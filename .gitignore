@@ -1,0 +1,7 @@
+/target/
+**/node_modules/
+*.log
+*.staged
+*.backup
+
+**/target/

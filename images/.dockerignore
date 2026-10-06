@@ -1,0 +1,6 @@
+**/node_modules
+**/*.log
+**/*.staged
+**/*.backup
+**/*.bak
+**/.DS_Store
