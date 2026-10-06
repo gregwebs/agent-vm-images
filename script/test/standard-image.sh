@@ -8,13 +8,18 @@ FIXTURE_DOCKERFILE="$REPO_ROOT/script/test/fixtures/t5-negative/Dockerfile"
 # status bytes with it rather than a first-line key/value extraction (review F2).
 STATUS_VALIDATOR="$REPO_ROOT/images/recipe-contract/install-status.py"
 
-usage() { echo "usage: $0 BASE_IMAGE STANDARD_IMAGE [--platform linux/ARCH] [--expect SUFFIX=VERSION ...] | --self-test" >&2; }
+usage() { echo "usage: $0 BASE_IMAGE STANDARD_IMAGE [--platform linux/ARCH] [--expect SUFFIX=VERSION ...] | --self-test | --pi-audit-status BASE_IMAGE [--platform linux/ARCH]" >&2; }
 self_test=false
+pi_audit=false
 BASE_IMAGE="" STANDARD_IMAGE="" platform=""
 keep=false
 expect_overrides=()
 if [ "${1:-}" = --self-test ]; then
     self_test=true; shift
+elif [ "${1:-}" = --pi-audit-status ]; then
+    pi_audit=true; shift
+    [ "$#" -ge 1 ] || { usage; exit 2; }
+    BASE_IMAGE=$1; shift
 else
     [ "$#" -ge 2 ] || { usage; exit 2; }
     BASE_IMAGE=$1; STANDARD_IMAGE=$2; shift 2
@@ -385,9 +390,17 @@ bridge_marks </tmp/p.out >/tmp/p.marks
 printf 'probe=%s\n' "$(head -n 1 /tmp/p.marks)"
 printf 'probes=%s\n' "$(wc -l </tmp/p.marks | tr -d ' ')"
 printf '=== T5 ===\n'
-python3 /contract/check-tool-access.py pi /opt/agent-vm/seed.d/20-pi-claude-bridge
-python3 /contract/check-tool-access.py --content /opt/agent-vm/pi-extensions/guest-credential-warning.js /opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts || exit 1
-printf 't5rc=%s\n' "$?"
+# The audit shell runs without `set -e`. Capture BOTH access checks separately
+# and combine them: the content check must not overwrite a failed Pi/seed-hook
+# access check (review MAJOR: a failed all-uid access audit reported t5rc=0).
+t5_pi_seed=0
+python3 /contract/check-tool-access.py pi /opt/agent-vm/seed.d/20-pi-claude-bridge || t5_pi_seed=$?
+t5_pi_content=0
+python3 /contract/check-tool-access.py --content /opt/agent-vm/pi-extensions/guest-credential-warning.js /opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts || t5_pi_content=$?
+t5rc=0
+[ "$t5_pi_seed" -eq 0 ] || t5rc=1
+[ "$t5_pi_content" -eq 0 ] || t5rc=1
+printf 't5rc=%s\n' "$t5rc"
 printf '=== STATUS ===\n'
 printf 'status_b64=%s\n' "$(b64file /opt/agent-vm/install-status/pi)"
 printf 'bridgestatus_b64=%s\n' "$(b64file /opt/agent-vm/install-status/pi-claude-bridge)"
@@ -395,6 +408,64 @@ EOS
             ;;
         *) fail "unknown recipe: $1" ;;
     esac
+}
+
+# Regression for the generated Pi audit's status propagation (review MAJOR).
+# The audit shell runs WITHOUT `set -e`, so the first two access checks (the Pi
+# command and the seed hook) and the extension content check must each make the
+# emitted t5rc nonzero: the content check must never overwrite a failed first
+# check. This executes the REAL generated script (container_script pi) against a
+# controlled fixture mounted over /opt/agent-vm, not a seeded t5rc literal.
+pi_audit_status_regression() {
+    local fixture="$TMP/pi-audit-fixture" generated
+    mkdir -p "$fixture/opt/agent-vm/seed.d" \
+        "$fixture/opt/agent-vm/pi-extensions" \
+        "$fixture/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src" \
+        "$fixture/opt/agent-vm/install-status" "$fixture/bin"
+    printf '#!/bin/sh\necho pi\n' >"$fixture/bin/pi"
+    printf '#!/bin/sh\necho seed\n' >"$fixture/opt/agent-vm/seed.d/20-pi-claude-bridge"
+    printf 'export default function () {}\n' >"$fixture/opt/agent-vm/pi-extensions/guest-credential-warning.js"
+    printf 'export const bridge = true\n' >"$fixture/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts"
+    printf 'installed\n' >"$fixture/opt/agent-vm/install-status/pi"
+    printf 'installed\n' >"$fixture/opt/agent-vm/install-status/pi-claude-bridge"
+    chmod 0755 "$fixture/bin/pi" "$fixture/opt/agent-vm/seed.d/20-pi-claude-bridge"
+    chmod 0644 "$fixture/opt/agent-vm/pi-extensions/guest-credential-warning.js" \
+        "$fixture/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts"
+    generated="$(container_script pi)"
+
+    expect_t5rc() { # $1 label, $2 expected t5rc
+        local label="$1" want="$2" rc=0 out got
+        out="$(run_with_watchdog "$RUNTIME_WATCHDOG_SECONDS" \
+            docker_run --rm --platform "$platform" --user 12345:23456 \
+            --cap-drop ALL --network none --tmpfs /tmp:rw,exec -e HOME=/tmp \
+            -v "$fixture/opt/agent-vm:/opt/agent-vm:ro" \
+            -v "$fixture/bin:/fixture-bin:ro" \
+            -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
+            -e "PATH=/fixture-bin:/usr/bin:/bin" \
+            --entrypoint sh "$BASE_IMAGE" -c "$generated" 2>&1)" || rc=$?
+        [ "$rc" -ne 124 ] || fail "pi audit regression ($label) timed out after ${RUNTIME_WATCHDOG_SECONDS}s"
+        got="$(kv "$out" t5rc)"
+        [ -n "$got" ] ||
+            fail "pi audit regression ($label): generated audit emitted no t5rc: $(printf '%s' "$out" | head -c 400)"
+        [ "$got" = "$want" ] ||
+            fail "pi audit regression ($label): t5rc=$got, want $want: $(printf '%s' "$out" | head -c 400)"
+        echo "  pi audit regression: $label -> t5rc=$got"
+    }
+
+    # Positive control: a healthy fixture passes BOTH access checks.
+    expect_t5rc healthy 0
+    # First check (Pi command + seed hook) fails, the content check still passes.
+    chmod 0700 "$fixture/bin/pi"
+    expect_t5rc pi-command-denied 1
+    chmod 0755 "$fixture/bin/pi"
+    chmod 0700 "$fixture/opt/agent-vm/seed.d/20-pi-claude-bridge"
+    expect_t5rc seed-hook-denied 1
+    chmod 0755 "$fixture/opt/agent-vm/seed.d/20-pi-claude-bridge"
+    # The extension content check fails independently of a healthy first check.
+    chmod 0600 "$fixture/opt/agent-vm/pi-extensions/guest-credential-warning.js"
+    expect_t5rc content-denied 1
+    chmod 0644 "$fixture/opt/agent-vm/pi-extensions/guest-credential-warning.js"
+    echo '  pi audit status: first-check failure is not overwritten by a passing content check'
 }
 
 # run_container IMG RECIPE UID -> stdout+stderr of the audit script
@@ -1066,6 +1137,12 @@ oracle_wiring_self_test() {
 if [ "$self_test" = true ]; then
     oracle_self_test
     echo 'standard-image --self-test: OK'
+    exit 0
+fi
+if [ "$pi_audit" = true ]; then
+    for required in docker python3; do command -v "$required" >/dev/null || fail "$required required"; done
+    pi_audit_status_regression
+    echo 'standard-image --pi-audit-status: OK'
     exit 0
 fi
 for required in docker jq python3; do command -v "$required" >/dev/null || fail "$required required"; done

@@ -51,6 +51,7 @@ case "$phase" in
     audit)
         timed standard-uid-t5 bash script/test/standard-image.sh agent-vm-base:local agent-vm-standard:local --platform "$platform"
         timed pi-runtime bash script/test/pi-runtime.sh agent-vm-base:local agent-vm-standard:local
+        timed pi-audit-status bash script/test/standard-image.sh --pi-audit-status agent-vm-base:local --platform "$platform"
         timed example-uid docker run --rm --user 12345:23456 --cap-drop ALL --network none -e HOME=/tmp my-agent-vm:local
         printf 'hello from my base extension\nLinux\n12345\n' >target/ci-logs/example-expected
         cmp target/ci-logs/example-expected target/ci-logs/example-uid.log
