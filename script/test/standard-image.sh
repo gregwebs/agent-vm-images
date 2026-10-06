@@ -266,6 +266,7 @@ container_script() { # $1 recipe
     # emitted base64-encoded so a first-line extraction cannot hide a
     # contradictory trailing line or a multi-line record (review F2).
     printf '%s\n' "$(declare -f b64file)"
+    # shellcheck disable=SC2016 # evaluated inside the container
     printf '%s\n' 'uid=$(id -u); if [ "$uid" != 0 ] && getent passwd "$uid" >/dev/null; then echo "unexpected passwd identity" >&2; exit 1; fi'
 
     case "$1" in
@@ -459,11 +460,30 @@ PY
 # check_report RECIPE LABEL0 LABEL1 CONTAINER_OUTPUT -- the COMPLETE stdout
 # report, decoded from its base64 capture, must be exactly each tool's allowed
 # record; the whole report is validated, never just its first line (review F2).
+# Preserve harmless diagnostic stderr, but never certify a contradictory banner
+# there or normalize away nonprintable bytes. Independent of owning verifiers.
+check_stderr() {
+    python3 - "$1" "$2" <<'PYSTDERR'
+import re, sys
+name, path = sys.argv[1:]
+data = open(path, "rb").read()
+if any(not (b in (9, 10) or 32 <= b <= 126) for b in data):
+    sys.exit(1)
+patterns = {
+    "codex": rb"codex-cli [0-9A-Za-z.+-]+",
+    "claude": rb"[0-9][0-9A-Za-z.+-]* \(Claude Code\)",
+    "copilot": rb"GitHub Copilot CLI .*",
+}
+pattern = patterns.get(name, rb"v?[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*")
+sys.exit(1 if any(re.fullmatch(pattern, line) for line in data.splitlines()) else 0)
+PYSTDERR
+}
+
 check_report() { # $1 recipe, $2 label0 value, $3 label1 value, $4 output
     local recipe="$1" v0="$2" v1="$3" out="$4" expected file
     file="$TMP/report-stderr.$$"
     decode_b64 "$(kv "$out" stderr_b64)" "$file" || { printf 'stderr capture missing'; return 1; }
-    [ ! -s "$file" ] || { printf '%s version report has unexpected stderr' "$recipe"; return 1; }
+    check_stderr "$recipe" "$file" || { printf '%s version report has contradictory stderr' "$recipe"; return 1; }
     file="$TMP/report-check.$$"
     decode_b64 "$(kv "$out" report_b64)" "$file" ||
         { printf '%s report is missing' "$recipe"; return 1; }
@@ -492,7 +512,7 @@ check_report() { # $1 recipe, $2 label0 value, $3 label1 value, $4 output
             [ "$(kv "$out" rc1)" = 0 ] || { printf 'dsh pnpm exited %s' "$(kv "$out" rc1)"; return 1; }
             file="$TMP/report-pnpm-stderr.$$"
             decode_b64 "$(kv "$out" stderr1_b64)" "$file" || { printf 'pnpm stderr capture missing'; return 1; }
-            [ ! -s "$file" ] || { printf 'pnpm unexpected stderr'; return 1; }
+            check_stderr pnpm "$file" || { printf 'pnpm contradictory stderr'; return 1; }
             file="$TMP/report-check-pnpm.$$"
             decode_b64 "$(kv "$out" report1_b64)" "$file" ||
                 { printf 'dsh pnpm report is missing'; return 1; }
@@ -1013,8 +1033,9 @@ oracle_wiring_self_test() {
     WIRE=$(printf '%s\n' "$healthy" | sed "s/^report_b64=.*/report_b64=$(printf 'codex-cli 0.0.1\n' | blob)/")
     if ( audit_image img codex ) >/dev/null 2>&1; then fail 'stale selection wire accepted'; fi
     WIRE=$healthy
+    # shellcheck disable=SC2030,SC2031 # mutation intentionally confined to child
     if ( EXPECTED=$(printf '%s\n' "$EXPECTED" | sed 's/^codex=.*/codex=rust-v0.0.1/'); audit_image img codex ) >/dev/null 2>&1; then fail 'ignored explicit selection accepted'; fi
-    WIRE="$healthy"$'\nstderr_b64='"$(printf 'wrong banner\n' | blob)"
+    WIRE="$healthy"$'\nstderr_b64='"$(printf 'codex-cli 0.0.1\n' | blob)"
     # kv takes the first field; healthy has no stderr field, so this is genuine.
     if ( audit_image img codex ) >/dev/null 2>&1; then fail 'wrong stderr accepted'; fi
     local pi_wire
@@ -1052,6 +1073,7 @@ BUILDER=$(docker context show)
 docker buildx inspect "$BUILDER" | grep -Eq '^Driver:[[:space:]]+docker$' || fail 'T5 fixtures require daemon-backed builder'
 want=$(for suffix in codex opencode claude copilot dsh pnpm pi pi-claude-bridge; do echo "org.agent-vm.version.$suffix"; done | sort)
 [ "$(version_keys "$STANDARD_IMAGE")" = "$want" ] || fail 'standard must have exactly eight selection labels'
+# shellcheck disable=SC2031 # self-test mutation is confined to its own subshell
 assert_expected_selection "$STANDARD_IMAGE" "$EXPECTED"
 # shellcheck disable=SC2016 # in-container variables
 run_with_watchdog 180 docker_run --rm --platform "$platform" --network none "$BASE_IMAGE" bash -c '
