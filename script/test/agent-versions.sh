@@ -111,7 +111,8 @@ write_dockerfile() { # $1 = tool, remaining args = lines
     shift
     dir="$FIXTURE_ROOT/images/standard"
     mkdir -p "$dir"
-    local arg="AGENT_VERSION_$(printf '%s' "$tool" | tr '[:lower:]' '[:upper:]')"
+    local arg
+    arg="AGENT_VERSION_$(printf '%s' "$tool" | tr '[:lower:]' '[:upper:]')"
     if [ -f "$dir/Dockerfile" ]; then
         grep -v "^ARG ${arg}=" "$dir/Dockerfile" >"$dir/next" || true
         mv "$dir/next" "$dir/Dockerfile"
@@ -127,6 +128,7 @@ reset_fixture() {
     write_dockerfile opencode "ARG AGENT_VERSION_OPENCODE=${FIXTURE_OLD_OPENCODE}"
     write_dockerfile claude "ARG AGENT_VERSION_CLAUDE=${FIXTURE_OLD_CLAUDE}"
     write_dockerfile copilot "ARG AGENT_VERSION_COPILOT=${FIXTURE_OLD_COPILOT}"
+    # shellcheck disable=SC2016 # literal Dockerfile interpolation
     printf 'LABEL org.agent-vm.version.pi="${AGENT_VERSION_PI:-0.87.1}"\n' >>"$FIXTURE_ROOT/images/standard/Dockerfile"
     cp "$FIXTURE_ROOT/images/standard/Dockerfile" "$CASE/original"
 }

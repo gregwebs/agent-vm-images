@@ -246,7 +246,7 @@ else
     # REGISTERED, and the model catalog is non-empty (the bridge registers even
     # after printing "no models available from pi-ai's anthropic catalog",
     # src/index.ts:2045-2048). Keep the probe body in sync with the non-root copy
-    # in script/test/pi-layer-runtime.sh.
+    # in script/test/pi-runtime.sh.
     cat > "$GATE_WORK_DIR/probe.js" <<'PROBE'
 export default function (pi) {
   pi.on("session_start", (_event, ctx) => {
