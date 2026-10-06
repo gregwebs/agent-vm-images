@@ -689,6 +689,7 @@ class ReviewRegressionTests(unittest.TestCase):
             instance.scratch = Path(directory)
             instance.containers = ['owned-1', 'owned-2']; instance.images = ['owned:fixture']
             instance.network = 'owned-network'; instance.network_created = True
+            instance.state_dirs = []
             (instance.scratch / 'result.json').write_text('{}')
             calls = []
             def command(argv):
