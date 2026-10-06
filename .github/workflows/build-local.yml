@@ -1,0 +1,73 @@
+name: Native local images
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contracts:
+    uses: ./.github/workflows/contracts.yml
+  native:
+    needs: contracts
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Audit prerequisites
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq coreutils python3
+      - name: Native capacity and builder
+        env:
+          NATIVE_ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p target/ci-logs
+          set -o pipefail
+          python3 script/test/host-watchdog.py 1800 bash script/test/ci-native.sh prepare "$NATIVE_ARCH" 2>&1 | tee target/ci-logs/capacity.log
+      - name: build
+        env:
+          NATIVE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -o pipefail
+          python3 script/test/host-watchdog.py 10800 bash script/test/ci-native.sh build "$NATIVE_ARCH" 2>&1 | tee target/ci-logs/build-phase.log
+      - name: audit
+        env:
+          NATIVE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -o pipefail
+          python3 script/test/host-watchdog.py 5400 bash script/test/ci-native.sh audit "$NATIVE_ARCH" 2>&1 | tee target/ci-logs/audit-phase.log
+      - name: Evidence summary
+        if: always()
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          NATIVE_ARCH: ${{ matrix.arch }}
+          JOB_VERDICT: ${{ job.status }}
+        run: |
+          {
+            echo "Image source SHA: $SOURCE_SHA"
+            echo "Migration source: 3ec78eebb7bdf743c93942a6ed2e5510de15c52d"
+            echo "Native platform: linux/$NATIVE_ARCH; verdict: $JOB_VERDICT"
+            echo 'Failed or absent phases are NOT acceptance; see capacity/build/audit logs.'
+            if [ -f target/ci-logs/durations.txt ]; then cat target/ci-logs/durations.txt; fi
+            if [ -f target/ci-logs/verdicts.txt ]; then cat target/ci-logs/verdicts.txt; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload evidence (no image archive)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-local-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/ci-logs/
+          if-no-files-found: warn
