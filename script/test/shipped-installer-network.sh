@@ -125,12 +125,48 @@ PROXY="$RUN_ID-proxy"
 mkdir -p "$REPO_ROOT/target"
 TMP="$(mktemp -d "$REPO_ROOT/target/installer-egress.XXXXXX")"
 mkdir -p "$TMP/certs" "$TMP/logs"
+# Create the cumulative egress log once. It is never truncated per proxy
+# restart (markers scope each selection), so `mark_log` always has a file to
+# read while the addon appends across restarts.
+: >"$TMP/logs/egress.log"
+# Run-scoped, already-redacted request evidence. It lives under target/ci-logs
+# (the workflow's artifact path) rather than an unscoped /tmp name, so a failed
+# audit still uploads its per-selection logs before scratch cleanup. Every copy
+# failure is printed; a reported evidence path that does not exist is a failure.
+EVIDENCE_DIR="${INSTALLER_EGRESS_EVIDENCE_DIR:-$REPO_ROOT/target/ci-logs/installer-egress-$RUN_ID}"
+CURRENT_LABEL=""
+CURRENT_MARKER=0
+
+capture_evidence() { # $1 = label, $2 = marker line count in $TMP/logs/egress.log
+    local label="$1" marker="$2" rc=0
+    mkdir -p "$EVIDENCE_DIR" 2>/dev/null || {
+        echo "FAIL: cannot create evidence directory $EVIDENCE_DIR" >&2
+        return 1
+    }
+    if [ -f "$TMP/logs/egress.log" ]; then
+        cp "$TMP/logs/egress.log" "$EVIDENCE_DIR/egress-full.log" 2>/dev/null || {
+            echo "FAIL: cannot copy the egress log into $EVIDENCE_DIR" >&2
+            rc=1
+        }
+        tail -n "+$(( marker + 1 ))" "$TMP/logs/egress.log" >"$EVIDENCE_DIR/$label.log" 2>/dev/null || {
+            echo "FAIL: cannot write evidence $EVIDENCE_DIR/$label.log" >&2
+            rc=1
+        }
+    fi
+    if [ -f "$TMP/mutation.log" ]; then
+        cp "$TMP/mutation.log" "$EVIDENCE_DIR/mutation.log" 2>/dev/null || {
+            echo "FAIL: cannot write evidence $EVIDENCE_DIR/mutation.log" >&2
+            rc=1
+        }
+    fi
+    return "$rc"
+}
 
 cleanup() {
-    # Force-remove every container we named, including the proxy and any
-    # installer whose `docker run` client was killed by a watchdog (`--rm` only
-    # fires once the container exits, not when its client dies). Never a global
-    # prune: the filter is namescoped to this run.
+    # Preserve the run's already-redacted evidence before deleting scratch, so a
+    # failed exit still uploads what was captured. Never a global prune: the
+    # container filter is namescoped to this run.
+    capture_evidence "${CURRENT_LABEL:-current}" "${CURRENT_MARKER:-0}" || true
     local cids
     cids="$(docker ps -aq --filter "name=^${RUN_ID}-" 2>/dev/null || true)"
     if [ -n "$cids" ]; then
@@ -304,7 +340,10 @@ run_allowlist_negatives() { # $1 tool, $2 version
             printf '%s\t0\n' "https://downloads.claude.ai/claude-code-releases/$numeric/$cl_platform/claudex" >>"$cases"
             printf '%s\t0\n' "https://downloads.claude.ai/claude-code-releases/$numeric/manifest.json?sig=REVIEW-SIGNED-SECRET&token=REVIEW-TOKEN" >>"$cases" ;;
     esac
-    docker run --rm -i --platform "$platform" \
+    # Audit the addon under the SAME invocation identity as the proxy: a
+    # root-plus-cap-drop combination is not the demonstrated failure, but the
+    # invocation-owned log directory is the one the real proxy writes too.
+    docker run --rm -i --platform "$platform" --user "$(id -u):$(id -g)" \
         -v "$FIXTURES/addon.py:/addon/addon.py:ro" \
         -v "$cfg:/addon/config.json:ro" \
         -v "$cases:/addon/cases.tsv:ro" \
@@ -372,12 +411,17 @@ PY
 }
 
 start_proxy() { # $1 = config file
-    : >"$TMP/logs/egress.log"
     docker rm -f "$PROXY" >/dev/null 2>&1 || true
+    # Run mitmdump as the INVOKING numeric identity. With --cap-drop ALL the
+    # process has no CAP_DAC_OVERRIDE, so UID 0 cannot write the runner-owned
+    # cert/log bind mounts on a native runner (the reported failure); the
+    # invocation-owned scratch directories are writable by this same identity.
+    # The egress log is NOT truncated on restart: markers scope each selection's
+    # already-redacted segment, and the cumulative log is the failure evidence.
     docker run -d --name "$PROXY" \
         --network "$NET_EXTERNAL" \
         --cap-drop ALL --security-opt no-new-privileges \
-        --user 0:0 \
+        --user "$(id -u):$(id -g)" \
         -v "$TMP/certs:/certs" \
         -v "$1:/addon/config.json:ro" \
         -v "$FIXTURES/addon.py:/addon/addon.py:ro" \
@@ -539,6 +583,8 @@ run_denial_mutation() {
     write_config codex "$(selection_for codex 2)" "$TMP/config.json"
     start_proxy "$TMP/config.json"
     marker="$(mark_log)"
+    CURRENT_LABEL="mutation"
+    CURRENT_MARKER="$marker"
     echo "--- mutation: codex metadata URL forced to /releases/latest"
     set +e
     run_with_watchdog "$NETWORK_CONTAINER_WATCHDOG_SECONDS" \
@@ -576,18 +622,27 @@ for tool in "${tools[@]}"; do
         # exact selection over the REAL addon, before the run.
         run_allowlist_negatives "$tool" "$version" || status=1
         # Restart the proxy so the addon reloads the new config file contents.
+        # The cumulative egress log is never truncated; the marker scopes this
+        # selection's already-redacted segment for the evidence copy.
         start_proxy "$TMP/config.json"
+        CURRENT_LABEL="$tool-$version"
+        CURRENT_MARKER="$(mark_log)"
         run_one_combined "$tool" "$version" || status=1
+        capture_evidence "$CURRENT_LABEL" "$CURRENT_MARKER" || status=1
     done < <(selection_versions "$tool")
 done
 
 stop_proxy
 [ "$observe" = true ] || run_denial_mutation
-# Publish run-scoped, already-redacted evidence instead of an unscoped plaintext
-# file shared by every run (review F5).
-EVIDENCE="${TMPDIR:-/tmp}/installer-egress-$RUN_ID.log"
-cp "$TMP/logs/egress.log" "$EVIDENCE" 2>/dev/null || true
-echo "egress evidence: $EVIDENCE"
+# Publish the run-scoped, already-redacted evidence into the CI evidence
+# directory (target/ci-logs before scratch cleanup), one log per selection plus
+# the mutation. A reported evidence directory with no file is a failure.
+capture_evidence "${CURRENT_LABEL:-current}" "${CURRENT_MARKER:-0}" || status=1
+if [ -z "$(ls -A "$EVIDENCE_DIR" 2>/dev/null)" ]; then
+    echo "FAIL: no egress evidence was written to $EVIDENCE_DIR" >&2
+    status=1
+fi
+echo "egress evidence: $EVIDENCE_DIR"
 
 [ "$status" -eq 0 ] || fail "restricted-egress gate failed"
 echo 'shipped-installer-network gate: OK'
