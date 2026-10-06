@@ -81,14 +81,36 @@ class Controls:
         port = self.command(['docker', 'port', name, '5000/tcp']).decode().strip().rsplit(':', 1)[-1]
         endpoint = '127.0.0.1:' + port
         self.registries[endpoint] = name + ':5000'
+        self.await_registry(endpoint, private)
+        return name, endpoint
+
+    def await_registry(self, endpoint: str, private: bool) -> None:
+        # docker start returns before the registry binds on Linux runners, so a
+        # follow-up copy can race the listener; poll the same readiness signal
+        # used at initial start.
+        expected = b'401' if private else b'200'
         for _ in range(50):
             argv = ['curl', '-q', '--netrc-file', '/dev/null', '--silent', '--show-error', '--connect-timeout', '2', '--max-time', '3',
                     '--output', '/dev/null', '--write-out', '%{http_code}', 'http://' + endpoint + '/v2/']
             result = subprocess.run(argv, capture_output=True, timeout=5, env=op.public_http.public_env())
-            if result.returncode == 0 and result.stdout == (b'401' if private else b'200'):
-                return name, endpoint
+            if result.returncode == 0 and result.stdout == expected:
+                return
             time.sleep(0.1)
         raise ValueError('loopback registry readiness failed')
+
+    def restart_registry(self, name: str) -> str:
+        # A dynamically published host port can be reassigned by stop/start, so
+        # re-resolve it; host-skopeo addressing and readiness must use the live
+        # mapping while the container adapter keeps addressing by name.
+        for endpoint, container in list(self.registries.items()):
+            if container == name + ':5000':
+                del self.registries[endpoint]
+        self.command(['docker', 'start', name])
+        port = self.command(['docker', 'port', name, '5000/tcp']).decode().strip().rsplit(':', 1)[-1]
+        endpoint = '127.0.0.1:' + port
+        self.registries[endpoint] = name + ':5000'
+        self.await_registry(endpoint, False)
+        return endpoint
 
     def skopeo(self, argv: list[str], *, expected_failure=False) -> bytes:
         if shutil.which('skopeo'):
@@ -335,7 +357,7 @@ class Controls:
         with corrupt.open('r+b') as stream:
             first = stream.read(1); stream.seek(0); stream.write(bytes([first[0] ^ 1]))
         self.command(['docker', 'cp', str(corrupt), registry + ':' + stored])
-        self.command(['docker', 'start', registry])
+        endpoint = self.restart_registry(registry)
         # A new toolbox has no previously fetched layer to mask corruption.
         if self.tool is not None:
             self.command(['docker', 'rm', '-f', '-v', self.tool])
