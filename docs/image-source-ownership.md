@@ -94,9 +94,16 @@ Other mapping decisions:
 | `script/build/macos.sh` | excluded; launcher packaging |
 | `script/build/{agent-versions,dockerfile-label,npm-pin,transactional-publish}.sh` | deferred to maintenance pass; shared-file rewrite and rollback repair required before use |
 | `images/tools/{dsh,pi}/upgrade-*.sh`, `images/tools/pi/bridge/upgrade-bridge.sh` | deferred with maintenance; no old per-tool Dockerfile owner remains |
-| selected installer/recipe/runtime suites and fixtures under `script/test/` | deferred to audit pass per approved mapping |
+| `script/test/{agent-versions,claude-installer,codex-installer,copilot-installer,copilot-verify,opencode-installer,dsh-prepare-lock,dsh-verify,pi-install,pi-prepare-lock,pi-verify,pi-wrapper,shipped-installer-contracts,tool-access,vendored-installers,upgrade-scripts,install-zellij}.sh` | same paths deferred; canonical-helper and central-Dockerfile adaptations |
+| `script/test/shipped-tool-recipes.sh` | deferred `script/test/standard-image.sh`, finished-image numeric-UID/report oracle, not recipe builds |
+| `script/test/pi-layer-runtime.sh` | deferred `script/test/pi-runtime.sh`, accepts BASE_IMAGE STANDARD_IMAGE |
+| `script/test/shipped-installer-network.sh` | same path deferred; canonical mounts / standard defaults |
+| `script/test/{host-watchdog.sh,host-watchdog.py}` | same paths deferred |
+| `script/test/fixtures/t5-negative/Dockerfile` | same path deferred, disposable audit only |
+| `script/test/fixtures/installer-egress/{addon.py,selections.tsv}` | same paths deferred, exact-selection restricted-egress audit |
+| `script/test/ci-contracts.sh` | deferred image-only `script/test/contracts.sh` aggregate |
 | `crates/agent-vm/tests/image_sources.rs` | deferred independent test-only package, not a launcher workspace copy |
-| historical image CI workflows | references only; replacement local-build CI deferred |
+| `.github/workflows/{build-image,shipped-tool-recipes,pi-layer}.yml` | historical references only; replacement contracts/build-local/installer-network CI deferred |
 | all other launcher source/docs/workflows | excluded |
 
 This first pass implements layout, recipes, build interface, user example and
