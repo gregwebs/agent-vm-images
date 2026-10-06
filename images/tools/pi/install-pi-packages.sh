@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs the pinned Pi extension packages into the Pi packages prefix from the
 # committed (or prepared) lockfile. See images/tools/README.md and
-# docs/adr/0023-image-owned-pi-extension-packages.md.
+# https://github.com/gregwebs/agent-vm/blob/3ec78eebb7bdf743c93942a6ed2e5510de15c52d/docs/adr/0023-image-owned-pi-extension-packages.md.
 #
 # Runs inside the recipe-contract envelope (run-install.sh), so
 # AGENT_VM_TRANSPORT_RECEIPT names a fresh private receipt and the owning hook
@@ -22,7 +22,7 @@
 # Pi under this tree (Pi's own loader aliases those imports, so they must not be
 # installed). `--omit=optional` drops the Claude Agent SDK's platform packages,
 # each of which carries a whole second Claude Code binary -- the guest-platform
-# size is in docs/adr/0023-image-owned-pi-extension-packages.md. The image
+# size is in https://github.com/gregwebs/agent-vm/blob/3ec78eebb7bdf743c93942a6ed2e5510de15c52d/docs/adr/0023-image-owned-pi-extension-packages.md. The image
 # already ships one at /opt/agent/.local/bin/claude. `--ignore-scripts` matches
 # install-pi.sh: no upstream lifecycle script runs during the build.
 set -eu

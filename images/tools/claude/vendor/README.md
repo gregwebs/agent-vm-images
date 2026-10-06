@@ -1,11 +1,11 @@
-# claude layer — vendored installer
+# claude — vendored installer
 
 `install.upstream.sh` is a verbatim snapshot of Anthropic's published installer
 (`https://claude.ai/install.sh`, retrieved 2026-09-30). It is provenance, not an
 executable guard target, and is never run.
 
 `install.sh` is the runnable patched copy. `install.patch` is the reviewable
-patch; applying it to the snapshot reproduces `install.sh` byte-for-byte (see
+patch; applying it to the snapshot reproduces `install.sh` byte-for-byte (follow-up audit suite:
 `script/test/claude-installer.sh`). `git apply` it from a directory holding the
 snapshot renamed `install.sh`.
 
@@ -24,7 +24,7 @@ supply-chain guarantee.
 2. **curl required up front.** wget and the progress variant are not download
    policies here.
 3. **`download_file` routes through the shared classified helper**
-   (`contract/download.sh`), so a transport failure is a receipt + 75 and every
+   (`images/recipe-contract/download.sh`), so a transport failure is a receipt + 75 and every
    other failure is hard.
 4. **zstd asset path disabled.** Its download is wrapped in `2>/dev/null ||
    true`, which would swallow a classified transport result; the verified
@@ -36,3 +36,7 @@ supply-chain guarantee.
    `timeout --kill-after=5 300` (TERM, then SIGKILL, so a TERM-ignoring native
    installer cannot hang the build), and any nonzero is normalized to a hard
    failure.
+
+The owning recipe is `images/standard/Dockerfile`, with read-only canonical
+helper mounts. Installer audit suites are pending migration in the follow-up
+pass; the referenced test paths are planned interfaces, not current evidence.

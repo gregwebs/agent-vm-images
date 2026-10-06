@@ -1,4 +1,4 @@
-# opencode layer — vendored installer
+# opencode — vendored installer
 
 `install.upstream.sh` is a verbatim snapshot of OpenCode's published installer:
 
@@ -12,11 +12,11 @@ It is provenance, not an executable guard target, and is never run.
 
 The upstream snapshot is redistributed here under the OpenCode project's MIT
 License (SPDX `MIT`, Copyright (c) 2025 opencode), not under this repository's
-own license. The full license text is in `vendor/LICENSE` and the
-provenance/attribution record is in `vendor/NOTICE`.
+own license. The full license text is in `LICENSE` and the
+provenance/attribution record is in `NOTICE`.
 
 `install.sh` is the runnable patched copy. `install.patch` is the reviewable
-patch; applying it to the snapshot reproduces `install.sh` byte-for-byte (see
+patch; applying it to the snapshot reproduces `install.sh` byte-for-byte (follow-up audit suite:
 `script/test/opencode-installer.sh`). `git apply` it from a directory holding the
 snapshot renamed `install.sh`.
 
@@ -34,7 +34,7 @@ repairs keep the result usable by any uid; they are not a supply-chain guarantee
    parse and the release-existence HEAD probe are removed. The exact asset URL is
    the authority.
 2. **`download_and_install` routes through the shared classified helper**
-   (`contract/download.sh`), so a transport failure is a receipt + 75 and every
+   (`images/recipe-contract/download.sh`), so a transport failure is a receipt + 75 and every
    other failure is hard. The progress-download machinery it replaced
    (`download_with_progress`, `print_progress`, `unbuffered_sed`) is removed.
 3. **The already-installed skip is removed.** `check_version` no longer exits 0
@@ -46,3 +46,7 @@ repairs keep the result usable by any uid; they are not a supply-chain guarantee
    plus an EXIT/INT/TERM/HUP trap, so a classified transport failure (or any
    other error under `set -e`) removes the download scratch instead of leaving
    `opencode_install_*` leftovers for a degraded image to ship.
+
+The owning recipe is `images/standard/Dockerfile`, with read-only canonical
+helper mounts. Installer audit suites are pending migration in the follow-up
+pass; the referenced test paths are planned interfaces, not current evidence.

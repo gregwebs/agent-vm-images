@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs the exact GitHub Copilot CLI version this layer was given.
 #
-# Bind-mounted into the layer's Dockerfile, never COPYed, so it stays out of the
+# Bind-mounted into images/standard/Dockerfile, never COPYed, so it stays out of the
 # shipped image. The version is validated BEFORE any network call: a dist-tag
 # (`latest`, `next`), a range (`^1.0.0`), a URL or a whitespace/newline-bearing
 # value is rejected rather than handed to npm, which would silently resolve it.

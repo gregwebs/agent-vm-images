@@ -1,4 +1,4 @@
-# codex layer — vendored installer
+# codex — vendored installer
 
 `install.upstream.sh` is a verbatim snapshot of OpenAI's published Codex
 installer from the exact release it installs:
@@ -14,11 +14,11 @@ is byte-identical to the release asset.
 
 The upstream snapshot is redistributed here under the Codex project's Apache
 License 2.0 (SPDX `Apache-2.0`, Copyright 2025 OpenAI), not under this
-repository's own license. The full license text is in `vendor/LICENSE` and the
-provenance/attribution record is in `vendor/NOTICE`.
+repository's own license. The full license text is in `LICENSE` and the
+provenance/attribution record is in `NOTICE`.
 
 `install.sh` is the runnable patched copy. `install.patch` is the reviewable
-patch; applying it to the snapshot reproduces `install.sh` byte-for-byte (see
+patch; applying it to the snapshot reproduces `install.sh` byte-for-byte (follow-up audit suite:
 `script/test/codex-installer.sh`). `git apply` it from a directory holding the
 snapshot renamed `install.sh`.
 
@@ -41,7 +41,7 @@ are not a supply-chain guarantee.
    `resolve_release_from_releases` and the fallback URLs are gone: builds always
    use the exact GitHub release tag.
 3. **`download_file`/`download_text` route through the shared classified helper**
-   (`contract/download.sh`), so a transport failure is a receipt + 75 and every
+   (`images/recipe-contract/download.sh`), so a transport failure is a receipt + 75 and every
    other failure is hard. `download_text` buffers to a file so a classified 75
    is not lost in a pipe.
 4. **`download_file_with_fallback` is fallback-free.** There is exactly one
@@ -66,3 +66,7 @@ are not a supply-chain guarantee.
    run the native `--version` through the shared bounded, status-preserving
    `run-report.sh` (60s, `--kill-after`), so a hung or TERM-ignoring native
    fails the install instead of hanging the build before the verify gate runs.
+
+The owning recipe is `images/standard/Dockerfile`, with read-only canonical
+helper mounts. Installer audit suites are pending migration in the follow-up
+pass; the referenced test paths are planned interfaces, not current evidence.

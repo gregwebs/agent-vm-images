@@ -1,6 +1,6 @@
 #!/bin/sh
 # Build-time verification gate for the pinned Pi layer, run from the layer's
-# final `RUN --mount=type=bind` (see images/tools/pi/Dockerfile). Bind-mounted,
+# final `RUN --mount=type=bind` (see images/standard/Dockerfile). Bind-mounted,
 # never COPYed, so the script stays out of the shipped image and needs no
 # execute bit.
 #

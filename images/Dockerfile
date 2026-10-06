@@ -7,6 +7,7 @@ LABEL org.opencontainers.image.description="Tool-free Debian 13 building block w
 LABEL org.opencontainers.image.source="https://github.com/gregwebs/agent-vm-images"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
+# C.UTF-8 is present without locale generation and preserves non-ASCII paths.
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/root \
     PATH=/usr/local/bin:/usr/bin:/usr/sbin:/bin \
@@ -59,6 +60,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 
+# fuse-overlayfs accommodates downstream overlay-root guests. Docker is not
+# auto-started: runtime callers choose whether they need a daemon.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         docker.io docker-cli \
@@ -77,6 +80,7 @@ ARG ZELLIJ_SHA256_ARM64=d8b311d0f9ec7a03f3341563331aac12c9f52990ecc96a36ed44b1ad
 RUN --mount=type=bind,source=install-zellij.sh,target=/tmp/install-zellij.sh,ro \
     AGENT_INSTALL_SOFT_FAIL= bash /tmp/install-zellij.sh
 
+# Shared installation prefix outside HOME, traversable by arbitrary numeric UIDs.
 RUN mkdir -p /opt/agent && chmod 755 /opt/agent
 
 RUN mkdir -p /opt/agent-vm/seed.d && chmod -R a+rX /opt/agent-vm

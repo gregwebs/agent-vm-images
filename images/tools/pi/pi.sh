@@ -1,5 +1,5 @@
 #!/bin/sh
-# agent-vm's stable `pi` wrapper (docs/adr/0012-stable-pi-image-customization-seam.md).
+# agent-vm's stable `pi` wrapper (https://github.com/gregwebs/agent-vm/blob/3ec78eebb7bdf743c93942a6ed2e5510de15c52d/docs/adr/0012-stable-pi-image-customization-seam.md).
 #
 # The Pi installation under /opt/agent-vm/pi and the extensions under
 # /opt/agent-vm/pi-extensions may both be replaced or extended by a later image
@@ -65,7 +65,7 @@ fi
 # telemetry policy is Pi's own).
 #
 # The image-owned pi-claude-bridge
-# (docs/adr/0023-image-owned-pi-extension-packages.md). Unlike
+# (https://github.com/gregwebs/agent-vm/blob/3ec78eebb7bdf743c93942a6ed2e5510de15c52d/docs/adr/0023-image-owned-pi-extension-packages.md). Unlike
 # MANDATORY_EXTENSION, this one IS existence-checked. Pi treats an --extension
 # it cannot load as fatal before session startup (and a settings-listed or
 # discovered extension that fails is fatal too -- dist/main.js turns any

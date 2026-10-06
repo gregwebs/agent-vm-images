@@ -1,8 +1,8 @@
-# copilot layer
+# Copilot installer
 
 Installs the GitHub Copilot CLI from npm at an exact, committed version.
 
-- `Dockerfile` pins `AGENT_VERSION_COPILOT` (default `1.0.90`) and labels the
+- [`../../standard/Dockerfile`](../../standard/Dockerfile) pins `AGENT_VERSION_COPILOT` (default `1.0.90`) and labels the
   image `org.agent-vm.version.copilot=<that value>`. The label records the
   *selection*; the build gate decides health.
 - `install-copilot.sh` validates the supplied slot as canonical semver before
@@ -15,10 +15,9 @@ Installs the GitHub Copilot CLI from npm at an exact, committed version.
 
 ## Exact-version contract
 
-Ordinary and release builds install the committed default. A launcher override
-passes the same `AGENT_VERSION_COPILOT` build argument; there is no
-`latest` fallback and no build-time npm lookup. Bump with
-`script/build/agent-versions.sh --write` (see images/tools/README.md).
+Ordinary builds install the committed default; an ordinary Docker build ARG
+can select another exact version. There is no latest fallback or build-time
+npm lookup. Maintenance is deferred; see [CONTRIBUTING](../../../CONTRIBUTING.md).
 
 ## Recorded transcript
 

@@ -3,10 +3,10 @@
 # under /opt/agent-vm/seed.d/ before exec'ing the agent).
 #
 # Point the image-owned pi-claude-bridge at the image's own Claude Code binary.
-# agent-vm created this condition itself: images/tools/pi/Dockerfile installs
+# agent-vm created this condition itself: images/standard/Dockerfile installs
 # the bridge with `--omit=optional`, deliberately dropping the Claude Agent
 # SDK's platform packages (each carries a whole second Claude Code; see
-# docs/adr/0023-image-owned-pi-extension-packages.md for the guest-platform
+# https://github.com/gregwebs/agent-vm/blob/3ec78eebb7bdf743c93942a6ed2e5510de15c52d/docs/adr/0023-image-owned-pi-extension-packages.md for the guest-platform
 # size) in favour of the one the claude layer already ships at
 # /opt/agent/.local/bin/claude. So agent-vm is the one that repairs it -- the
 # parity principle (ADR-0021), not a policy agent-vm is imposing on Pi.

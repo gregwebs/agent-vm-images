@@ -4,9 +4,10 @@
 Canonical source: images/recipe-contract/install-status.py
 Bind-mounted directly by images/standard/Dockerfile; no tool-local copies.
 
-The build gate accepts a missing command ONLY when the recipe left a fresh,
-strictly valid `absent-transport CODE` record. This helper owns the two
-predicates that decision needs, so every recipe applies the same rules:
+Isolated low-level verifiers accept a missing command only with a fresh,
+strictly valid `absent-transport CODE` record for development/audit behavior.
+The maintained standard final gate requires every record to be `installed`.
+This helper owns the strict parsing and path-state predicates:
 
   path-state PATH
       Exit 0 when PATH is GENUINELY absent -- every existing ancestor is a real
