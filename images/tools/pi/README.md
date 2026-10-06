@@ -19,8 +19,9 @@ into project-owned Pi state without clobbering user configuration. Hooks are
 invoked by the caller, not Docker CMD. Registration probes are not authenticated
 session evidence.
 
-Upgrades are deferred until the central-Dockerfile maintenance rewrite lands;
-see [CONTRIBUTING](../../../CONTRIBUTING.md#selection-ownership-and-maintenance-follow-up).
+Upgrade with `bash images/tools/pi/upgrade-pi.sh VERSION` and
+`bash images/tools/pi/bridge/upgrade-bridge.sh VERSION`;
+see [CONTRIBUTING](../../../CONTRIBUTING.md#selection-ownership-and-maintenance).
 Review all integrity entries, exact five direct sibling versions and the bridge
 loader-alias exclusions. Do not regenerate locks during migration. Historical
 extension compatibility rationale is in the pinned upstream

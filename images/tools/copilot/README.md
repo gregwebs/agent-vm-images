@@ -17,7 +17,7 @@ Installs the GitHub Copilot CLI from npm at an exact, committed version.
 
 Ordinary builds install the committed default; an ordinary Docker build ARG
 can select another exact version. There is no latest fallback or build-time
-npm lookup. Maintenance is deferred; see [CONTRIBUTING](../../../CONTRIBUTING.md).
+npm lookup. Use the central-source maintenance workflow; see [CONTRIBUTING](../../../CONTRIBUTING.md).
 
 ## Recorded transcript
 

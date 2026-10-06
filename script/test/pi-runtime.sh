@@ -1,9 +1,9 @@
 #!/bin/bash
-# Runtime behaviour matrix for the pinned Pi layer: the acceptance criteria that
+# Runtime behaviour matrix for the pinned Pi standard image: the acceptance criteria that
 # only a built image can prove -- the locked version, the mandatory warning in
 # the modes a human reads, stdout cleanliness in the machine modes, fail-closed
 # when the mandatory extension is gone or broken, subcommand passthrough, and
-# arbitrary-uid access (C7). Everything is credential-free.
+# arbitrary-uid access. Everything is credential-free.
 #
 # Usage: script/test/pi-runtime.sh BASE_IMAGE STANDARD_IMAGE
 #
@@ -99,7 +99,7 @@ docker run --rm "$base" sh -ec '
     ! test -e /usr/local/bin/pi
 '
 
-# --- the locked version, and arbitrary-uid access (C7) -----------------------
+# --- the locked version, and arbitrary-uid access -----------------------
 
 version="$(run "$standard" pi --version)"
 [[ "$version" = "$PINNED" ]] || fail "pi --version reported '$version', lockfile pins '$PINNED'"
@@ -288,14 +288,14 @@ jq -e '.provider.plan == "max"
        and .startupNoticeShown == true' <<<"$out" >/dev/null \
     || fail "the seed hook must merge one provider key, preserving its siblings: $out"
 
-# Without the claude layer the hook is a silent no-op (the custom-catalog case).
+# Without the Claude executable the hook is a silent no-op (the custom-image case).
 out=$(seed_case '
     rm -f /opt/agent/.local/bin/claude
     /opt/agent-vm/seed.d/20-pi-claude-bridge
     test ! -e /agent-vm-state/pi/agent/claude-bridge.json && printf "ABSENT\n"
 ')
 [[ "$out" == "ABSENT" ]] \
-    || fail "with no claude layer the seed hook must write nothing at all: $out"
+    || fail "with no Claude executable the seed hook must write nothing at all: $out"
 
 # Running it twice is a no-op (it is a first-boot hook that may run every boot).
 out=$(seed_case '
@@ -371,8 +371,8 @@ grep -qx 'PI_SKIP_VERSION_CHECK=1' <<<"$out" \
     || fail "PI_SKIP_VERSION_CHECK must stay enforced even with PI_TELEMETRY set"
 
 # --- the seam ADR-0012 promises: a replaced install keeps the wrapper ---------
-# A later layer replaces the Pi installation and leaves the wrapper and the
-# mandatory extension alone. The wrapper (which that layer must not replace)
+# A later user Dockerfile replaces the Pi installation and leaves the wrapper and the
+# mandatory extension alone. The wrapper (which customization must retain)
 # still routes the mandatory --extension to WHATEVER entry point is installed,
 # and injects NO trust flag of its own; an explicit approve flag is forwarded
 # verbatim. We assert that routing with a stub entry point that echoes its argv;

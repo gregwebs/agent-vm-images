@@ -92,20 +92,24 @@ Other mapping decisions:
 | `images/min-agent-vm-version` | not migrated; obsolete launcher publication gate |
 | `script/build/sync-recipe-contracts.sh`, `script/test/sync-recipe-contracts.sh` | retired; no copies to sync |
 | `script/build/macos.sh` | excluded; launcher packaging |
-| `script/build/{agent-versions,dockerfile-label,npm-pin,transactional-publish}.sh` | deferred to maintenance pass; shared-file rewrite and rollback repair required before use |
-| `images/tools/{dsh,pi}/upgrade-*.sh`, `images/tools/pi/bridge/upgrade-bridge.sh` | deferred with maintenance; no old per-tool Dockerfile owner remains |
-| `script/test/{agent-versions,claude-installer,codex-installer,copilot-installer,copilot-verify,opencode-installer,dsh-prepare-lock,dsh-verify,pi-install,pi-prepare-lock,pi-verify,pi-wrapper,shipped-installer-contracts,tool-access,vendored-installers,upgrade-scripts,install-zellij}.sh` | same paths deferred; canonical-helper and central-Dockerfile adaptations |
-| `script/test/shipped-tool-recipes.sh` | deferred `script/test/standard-image.sh`, finished-image numeric-UID/report oracle, not recipe builds |
-| `script/test/pi-layer-runtime.sh` | deferred `script/test/pi-runtime.sh`, accepts BASE_IMAGE STANDARD_IMAGE |
+| `script/build/{agent-versions,dockerfile-label,npm-pin,transactional-publish}.sh` | same paths; shared-file rewrite and inclusive rollback repair |
+| `images/tools/{dsh,pi}/upgrade-*.sh`, `images/tools/pi/bridge/upgrade-bridge.sh` | same paths; staged central-Dockerfile edits and recovery retention |
+| `script/test/{agent-versions,claude-installer,codex-installer,copilot-installer,copilot-verify,opencode-installer,dsh-prepare-lock,dsh-verify,pi-install,pi-prepare-lock,pi-verify,pi-wrapper,shipped-installer-contracts,tool-access,vendored-installers,upgrade-scripts,install-zellij}.sh` | same paths; canonical-helper and central-Dockerfile adaptations |
+| `script/test/shipped-tool-recipes.sh` | `script/test/standard-image.sh`, finished-image numeric-UID/report oracle, not recipe builds |
+| `script/test/pi-layer-runtime.sh` | `script/test/pi-runtime.sh`, accepts BASE_IMAGE STANDARD_IMAGE |
 | `script/test/shipped-installer-network.sh` | same path deferred; canonical mounts / standard defaults |
-| `script/test/{host-watchdog.sh,host-watchdog.py}` | same paths deferred |
+| `script/test/{host-watchdog.sh,host-watchdog.py}` | same paths |
 | `script/test/fixtures/t5-negative/Dockerfile` | same path deferred, disposable audit only |
-| `script/test/fixtures/installer-egress/{addon.py,selections.tsv}` | same paths deferred, exact-selection restricted-egress audit |
-| `script/test/ci-contracts.sh` | deferred image-only `script/test/contracts.sh` aggregate |
-| `crates/agent-vm/tests/image_sources.rs` | deferred independent test-only package, not a launcher workspace copy |
-| `.github/workflows/{build-image,shipped-tool-recipes,pi-layer}.yml` | historical references only; replacement contracts/build-local/installer-network CI deferred |
+| `script/test/fixtures/installer-egress/{addon.py,selections.tsv}` | same paths, exact-selection restricted-egress audit |
+| `script/test/ci-contracts.sh` | image-only `script/test/contracts.sh` aggregate |
+| `crates/agent-vm/tests/image_sources.rs` | independent test-only package, not a launcher workspace copy |
+| `.github/workflows/{build-image,shipped-tool-recipes,pi-layer}.yml` | historical references only; replacement contracts/build-local/installer-network CI |
 | all other launcher source/docs/workflows | excluded |
 
-This first pass implements layout, recipes, build interface, user example and
-their documentation. Maintenance (§5), retained/new audit suites (§6) and CI
-(§7) remain follow-up work. Do not interpret their absence as passing acceptance.
+This migration includes maintenance (§5), retained/new audits (§6) and native
+non-publishing CI (§7). The plan's retained-suite list says 18 but enumerates 17
+paths; all 17 are retained. Source-only integrity tests run in the independent
+`script/test/image-sources` package, never the launcher workspace. New tests and
+CI do not imply actual native acceptance passed: see CONTRIBUTING's evidence
+requirements and the proposed PR run logs. Full standard builds and strict
+egress on both native architectures remain mandatory before merge.

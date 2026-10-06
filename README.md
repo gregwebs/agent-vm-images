@@ -110,7 +110,8 @@ for agent commands: `bash -lc` can reset the image PATH through `/etc/profile`.
 - [Installer security, locks and runtime payloads](images/tools/README.md)
 - [Layout, migration manifest and staged ownership](docs/image-source-ownership.md)
 
-**Staged implementation:** maintenance rewrites, audit suites and CI are pending
-in the follow-up pass. Full standard builds and native amd64/arm64 audits remain
-required before acceptance; base/example execution alone is not standard health
-or agent-vm guest boot evidence.
+Maintenance, hermetic audits and native non-publishing CI live in this repository.
+See [CONTRIBUTING](CONTRIBUTING.md) for commands and acceptance evidence. Fast tests
+are not proof of full standard installation: both native architecture builds and
+mandatory runtime/strict-egress audits must pass before merge. No publication or
+launcher boot evidence is claimed here.

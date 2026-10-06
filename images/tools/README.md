@@ -151,11 +151,17 @@ is not a working bridge or evidence of an authenticated turn.
 
 ## Maintenance and runtime ownership
 
-[CONTRIBUTING](../../CONTRIBUTING.md#selection-ownership-and-maintenance-follow-up)
-is canonical for staged maintenance interfaces, review and required evidence.
-The maintenance rewrite and retained/new audit suites are deferred in this pass;
-old per-tool bump/build commands are **not** supported here. Locks and pins were
-transferred unchanged, not regenerated. There are no standalone tool Dockerfiles.
+[CONTRIBUTING](../../CONTRIBUTING.md#selection-ownership-and-maintenance)
+is canonical for maintenance commands, audit interfaces, prerequisites and CI
+evidence. Bump scripts stage owning manifests/locks and the one standard Dockerfile
+transactionally. Rollback status 3 preserves/report recovery material: stop and
+recover before further edits. Locks and pins were transferred unchanged, not
+regenerated. There are no standalone tool Dockerfiles. Run the linked
+[fast contracts](../../script/test/contracts.sh),
+[finished-image audit](../../script/test/standard-image.sh),
+[Pi runtime matrix](../../script/test/pi-runtime.sh) and
+[strict installer egress audit](../../script/test/shipped-installer-network.sh)
+at the appropriate verification tier.
 
 Seed hooks are shipped integrations, not a universal boot contract. Docker CMD
 does not execute them automatically; a caller prepares user-owned state and
