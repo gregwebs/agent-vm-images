@@ -120,10 +120,20 @@ implicitly. `pi-runtime.sh BASE STANDARD` retains deeper credential-free runtime
 behavior, replacement, warning, bridge and seed cases. Container checks do not
 prove VM provisioning, authenticated sessions or actual LSP execution.
 
+`standard-image.sh --pi-audit-status BASE_IMAGE [--platform linux/ARCH]` runs the
+real generated Pi access audit against a controlled fixture (no full standard).
+It requires a nonzero verdict when the Pi command or seed-hook check fails, even
+when the later extension-content check passes, and a nonzero verdict when the
+content check fails independently; CI runs it in the native audit phase.
+
 ```bash
 bash script/test/shipped-installer-network.sh agent-vm-base:local --platform linux/arm64
 # Strict defaults: all three vendored installers plus denied-latest control.
 # --overrides adds tracked exact alternates; --observe is NEVER acceptance.
+# Redacted request evidence (one log per selection plus the mutation) is written
+# under target/ci-logs/installer-egress-<run>/ and uploaded; a run that writes no
+# evidence fails, and mitmdump runs as the invoking numeric uid with --cap-drop
+# ALL so it can write its invocation-owned cert/log mounts.
 ```
 
 CI uses read-only permissions, pinned actions and checkout without persisted

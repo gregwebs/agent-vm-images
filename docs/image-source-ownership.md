@@ -97,9 +97,9 @@ Other mapping decisions:
 | `script/test/{agent-versions,claude-installer,codex-installer,copilot-installer,copilot-verify,opencode-installer,dsh-prepare-lock,dsh-verify,pi-install,pi-prepare-lock,pi-verify,pi-wrapper,shipped-installer-contracts,tool-access,vendored-installers,upgrade-scripts,install-zellij}.sh` | same paths; canonical-helper and central-Dockerfile adaptations |
 | `script/test/shipped-tool-recipes.sh` | `script/test/standard-image.sh`, finished-image numeric-UID/report oracle, not recipe builds |
 | `script/test/pi-layer-runtime.sh` | `script/test/pi-runtime.sh`, accepts BASE_IMAGE STANDARD_IMAGE |
-| `script/test/shipped-installer-network.sh` | same path deferred; canonical mounts / standard defaults |
+| `script/test/shipped-installer-network.sh` | same path; migrated/adapted strict restricted-egress audit with canonical mounts and standard defaults (interface implemented; live acceptance run pending) |
 | `script/test/{host-watchdog.sh,host-watchdog.py}` | same paths |
-| `script/test/fixtures/t5-negative/Dockerfile` | same path deferred, disposable audit only |
+| `script/test/fixtures/t5-negative/Dockerfile` | same path; migrated/adapted disposable numeric-owner/group denial fixture for the finished-image audit (interface implemented; acceptance run pending) |
 | `script/test/fixtures/installer-egress/{addon.py,selections.tsv}` | same paths, exact-selection restricted-egress audit |
 | `script/test/ci-contracts.sh` | image-only `script/test/contracts.sh` aggregate |
 | `crates/agent-vm/tests/image_sources.rs` | independent test-only package, not a launcher workspace copy |
