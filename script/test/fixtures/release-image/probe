@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$(id -u)" = 12345 ]
+[ "$(id -g)" = 23456 ]
+printf 'probe\n' > "$HOME/release-probe-file"
+printf 'release-transport numeric UID OK\n'

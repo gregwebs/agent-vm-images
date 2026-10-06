@@ -16,11 +16,19 @@ the reviewed bytes and pins. Private npm metadata names containing “layer” a
 historical names, not separate image products.
 
 [Slice #263](https://github.com/gregwebs/agent-vm/issues/263) implements the source
-boundary of [parent #257](https://github.com/gregwebs/agent-vm/issues/257).
-[Publication #264](https://github.com/gregwebs/agent-vm/issues/264) and launcher /
-submodule integration #265 are separate. No public base artifact, per-tool
-artifact service, release scheme or universal boot contract is introduced here.
-Container checks do not demonstrate microsandbox boot or authenticated sessions.
+boundary of [parent #257](https://github.com/gregwebs/agent-vm/issues/257) and its
+own native source/audit/strict-egress gates passed (see the
+[#263 close-out](https://github.com/gregwebs/agent-vm/issues/263#issuecomment-6018677984);
+that evidence belongs to #263, not to a publication run).
+[Publication #264](https://github.com/gregwebs/agent-vm/issues/264) adds a
+maintained, image-owned standard release contract (one
+`ghcr.io/gregwebs/agent-vm-standard` product, independent image versions,
+digest-addressed OCI index plus archive/SBOM assets), described in
+[standard image releases](standard-image-releases.md). The base stays local-only;
+there is still no per-tool artifact service or universal boot contract. The
+launcher/submodule integration remains #265 and is not claimed here, and
+container/fixture checks do not demonstrate microsandbox boot or authenticated
+sessions.
 
 ## Selective migration manifest
 
@@ -97,9 +105,9 @@ Other mapping decisions:
 | `script/test/{agent-versions,claude-installer,codex-installer,copilot-installer,copilot-verify,opencode-installer,dsh-prepare-lock,dsh-verify,pi-install,pi-prepare-lock,pi-verify,pi-wrapper,shipped-installer-contracts,tool-access,vendored-installers,upgrade-scripts,install-zellij}.sh` | same paths; canonical-helper and central-Dockerfile adaptations |
 | `script/test/shipped-tool-recipes.sh` | `script/test/standard-image.sh`, finished-image numeric-UID/report oracle, not recipe builds |
 | `script/test/pi-layer-runtime.sh` | `script/test/pi-runtime.sh`, accepts BASE_IMAGE STANDARD_IMAGE |
-| `script/test/shipped-installer-network.sh` | same path; migrated/adapted strict restricted-egress audit with canonical mounts and standard defaults (interface implemented; live acceptance run pending) |
+| `script/test/shipped-installer-network.sh` | same path; migrated/adapted strict restricted-egress audit with canonical mounts and standard defaults (interface and native gating evidence from #263) |
 | `script/test/{host-watchdog.sh,host-watchdog.py}` | same paths |
-| `script/test/fixtures/t5-negative/Dockerfile` | same path; migrated/adapted disposable numeric-owner/group denial fixture for the finished-image audit (interface implemented; acceptance run pending) |
+| `script/test/fixtures/t5-negative/Dockerfile` | same path; migrated/adapted disposable numeric-owner/group denial fixture for the finished-image audit (interface and native gating evidence from #263) |
 | `script/test/fixtures/installer-egress/{addon.py,selections.tsv}` | same paths, exact-selection restricted-egress audit |
 | `script/test/ci-contracts.sh` | image-only `script/test/contracts.sh` aggregate |
 | `crates/agent-vm/tests/image_sources.rs` | independent test-only package, not a launcher workspace copy |
@@ -109,7 +117,10 @@ Other mapping decisions:
 This migration includes maintenance (§5), retained/new audits (§6) and native
 non-publishing CI (§7). The plan's retained-suite list says 18 but enumerates 17
 paths; all 17 are retained. Source-only integrity tests run in the independent
-`script/test/image-sources` package, never the launcher workspace. New tests and
-CI do not imply actual native acceptance passed: see CONTRIBUTING's evidence
-requirements and the proposed PR run logs. Full standard builds and strict
-egress on both native architectures remain mandatory before merge.
+`script/test/image-sources` package, never the launcher workspace. #263's own
+native source/audit/strict-egress gates passed at its close-out; a publication
+run (#264) does not re-claim that evidence, and new tests/CI do not imply that
+native acceptance passed. Full standard builds and strict egress on both native
+architectures remain mandatory before merge, and released-standard consumption
+(anonymous digest/archive plus both native `msb` boots) is a separate
+publication gate.

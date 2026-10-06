@@ -8,14 +8,19 @@ FIXTURE_DOCKERFILE="$REPO_ROOT/script/test/fixtures/t5-negative/Dockerfile"
 # status bytes with it rather than a first-line key/value extraction (review F2).
 STATUS_VALIDATOR="$REPO_ROOT/images/recipe-contract/install-status.py"
 
-usage() { echo "usage: $0 BASE_IMAGE STANDARD_IMAGE [--platform linux/ARCH] [--expect SUFFIX=VERSION ...] | --self-test | --pi-audit-status BASE_IMAGE [--platform linux/ARCH]" >&2; }
+usage() { echo "usage: $0 BASE_IMAGE STANDARD_IMAGE [--platform linux/ARCH] [--expect SUFFIX=VERSION ...] | --artifact STANDARD_IMAGE [--platform linux/ARCH] [--expect SUFFIX=VERSION ...] | --self-test | --pi-audit-status BASE_IMAGE [--platform linux/ARCH]" >&2; }
 self_test=false
 pi_audit=false
+artifact=false
 BASE_IMAGE="" STANDARD_IMAGE="" platform=""
 keep=false
 expect_overrides=()
 if [ "${1:-}" = --self-test ]; then
     self_test=true; shift
+elif [ "${1:-}" = --artifact ]; then
+    artifact=true; shift
+    [ "$#" -ge 1 ] || { usage; exit 2; }
+    STANDARD_IMAGE=$1; shift
 elif [ "${1:-}" = --pi-audit-status ]; then
     pi_audit=true; shift
     [ "$#" -ge 1 ] || { usage; exit 2; }
@@ -1146,21 +1151,36 @@ if [ "$pi_audit" = true ]; then
     exit 0
 fi
 for required in docker jq python3; do command -v "$required" >/dev/null || fail "$required required"; done
-BUILDER=$(docker context show)
-docker buildx inspect "$BUILDER" | grep -Eq '^Driver:[[:space:]]+docker$' || fail 'T5 fixtures require daemon-backed builder'
+if [ "$artifact" = false ]; then
+    BUILDER=$(docker context show)
+    docker buildx inspect "$BUILDER" | grep -Eq '^Driver:[[:space:]]+docker$' || fail 'T5 fixtures require daemon-backed builder'
+fi
 want=$(for suffix in codex opencode claude copilot dsh pnpm pi pi-claude-bridge; do echo "org.agent-vm.version.$suffix"; done | sort)
 [ "$(version_keys "$STANDARD_IMAGE")" = "$want" ] || fail 'standard must have exactly eight selection labels'
 # shellcheck disable=SC2031 # self-test mutation is confined to its own subshell
 assert_expected_selection "$STANDARD_IMAGE" "$EXPECTED"
+if [ "$artifact" = false ]; then
 # shellcheck disable=SC2016 # in-container variables
 run_with_watchdog 180 docker_run --rm --platform "$platform" --network none "$BASE_IMAGE" bash -c '
 set -euo pipefail
 bash --version >/dev/null; node --version; python3 --version; zellij --version
 for tool in dsh pnpm pi codex opencode claude copilot; do if command -v "$tool"; then exit 1; fi; done
 test ! -e /usr/local/bin/pi; test ! -e /opt/agent-vm/pi; test ! -e /opt/agent-vm/pi-extensions' || fail 'base is not tool-free'
+fi
 run_with_watchdog 180 docker_run --rm --platform "$platform" --network none "$STANDARD_IMAGE" bash -c 'set -euo pipefail; bash --version >/dev/null; node --version; python3 --version; zellij --version' || fail 'base facilities lost'
 for tool in codex opencode claude copilot dsh pi; do audit_image "$STANDARD_IMAGE" "$tool" 0; done
 check_locks "$STANDARD_IMAGE"
 bash "$REPO_ROOT/script/test/seed-hooks.sh" "$STANDARD_IMAGE"
-t5_negatives
+if [ "$artifact" = false ]; then
+    t5_negatives
+else
+    probe=$(cat "$REPO_ROOT/script/test/fixtures/released-agent-probe.sh")
+    for pair in "$(id -u):$(id -g)" 12345:23456 54321:34567; do
+        run_with_watchdog 600 docker_run --rm --platform "$platform" --network none --cap-drop ALL \
+            --user "$pair" --tmpfs /home/probe:rw,exec,mode=1777 -e HOME=/home/probe \
+            --entrypoint bash "$STANDARD_IMAGE" -c "$probe" released-agent-probe \
+            "${pair%:*}" "${pair#*:}" "$DEFAULT_CODEX" "$DEFAULT_OPENCODE" "$DEFAULT_CLAUDE" \
+            "$DEFAULT_COPILOT" "$DEFAULT_DSH" "$DEFAULT_PNPM" "$DEFAULT_PI" "$DEFAULT_BRIDGE"
+    done
+fi
 echo 'finished standard image acceptance passed'

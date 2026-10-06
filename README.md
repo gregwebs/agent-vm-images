@@ -14,7 +14,9 @@ images/Dockerfile → agent-vm-base:local
 ```
 
 No launcher, project configuration, Rust or contributor tooling is required to
-build. This repository does not publish the base or promise a standard release.
+build. The base is never published; the standard image is published as an
+independent, versioned, digest-addressed OCI product at
+`ghcr.io/gregwebs/agent-vm-standard` plus matching archive/SBOM release assets.
 OS/apt inputs and optional Claude plugins float; committed agent selections,
 locks and reviewed installer snapshots are not silently refreshed.
 
@@ -107,11 +109,14 @@ Scripts installed outside HOME survive HOME mounts. Use non-login `bash -c`
 for agent commands: `bash -lc` can reset the image PATH through `/etc/profile`.
 
 - [Contributing and verification](CONTRIBUTING.md)
+- [Standard image releases](docs/standard-image-releases.md)
 - [Installer security, locks and runtime payloads](images/tools/README.md)
 - [Layout, migration manifest and staged ownership](docs/image-source-ownership.md)
 
 Maintenance, hermetic audits and native non-publishing CI live in this repository.
 See [CONTRIBUTING](CONTRIBUTING.md) for commands and acceptance evidence. Fast tests
 are not proof of full standard installation: both native architecture builds and
-mandatory runtime/strict-egress audits must pass before merge. No publication or
-launcher boot evidence is claimed here.
+mandatory runtime/strict-egress audits must pass before merge. Publication is a
+separate maintainer-only workflow; a merged workflow or fixture is not released
+acceptance. See [standard image releases](docs/standard-image-releases.md) for the
+version contract, published registry/archive interface and promotion gates.

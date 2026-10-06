@@ -1,0 +1,11 @@
+{
+  "syft_version": "1.20.0",
+  "syft_linux_amd64_sha256": "689e12c5cbf67521ce61b9c126068f9eaabe1223e77971b2fede50033ff6b5cc",
+  "syft_linux_arm64_sha256": "53f76737ddbf425c89240d5b0be0990b1a71e66890b44f19743221b17e6ee635",
+  "fixture_base": "alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c",
+  "fixture_registry": "registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373",
+  "fixture_skopeo": "quay.io/skopeo/stable:v1.18.0@sha256:c4c8a9d6fc95e331fa92fc31de3f6c9b5fe4761c82f0acb99669eef067fb7c33",
+  "gh_version": "2.97.0",
+  "gh_linux_amd64_sha256": "a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112",
+  "gh_linux_arm64_sha256": "73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5"
+}

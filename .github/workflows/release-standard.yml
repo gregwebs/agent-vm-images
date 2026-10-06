@@ -1,0 +1,338 @@
+name: Release standard image
+
+# Maintainer-only, manual publication of the committed standard image. There is
+# no PR/push/schedule trigger, no arbitrary source/config/build-arg input; the
+# version is read from the checked-out committed images/standard/version file.
+# Publication ref must be refs/heads/main of gregwebs/agent-vm-images. See
+# docs/standard-image-releases.md. A successful run creates an immutable,
+# digest-addressed PUBLIC PRERELEASE; it is never default-ready and is never
+# auto-promoted. Anonymous registry/archive consumption and native msb boots on
+# both architectures are separate, reviewed deployment gates.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: standard-image-release
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/gregwebs/agent-vm-standard
+
+jobs:
+  contracts:
+    uses: ./.github/workflows/contracts.yml
+
+  preflight:
+    needs: contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: image-release
+    # Write-capable only so the draft-inclusive Release list is authoritative.
+    # Preflight performs GETs only; it never mutates tags, Releases or packages.
+    permissions:
+      contents: write
+      packages: write
+    outputs:
+      version: ${{ steps.bind.outputs.version }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Require exact trusted main publication source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REPOSITORY" = gregwebs/agent-vm-images
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+      - name: Bind committed version
+        id: bind
+        run: |
+          set -euo pipefail
+          version=$(tr -d '[:space:]' < images/standard/version)
+          printf '%s\n' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Authenticated create-once preflight
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_PACKAGE_INVENTORY_TOKEN: ${{ secrets.GHCR_PACKAGE_INVENTORY_TOKEN }}
+          RELEASE_EFFECTIVE_CONTENTS: ${{ vars.RELEASE_EFFECTIVE_CONTENTS }}
+          RELEASE_PERMISSION_EVIDENCE_URL: ${{ vars.RELEASE_PERMISSION_EVIDENCE_URL }}
+          VERSION: ${{ steps.bind.outputs.version }}
+        run: |
+          set -euo pipefail
+          bash script/release/preflight.sh \
+            --version "$VERSION" \
+            --source-sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --out "$RUNNER_TEMP/preflight"
+      - name: Upload preflight evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/preflight/preflight.json
+          if-no-files-found: warn
+          retention-days: 7
+
+  native:
+    needs: [contracts, preflight]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    environment: image-release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Require exact trusted main publication source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REPOSITORY" = gregwebs/agent-vm-images
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+      - name: Provision pinned publication tools
+        run: bash script/release/install-ci-tools.sh
+      - name: Require containerd image store on this disposable runner
+        run: bash script/release/prepare-ci.sh
+      - name: Build once, export canonical OCI layout, Docker-load and audit
+        env:
+          NATIVE_ARCH: ${{ matrix.arch }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          OUT: ${{ runner.temp }}/standard-release-out
+          SCRATCH: ${{ runner.temp }}/standard-release
+        run: |
+          set -euo pipefail
+          mkdir -p target/ci-logs
+          python3 script/test/host-watchdog.py 19800 bash script/release/build-standard.sh \
+            --arch "$NATIVE_ARCH" --version "$VERSION" --out "$OUT" --scratch-root "$SCRATCH" \
+            2>&1 | tee target/ci-logs/release-build.log
+      - name: Owned post-audit GHCR login (never used by build RUNs)
+        env:
+          PUBLISH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOCKER_CONFIG"
+          chmod 700 "$DOCKER_CONFIG"
+          printf '%s' "$PUBLISH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+      - name: Push one digest-preserving standard platform ref
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_PACKAGE_INVENTORY_TOKEN: ${{ secrets.GHCR_PACKAGE_INVENTORY_TOKEN }}
+          NATIVE_ARCH: ${{ matrix.arch }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          OUT: ${{ runner.temp }}/standard-release-out
+        run: |
+          set -euo pipefail
+          layout=$(jq -r .layout "$OUT/result.json")
+          bash script/release/publish-standard.sh \
+            --layout "$layout" --image "$IMAGE" --tag "v$VERSION-$NATIVE_ARCH" \
+            --arch "$NATIVE_ARCH" --metadata "$OUT/platform.json"
+      - name: Bind platform digest
+        id: digest
+        env:
+          OUT: ${{ runner.temp }}/standard-release-out
+        run: |
+          set -euo pipefail
+          digest=$(jq -er '.graph.manifest.digest' "$OUT/platform.json")
+          printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          echo "value=$digest" >> "$GITHUB_OUTPUT"
+      - name: Attest platform image provenance
+        id: image
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ghcr.io/gregwebs/agent-vm-standard
+          subject-digest: ${{ steps.digest.outputs.value }}
+          push-to-registry: true
+      - name: Attest platform SPDX SBOM
+        id: sbom
+        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3.0.0
+        with:
+          subject-name: ghcr.io/gregwebs/agent-vm-standard
+          subject-digest: ${{ steps.digest.outputs.value }}
+          sbom-path: ${{ runner.temp }}/standard-release-out/agent-vm-standard-v${{ needs.preflight.outputs.version }}-linux-${{ matrix.arch }}.spdx.json
+          push-to-registry: true
+      - name: Attest frozen platform inventory and payloads
+        id: files
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: |
+            ${{ runner.temp }}/standard-release-out/platform.json
+            ${{ runner.temp }}/standard-release-out/*.oci.tar*
+            ${{ runner.temp }}/standard-release-out/*.spdx.json
+      - name: Freeze signed bundle filenames
+        env:
+          NATIVE_ARCH: ${{ matrix.arch }}
+          OUT: ${{ runner.temp }}/standard-release-out
+          IMAGE_BUNDLE: ${{ steps.image.outputs.bundle-path }}
+          SBOM_BUNDLE: ${{ steps.sbom.outputs.bundle-path }}
+          FILES_BUNDLE: ${{ steps.files.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "$IMAGE_BUNDLE" "$OUT/platform-$NATIVE_ARCH-image.sigstore.json"
+          cp "$SBOM_BUNDLE" "$OUT/platform-$NATIVE_ARCH-sbom.sigstore.json"
+          cp "$FILES_BUNDLE" "$OUT/platform-$NATIVE_ARCH-files.sigstore.json"
+      - name: Upload run/attempt-scoped staging artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: standard-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/standard-release-out/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+      - name: Upload native evidence (never turns failure green)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: standard-${{ matrix.arch }}-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/standard-release-out/evidence/
+            ${{ runner.temp }}/standard-release/standard-*/**/*.log
+            ${{ runner.temp }}/standard-release/standard-*/**/*.json
+            !${{ runner.temp }}/standard-release/standard-*/**/*layout*/**
+            !${{ runner.temp }}/standard-release/standard-*/**/auth/**
+            target/ci-logs/**/*.log
+            target/ci-logs/**/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Native evidence summary
+        if: always()
+        env:
+          NATIVE_ARCH: ${{ matrix.arch }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          JOB_VERDICT: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Standard image v$VERSION on linux/$NATIVE_ARCH; verdict: $JOB_VERDICT"
+            echo "Source SHA: $GITHUB_SHA; builder driver: $(docker info --format '{{.DriverStatus}}' 2>/dev/null || true)"
+            echo "Verdicts in this summary are not, by themselves, a published or native-accepted release."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  assemble:
+    needs: [preflight, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    environment: image-release
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Require exact trusted main publication source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_REPOSITORY" = gregwebs/agent-vm-images
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+      - name: Download only this run/attempt staging artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: standard-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/platform
+      - name: Provision pinned publication tools
+        run: bash script/release/install-ci-tools.sh
+      - name: Owned assembly GHCR login
+        env:
+          PUBLISH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
+        run: |
+          set -euo pipefail
+          mkdir -p "$DOCKER_CONFIG"
+          chmod 700 "$DOCKER_CONFIG"
+          printf '%s' "$PUBLISH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+      - name: Verify signed handoff, assemble index and create draft
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_PACKAGE_INVENTORY_TOKEN: ${{ secrets.GHCR_PACKAGE_INVENTORY_TOKEN }}
+          RELEASE_EFFECTIVE_CONTENTS: ${{ vars.RELEASE_EFFECTIVE_CONTENTS }}
+          RELEASE_PERMISSION_EVIDENCE_URL: ${{ vars.RELEASE_PERMISSION_EVIDENCE_URL }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          PLATFORM_ROOT: ${{ runner.temp }}/platform
+          OUT: ${{ runner.temp }}/assembled
+        run: |
+          set -euo pipefail
+          bash script/release/release-standard.sh prepare \
+            --version "$VERSION" \
+            --source-sha "$GITHUB_SHA" \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --platform-dir "$PLATFORM_ROOT/standard-amd64-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --platform-dir "$PLATFORM_ROOT/standard-arm64-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --out "$OUT"
+      - name: Bind index digest
+        id: index
+        env:
+          OUT: ${{ runner.temp }}/assembled
+        run: |
+          set -euo pipefail
+          digest=$(jq -er .index_digest "$OUT/result.json")
+          printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          echo "value=$digest" >> "$GITHUB_OUTPUT"
+      - name: Attest two-platform release index
+        id: indexAttestation
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ghcr.io/gregwebs/agent-vm-standard
+          subject-digest: ${{ steps.index.outputs.value }}
+          push-to-registry: true
+      - name: Attest final release metadata and checksums
+        id: metadata
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: |
+            ${{ runner.temp }}/assembled/release.json
+            ${{ runner.temp }}/assembled/SHA256SUMS
+      - name: Freeze release bundle filenames
+        env:
+          OUT: ${{ runner.temp }}/assembled
+          INDEX_BUNDLE: ${{ steps.indexAttestation.outputs.bundle-path }}
+          META_BUNDLE: ${{ steps.metadata.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          cp "$INDEX_BUNDLE" "$OUT/release-index.sigstore.json"
+          cp "$META_BUNDLE" "$OUT/release-metadata.sigstore.json"
+      - name: Publish public prerelease after anonymous validation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUT: ${{ runner.temp }}/assembled
+        run: bash script/release/release-standard.sh publish --state "$OUT/state.json"
+      - name: Upload assembly evidence (never turns failure green)
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assembly-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/assembled/*.json
+            ${{ runner.temp }}/assembled/SHA256SUMS
+            ${{ runner.temp }}/assembled/*.sigstore.json
+          if-no-files-found: warn
+          retention-days: 7
+          compression-level: 0
