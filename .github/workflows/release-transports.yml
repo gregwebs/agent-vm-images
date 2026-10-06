@@ -1,0 +1,79 @@
+name: Release transport controls
+
+# Read-only fixture transport controls. No GHCR credentials, no publication and
+# no VM boot. A passing fixture proves transport mechanics only; it is never
+# released-standard acceptance (see docs/standard-image-releases.md).
+on:
+  pull_request:
+    paths: ['images/**', 'script/**', '.github/workflows/**']
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    uses: ./.github/workflows/contracts.yml
+  transports:
+    needs: contracts
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Transport prerequisites
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y skopeo coreutils jq python3 curl tar apache2-utils
+      - name: Require containerd image store on this disposable runner
+        run: bash script/release/prepare-ci.sh
+      - name: Fixture transport controls
+        env:
+          NATIVE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/ci-logs
+          python3 script/test/host-watchdog.py 7200 bash script/test/release-transports.sh \
+            --arch "$NATIVE_ARCH" --scratch-root "$RUNNER_TEMP/transport-scratch" \
+            2>&1 | tee target/ci-logs/transports.log
+      - name: Evidence summary
+        if: always()
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          NATIVE_ARCH: ${{ matrix.arch }}
+          JOB_VERDICT: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Image source SHA: $SOURCE_SHA"
+            echo "Native platform: linux/$NATIVE_ARCH; verdict: $JOB_VERDICT"
+            echo 'Fixture transport controls only; absent/failed phases are NOT released-standard acceptance.'
+            if [ -f target/ci-logs/transports.log ]; then tail -n 5 target/ci-logs/transports.log; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload transport evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-transports-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/ci-logs/**/*.log
+            target/ci-logs/**/*.json
+            ${{ runner.temp }}/transport-scratch/transport-*/**/*.log
+            ${{ runner.temp }}/transport-scratch/transport-*/peak-samples.json
+            ${{ runner.temp }}/transport-scratch/transport-*/graph.json
+            ${{ runner.temp }}/transport-scratch/transport-*/result.json
+            !${{ runner.temp }}/transport-scratch/transport-*/**/auth/**
+          if-no-files-found: warn

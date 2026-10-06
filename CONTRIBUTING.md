@@ -144,7 +144,10 @@ and `ubuntu-24.04-arm`; 330-minute jobs separately bound setup, 180-minute build
 and 90-minute audits. `installer-network.yml` runs strict default PR audits on
 both native architectures, with separate 60-minute base / 90-minute audit bounds
 and 180-minute job limits. Optional alternates are manual only. macOS CI is
-explicitly deferred; Bash 3.2 checks are local.
+explicitly deferred; Bash 3.2 checks are local. `release-transports.yml` runs
+read-only loopback registry/archive/negative fixture controls, with no GHCR
+credentials and no VM boot, on both native architectures; it proves transport
+mechanics only, never released-standard acceptance.
 
 Hosted runner cleanup names four unused SDK directories only, is bounded to ten
 minutes, and remeasures the daemon filesystem. Capacity/native availability
@@ -153,7 +156,35 @@ runner cannot supply evidence, attach equivalent clean native-host runs at the
 proposed SHA before merge; postmerge dispatch is not a substitute. Record first
 run phase durations per architecture, use at least 1.5× measured maxima and keep
 initial floors; if adequate headroom exceeds hosted limits, use recorded native
-runs rather than drop audits. No publication or cross-job image transport.
+runs rather than drop audits. Cross-job image transport for a release is limited
+to the run/attempt-scoped staging artifact; ordinary PR CI moves no image
+archives.
+
+## Standard image publication
+
+`images/standard/version` is the single owner of the image version; bumping it
+is a reviewed source change and never bumps any launcher workspace version.
+Publication is maintainer-only and manual: `.github/workflows/release-standard.yml`
+is `workflow_dispatch` only (no PR/push/schedule trigger and no arbitrary
+build-arg/source input), requires `refs/heads/main` of `gregwebs/agent-vm-images`,
+and runs in the protected `image-release` environment. Read
+[standard image releases](docs/standard-image-releases.md) before dispatching.
+
+Release prerequisites are deployment prerequisites, not PR gates: an
+authoritative owner `read:packages` inventory token, the confirmed effective
+`Contents: write` grant, GHCR package write and public visibility, and suitable
+native amd64 and arm64 hosts with a compatible standalone `msb` runtime.
+Checksum-pinned tooling (Syft `v1.20.0`, gh `v2.97.0`) and apt-selected
+skopeo/coreutils/jq/Python (floating OS inputs, versions recorded) are installed only on disposable Linux CI by `script/release/install-ci-tools.sh`;
+host operators may provide their own tools but must record exact versions.
+Signing and SBOM use GitHub/Sigstore attestations; no custom signer exists.
+
+Merging the release workflow is not release acceptance. #264 remains complete
+only after the published prerelease is consumed anonymously by digest and by
+exact archive/SBOM on **both** native architectures, both `msb` boots pass, and
+a named maintainer reviews the hash-bound evidence and explicitly promotes the
+same bytes. A merged workflow or a passing fixture must never be reported as a
+native or published acceptance.
 
 ### Evidence and failures
 
@@ -164,5 +195,6 @@ archives. State each not-run check explicitly. Separate fast controls, actual
 full installation, optional plugins, strict egress and runtime observations.
 A timeout/nonzero is failure. Until both native full builds and mandatory audits
 pass, merge remains blocked, even if contracts pass. Publication is
-[#264](https://github.com/gregwebs/agent-vm/issues/264); launcher/submodule
+[#264](https://github.com/gregwebs/agent-vm/issues/264) and is described in
+[standard image releases](docs/standard-image-releases.md); launcher/submodule
 integration is [#265](https://github.com/gregwebs/agent-vm/issues/265).
