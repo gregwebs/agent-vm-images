@@ -21,7 +21,7 @@
 #   --platform P  Docker platform (default: the host's)
 #
 # Tier: real Docker + real network. It downloads real release assets, so it is
-# an explicit developer/dispatched-CI step, never part of the boot-free suite.
+# a bounded PR/manual native CI audit, never part of the hermetic aggregate.
 
 set -euo pipefail
 

@@ -83,8 +83,8 @@ sblob() {
 
 # Per-build / per-runtime-probe budgets (plan task 5). Overridable only for
 # targeted testing; the production values are the plan's 20 min / 3 min.
-BUILD_WATCHDOG_SECONDS="${SHIPPED_TOOL_RECIPES_BUILD_WATCHDOG:-1200}"
-RUNTIME_WATCHDOG_SECONDS="${SHIPPED_TOOL_RECIPES_RUNTIME_WATCHDOG:-180}"
+BUILD_WATCHDOG_SECONDS="${STANDARD_IMAGE_FIXTURE_WATCHDOG:-1200}"
+RUNTIME_WATCHDOG_SECONDS="${STANDARD_IMAGE_RUNTIME_WATCHDOG:-180}"
 
 # --- the committed exact alternate selections (never `latest`) ---------------
 # Sources: /tmp/agent-vm-227/{initial-pin-candidates.txt,alternate-selection-capture.json}
