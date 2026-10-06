@@ -1,0 +1,5 @@
+#!/bin/bash
+set -euo pipefail
+printf '%s\n' 'hello from my base extension'
+uname -s
+id -u
