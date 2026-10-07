@@ -58,27 +58,30 @@ To publish:
 
 1. Land the new `images/standard/version` (and any source change) on `main`.
 2. Dispatch **Release standard image** from `main`.
-3. At the `image-release` environment approval prompts, confirm the effective
-   `Contents: write` grant (Set up job → GITHUB_TOKEN Permissions) and, after
-   native pushes, make the GHCR package public before approving the assembly
-   job. Preflight writes nothing; it performs GETs only.
+3. There is exactly one approval per release: the `assemble` job pauses in the
+   protected `image-release` environment after both native builds. Confirm the
+   effective `Contents: write` grant (Set up job → GITHUB_TOKEN Permissions)
+   and, on the first release only, make the GHCR package public before
+   approving — a new user-owned package defaults to private and anonymous
+   consumption is required. `preflight` and `native` do not pause.
 
 ## Permissions and approval hosts
 
 - Top level is `contents: read`. Each job narrows or widens explicitly.
-- `preflight` and `assemble` run in the protected `image-release` environment
-  and hold `contents: write` so the draft-inclusive Release list is
-  authoritative. `preflight` still performs GETs only.
+- `assemble` is the only job in the protected `image-release` environment, so
+  a release needs a single review; `preflight` and `assemble` hold
+  `contents: write` so the draft-inclusive Release list is authoritative, and
+  `preflight` performs GETs only and does not pause.
 - `native` (matrix `amd64` → `ubuntu-24.04`, `arm64` → `ubuntu-24.04-arm`)
   holds `contents: read`, `packages: write`, `id-token: write`,
   `attestations: write`. It publishes only after build and audits.
-- `GHCR_PACKAGE_INVENTORY_TOKEN` is a protected secret: an owner classic token
+- `GHCR_PACKAGE_INVENTORY_TOKEN` is a repository secret: an owner classic token
   restricted to `read:packages`. It is the authoritative owner-wide package
   inventory; a repo token's concealed 404 can never prove first-package
   absence. It is never a write credential and is never injected into build RUNs.
-- `RELEASE_EFFECTIVE_CONTENTS` (must be `write`) is the protected environment
-  attestation that this pipeline runs with an effective contents-write grant.
-  It is set once and does not change per release.
+- `RELEASE_EFFECTIVE_CONTENTS` (must be `write`) is a repository variable: the
+  one-time attestation that this pipeline runs with an effective contents-write
+  grant. It is set once and does not change per release.
   `RELEASE_PERMISSION_EVIDENCE_URL` is **not** a configured variable: the
   workflow derives it per run from `github.run_id`/`github.run_attempt`, since
   the bound run/attempt cannot exist when a static variable is configured.
