@@ -60,11 +60,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_PACKAGE_INVENTORY_TOKEN: ${{ secrets.GHCR_PACKAGE_INVENTORY_TOKEN }}
-          RELEASE_EFFECTIVE_CONTENTS: ${{ vars.RELEASE_EFFECTIVE_CONTENTS }}
-          # Run-bound and derived, never maintained by hand: preflight binds the
-          # approval to this exact run/attempt, which cannot be known when a
-          # static repository variable is configured.
-          RELEASE_PERMISSION_EVIDENCE_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}#permissions"
           VERSION: ${{ steps.bind.outputs.version }}
         run: |
           set -euo pipefail
@@ -274,9 +269,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_PACKAGE_INVENTORY_TOKEN: ${{ secrets.GHCR_PACKAGE_INVENTORY_TOKEN }}
-          RELEASE_EFFECTIVE_CONTENTS: ${{ vars.RELEASE_EFFECTIVE_CONTENTS }}
-          # Run-bound and derived, never maintained by hand (see the preflight job).
-          RELEASE_PERMISSION_EVIDENCE_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}#permissions"
           VERSION: ${{ needs.preflight.outputs.version }}
           PLATFORM_ROOT: ${{ runner.temp }}/platform
           OUT: ${{ runner.temp }}/assembled

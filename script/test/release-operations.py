@@ -168,10 +168,6 @@ class AuthorityTests(unittest.TestCase):
 
 
 class DraftAuthorityTests(unittest.TestCase):
-    def authority(self, contents='write', evidence=True):
-        return preflight.PushAuthority(preflight.REPO, '264', '1', contents,
-            preflight.SOURCE_URL + '/actions/runs/264/attempts/1#job-1' if evidence else '')
-
     def client(self, records=None, *, page2=None, published=None, tag=None, status=200):
         responses = [reply(200, {'full_name': preflight.REPO})]
         headers = {} if page2 is None else {'link':
@@ -183,9 +179,9 @@ class DraftAuthorityTests(unittest.TestCase):
                       reply(404, {'message': 'Not Found'}) if tag is None else reply(200, tag)]
         return FakeClient(responses)
 
-    def check(self, client, authority=None):
-        return preflight.release_tag_absence(client, token='fixture-workflow-token', version='0.1.0',
-                                            authority=authority or self.authority()).value
+    def check(self, client):
+        return preflight.release_tag_absence(client, token='fixture-workflow-token',
+                                            version='0.1.0').value
 
     def test_complete_absence_is_get_only(self):
         client = self.client()
@@ -197,12 +193,6 @@ class DraftAuthorityTests(unittest.TestCase):
         draft = {'id': 1, 'tag_name': 'v0.1.0', 'draft': True}
         self.assertEqual(self.check(self.client([draft])), 'OCCUPIED_BY_DRAFT')
         self.assertEqual(self.check(self.client(page2=[draft])), 'OCCUPIED_BY_DRAFT')
-
-    def test_read_only_success_or_missing_evidence_is_not_authority(self):
-        for authority in (self.authority(contents='read'), self.authority(evidence=False)):
-            client = self.client()
-            self.assertEqual(self.check(client, authority), 'UNAUTHORIZED_OR_CONCEALED')
-            self.assertEqual(client.requests, [])
 
     def test_published_and_tag_only_collisions(self):
         release = {'id': 2, 'tag_name': 'v0.1.0', 'draft': False}
@@ -561,19 +551,16 @@ class ReviewRegressionTests(unittest.TestCase):
     def test_initial_preflight_then_intervening_draft_blocks_assembly_cli(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); release, folders = self.release_fixture(root)
-            authority = preflight.PushAuthority(preflight.REPO, '264', '1', 'write',
-                content.SOURCE + '/actions/runs/264/attempts/1#job')
             def snapshot(draft=False):
                 return FakeClient([reply(200, {'full_name': preflight.REPO}), reply(200,
                     [{'id': 264, 'tag_name': 'v0.1.0', 'draft': True}] if draft else []),
                     reply(404, {'message': 'Not Found'}), reply(404, {'message': 'Not Found'})])
             env = {'GITHUB_REPOSITORY': preflight.REPO, 'GITHUB_REF': 'refs/heads/main', 'GITHUB_SHA': 'a'*40,
                 'GITHUB_RUN_ID': '264', 'GITHUB_RUN_ATTEMPT': '1', 'GITHUB_TOKEN': 'fixture',
-                'GHCR_PACKAGE_INVENTORY_TOKEN': 'fixture', 'GITHUB_ACTOR': 'fixture'}
+                'GHCR_PACKAGE_INVENTORY_TOKEN': 'fixture', 'GITHUB_ACTOR': 'fixture', 'GITHUB_ACTIONS': 'true'}
             client = snapshot(); client.responses.insert(0, reply(200, {'full_name': preflight.REPO}))
             with mock.patch.dict(os.environ, env), mock.patch.object(preflight, 'Curl', return_value=client), \
                  mock.patch.object(preflight, 'owner_inventory', return_value=(True, 'sanitized-hash')), \
-                 mock.patch.object(preflight, 'workflow_authority', return_value=authority), \
                  mock.patch.object(preflight, 'check_refs', return_value={'v0.1.0': preflight.Outcome.REF_ABSENT}), \
                  mock.patch.object(sys, 'argv', ['preflight', '--version', '0.1.0', '--source-sha', 'a'*40,
                     '--run-id', '264', '--run-attempt', '1', '--out', str(root / 'preflight')]):
@@ -589,7 +576,6 @@ class ReviewRegressionTests(unittest.TestCase):
             refs = {'v0.1.0': preflight.Outcome.REF_ABSENT,
                     'v0.1.0-amd64': preflight.Outcome.REF_PRESENT, 'v0.1.0-arm64': preflight.Outcome.REF_PRESENT}
             with mock.patch.dict(os.environ, env), mock.patch.object(preflight, 'Curl', return_value=snapshot(True)), \
-                 mock.patch.object(preflight, 'workflow_authority', return_value=authority), \
                  mock.patch.object(operations, 'source_sha', return_value='a'*40), \
                  mock.patch.object(operations, 'committed_version'), mock.patch.object(operations, 'authfile', return_value=root/'owned.json'), \
                  mock.patch.object(operations, 'verify_platform_handoff', side_effect=release.platforms), \
@@ -1033,8 +1019,7 @@ class ReleaseInterfaceTests(unittest.TestCase):
             GITHUB_RUN_ID='264', GITHUB_RUN_ATTEMPT='1', GITHUB_TOKEN='fixture-host-secret',
             GITHUB_ACTOR='fixture', GITHUB_ACTIONS='true',
             GH_TOKEN='fixture-host-secret', GHCR_PACKAGE_INVENTORY_TOKEN='fixture-owner-secret',
-            MSB_LIBKRUNFW_PATH=str(self.firmware), MSB_LIBKRUN_VERSION='fake-runtime', MSB_LIBKRUN_EMBEDDED='1',
-            RELEASE_EFFECTIVE_CONTENTS='write', RELEASE_PERMISSION_EVIDENCE_URL=content.SOURCE + '/actions/runs/264/attempts/1#permission-report')
+            MSB_LIBKRUNFW_PATH=str(self.firmware), MSB_LIBKRUN_VERSION='fake-runtime', MSB_LIBKRUN_EMBEDDED='1')
         # The real Darwin storage gate still sees an existing backing filesystem.
         self.env['RELEASE_VM_BACKING_PATH'] = str(self.root)
         auth = self.root / 'publisher-auth'; auth.mkdir()

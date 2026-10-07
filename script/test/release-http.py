@@ -50,12 +50,9 @@ class HTTPControls(unittest.TestCase):
                     raise ValueError('unapproved fixture source')
                 return endpoint + parsed.path + ('?' + parsed.query if parsed.query else '')
         self.client = FixtureCurl(Path(self.directory.name))
-        self.authority = preflight.PushAuthority(preflight.REPO, '264', '1', 'write',
-            preflight.SOURCE_URL + '/actions/runs/264/attempts/1#job-1')
-
-    def check(self, authority=None):
-        return preflight.release_tag_absence(self.client, token='nonsecret-fixture-token', version='0.1.0',
-                                             authority=authority or self.authority).value
+    def check(self):
+        return preflight.release_tag_absence(self.client, token='nonsecret-fixture-token',
+                                             version='0.1.0').value
 
     def response(self, status, body, headers=None):
         self.responses.append((status, body, headers or {}))
@@ -87,10 +84,7 @@ class HTTPControls(unittest.TestCase):
         self.assertEqual(self.check(), 'OCCUPIED_BY_DRAFT')
         self.assertEqual(sum(path.endswith('&page=1') for path in self.paths), 2)
 
-    def test_read_only_concealed_and_denied(self):
-        authority = preflight.PushAuthority(preflight.REPO, '264', '1', 'read', self.authority.evidence_url)
-        self.assertEqual(self.check(authority), 'UNAUTHORIZED_OR_CONCEALED')
-        self.assertEqual(self.paths, [])
+    def test_errors_are_unauthorized_or_concealed(self):
         for status in (401, 403, 404):
             self.response(status, {'message': 'Not Found'})
             self.assertEqual(self.check(), 'UNAUTHORIZED_OR_CONCEALED')
