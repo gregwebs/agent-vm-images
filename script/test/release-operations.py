@@ -88,12 +88,22 @@ class AuthorityTests(unittest.TestCase):
         return FakeClient([reply(status, {'login': login}, {'x-oauth-scopes': scopes})] + records)
 
     def test_owner_authorized_absence(self):
-        client = self.inventory_client([reply(200, []), reply(404, {'message': 'Not Found'})])
+        client = self.inventory_client([reply(200, []), reply(404, {'message': 'Package not found.'})])
         exists, digest = preflight.owner_inventory(client, 'fixture-read-token')
         self.assertFalse(exists)
         self.assertEqual(len(digest), 64)
         self.assertEqual(len(client.requests), 3)
         self.assertTrue(all(x[1]['authorization'] == 'Bearer fixture-read-token' for x in client.requests))
+
+    def test_absence_requires_the_authoritative_package_message(self):
+        # GitHub's container-package endpoint returns "Package not found."; a
+        # 404 carrying the releases/git-ref wording (or any other message) is
+        # not authoritative package absence and must fail closed.
+        for message in ('Not Found', 'Package not found', 'forbidden', ''):
+            with self.subTest(message=message), self.assertRaises(ValueError):
+                preflight.owner_inventory(
+                    self.inventory_client([reply(200, []), reply(404, {'message': message})]),
+                    'fixture-read-token')
 
     def test_package_only_on_second_page(self):
         record = {'name': 'agent-vm-standard', 'package_type': 'container', 'visibility': 'private'}
@@ -115,7 +125,7 @@ class AuthorityTests(unittest.TestCase):
 
     def test_concealed_existing_package_metadata_fails(self):
         record = {'name': 'agent-vm-standard', 'package_type': 'container', 'visibility': 'private'}
-        client = self.inventory_client([reply(200, [record]), reply(404, {'message': 'Not Found'})])
+        client = self.inventory_client([reply(200, [record]), reply(404, {'message': 'Package not found.'})])
         with self.assertRaises(ValueError):
             preflight.owner_inventory(client, 'fixture-read-token')
 
@@ -406,7 +416,7 @@ class SubprocessOperationTests(unittest.TestCase):
             'https://api.github.com/users/gregwebs/packages?package_type=container&per_page=100':
                 {'status': 200, 'headers': {}, 'body': '[]'},
             'https://api.github.com/users/gregwebs/packages/container/agent-vm-standard':
-                {'status': 404, 'headers': {}, 'body': json.dumps({'message': 'Not Found'})},
+                {'status': 404, 'headers': {}, 'body': json.dumps({'message': 'Package not found.'})},
             'https://ghcr.io/token?service=ghcr.io&scope=repository:gregwebs/agent-vm-standard:pull,push':
                 {'status': 200, 'headers': {}, 'body': json.dumps({'token': 'fixture'})},
             'https://ghcr.io/v2/gregwebs/agent-vm-standard/manifests/v0.1.0': self.absent(),
