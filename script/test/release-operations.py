@@ -736,7 +736,10 @@ class ReviewRegressionTests(unittest.TestCase):
             original = operations.run
             stats = {'scratch_host': 'fixture-client', 'daemon_filesystems': [{'host': 'fixture-daemon',
                 'filesystem': 'disk', 'path': '/owned', 'free_bytes': 100 * capacity.GIB}]}
-            for phase in (None, 'base', 'standard', 'archive', 'load', 'audit', 'sbom', 'cleanup'):
+            phases = [(phase, False) for phase in (None, 'base', 'standard', 'archive', 'load', 'audit', 'sbom', 'cleanup')]
+            # A rehearsal build must pass the same end-to-end path, including the
+            # packaging step that records the run identity.
+            for phase, rehearsal in phases + [(None, True)]:
                 calls = []
                 def command(argv, **kwargs):
                     calls.append(argv)
@@ -765,8 +768,9 @@ class ReviewRegressionTests(unittest.TestCase):
                     if argv[:2] == ['docker', 'info']: return b'[]'
                     if argv[:2] == ['docker', 'version']: return b'fixture-docker'
                     return b''
-                out = base / ('out-' + str(phase)); scratch = base / ('scratch-' + str(phase))
-                env = {'GITHUB_REPOSITORY': preflight.REPO, 'GITHUB_REF': 'refs/heads/main', 'GITHUB_SHA': sha,
+                out = base / f'out-{phase}-{rehearsal}'; scratch = base / f'scratch-{phase}-{rehearsal}'
+                env = {'GITHUB_REPOSITORY': preflight.REPO, 'GITHUB_SHA': sha,
+                       'GITHUB_REF': operations.REHEARSAL_REF_PREFIX + 'fixture' if rehearsal else 'refs/heads/main',
                        'GITHUB_RUN_ID': '264', 'GITHUB_RUN_ATTEMPT': '1'}
                 with mock.patch.dict(os.environ, env), mock.patch.object(operations, 'ROOT', repo), \
                      mock.patch.object(operations, 'run', side_effect=command), \
@@ -774,11 +778,13 @@ class ReviewRegressionTests(unittest.TestCase):
                      mock.patch.object(build.capability, 'check'), \
                      mock.patch.object(build.storage, 'measure', return_value=stats), \
                      mock.patch.object(build.peaks.Sampler, 'start'), mock.patch.object(build.peaks.Sampler, 'stop'), \
-                     mock.patch.object(sys, 'argv', ['build', '--arch', arch, '--version', '0.1.0', '--out', str(out), '--scratch-root', str(scratch)]):
+                     mock.patch.object(sys, 'argv', ['build', '--arch', arch, '--version', '0.1.0']
+                                        + (['--rehearsal'] if rehearsal else [])
+                                        + ['--out', str(out), '--scratch-root', str(scratch)]):
                     status = build.main()
-                self.assertEqual(status, 0 if phase is None else 1, phase)
+                self.assertEqual(status, 0 if phase is None else 1, (phase, rehearsal))
                 if phase is not None:
-                    self.assertFalse((out / 'result.json').exists(), phase)
+                    self.assertFalse((out / 'result.json').exists(), (phase, rehearsal))
                 else:
                     recipe_builds = [argv for argv in calls if '-f' in argv and 'build' in argv]
                     self.assertEqual(len(recipe_builds), 2)
