@@ -5,8 +5,7 @@ export PYTHONDONTWRITEBYTECODE=1
 ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
 [ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_OS:-}" = Linux ] || { echo 'disposable Linux Actions runner only' >&2; exit 1; }
 case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) exit 1 ;; esac
-timeout --kill-after=10s 600 sudo apt-get update
-timeout --kill-after=10s 600 sudo apt-get install -y skopeo coreutils jq python3
+bash "$ROOT/script/ci/apt-install.sh" skopeo coreutils jq python3
 out=$(mktemp -d "$RUNNER_TEMP/release-tools.XXXXXX")
 mkdir "$out/bin"
 version=$(jq -r .syft_version "$ROOT/script/release/tool-pins.json")
