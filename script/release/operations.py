@@ -167,7 +167,7 @@ def trusted_run(*, sha: str) -> tuple[str, str, str]:
     return run_id, attempt, f'{c.SOURCE}/actions/runs/{run_id}/attempts/{attempt}'
 
 
-def rehearsal_run(*, sha: str) -> None:
+def rehearsal_run(*, sha: str) -> tuple[str, str, str]:
     """Validate a non-publishing rehearsal invocation.
 
     Rehearsal exists so the expensive build and native audits can be exercised
@@ -184,6 +184,7 @@ def rehearsal_run(*, sha: str) -> None:
             or not run_id.isdecimal() or not attempt.isdecimal()
             or int(run_id) < 1 or int(attempt) < 1):
         raise ValueError('exact trusted rehearsal workflow run required')
+    return run_id, attempt, f'{c.SOURCE}/actions/runs/{run_id}/attempts/{attempt}'
 
 
 def asset(path: Path) -> c.ArchivePart:
@@ -243,12 +244,15 @@ def docker_matches(layout: Path, graph: c.ImageGraph, ref: str) -> dict:
     return image
 
 
-def package_standard(args: PackageRequest) -> None:
+def package_standard(args: PackageRequest, *, rehearsal: bool = False) -> None:
     arch = c.parse_arch(args.arch)
     native(arch)
     version = committed_version(args.version)
     sha = source_sha()
-    run_id, attempt, invocation = trusted_run(sha=sha)
+    # Packaging records the run identity in the platform inventory, so it repeats
+    # the invocation guard. It must follow the caller's mode: a rehearsal build
+    # reaches this step after every audit and would otherwise fail here.
+    run_id, attempt, invocation = (rehearsal_run if rehearsal else trusted_run)(sha=sha)
     graph = c.inventory_layout(args.layout, arch, require_platform=True)
     c.verify_archive(args.archive, graph)
     image = docker_matches(args.layout, graph, args.docker_ref)
@@ -545,6 +549,8 @@ def main() -> int:
         cli.add_argument('--' + key, type=Path, required=True)
     for key in ('docker-ref', 'version', 'arch'):
         cli.add_argument('--' + key, required=True)
+    cli.add_argument('--rehearsal', action='store_true',
+                     help='validate a non-publishing rehearsal invocation')
     cli = sub.add_parser('publish-platform')
     for key in ('layout', 'metadata'):
         cli.add_argument('--' + key, type=Path, required=True)
@@ -565,7 +571,8 @@ def main() -> int:
     try:
         if args.command == 'package':
             package_standard(PackageRequest(args.layout, args.docker_ref, args.archive,
-                                           c.parse_version(args.version).value, c.parse_arch(args.arch), args.out))
+                                           c.parse_version(args.version).value, c.parse_arch(args.arch), args.out),
+                             rehearsal=args.rehearsal)
         elif args.command == 'publish-platform':
             publish_standard(PlatformPublishRequest(args.layout, args.metadata, args.image, args.tag, c.parse_arch(args.arch)))
         elif args.command == 'prepare':

@@ -112,7 +112,8 @@ def main() -> int:
                    output=scratch / (name + '.log'), env=env, timeout=5460)
         check('stage', tar=archive.stat().st_size)
         op.package_standard(op.PackageRequest(layout=layout, docker_ref=standard, archive=archive,
-                                            version=args.version, arch=arch, out=scratch / 'package'))
+                                            version=args.version, arch=arch, out=scratch / 'package'),
+                            rehearsal=args.rehearsal)
         package = scratch / 'package'
         for path in package.iterdir():
             op.stage_file(path, args.out / path.name)
