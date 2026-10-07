@@ -76,11 +76,18 @@ To publish:
   restricted to `read:packages`. It is the authoritative owner-wide package
   inventory; a repo token's concealed 404 can never prove first-package
   absence. It is never a write credential and is never injected into build RUNs.
-- `RELEASE_EFFECTIVE_CONTENTS` (must be `write`) and
-  `RELEASE_PERMISSION_EVIDENCE_URL` (a current-run link to the effective
-  permission report) are protected environment variables set by the maintainer.
-  Requested YAML permissions or a public GET alone are not authority; if the
-  effective push grant cannot be established, preflight classifies
+- `RELEASE_EFFECTIVE_CONTENTS` (must be `write`) is the protected environment
+  attestation that this pipeline runs with an effective contents-write grant.
+  It is set once and does not change per release.
+  `RELEASE_PERMISSION_EVIDENCE_URL` is **not** a configured variable: the
+  workflow derives it per run from `github.run_id`/`github.run_attempt`, since
+  the bound run/attempt cannot exist when a static variable is configured.
+  There is no effective-permission introspection for installation tokens
+  (`GET /repos` `permissions`, GraphQL `viewerPermission` and
+  `GET /installation/repositories` all report `false`/`null` for a
+  write-capable `GITHUB_TOKEN`), so effective write is enforced by the real
+  draft/asset writes failing closed, never by a probe. If the effective push
+  grant cannot be established, preflight classifies
   `UNAUTHORIZED_OR_CONCEALED` and stops.
 
 ## Create-once and recovery
