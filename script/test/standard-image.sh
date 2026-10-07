@@ -1158,7 +1158,7 @@ fi
 for required in docker jq python3; do command -v "$required" >/dev/null || fail "$required required"; done
 if [ "$artifact" = false ]; then
     BUILDER=$(docker context show)
-    docker buildx inspect "$BUILDER" | grep -Eq '^Driver:[[:space:]]+docker$' || fail 'T5 fixtures require daemon-backed builder'
+    bash "$REPO_ROOT/script/test/require-daemon-builder.sh" || fail 'T5 fixtures require daemon-backed builder'
 fi
 want=$(for suffix in codex opencode claude copilot dsh pnpm pi pi-claude-bridge; do echo "org.agent-vm.version.$suffix"; done | sort)
 [ "$(version_keys "$STANDARD_IMAGE")" = "$want" ] || fail 'standard must have exactly eight selection labels'

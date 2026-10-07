@@ -8,7 +8,7 @@ arch=${2:?native architecture required}
 case "$arch:$(uname -m)" in amd64:x86_64 | arm64:aarch64) ;; *) echo 'runner is not requested native architecture' >&2; exit 1 ;; esac
 platform="linux/$arch"
 BUILDER=$(docker context show)
-docker buildx inspect "$BUILDER" | grep -Eq '^Driver:[[:space:]]+docker$' || { echo 'daemon-backed builder required' >&2; exit 1; }
+bash "$ROOT/script/test/require-daemon-builder.sh" || { echo 'daemon-backed builder required' >&2; exit 1; }
 mkdir -p target/ci-logs
 measure_capacity() {
     local root available
