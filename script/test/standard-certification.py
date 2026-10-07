@@ -1,7 +1,12 @@
 import atexit, shutil
 from pathlib import Path
 import os,subprocess,tempfile
-r=Path(__file__).resolve().parents[2]; tmp=Path(tempfile.mkdtemp(prefix='gate.')); tmp.chmod(0o755)
+r=Path(__file__).resolve().parents[2]
+# The real verifier runs check-tool-access.py over host paths, which requires every
+# audited ancestor to be traversable by all. The release build points TMPDIR under
+# /home/runner (mode 750), so the fixture must live under a world-traversable root
+# rather than the ambient TMPDIR.
+tmp=Path(tempfile.mkdtemp(prefix='gate.', dir='/tmp')); tmp.chmod(0o755)
 atexit.register(shutil.rmtree, tmp)
 records=tmp/'records'; records.mkdir(); tools=tmp/'tools'; commands=tmp/'bin'; commands.mkdir()
 names=['dsh','pi','pi-claude-bridge','codex','opencode','claude','copilot']; verifiers=['dsh','pi','codex','opencode','claude','copilot']
