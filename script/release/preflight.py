@@ -235,9 +235,12 @@ def check_refs(client: Curl, *, workflow_token: str, actor: str,
         response = client.get(f'https://ghcr.io/v2/{OWNER}/{PACKAGE}/manifests/{ref}',
                               authorization='Bearer ' + value['token'], accept=ACCEPT)
         outcome = classify_manifest(response, package_exists=package_exists)
-        # NAME_UNKNOWN is never absence; independent inventory is the sole
-        # authority for first-package bootstrap, not registry denial/404.
-        if not package_exists and response.status == 404 and error_codes(response) == ['NAME_UNKNOWN']:
+        # A registry 404 is never absence on its own: GHCR reports a manifest
+        # GET for a never-published package as MANIFEST_UNKNOWN, which equally
+        # means "tag absent" for a package that does exist. The independent
+        # owner inventory is the sole authority for first-package bootstrap.
+        if (not package_exists and response.status == 404
+                and error_codes(response) == ['MANIFEST_UNKNOWN']):
             outcome = Outcome.PACKAGE_NOT_CREATED
         results[ref] = outcome
     return results

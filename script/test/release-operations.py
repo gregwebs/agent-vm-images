@@ -149,6 +149,22 @@ class AuthorityTests(unittest.TestCase):
             preflight.check_refs(FakeClient([reply(401, {'errors': [{'code': 'UNAUTHORIZED'}]})]),
                                  workflow_token='fixture-workflow-token', actor='fixture',
                                  version='0.1.0', package_exists=False)
+    def test_first_package_manifest_unknown_bootstraps_only_without_package(self):
+        def refs(code, *, package_exists):
+            # check_refs does one bearer-token exchange then one manifest GET
+            # per version ref.
+            client = FakeClient([reply(200, {'token': 'fixture-bearer'})] +
+                                [reply(404, {'errors': [{'code': code}]})] * 3)
+            return preflight.check_refs(client, workflow_token='fixture-workflow-token',
+                                        actor='fixture', version='0.1.0',
+                                        package_exists=package_exists)
+        self.assertEqual({x.value for x in refs('MANIFEST_UNKNOWN', package_exists=False).values()},
+                         {'PACKAGE_NOT_CREATED'})
+        self.assertEqual({x.value for x in refs('MANIFEST_UNKNOWN', package_exists=True).values()},
+                         {'REF_ABSENT'})
+        # NAME_UNKNOWN is registry concealment, never bootstrap authority.
+        self.assertEqual({x.value for x in refs('NAME_UNKNOWN', package_exists=False).values()},
+                         {'UNKNOWN'})
 
 
 class DraftAuthorityTests(unittest.TestCase):
@@ -406,7 +422,7 @@ class SubprocessOperationTests(unittest.TestCase):
 
     def absent(self) -> dict:
         return {'status': 404, 'headers': {},
-                'body': json.dumps({'errors': [{'code': 'NAME_UNKNOWN'}]})}
+                'body': json.dumps({'errors': [{'code': 'MANIFEST_UNKNOWN'}]})}
 
     def responses(self) -> dict:
         return {
