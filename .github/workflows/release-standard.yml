@@ -125,13 +125,17 @@ jobs:
       - name: Owned post-audit GHCR login (never used by build RUNs)
         env:
           PUBLISH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
         run: |
           set -euo pipefail
-          mkdir -p "$DOCKER_CONFIG"
-          chmod 700 "$DOCKER_CONFIG"
+          # actions/attest reads $HOME/.docker/config.json directly and ignores
+          # DOCKER_CONFIG, while operations.py requires DOCKER_CONFIG. Satisfy
+          # both from one file: log in to the default location, then point
+          # DOCKER_CONFIG at it. This step runs after every build and audit step,
+          # so no build RUN can read the publish credential.
+          install -d -m 700 "$HOME/.docker"
           printf '%s' "$PUBLISH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+          jq -e '.auths["ghcr.io"]' "$HOME/.docker/config.json" >/dev/null
+          echo "DOCKER_CONFIG=$HOME/.docker" >> "$GITHUB_ENV"
       - name: Push one digest-preserving standard platform ref
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -257,13 +261,14 @@ jobs:
       - name: Owned assembly GHCR login
         env:
           PUBLISH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DOCKER_CONFIG: ${{ runner.temp }}/docker-config
         run: |
           set -euo pipefail
-          mkdir -p "$DOCKER_CONFIG"
-          chmod 700 "$DOCKER_CONFIG"
+          # See the native job: actions/attest only reads $HOME/.docker/config.json
+          # while operations.py requires DOCKER_CONFIG, so both share one file.
+          install -d -m 700 "$HOME/.docker"
           printf '%s' "$PUBLISH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+          jq -e '.auths["ghcr.io"]' "$HOME/.docker/config.json" >/dev/null
+          echo "DOCKER_CONFIG=$HOME/.docker" >> "$GITHUB_ENV"
       - name: Verify signed handoff, assemble index and create draft
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
