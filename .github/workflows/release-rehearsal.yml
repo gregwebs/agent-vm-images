@@ -1,0 +1,77 @@
+name: Rehearse standard image build
+
+# Exercise the full standard build and native audits from a throwaway branch.
+# This workflow holds no publication authority: contents:read only, no GHCR
+# login, no attestations, no Release. It stops short of pushing anywhere, so
+# build and audit regressions are caught before a merge to main.
+
+on:
+  push:
+    branches:
+      - 'test/release-standard/**'
+  workflow_dispatch:
+
+concurrency:
+  group: release-rehearsal-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rehearse:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Require exact rehearsal branch source
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in
+            refs/heads/test/release-standard/*) ;;
+            *) echo "not a rehearsal ref: $GITHUB_REF" >&2; exit 1 ;;
+          esac
+          test "$GITHUB_REPOSITORY" = gregwebs/agent-vm-images
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+      - name: Provision pinned build tools
+        run: bash script/release/install-ci-tools.sh
+      - name: Require containerd image store on this disposable runner
+        run: bash script/release/prepare-ci.sh
+      - name: Build once, export canonical OCI layout, Docker-load and audit (never publishes)
+        env:
+          NATIVE_ARCH: ${{ matrix.arch }}
+          OUT: ${{ runner.temp }}/standard-rehearsal-out
+          SCRATCH: ${{ runner.temp }}/standard-rehearsal
+        run: |
+          set -euo pipefail
+          mkdir -p target/ci-logs
+          version=$(tr -d '\n' < images/standard/version)
+          python3 script/test/host-watchdog.py 19800 bash script/release/build-standard.sh \
+            --arch "$NATIVE_ARCH" --version "$version" --rehearsal \
+            --out "$OUT" --scratch-root "$SCRATCH" \
+            2>&1 | tee target/ci-logs/rehearsal-build.log
+      - name: Upload rehearsal evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rehearsal-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/standard-rehearsal-out/evidence/
+            ${{ runner.temp }}/standard-rehearsal-out/*.json
+            ${{ runner.temp }}/standard-rehearsal/standard-*/**/*.log
+            ${{ runner.temp }}/standard-rehearsal/standard-*/**/*.json
+            !${{ runner.temp }}/standard-rehearsal/standard-*/**/*layout*/**
+            target/ci-logs/**/*.log
+          if-no-files-found: warn
+          retention-days: 7

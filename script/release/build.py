@@ -27,6 +27,8 @@ def main() -> int:
     parser.add_argument('--version', required=True)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--scratch-root', type=Path, required=True)
+    parser.add_argument('--rehearsal', action='store_true',
+                        help='validate a non-publishing rehearsal run instead of a publication run')
     args = parser.parse_args()
     scratch = None
     sampler = None
@@ -37,7 +39,10 @@ def main() -> int:
         op.native(arch)
         op.committed_version(args.version)
         sha = op.source_sha()
-        op.trusted_run(sha=sha)
+        if args.rehearsal:
+            op.rehearsal_run(sha=sha)
+        else:
+            op.trusted_run(sha=sha)
         args.out.mkdir()
         args.scratch_root.mkdir(parents=True, exist_ok=True)
         scratch = Path(tempfile.mkdtemp(prefix='standard-', dir=args.scratch_root)).resolve()

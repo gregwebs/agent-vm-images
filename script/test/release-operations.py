@@ -1296,5 +1296,32 @@ class ReleaseInterfaceTests(unittest.TestCase):
                 self.assertEqual(len(self.calls()), 1)
 
 
+class RehearsalRunTests(unittest.TestCase):
+    def env(self, **overrides):
+        value = {'GITHUB_REPOSITORY': preflight.REPO,
+                 'GITHUB_REF': operations.REHEARSAL_REF_PREFIX + 'try',
+                 'GITHUB_SHA': 'a' * 40, 'GITHUB_RUN_ID': '264', 'GITHUB_RUN_ATTEMPT': '1'}
+        value.update(overrides)
+        return value
+
+    def test_only_a_rehearsal_ref_is_accepted(self):
+        # `main`, unrelated branches and the bare prefix must all be refused, so
+        # rehearsal can never validate a publication ref or vice versa.
+        for ref in ('refs/heads/main', 'refs/heads/feature/x', 'refs/heads/test/release',
+                    'refs/heads/test/release-standard', 'refs/heads/test/release-standard/'):
+            with self.subTest(ref=ref), mock.patch.dict(os.environ, self.env(GITHUB_REF=ref)):
+                with self.assertRaises(ValueError):
+                    operations.rehearsal_run(sha='a' * 40)
+        with mock.patch.dict(os.environ, self.env()):
+            operations.rehearsal_run(sha='a' * 40)
+
+    def test_rehearsal_requires_the_exact_run_identity(self):
+        for overrides in ({'GITHUB_REPOSITORY': 'other/repo'}, {'GITHUB_SHA': 'b' * 40},
+                          {'GITHUB_RUN_ID': '0'}, {'GITHUB_RUN_ATTEMPT': 'x'}):
+            with self.subTest(**overrides), mock.patch.dict(os.environ, self.env(**overrides)):
+                with self.assertRaises(ValueError):
+                    operations.rehearsal_run(sha='a' * 40)
+
+
 if __name__ == '__main__':
     unittest.main()

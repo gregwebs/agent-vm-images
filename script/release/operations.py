@@ -26,6 +26,10 @@ import release_trace
 
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE = 'ghcr.io/gregwebs/agent-vm-standard'
+# A rehearsal exercises the build and native audits from a throwaway branch
+# without any publication step. The allowed ref is disjoint from `main`, so a
+# rehearsal invocation can never be mistaken for a publication invocation.
+REHEARSAL_REF_PREFIX = 'refs/heads/test/release-standard/'
 
 
 @dataclass(frozen=True)
@@ -161,6 +165,25 @@ def trusted_run(*, sha: str) -> tuple[str, str, str]:
             or int(run_id) < 1 or int(attempt) < 1):
         raise ValueError('exact trusted main workflow run required')
     return run_id, attempt, f'{c.SOURCE}/actions/runs/{run_id}/attempts/{attempt}'
+
+
+def rehearsal_run(*, sha: str) -> None:
+    """Validate a non-publishing rehearsal invocation.
+
+    Rehearsal exists so the expensive build and native audits can be exercised
+    from a throwaway branch before a merge. It authorises no write, and it is
+    deliberately disjoint from trusted_run: the ref must be under
+    REHEARSAL_REF_PREFIX, which `refs/heads/main` never matches.
+    """
+    ref = os.environ.get('GITHUB_REF', '')
+    run_id, attempt = os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']
+    if (os.environ.get('GITHUB_REPOSITORY') != preflight.REPO
+            or not ref.startswith(REHEARSAL_REF_PREFIX)
+            or len(ref) == len(REHEARSAL_REF_PREFIX)
+            or os.environ.get('GITHUB_SHA') != sha
+            or not run_id.isdecimal() or not attempt.isdecimal()
+            or int(run_id) < 1 or int(attempt) < 1):
+        raise ValueError('exact trusted rehearsal workflow run required')
 
 
 def asset(path: Path) -> c.ArchivePart:

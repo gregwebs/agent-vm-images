@@ -65,6 +65,34 @@ To publish:
    approving — a new user-owned package defaults to private and anonymous
    consumption is required. `preflight` and `native` do not pause.
 
+## Rehearsal before a merge
+
+The build and its native audits are the expensive, failure-prone half of a
+release, and they are worth exercising without publishing anything.
+`.github/workflows/release-rehearsal.yml` runs on any push to a branch under
+`test/release-standard/`:
+
+```
+git push origin HEAD:test/release-standard/<name>
+```
+
+It runs the same `script/release/build-standard.sh` sequence as the release
+(base + standard build, canonical OCI export, Docker load, capacity sampling,
+SBOM, and all five native audits) on both architectures and uploads the per-arch
+evidence. It holds no publication authority at all: `contents: read` only, no
+GHCR login, no attestations and no Release, so it stops short of the registry
+push.
+
+The build is invoked with `--rehearsal`, which validates `GITHUB_REF` against
+`refs/heads/test/release-standard/` (`operations.rehearsal_run`). That check is
+deliberately disjoint from the `refs/heads/main` check `operations.trusted_run`
+performs, so neither mode can pass the other's guard: a rehearsal build on
+`main` is refused, and a publication build on a rehearsal branch is refused.
+
+A green rehearsal is evidence, not a release. Nothing it produces is
+consumable, and the version is still published only by the `main` dispatch
+above.
+
 ## Permissions and approval hosts
 
 - Top level is `contents: read`. Each job narrows or widens explicitly.

@@ -50,5 +50,5 @@ assert not list(Path('images/tools').glob('*/Dockerfile')), 'no per-tool product
 PY
 node --check images/tools/dsh/check-lock-update.js
 (cd script/test/image-sources && cargo test --locked && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings)
-actionlint .github/workflows/contracts.yml .github/workflows/build-local.yml .github/workflows/installer-network.yml .github/workflows/release-standard.yml .github/workflows/release-transports.yml
+actionlint .github/workflows/contracts.yml .github/workflows/build-local.yml .github/workflows/installer-network.yml .github/workflows/release-standard.yml .github/workflows/release-rehearsal.yml .github/workflows/release-transports.yml
 echo 'image contracts passed'
