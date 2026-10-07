@@ -208,7 +208,10 @@ def owner_inventory(client: Curl, token: str) -> tuple[bool, str]:
         evidence = {'target': PACKAGE, 'present': True, 'visibility': target['visibility']}
     else:
         require_status(metadata, 404)
-        if not isinstance(metadata.json(), dict) or metadata.json().get('message') != 'Not Found':
+        # The package endpoint's authoritative absence message is not the
+        # releases/git-ref "Not Found"; GitHub returns "Package not found.".
+        if (not isinstance(metadata.json(), dict)
+                or metadata.json().get('message') != 'Package not found.'):
             raise ValueError('malformed authoritative package absence')
         evidence = {'target': PACKAGE, 'present': False}
     # Never persist unrelated private package names.
