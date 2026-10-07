@@ -29,9 +29,10 @@ jobs:
     needs: contracts
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    environment: image-release
-    # Write-capable only so the draft-inclusive Release list is authoritative.
-    # Preflight performs GETs only; it never mutates tags, Releases or packages.
+    # Deliberately outside the protected environment: a release takes exactly
+    # one review, on `assemble`. Write is requested only so the draft-inclusive
+    # Release list is authoritative; preflight performs GETs only and never
+    # mutates tags, Releases or packages.
     permissions:
       contents: write
       packages: write
@@ -94,7 +95,6 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
-    environment: image-release
     permissions:
       contents: read
       packages: write
