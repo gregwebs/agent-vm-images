@@ -721,6 +721,9 @@ class ReviewRegressionTests(unittest.TestCase):
             base = Path(directory); repo = base / 'repo'; repo.mkdir()
             shutil.copytree(ROOT / 'images', repo / 'images')
             shutil.copytree(ROOT / 'script/release', repo / 'script/release', ignore=shutil.ignore_patterns('__pycache__'))
+            # committed_version() compares against the checked-in file, so pin the
+            # fixture's own version instead of tracking the repository's bump.
+            (repo / 'images/standard/version').write_text('0.1.0\n')
             for argv in (['git', 'init', '-q'], ['git', 'add', '.'],
                 ['git', '-c', 'user.name=Fixture', '-c', 'user.email=f@invalid', 'commit', '-qm', 'fixture']):
                 subprocess.run(argv, cwd=repo, check=True, capture_output=True)
@@ -960,6 +963,9 @@ class ReleaseInterfaceTests(unittest.TestCase):
         self.checkout.mkdir()
         for name in ('script', 'images'):
             shutil.copytree(ROOT / name, self.checkout / name, ignore=shutil.ignore_patterns('__pycache__'))
+        # The release fixtures below are written for 0.1.0 and committed_version()
+        # reads this copied file, so pin it instead of tracking the repository bump.
+        (self.checkout / 'images/standard/version').write_text('0.1.0\n')
         # Scale resource caps only in this disposable, committed fixture source.
         # Real free-space gates still run; tiny OCI interface tests must not need
         # standard-size (~49 GiB) host headroom. Production caps are unchanged.

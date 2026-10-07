@@ -26,10 +26,8 @@ jobs:
         with:
           persist-credentials: false
       - name: Audit prerequisites
-        timeout-minutes: 10
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y jq coreutils python3
+        timeout-minutes: 20
+        run: bash script/ci/apt-install.sh jq coreutils python3
       - name: Native capacity and builder
         env:
           NATIVE_ARCH: ${{ matrix.arch }}
