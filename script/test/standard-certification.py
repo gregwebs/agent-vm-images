@@ -5,7 +5,10 @@ r=Path(__file__).resolve().parents[2]
 # The real verifier runs check-tool-access.py over host paths, which requires every
 # audited ancestor to be traversable by all. The release build points TMPDIR under
 # /home/runner (mode 750), so the fixture must live under a world-traversable root
-# rather than the ambient TMPDIR.
+# rather than the ambient TMPDIR. It also runs children under umask 077: the 0700
+# mkdtemp root was not the only victim, because every nested mkdir inherited 0700
+# too, so pin the umask to the image's 022 before creating any fixture directory.
+os.umask(0o022)
 tmp=Path(tempfile.mkdtemp(prefix='gate.', dir='/tmp')); tmp.chmod(0o755)
 atexit.register(shutil.rmtree, tmp)
 records=tmp/'records'; records.mkdir(); tools=tmp/'tools'; commands=tmp/'bin'; commands.mkdir()
