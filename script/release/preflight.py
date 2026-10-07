@@ -255,32 +255,16 @@ class ReleaseOutcome(str, Enum):
     TRANSIENT_FAILURE = 'TRANSIENT_FAILURE'
 
 
-@dataclass(frozen=True)
-class PushAuthority:
-    repository: str
-    run_id: str
-    run_attempt: str
-    effective_contents: str
-    evidence_url: str
-
-    def established(self) -> bool:
-        prefix = f'{SOURCE_URL}/actions/runs/{self.run_id}/attempts/{self.run_attempt}'
-        return (self.repository == REPO and self.effective_contents == 'write'
-                and self.evidence_url.startswith(prefix + '#')
-                and len(self.evidence_url) > len(prefix) + 1)
-
-
-def workflow_authority() -> PushAuthority:
-    # The protected environment supplies the maintainer's current-run link to
-    # the effective permission report; requested YAML permissions alone are not
-    # authority. This is a deployment approval, not a write probe.
+def require_trusted_invocation() -> None:
+    # Authority is the trusted main-workflow invocation plus the real writes
+    # failing closed. GitHub exposes no effective-permission introspection for
+    # installation tokens (GET /repos permissions, GraphQL viewerPermission and
+    # GET /installation/repositories all report false/null for a write-capable
+    # GITHUB_TOKEN), so no hand-set attestation variable is consulted.
     if (os.environ.get('GITHUB_REPOSITORY') != REPO
             or os.environ.get('GITHUB_REF') != 'refs/heads/main'
             or os.environ.get('GITHUB_ACTIONS') != 'true'):
         raise ValueError(ReleaseOutcome.UNAUTHORIZED_OR_CONCEALED.value)
-    return PushAuthority(REPO, os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT'],
-                         os.environ.get('RELEASE_EFFECTIVE_CONTENTS', ''),
-                         os.environ.get('RELEASE_PERMISSION_EVIDENCE_URL', ''))
 
 
 def release_record(value: object) -> dict:
@@ -290,10 +274,7 @@ def release_record(value: object) -> dict:
     return value
 
 
-def _release_tag_snapshot(client: Curl, *, token: str, version: str,
-                        authority: PushAuthority) -> ReleaseOutcome:
-    if not authority.established():
-        return ReleaseOutcome.UNAUTHORIZED_OR_CONCEALED
+def _release_tag_snapshot(client: Curl, *, token: str, version: str) -> ReleaseOutcome:
     auth = 'Bearer ' + token
     try:
         repository = client.get(f'https://api.github.com/repos/{REPO}', authorization=auth)
@@ -370,13 +351,12 @@ def validate_repository(client: Curl, token: str) -> None:
         raise ValueError('workflow repository authority mismatch')
 
 
-def release_tag_absence(client: Curl, *, token: str, version: str,
-                        authority: PushAuthority) -> ReleaseOutcome:
+def release_tag_absence(client: Curl, *, token: str, version: str) -> ReleaseOutcome:
     # A retry discards the entire snapshot, including every previous list page.
     client.snapshot = True
     try:
         for attempt in range(3):
-            outcome = _release_tag_snapshot(client, token=token, version=version, authority=authority)
+            outcome = _release_tag_snapshot(client, token=token, version=version)
             if outcome != ReleaseOutcome.TRANSIENT_FAILURE:
                 return outcome
             if attempt < 2:
@@ -387,7 +367,8 @@ def release_tag_absence(client: Curl, *, token: str, version: str,
 
 
 def require_release_absent(client: Curl, *, token: str, version: str) -> None:
-    outcome = release_tag_absence(client, token=token, version=version, authority=workflow_authority())
+    require_trusted_invocation()
+    outcome = release_tag_absence(client, token=token, version=version)
     if outcome != ReleaseOutcome.ABSENT:
         raise ValueError('Release/tag collision check: ' + outcome.value)
 
