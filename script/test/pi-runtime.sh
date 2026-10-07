@@ -392,7 +392,7 @@ RUN rm -rf /opt/agent-vm/pi \
  && chmod -R a+rX /opt/agent-vm/pi
 EOF
 BUILDER="$(docker context show)"
-docker buildx inspect "$BUILDER" | grep -Eq '^Driver:[[:space:]]+docker$' || fail "fixture requires daemon-backed docker driver"
+bash "$REPO_ROOT/script/test/require-daemon-builder.sh" || fail "fixture requires daemon-backed docker driver"
 docker build --builder "$BUILDER" --build-arg "BASE_IMAGE=$standard" -t "$replacement" "$ctx" >/dev/null
 capture "$replacement" pi --mode rpc
 [[ $CAP_STATUS -eq 0 ]] || fail "replacement-seam run exited $CAP_STATUS: $CAP_ERR"
