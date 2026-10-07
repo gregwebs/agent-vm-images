@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Independent finished-image report/status/UID oracle; builds only disposable T5 fixtures.
 set -euo pipefail
+# Do not inherit the caller's umask: this oracle bind-mounts fixture directories
+# into non-root audit containers, and the release build runs with umask 0077, so
+# inherited 0700 fixture directories would make `pi` unreachable to the audit
+# user (rc 126 / "not found on PATH").
+umask 022
 
 REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
 FIXTURE_DOCKERFILE="$REPO_ROOT/script/test/fixtures/t5-negative/Dockerfile"
