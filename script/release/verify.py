@@ -264,7 +264,7 @@ def main() -> int:
             attestations.verify(subject, args.assets_dir / f'platform-{arch}-image.sigstore.json', source_sha=release.source_sha,
                                 digest=inventory.graph.manifest.digest, invocation=invocation)
             attestations.verify(subject, args.assets_dir / f'platform-{arch}-sbom.sigstore.json', source_sha=release.source_sha,
-                                digest=inventory.graph.manifest.digest, predicate=attestations.SPDX, invocation=invocation,
+                                digest=inventory.graph.manifest.digest, invocation=invocation,
                         spdx_file=args.assets_dir / inventory.sbom.name)
             attestations.verify('oci://' + op.IMAGE + '@' + release.index_digest.value,
                                 args.assets_dir / 'release-index.sigstore.json', source_sha=release.source_sha,
