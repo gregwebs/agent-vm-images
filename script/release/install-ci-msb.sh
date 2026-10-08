@@ -21,7 +21,7 @@ fetch() {
         curl -q --netrc-file /dev/null --max-filesize 100000000 --fail --silent --show-error --location \
         --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 300 "$url" -o "$2"
     printf '%s  %s\n' "$3" "$2" | sha256sum -c -
-    printf '%s sha256:%s\n' "$url" "$3" >> "$out/msb-runtime.log"
+    printf '%s sha256:%s\n' "$url" "$3" | tee -a "$out/msb-runtime.log"
 }
 fetch msb-linux-x86_64 "$out/msb.download" "$msb_hash"
 fetch libkrunfw-linux-x86_64.so "$out/libkrunfw.download" "$firmware_hash"
@@ -32,11 +32,12 @@ reported=$("$out/bin/msb" --version)
 [ "$reported" = "msb $version" ] || { echo "pinned msb reports '$reported', expected 'msb $version'" >&2; exit 1; }
 # MSB_LIBKRUN_EMBEDDED=1 is honest only while the executable resolves no libkrun;
 # verify.py re-checks the same linkage and records it.
-ldd "$out/bin/msb" > "$out/msb-ldd.log"
+# Console diagnostics survive failed provisioning, which deliberately publishes no dir.
+ldd "$out/bin/msb" 2>&1 | tee "$out/msb-ldd.log"
 if grep -q 'libkrun\.' "$out/msb-ldd.log"; then
     echo 'pinned msb links libkrun dynamically; declare MSB_LIBKRUN_PATH instead of embedded' >&2; exit 1
 fi
-printf '%s\nlibkrun: %s\n' "$reported" "$libkrun_version" >> "$out/msb-runtime.log"
+printf '%s\nlibkrun: %s\n' "$reported" "$libkrun_version" | tee -a "$out/msb-runtime.log"
 {
     echo "msb=$out/bin/msb"
     echo "libkrunfw=$out/lib/libkrunfw.so.$firmware_version"

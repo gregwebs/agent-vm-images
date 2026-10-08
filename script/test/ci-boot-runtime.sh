@@ -28,11 +28,12 @@ SH
 cat > "$work/bin/ldd" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "${FAKE_LDD:-libc.so.6 => /lib/libc.so.6}"
+exit "${FAKE_LDD_STATUS:-0}"
 SH
 chmod +x "$work/bin/"*
 export PATH="$work/bin:$PATH"
 fail() { echo "runtime regression: $*" >&2; exit 1; }
-for number in 1 2 3 4 5 6 7; do
+for number in 1 2 3 4 5 6 7 8; do
     case_dir="$work/case-$number"
     mkdir -p "$case_dir/tmp"
     rm -f "$work/urls"
@@ -50,11 +51,12 @@ for number in 1 2 3 4 5 6 7; do
     esac
     status=0
     (export GITHUB_ACTIONS=true RUNNER_OS=Linux RUNNER_TEMP="$case_dir/tmp" GITHUB_OUTPUT="$case_dir/out"
-     unset FAKE_ARCH FAKE_LDD
+     unset FAKE_ARCH FAKE_LDD FAKE_LDD_STATUS
      case "$number" in
          5) export FAKE_LDD='libkrun.so.1 => /opt/libkrun.so.1' ;;
          6) unset GITHUB_ACTIONS ;;
          7) export FAKE_ARCH=aarch64 ;;
+         8) export FAKE_LDD='ldd: dependency inspection failed' FAKE_LDD_STATUS=1 ;;
      esac
      bash "$work/tree/script/release/install-ci-msb.sh") > "$case_dir/log" 2>&1 || status=$?
     if [ "$number" = 1 ]; then
@@ -77,7 +79,19 @@ for number in 1 2 3 4 5 6 7; do
     else
         [ "$status" != 0 ] || fail "case $number unexpectedly passed"
         [ ! -s "$case_dir/out" ] || fail "case $number published outputs"
-        if [ "$number" -ge 6 ]; then [ ! -e "$work/urls" ] || fail 'guard attempted network'; fi
+        case "$number" in
+            5|8)
+                if [ "$number" = 5 ]; then
+                    linkage='libkrun.so.1 => /opt/libkrun.so.1'
+                else
+                    linkage='ldd: dependency inspection failed'
+                fi
+                grep -Fq "$linkage" "$case_dir/log" || fail 'failed linkage missing from console'
+                grep -Fq 'msb-linux-x86_64 sha256:' "$case_dir/log" || fail 'msb provenance missing from console'
+                grep -Fq 'libkrunfw-linux-x86_64.so sha256:' "$case_dir/log" || fail 'firmware provenance missing from console'
+                ;;
+            6|7) [ ! -e "$work/urls" ] || fail 'guard attempted network' ;;
+        esac
     fi
     echo "runtime case $number passed"
 done
