@@ -22,7 +22,7 @@ if [ "$guard_only" = false ]; then
         opencode-installer dsh-prepare-lock dsh-verify pi-install pi-prepare-lock pi-verify \
         pi-wrapper shipped-installer-contracts tool-access vendored-installers upgrade-scripts \
         install-zellij host-watchdog transactional-publish standard-certification build-entrypoint \
-        release-content release-operations release-http; do
+        release-content release-operations release-http ci-boot-runtime ci-boot-evidence; do
         echo "=== $suite ==="
         bash "script/test/$suite.sh"
     done
@@ -50,5 +50,5 @@ assert not list(Path('images/tools').glob('*/Dockerfile')), 'no per-tool product
 PY
 node --check images/tools/dsh/check-lock-update.js
 (cd script/test/image-sources && cargo test --locked && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings)
-actionlint .github/workflows/contracts.yml .github/workflows/build-local.yml .github/workflows/installer-network.yml .github/workflows/release-standard.yml .github/workflows/release-rehearsal.yml .github/workflows/release-transports.yml
+actionlint .github/workflows/contracts.yml .github/workflows/build-local.yml .github/workflows/installer-network.yml .github/workflows/release-standard.yml .github/workflows/release-rehearsal.yml .github/workflows/release-transports.yml .github/workflows/verify-release-boot.yml
 echo 'image contracts passed'

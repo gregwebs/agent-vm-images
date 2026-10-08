@@ -64,6 +64,10 @@ To publish:
    and, on the first release only, make the GHCR package public before
    approving — a new user-owned package defaults to private and anonymous
    consumption is required. `preflight` and `native` do not pause.
+4. After `assemble` publishes the prerelease, `boot-amd64` runs the hosted amd64
+   boot gate below. Red does not unpublish anything: **do not promote**. Inspect
+   its evidence artifact, then re-run the job or dispatch **Verify released
+   standard image boot (amd64)** for that version.
 
 ## Rehearsal before a merge
 
@@ -93,9 +97,21 @@ A green rehearsal is evidence, not a release. Nothing it produces is
 consumable, and the version is still published only by the `main` dispatch
 above.
 
+The build rehearsal cannot boot-verify a signed release because it signs nothing.
+Exercise the boot gate against an **already published** version instead:
+`git push origin HEAD:test/release-boot/<VERSION>` (optionally `/<name>`). It has
+only `contents: read`, no secrets. Push to this repository, not a fork, with a
+credential able to trigger Actions (not an ordinary workflow `GITHUB_TOKEN`
+push). Push is the reliable initial registration path; API/CLI branch dispatch
+may work after registration/first run, even before merge.
+
 ## Permissions and approval hosts
 
 - Top level is `contents: read`. Each job narrows or widens explicitly.
+- `boot-amd64` / `verify-release-boot.yml`: `contents: read` only, no secrets,
+  no environment, hosted `ubuntu-24.04`. `gh attestation verify` needs no token
+  for bundle verification; fresh-runner default TUF trust initialization remains
+  first-run acceptance.
 - `assemble` is the only job in the protected `image-release` environment, so
   a release needs a single review; `preflight` and `assemble` hold
   `contents: write` so the draft-inclusive Release list is authoritative, and
@@ -178,7 +194,8 @@ remains an explicit constraint.
   never prune to get tests passing.
 - Verify tooling needs a compatible `gh attestation` verifier, `skopeo` with
   OCI `--preserve-digests` and a real standalone `msb` runtime with matching
-  libkrun firmware for VM checks.
+  libkrun firmware for VM checks. CI uses the pinned runtime described in
+  Hosted amd64 boot verification; host operators provide and declare their own.
 
 Required native environment (set from the reviewed standalone distribution):
 
@@ -256,9 +273,12 @@ yields a passing `verification-ARCH.json`.
 Native batch verification on **both** architectures is a required completion
 gate before stable promotion:
 
-1. On a fresh amd64 and a fresh arm64 host, run the source-SHA-pinned
+1. On fresh amd64 and arm64 hosts, run the source-SHA-pinned
    `download-release.sh` / `verify-release.sh --boot` interfaces with fresh
    short private states, no GHCR credentials and a compatible standalone runtime.
+   A green `verify-release-boot.yml` run satisfies the amd64 leg: the hosted
+   runner is a fresh host with fresh private state and no GHCR credentials.
+   Arm64 still needs a fresh native arm64 host.
 2. Each run writes `verification-ARCH.json` plus hashed command/guest/probe logs
    recording source/version/run identity, the current attested `release.json`
    subject hash, index/child/config/layer identities, host/tools hashes, UID/GID
@@ -276,8 +296,10 @@ gate before stable promotion:
    verifier again to compare live index/platform version refs and both digest-downloaded
    graphs with those reviewed subjects (no rebuild/fallback). Any changed bytes,
    refs or missing/denied asset block promotion and require renewed verification
-   and maintainer review. Link the maintainer decision/evidence comment in the
-   existing Release notes before explicitly promoting the **same bytes**:
+   and maintainer review. For amd64, dispatch `verify-release-boot.yml` again
+   immediately before promotion; arm64 still needs a fresh native-host
+   verification. Link the maintainer decision/evidence comment in the existing
+   Release notes before explicitly promoting the **same bytes**:
 
    ```bash
    gh release edit vVERSION --prerelease=false --latest=false \
@@ -286,6 +308,104 @@ gate before stable promotion:
 
    Promotion replaces no asset and rebuilds nothing. If anything changed since
    review, repeat verification and review against the new bytes.
+
+## Hosted amd64 boot verification
+
+`verify-release-boot.yml` runs after publication in `release-standard.yml`, bound
+to that run's `GITHUB_SHA`; it also accepts `workflow_dispatch(version)` and
+pushes to `test/release-boot/<VERSION>[/<name>]`. All modes first invoke the local
+reusable `contracts.yml` (no inputs/secrets); duplicate contracts on release calls
+is intentional. Initial dispatch registration/UI depends on default-branch
+visibility; registered workflows may dispatch branch/tag versions via API/CLI.
+Failed contracts means boot **NOT RUN**, with no boot artifact.
+
+Two sibling clean checkouts keep responsibilities separate: `harness/` is the
+workflow commit, providing tools, runtime and initial authenticated download;
+`source/` is the authenticated `release.json.source_sha`, providing its own
+unchanged `verify-release.sh --boot`. No unauthenticated SHA selects code.
+Initial amd64 archive/SBOM transfers repeat in the signed verifier's
+`public-assets` check (v0.1.3's archive is 868,034,560 bytes per transfer).
+Opposite-architecture controls, both registry graphs, layouts and tars consume
+additional disk. Initial assets remain allocated when capacity is checked.
+
+On the disposable amd64 runner only, `prepare-ci-boot.sh` reclaims exactly
+`/usr/share/dotnet`, `/usr/local/lib/android`, `/opt/ghc`, and
+`/usr/local/share/boost` within ten minutes, then grants KVM:
+
+```bash
+echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+  | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger --name-match=kvm
+```
+
+It asserts readable/writable `/dev/kvm` and proves an `open(O_RDWR)`. Never run
+this host mutation on an operator machine. `ubuntu-24.04-arm` has no `/dev/kvm`:
+there is **no hosted arm64 leg**. Capacity failure remains failure, never prune.
+For v0.1.3 the verifier requires about 51.43 GiB free after initial download,
+plus successive roughly 25-GiB `/tmp` floors and measured daemon capacity;
+GitHub's documented standard-runner availability does not guarantee those floors.
+
+The reviewed latest published runtime is upstream microsandbox **v0.7.7**,
+not the launcher's msb. `tool-pins.json` pins SHA-256 for `msb-linux-x86_64` and
+`libkrunfw-linux-x86_64.so`; `install-ci-msb.sh` checks both hashes, version and
+linkage. agentd is embedded. The explicit declaration is:
+
+```text
+MSB_LIBKRUN_EMBEDDED=1
+MSB_LIBKRUN_VERSION=msb_krun 0.1.40 (statically linked into microsandbox v0.7.7)
+MSB_LIBKRUNFW_PATH=<runtime>/lib/libkrunfw.so.5.6.1
+```
+
+This proves boot under the **upstream runtime**, not launcher compatibility;
+agent-vm#286 owns that join. There is no source build or automatic latest lookup.
+
+### Bumping the runtime pin
+
+A pin bump is a reviewed source change, never an automatic CI lookup. For a new
+microsandbox release `vX`:
+
+1. Take asset SHA-256 digests for `msb-linux-x86_64` and
+   `libkrunfw-linux-x86_64.so` and cross-check `checksums.sha256`.
+2. Read `LIBKRUNFW_VERSION` in `crates/utils/lib/lib.rs` and `msb_krun` in
+   `Cargo.lock` at tag `vX`.
+3. Confirm `ldd` / `objdump -p` shows no libkrun. Otherwise switch to an honest
+   `MSB_LIBKRUN_PATH` declaration instead of embedded.
+4. Update the five runtime keys in `tool-pins.json`.
+5. Prove the pin with a `test/release-boot/<latest published VERSION>` run at
+   the proposed harness SHA before merge.
+
+### Retained evidence and budgets
+
+Artifact `boot-amd64-v<V>-<run>-<attempt>` is retained for 30 days:
+`verification/` holds the success record and hashed logs; `release/` holds
+metadata and bundles; `runtime/` holds KVM/capacity, msb provenance and verifier
+console logs. No image archives or layouts are uploaded. Exactly one original
+success record must match the staged record's hash and size; staged metadata is
+re-authenticated and bound to source/version/subject/platform/index. **Every**
+inventoried log is hash/size-verified. Copy or validation failure makes CI red
+even after a successful boot. Always-upload attempts remaining diagnostics;
+cancellation, runner loss or job timeout can prevent it. Missing evidence is
+never success or promotion input.
+
+Initial budgets are provisional, not measured adequacy: boot job 360 minutes,
+353 minutes in phase limits plus 7 overhead. Checkout/bind 5+2, tools 20,
+containerd 5, reclaim/KVM 12, runtime 11, download/authentication 30 (1740-second
+whole-process watchdog), source checkout/check 5+2, verifier 242 (14400-second
+watchdog), stage 3, staged authentication/validation 4 (180-second watchdog),
+upload/summary 10+2. Contracts has its separate 45-minute limit. Record phase
+maxima including attestations, upload/summary durations and maximum staged
+artifact size in hosted acceptance evidence. Retune before merge to at least
+1.5× measured maxima, preserving initial floors and upload/overhead headroom.
+If these cannot fit 360 minutes, report the constraint and seek a larger/native
+host; never drop checks or shorten floors to hide it. A forced phase-timeout
+exercise must prove the diagnostic tail reaches upload. Measured headroom is
+**NOT YET AVAILABLE** until the hosted pre-merge runs.
+
+A green run is amd64 evidence for maintainer review, **not promotion**. Combine
+`verification/` with native arm64 evidence and run unchanged
+`content.py check-evidence`, which still requires both architectures. A failed
+post-publication boot leaves the immutable prerelease published and unpromoted.
 
 ## Evidence and independent cadence
 
@@ -298,7 +418,8 @@ architectures. Passing those proves transport mechanics only.
 
 Do not claim success for any phase that did not run. Native standard builds,
 live GHCR publication, public visibility, anonymous archive/SBOM consumption
-and both native `msb` boots are deployment gates: if the required native hosts
-or credentials are unavailable, the release stays a prerelease and
+and both `msb` boots are deployment gates. The amd64 boot runs in CI after
+publication; arm64 still needs a native host. Without both boot legs or the
+required credentials, the release stays a prerelease and
 [#264](https://github.com/gregwebs/agent-vm/issues/264) stays open. Packaging a
 launcher that consumes the release is [#265](https://github.com/gregwebs/agent-vm/issues/265).

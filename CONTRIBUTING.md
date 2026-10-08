@@ -147,7 +147,9 @@ and 180-minute job limits. Optional alternates are manual only. macOS CI is
 explicitly deferred; Bash 3.2 checks are local. `release-transports.yml` runs
 read-only loopback registry/archive/negative fixture controls, with no GHCR
 credentials and no VM boot, on both native architectures; it proves transport
-mechanics only, never released-standard acceptance.
+mechanics only, never released-standard acceptance. `verify-release-boot.yml`
+boot-verifies a published release on hosted amd64 after publication, on dispatch,
+or on `test/release-boot/<VERSION>` pushes; never a PR gate. Arm64 boot stays native.
 
 Hosted runner cleanup names four unused SDK directories only, is bounded to ten
 minutes, and remeasures the daemon filesystem. Capacity/native availability
@@ -172,8 +174,9 @@ and runs in the protected `image-release` environment. Read
 
 Release prerequisites are deployment prerequisites, not PR gates: an
 authoritative owner `read:packages` inventory token, the confirmed effective
-`Contents: write` grant, GHCR package write and public visibility, and suitable
-native amd64 and arm64 hosts with a compatible standalone `msb` runtime.
+`Contents: write` grant, GHCR package write and public visibility, and a native
+arm64 host with a compatible standalone `msb` runtime (the amd64 boot runs on
+hosted CI with the pinned runtime).
 Checksum-pinned tooling (Syft `v1.20.0`, gh `v2.97.0`) and apt-selected
 skopeo/coreutils/jq/Python (floating OS inputs, versions recorded) are installed only on disposable Linux CI by `script/release/install-ci-tools.sh`;
 host operators may provide their own tools but must record exact versions.

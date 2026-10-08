@@ -7,5 +7,10 @@
   "fixture_skopeo": "quay.io/skopeo/stable:v1.18.0@sha256:c4c8a9d6fc95e331fa92fc31de3f6c9b5fe4761c82f0acb99669eef067fb7c33",
   "gh_version": "2.97.0",
   "gh_linux_amd64_sha256": "a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112",
-  "gh_linux_arm64_sha256": "73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5"
+  "gh_linux_arm64_sha256": "73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5",
+  "msb_version": "0.7.7",
+  "msb_linux_amd64_sha256": "77326170666e686f66cbdbb6db853ed2860bc4c8c90b54c2c41e8c610b87b8f6",
+  "libkrunfw_version": "5.6.1",
+  "libkrunfw_linux_amd64_sha256": "ce0a915daa6aff403e9a388e161671fbac9b85b0c200a99d7a9fdf0e1c03d668",
+  "msb_libkrun_version": "msb_krun 0.1.40 (statically linked into microsandbox v0.7.7)"
 }
