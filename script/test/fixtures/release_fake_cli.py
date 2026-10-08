@@ -206,7 +206,7 @@ elif tool == 'gh':
             and any(x['digest']['sha256'] == digest for x in entry['verificationResult']['statement']['subject'])]
         if not matches: fail('signed subject mismatch')
         if config.get('failure') == 'signature' and predicate.startswith('https://spdx.dev/Document'):
-            matches[0]['verificationResult']['signature']['certificate']['extensions']['runInvocationURI'] += '9'
+            matches[0]['verificationResult']['signature']['certificate']['runInvocationURI'] += '9'
         if config.get('failure') == 'publish-signature' and Path(subject).name == 'SHA256SUMS':
             matches[0]['verificationResult']['statement']['predicate']['runDetails']['metadata']['invocationId'] += '9'
         emit(matches)

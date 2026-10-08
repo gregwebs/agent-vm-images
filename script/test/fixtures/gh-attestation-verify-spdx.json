@@ -1,0 +1,71 @@
+[
+ {
+  "attestation": null,
+  "verificationResult": {
+   "mediaType": "application/vnd.dev.sigstore.verificationresult+json;version=0.1",
+   "verifiedIdentity": {
+    "subjectAlternativeName": {
+     "subjectAlternativeName": "",
+     "regexp": "^https://github\\.com/gregwebs/agent-vm-images/\\.github/workflows/release-standard\\.yml"
+    },
+    "issuer": {
+     "issuer": "",
+     "regexp": ".*"
+    },
+    "runnerEnvironment": "github-hosted"
+   },
+   "verifiedTimestamps": [
+    {
+     "type": "Tlog",
+     "uri": "https://rekor.sigstore.dev",
+     "timestamp": "2026-10-07T18:45:14-05:00"
+    }
+   ],
+   "signature": {
+    "certificate": {
+     "certificateIssuer": "CN=sigstore-intermediate,O=sigstore.dev",
+     "subjectAlternativeName": "https://github.com/gregwebs/agent-vm-images/.github/workflows/release-standard.yml@refs/heads/main",
+     "issuer": "https://token.actions.githubusercontent.com",
+     "githubWorkflowTrigger": "workflow_dispatch",
+     "githubWorkflowSHA": "a15f198e9189b2be1270e1575a98f6c9c6bbb7d5",
+     "githubWorkflowName": "Release standard image",
+     "githubWorkflowRepository": "gregwebs/agent-vm-images",
+     "githubWorkflowRef": "refs/heads/main",
+     "buildSignerURI": "https://github.com/gregwebs/agent-vm-images/.github/workflows/release-standard.yml@refs/heads/main",
+     "buildSignerDigest": "a15f198e9189b2be1270e1575a98f6c9c6bbb7d5",
+     "runnerEnvironment": "github-hosted",
+     "sourceRepositoryURI": "https://github.com/gregwebs/agent-vm-images",
+     "sourceRepositoryDigest": "a15f198e9189b2be1270e1575a98f6c9c6bbb7d5",
+     "sourceRepositoryRef": "refs/heads/main",
+     "sourceRepositoryIdentifier": "1407270270",
+     "sourceRepositoryOwnerURI": "https://github.com/gregwebs",
+     "sourceRepositoryOwnerIdentifier": "1183",
+     "buildConfigURI": "https://github.com/gregwebs/agent-vm-images/.github/workflows/release-standard.yml@refs/heads/main",
+     "buildConfigDigest": "a15f198e9189b2be1270e1575a98f6c9c6bbb7d5",
+     "buildTrigger": "workflow_dispatch",
+     "runInvocationURI": "https://github.com/gregwebs/agent-vm-images/actions/runs/37702678174/attempts/1",
+     "sourceRepositoryVisibilityAtSigning": "public"
+    }
+   },
+   "statement": {
+    "predicateType": "https://spdx.dev/Document/v2.3",
+    "subject": [
+     {
+      "name": "ghcr.io/gregwebs/agent-vm-standard",
+      "digest": {
+       "sha256": "48d51425a678f8643360a09be274f3ef92735b7060a36af0c62ae3b32c294ade"
+      }
+     }
+    ],
+    "predicate": {
+     "spdxVersion": "SPDX-2.3",
+     "packages": [
+      {
+       "name": "standard"
+      }
+     ]
+    }
+   }
+  }
+ }
+]

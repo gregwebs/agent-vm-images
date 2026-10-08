@@ -636,7 +636,7 @@ class ReviewRegressionTests(unittest.TestCase):
                     'predicateType': predicate_type, 'predicate': spdx if predicate_type == attestations.spdx_predicate_type(spdx) else
                     {'runDetails': {'metadata': {'invocationId': invocation}}}}
                 value = [{'verificationResult': {'verifiedTimestamps': [], 'statement': statement,
-                    'signature': {'certificate': {'extensions': {'runInvocationURI': invocation}}}}}]
+                    'signature': {'certificate': {'runInvocationURI': invocation}}}}]
                 return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode(), b'')
             with mock.patch.object(attestations.subprocess, 'run', side_effect=gh):
                 actual = operations.verify_platform_handoff(root, sha='a'*40, version='0.1.0', run_id='264', attempt='1')
@@ -938,6 +938,25 @@ class SignatureBindingTests(unittest.TestCase):
             attestations.verify(payload, Path('/nonexistent-bundle'), source_sha='a' * 40, predicate=attestations.SPDX)
         self.assertFalse(run.called)
 
+    def test_real_gh_certificate_extension_shape(self):
+        # Shape anchor captured from gh 2.97.0 `attestation verify --format json` against the
+        # real 0.1.1 SBOM attestation (run 37702678174): every field is verbatim except the
+        # 16MB SPDX predicate, which is reduced. Two release runs failed `assemble` because
+        # this parse assumed a nested "extensions" key that gh does not emit.
+        path = Path(__file__).parent / 'fixtures' / 'gh-attestation-verify-spdx.json'
+        value = json.loads(path.read_text())
+        certificate = value[0]['verificationResult']['signature']['certificate']
+        self.assertNotIn('extensions', certificate)
+        invocation = content.SOURCE + '/actions/runs/37702678174/attempts/1'
+        self.assertEqual(certificate['runInvocationURI'], invocation)
+        digest = content.Sha256('sha256:48d51425a678f8643360a09be274f3ef92735b7060a36af0c62ae3b32c294ade')
+        spdx = value[0]['verificationResult']['statement']['predicate']
+        predicate = attestations.spdx_predicate_type(spdx)
+        attestations.check_verified(value, digest, predicate=predicate, invocation=invocation, spdx=spdx)
+        certificate['runInvocationURI'] = invocation.replace('/attempts/1', '/attempts/2')
+        with self.assertRaises(ValueError):
+            attestations.check_verified(value, digest, predicate=predicate, invocation=invocation, spdx=spdx)
+
     def test_spdx_binds_certificate_run_and_signed_file(self):
         digest = content.Sha256(self.digest('image'))
         invocation = content.SOURCE + '/actions/runs/264/attempts/1'
@@ -946,12 +965,12 @@ class SignatureBindingTests(unittest.TestCase):
         value = self.verification(predicate, [digest.value])
         verified = value[0]['verificationResult']
         verified['statement']['predicate'] = spdx
-        verified['signature'] = {'certificate': {'extensions': {'runInvocationURI': invocation}}}
+        verified['signature'] = {'certificate': {'runInvocationURI': invocation}}
         attestations.check_verified(value, digest, predicate=predicate, invocation=invocation, spdx=spdx)
-        verified['signature']['certificate']['extensions']['runInvocationURI'] = invocation.replace('/264/', '/265/')
+        verified['signature']['certificate']['runInvocationURI'] = invocation.replace('/264/', '/265/')
         with self.assertRaises(ValueError):
             attestations.check_verified(value, digest, predicate=predicate, invocation=invocation, spdx=spdx)
-        verified['signature']['certificate']['extensions']['runInvocationURI'] = invocation
+        verified['signature']['certificate']['runInvocationURI'] = invocation
         with self.assertRaises(ValueError):
             attestations.check_verified(value, digest, predicate=predicate, invocation=invocation, spdx={'packages': []})
         verified['signature'] = []
@@ -1071,7 +1090,7 @@ class ReleaseInterfaceTests(unittest.TestCase):
                 'subject': [{'digest': {'sha256': digest.value[7:]}}],
                 'predicateType': attestations.spdx_predicate_type(spdx) if spdx is not None else attestations.SLSA,
                 'predicate': spdx if spdx is not None else {'runDetails': {'metadata': {'invocationId': invocation}}}},
-                'signature': {'certificate': {'extensions': {'runInvocationURI': invocation}}}}})
+                'signature': {'certificate': {'runInvocationURI': invocation}}}})
         content.atomic_json(self.assets / name, {'fake_verified': entries})
 
     def calls(self):
