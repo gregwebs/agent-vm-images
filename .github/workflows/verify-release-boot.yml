@@ -39,8 +39,9 @@ jobs:
   boot-amd64:
     needs: contracts
     runs-on: ubuntu-24.04
-    # Initial phase floors + upload reserve; retune per docs/standard-image-releases.md.
-    timeout-minutes: 360
+    # Retuned from run 37854354512: measured job 7 m 51 s; phase limits sum 178 min.
+    # 300 min leaves 122 min headroom (115 after 7 min setup/post-step overhead).
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         timeout-minutes: 5
@@ -49,7 +50,7 @@ jobs:
           persist-credentials: false
       - name: Bind requested version and require this repository's harness
         id: bind
-        timeout-minutes: 2
+        timeout-minutes: 3
         env:
           VERSION_INPUT: ${{ inputs.version }}
         run: |
@@ -91,20 +92,20 @@ jobs:
           bash harness/script/release/prepare-ci-boot.sh "$RUNTIME_LOGS"
       - name: Provision pinned standalone msb runtime
         id: msb
-        timeout-minutes: 11
+        timeout-minutes: 10
         run: |
           set -euo pipefail
           bash harness/script/release/install-ci-msb.sh 2>&1 | tee "$RUNTIME_LOGS/install-msb.log"
       - name: Download and authenticate release assets anonymously; bind signed source
         id: release
-        timeout-minutes: 30
+        timeout-minutes: 20
         env:
           VERSION: ${{ steps.bind.outputs.version }}
           EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
         run: |
           set -euo pipefail
           # Bound the WHOLE download, including all repeated transfers and attestations.
-          python3 harness/script/test/host-watchdog.py 1740 bash harness/script/release/download-release.sh \
+          python3 harness/script/test/host-watchdog.py 900 bash harness/script/release/download-release.sh \
             --version "$VERSION" --arch amd64 --out "$ASSETS" \
             2>&1 | tee "$RUNTIME_LOGS/download-release.log"
           # release.json is authenticated by download-release (signer workflow, main ref, hosted runner).
@@ -121,7 +122,7 @@ jobs:
           path: source
           persist-credentials: false
       - name: Require exact signed source checkout
-        timeout-minutes: 2
+        timeout-minutes: 3
         env:
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
         run: |
@@ -130,7 +131,7 @@ jobs:
           test -z "$(git -C source status --porcelain)"
       - name: Native amd64 boot verification with the signed source's own gate
         id: verify
-        timeout-minutes: 242
+        timeout-minutes: 60
         env:
           VERSION: ${{ steps.bind.outputs.version }}
           MSB: ${{ steps.msb.outputs.msb }}
@@ -142,14 +143,14 @@ jobs:
           MSB_LIBKRUN_EMBEDDED: '1'
         run: |
           set -euo pipefail
-          python3 harness/script/test/host-watchdog.py 14400 bash source/script/release/verify-release.sh \
+          python3 harness/script/test/host-watchdog.py 3300 bash source/script/release/verify-release.sh \
             --version "$VERSION" --arch amd64 --assets-dir "$ASSETS" --msb-bin "$MSB" --boot \
             2>&1 | tee "$RUNTIME_LOGS/verify-release.log"
           # Exit 0 without the record is not success.
           compgen -G "$ASSETS/verify-amd64-*/verification-amd64.json" >/dev/null
       - name: Stage hash-bound evidence (never turns failure green)
         if: always()
-        timeout-minutes: 3
+        timeout-minutes: 5
         env:
           MSB_DIR: ${{ steps.msb.outputs.dir }}
         run: |
@@ -159,14 +160,14 @@ jobs:
       - name: Validate staged amd64 success record and every inventoried log
         # Still validate after a staging failure; upload follows even if this fails.
         if: ${{ always() && steps.verify.outcome == 'success' }}
-        timeout-minutes: 4
+        timeout-minutes: 10
         env:
           VERSION: ${{ steps.bind.outputs.version }}
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
         run: |
           set -euo pipefail
           status=0
-          python3 harness/script/test/host-watchdog.py 180 python3 harness/script/release/check-ci-boot-evidence.py \
+          python3 harness/script/test/host-watchdog.py 420 python3 harness/script/release/check-ci-boot-evidence.py \
             "$GITHUB_WORKSPACE/source" "$ASSETS" "$RUNNER_TEMP/boot-evidence" "$VERSION" "$SOURCE_SHA" \
             2>&1 | tee "$RUNTIME_LOGS/staged-validation.log" || status=$?
           # Retain the validation error even on failure; never mask the checker's status.
@@ -174,7 +175,7 @@ jobs:
           exit "$status"
       - name: Upload boot evidence (never turns failure green)
         if: always()
-        timeout-minutes: 10
+        timeout-minutes: 15
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: boot-amd64-v${{ steps.bind.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -184,7 +185,7 @@ jobs:
           retention-days: 30
       - name: Boot evidence summary
         if: always()
-        timeout-minutes: 2
+        timeout-minutes: 5
         env:
           VERSION: ${{ steps.bind.outputs.version }}
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}

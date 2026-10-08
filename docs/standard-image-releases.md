@@ -388,19 +388,29 @@ even after a successful boot. Always-upload attempts remaining diagnostics;
 cancellation, runner loss or job timeout can prevent it. Missing evidence is
 never success or promotion input.
 
-Initial budgets are provisional, not measured adequacy: boot job 360 minutes,
-353 minutes in phase limits plus 7 overhead. Checkout/bind 5+2, tools 20,
-containerd 5, reclaim/KVM 12, runtime 11, download/authentication 30 (1740-second
-whole-process watchdog), source checkout/check 5+2, verifier 242 (14400-second
-watchdog), stage 3, staged authentication/validation 4 (180-second watchdog),
-upload/summary 10+2. Contracts has its separate 45-minute limit. Record phase
-maxima including attestations, upload/summary durations and maximum staged
-artifact size in hosted acceptance evidence. Retune before merge to at least
-1.5× measured maxima, preserving initial floors and upload/overhead headroom.
-If these cannot fit 360 minutes, report the constraint and seek a larger/native
-host; never drop checks or shorten floors to hide it. A forced phase-timeout
-exercise must prove the diagnostic tail reaches upload. Measured headroom is
-**NOT YET AVAILABLE** until the hosted pre-merge runs.
+The first measured hosted run was **37854354512** (job `boot-amd64`, commit
+`fe240ca`): per-phase wall-clock maxima were harness checkout ~1 s, bind <0.1 s,
+verifier tools 8.8 s, containerd 0.6 s, reclaim/KVM 53.6 s, runtime 1.0 s,
+download/authentication/source binding 43.1 s, signed source checkout/check
+0.9 s, native boot verifier 350.3 s (5 m 50 s), staging 0.3 s, staged validation
+6.5 s, upload 2.9 s and summary <0.1 s. Whole-job wall clock was **7 m 51 s**;
+the staged artifact was **6,194,500 bytes** (188 files). Retuned limits in
+minutes are checkout/bind 5+3, tools 20, containerd 5, reclaim/KVM 12, runtime
+10, download/authentication 20 (900-second whole-process watchdog), source
+checkout/check 5+3, verifier 60 (3300-second watchdog), stage 5, staged
+authentication/validation 10 (420-second watchdog), upload/summary 15+5.
+Phase limits sum to **178 minutes**, leaving **122 minutes** inside the
+**300-minute** job bound: 7 minutes for setup/post steps and transitions plus
+**115 minutes** of additional safety headroom. Contracts has its separate
+45-minute limit. Keep bounds at **at least 1.5× measured maxima**, including
+attestations and upload/summary, with upload/overhead headroom. Re-measure when
+the runtime pin, runner image or archive size changes materially; a materially
+larger release archive is grounds to re-measure and raise the verifier bound,
+not let it fail spuriously. Record phase maxima and maximum staged artifact
+size in hosted acceptance evidence. Never drop checks or shorten capacity
+floors to fit a budget; report a host/timing constraint and seek a larger/native
+host instead of weakening a gate. A forced phase-timeout exercise must prove
+the diagnostic tail reaches upload; this exercise is **still to be run**.
 
 A green run is amd64 evidence for maintainer review, **not promotion**. Combine
 `verification/` with native arm64 evidence and run unchanged
