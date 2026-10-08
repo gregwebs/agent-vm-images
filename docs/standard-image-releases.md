@@ -410,7 +410,43 @@ not let it fail spuriously. Record phase maxima and maximum staged artifact
 size in hosted acceptance evidence. Never drop checks or shorten capacity
 floors to fit a budget; report a host/timing constraint and seek a larger/native
 host instead of weakening a gate. A forced phase-timeout exercise must prove
-the diagnostic tail reaches upload; this exercise is **still to be run**.
+the diagnostic tail reaches upload; run **37856686660** on throwaway branch
+`test/release-boot/9.9.8/forced-timeout` has now proved this. It replaced the
+download command with a 1-second whole-process watchdog around a 60-second
+sleep: the step was killed with exit code 124 and the job stayed red.
+`runtime/download-release.log` retained both `forced-phase-timeout` and
+`host-watchdog: command timed out after 1s; killing process group`. Artifact
+`boot-amd64-v9.9.8-37856686660-1` (3,818 bytes) was still uploaded with runtime
+diagnostics and no `verification-amd64.json`. Any change to the timeout
+arrangement must still guarantee that the diagnostic tail reaches upload.
+
+**Pre-merge acceptance evidence:** at final pre-merge commit `5f6b942`, all
+three green modes produced the full 188-file evidence artifact, with all 18
+mandatory checks status 0 and every inventoried log independently
+hash/size-verified: push to `test/release-boot/0.1.3`, run **37856658989**
+(7 m 06 s, 6,193,769 bytes); `workflow_dispatch` with `version=0.1.3` against
+the branch, run **37857953724**, artifact `boot-amd64-v0.1.3-37857953724-1`
+(6,194,276 bytes); and a throwaway read-only `workflow_call` caller with the
+authenticated source SHA, run **37856665867** (`test/release-boot-call/good`,
+7 m 13 s). Dispatch against a non-default branch works here because the
+workflow is already registered; the initial-registration/UI limitation is the
+only reason the push trigger is the bootstrap path. The throwaway caller with
+all-zero `expected_source_sha`, run **37856669408**, failed before the
+signed-source checkout with `signed source 087f8bad… is not the expected 0000…`;
+its artifact retained release/runtime diagnostics and no success record.
+Unpublished version `9.9.9`, run **37856653846**, failed in the download step
+with `release download: HTTP transport failed (curl exit 22)` and no success
+record. Malformed branch `test/release-boot/latest`, run **37856655602**, was
+rejected by the whole-string semver bind in 8 s, before any provisioning or
+download. Staging cannot go green on a failure: every failed run above showed
+`evidence copy failed: …` from the fail-closed staging step and the job stayed
+red. The release call passes `expected_source_sha: ${{ github.sha }}`, so a
+version whose authenticated `release.json.source_sha` differs from the
+publishing run's commit is refused before any signed-source code is checked
+out or executed. The throwaway branches were deleted after evidence
+collection. The real `refs/heads/main` publication → `boot-amd64` integration
+is **NOT RUN** and cannot be exercised without publishing a version; it
+remains to be observed at the next real release.
 
 A green run is amd64 evidence for maintainer review, **not promotion**. Combine
 `verification/` with native arm64 evidence and run unchanged
