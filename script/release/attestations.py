@@ -51,9 +51,11 @@ def check_verified(value: object, digest: Sha256, *, predicate: str, invocation:
                 actual = mapping(mapping(claim.get('runDetails'), 'run details').get('metadata'),
                                  'run metadata').get('invocationId')
             else:
+                # gh 2.97.0 renders the certificate extensions as the certificate object
+                # itself; there is no nested "extensions" key.
                 signature = mapping(verified.get('signature'), 'verified signature')
                 certificate = mapping(signature.get('certificate'), 'verified certificate')
-                actual = mapping(certificate.get('extensions'), 'certificate extensions').get('runInvocationURI')
+                actual = certificate.get('runInvocationURI')
             if actual != invocation:
                 continue
         if predicate.startswith(SPDX) and (spdx is None or claim != spdx):
