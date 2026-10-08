@@ -16,6 +16,20 @@ SLSA = 'https://slsa.dev/provenance/v1'
 SPDX = 'https://spdx.dev/Document'
 
 
+def spdx_predicate_type(sbom: dict[str, object]) -> str:
+    """The predicate type the pinned actions/attest-sbom derives from the SBOM itself.
+
+    Its generateSPDXIntoto() splits the document's spdxVersion on '-' and appends the
+    remainder, so `SPDX-2.3` is attested as `https://spdx.dev/Document/v2.3`. Deriving it
+    from the same document keeps the signed handoff verifiable across a syft SPDX version
+    bump, instead of pinning a string that only the third-party action knows.
+    """
+    parts = str(sbom.get('spdxVersion', '')).split('-')
+    if len(parts) != 2 or parts[0] != 'SPDX' or not parts[1]:
+        raise ValueError('SPDX document must declare spdxVersion as SPDX-<version>')
+    return f'{SPDX}/v{parts[1]}'
+
+
 def check_verified(value: object, digest: Sha256, *, predicate: str, invocation: str | None,
                    spdx: dict[str, object] | None = None) -> None:
     results = sequence(value, 'gh verification results')
@@ -42,7 +56,7 @@ def check_verified(value: object, digest: Sha256, *, predicate: str, invocation:
                 actual = mapping(certificate.get('extensions'), 'certificate extensions').get('runInvocationURI')
             if actual != invocation:
                 continue
-        if predicate == SPDX and (spdx is None or claim != spdx):
+        if predicate.startswith(SPDX) and (spdx is None or claim != spdx):
             continue
         return
     raise ValueError('verified attestation subject/predicate/invocation/SPDX mismatch')
@@ -52,6 +66,11 @@ def verify(subject: str | Path, bundle: Path, *, source_sha: str | None,
            digest: Sha256 | None = None, predicate: str = SLSA,
            invocation: str | None = None, output: Path | None = None, spdx_file: Path | None = None) -> None:
     expected = digest if digest is not None else hash_file(Path(subject))[0]
+    spdx = read_json(spdx_file) if spdx_file is not None else None
+    if spdx is not None:
+        predicate = spdx_predicate_type(spdx)
+    elif predicate.startswith(SPDX):
+        raise ValueError('SPDX verification requires the signed SBOM document')
     argv = ['gh', 'attestation', 'verify', str(subject), '--bundle', str(bundle), '--repo', REPO,
             '--signer-workflow', WORKFLOW, '--deny-self-hosted-runners', '--source-ref', 'refs/heads/main',
             '--predicate-type', predicate, '--format', 'json']
@@ -60,7 +79,6 @@ def verify(subject: str | Path, bundle: Path, *, source_sha: str | None,
     proc = subprocess.run(argv, check=False, capture_output=True, timeout=1800)
     release_trace.emit(argv, proc.returncode, proc.stdout, proc.stderr)
     proc.check_returncode()
-    check_verified(json.loads(proc.stdout), expected, predicate=predicate, invocation=invocation,
-                   spdx=read_json(spdx_file) if spdx_file is not None else None)
+    check_verified(json.loads(proc.stdout), expected, predicate=predicate, invocation=invocation, spdx=spdx)
     if output is not None:
         output.write_bytes(proc.stdout)

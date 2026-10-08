@@ -633,7 +633,7 @@ class ReviewRegressionTests(unittest.TestCase):
                 subject = argv[3]
                 predicate_type = argv[argv.index('--predicate-type')+1]
                 statement = {'subject': [{'digest': {'sha256': signed.get(subject, graph.manifest.digest.value[7:])}}],
-                    'predicateType': predicate_type, 'predicate': spdx if predicate_type == attestations.SPDX else
+                    'predicateType': predicate_type, 'predicate': spdx if predicate_type == attestations.spdx_predicate_type(spdx) else
                     {'runDetails': {'metadata': {'invocationId': invocation}}}}
                 value = [{'verificationResult': {'verifiedTimestamps': [], 'statement': statement,
                     'signature': {'certificate': {'extensions': {'runInvocationURI': invocation}}}}}]
@@ -917,24 +917,46 @@ class SignatureBindingTests(unittest.TestCase):
             'verifiedTimestamps': [{'type': 'transparency-log', 'uri': 'tlog', 'timestamp': 't'}],
             'statement': statement}}]
 
+    def test_spdx_predicate_type_tracks_the_pinned_action(self):
+        # actions/attest-sbom builds this from the SBOM's own spdxVersion, so a verifier
+        # that hardcodes the bare URI silently matches nothing (run 37702678174).
+        self.assertEqual(attestations.spdx_predicate_type({'spdxVersion': 'SPDX-2.3'}),
+                         'https://spdx.dev/Document/v2.3')
+        self.assertEqual(attestations.spdx_predicate_type({'spdxVersion': 'SPDX-3.0'}),
+                         'https://spdx.dev/Document/v3.0')
+        for sbom in ({}, {'spdxVersion': '2.3'}, {'spdxVersion': 'SPDX-'}, {'spdxVersion': 'other-2.3'}):
+            with self.subTest(sbom=sbom), self.assertRaises(ValueError):
+                attestations.spdx_predicate_type(sbom)
+
+    def test_spdx_verification_requires_the_signed_document(self):
+        # Fail closed: the bare URI is not a predicate type any attester produces, so it
+        # must be impossible to request an SPDX check without the document that owns it.
+        payload = Path(tempfile.mkstemp()[1])
+        self.addCleanup(payload.unlink)
+        payload.write_text('payload')
+        with mock.patch.object(attestations.subprocess, 'run') as run, self.assertRaises(ValueError):
+            attestations.verify(payload, Path('/nonexistent-bundle'), source_sha='a' * 40, predicate=attestations.SPDX)
+        self.assertFalse(run.called)
+
     def test_spdx_binds_certificate_run_and_signed_file(self):
         digest = content.Sha256(self.digest('image'))
         invocation = content.SOURCE + '/actions/runs/264/attempts/1'
         spdx = {'spdxVersion': 'SPDX-2.3', 'packages': [{'name': 'standard'}]}
-        value = self.verification(attestations.SPDX, [digest.value])
+        predicate = attestations.spdx_predicate_type(spdx)
+        value = self.verification(predicate, [digest.value])
         verified = value[0]['verificationResult']
         verified['statement']['predicate'] = spdx
         verified['signature'] = {'certificate': {'extensions': {'runInvocationURI': invocation}}}
-        attestations.check_verified(value, digest, predicate=attestations.SPDX, invocation=invocation, spdx=spdx)
+        attestations.check_verified(value, digest, predicate=predicate, invocation=invocation, spdx=spdx)
         verified['signature']['certificate']['extensions']['runInvocationURI'] = invocation.replace('/264/', '/265/')
         with self.assertRaises(ValueError):
-            attestations.check_verified(value, digest, predicate=attestations.SPDX, invocation=invocation, spdx=spdx)
+            attestations.check_verified(value, digest, predicate=predicate, invocation=invocation, spdx=spdx)
         verified['signature']['certificate']['extensions']['runInvocationURI'] = invocation
         with self.assertRaises(ValueError):
-            attestations.check_verified(value, digest, predicate=attestations.SPDX, invocation=invocation, spdx={'packages': []})
+            attestations.check_verified(value, digest, predicate=predicate, invocation=invocation, spdx={'packages': []})
         verified['signature'] = []
         with self.assertRaises(ValueError):
-            attestations.check_verified(value, digest, predicate=attestations.SPDX, invocation=invocation, spdx=spdx)
+            attestations.check_verified(value, digest, predicate=predicate, invocation=invocation, spdx=spdx)
 
     def test_matching_signature_accepts_and_mutations_reject(self):
         path = Path(tempfile.mkstemp()[1])
@@ -1047,7 +1069,7 @@ class ReleaseInterfaceTests(unittest.TestCase):
             digest = subject if isinstance(subject, content.Sha256) else content.hash_file(subject)[0]
             entries.append({'verificationResult': {'verifiedTimestamps': [], 'statement': {
                 'subject': [{'digest': {'sha256': digest.value[7:]}}],
-                'predicateType': attestations.SPDX if spdx is not None else attestations.SLSA,
+                'predicateType': attestations.spdx_predicate_type(spdx) if spdx is not None else attestations.SLSA,
                 'predicate': spdx if spdx is not None else {'runDetails': {'metadata': {'invocationId': invocation}}}},
                 'signature': {'certificate': {'extensions': {'runInvocationURI': invocation}}}}})
         content.atomic_json(self.assets / name, {'fake_verified': entries})

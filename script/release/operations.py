@@ -354,7 +354,7 @@ def verify_platform_handoff(directory: Path, *, sha: str, version: str,
     attestations.verify(subject, directory / f'platform-{arch}-image.sigstore.json', source_sha=sha,
                         digest=inventory.graph.manifest.digest, invocation=invocation)
     attestations.verify(subject, directory / f'platform-{arch}-sbom.sigstore.json', source_sha=sha,
-                        digest=inventory.graph.manifest.digest, predicate=attestations.SPDX, invocation=invocation,
+                        digest=inventory.graph.manifest.digest, invocation=invocation,
                         spdx_file=directory / inventory.sbom.name)
     for payload in (inventory.parts or (inventory.archive,)) + (inventory.sbom,):
         payload.verify(directory)
