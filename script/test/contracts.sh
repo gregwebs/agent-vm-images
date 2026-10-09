@@ -28,6 +28,7 @@ if [ "$guard_only" = false ]; then
         bash "script/test/$suite.sh"
     done
     bash script/test/standard-image.sh --self-test
+    bash script/test/example-layers.sh --self-test
 fi
 # Syntax follows the script's interpreter; upstream snapshots are provenance.
 while IFS= read -r -d '' script; do
@@ -39,6 +40,7 @@ while IFS= read -r -d '' script; do
     # literal interpolation, not a warning; don't rewrite reviewed payloads.
     shellcheck --severity=warning "$script"
 done < <(find images script examples -type f \( -name '*.sh' -o -name hello-image \) ! -name '*.upstream.sh' ! -path '*/target/*' -print0)
+bash script/test/example-layers.sh
 python3 - <<'PY'
 import ast
 from pathlib import Path

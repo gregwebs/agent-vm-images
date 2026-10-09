@@ -1,7 +1,7 @@
 # examples/layers/rust-dev — Rust development toolchain custom boot image.
 #
 # Build it, import it, and select it to build, test, lint and formally verify
-# this repo's Rust code inside the microVM (there is no launcher-side layering,
+# agent-vm's Rust code inside the microVM (there is no launcher-side layering,
 # #259):
 #
 #   agent-vm build --builder native-oci \
@@ -9,10 +9,10 @@
 #     --tag agent-vm-rust-dev:dev examples/layers/rust-dev
 #   agent-vm claude --image agent-vm-rust-dev:dev
 #
-# It provides the toolchain the repo pins (rust-toolchain.toml) with clippy and
+# It provides the toolchain agent-vm pins (its rust-toolchain.toml) with clippy and
 # rustfmt, the musl target a vendored agentd/msb build needs, the native libraries
-# ci.yml installs, shellcheck for script/test/ci-contracts.sh, and the pinned
-# Verus release CI verifies with. See examples/layers/README.md and
+# agent-vm's ci.yml installs, shellcheck for its script/test/ci-contracts.sh, and the pinned
+# Verus release CI verifies with. See examples/layers/README.md and agent-vm's
 # docs/adr/0035-consume-user-owned-boot-images.md.
 #
 # The three steps that need real shell live as standalone, independently
@@ -27,11 +27,11 @@
 ARG BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de
 FROM ${BASE_IMAGE}
 
-# Pins. RUST_TOOLCHAIN is enforced against rust-toolchain.toml's channel, and
-# VERUS_RELEASE/VERUS_SHA256 against .github/workflows/verus.yml, by
-# script/check-rust-toolchain.sh. A bump moves this file, rust-toolchain.toml
-# (or verus.yml), the `vstd` pin in crates/agent-vm/Cargo.toml, and
-# CONTRIBUTING.md together.
+# Pins. These mirror agent-vm's canonical pins: RUST_TOOLCHAIN its
+# rust-toolchain.toml channel, VERUS_RELEASE/VERUS_SHA256 its
+# .github/workflows/verus.yml. This repository does not check out/read those files;
+# docs/image-source-ownership.md states the bump order and what is and is not
+# machine-checked. Move the two Verus values together.
 ARG RUST_TOOLCHAIN=1.98.1
 ARG VERUS_RELEASE=0.2026.09.20.aef82ed
 ARG VERUS_SHA256=7b870fa12bc589015c2fab60a8b3d9f07c7b1adb3444eb0fadffcbf7f0447b33
@@ -45,13 +45,13 @@ ARG RUSTUP_HOME=/opt/rustup
 ARG CARGO_HOME=/opt/cargo
 
 # Native build dependencies for cargo build/test/clippy on this workspace,
-# mirroring ci.yml's "Install build dependencies" step (GitHub's runner
+# mirroring agent-vm's ci.yml's "Install build dependencies" step (GitHub's runner
 # already has build-essential; this slim base does not):
 #   - build-essential, pkg-config: cc/pkg-config for the -sys crates
 #     (libcap-ng, dbus) the microsandbox SDK links against;
 #   - musl-tools: the *-unknown-linux-musl target the guest agentd needs
 #     when building the vendored msb (agent-vm itself does not need it);
-#   - shellcheck: script/test/ci-contracts.sh lints the repo's scripts.
+#   - shellcheck: agent-vm's script/test/ci-contracts.sh lints its scripts.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         build-essential pkg-config \
@@ -67,7 +67,7 @@ RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro \
 
 # Verus, the SMT-backed verifier for the verus! contracts (ADR-0018). Pinned
 # release + digest on linux/amd64; a clean no-op where upstream publishes no
-# asset (run the host's arm64-macos Verus there instead; see CONTRIBUTING.md).
+# asset (run the host's arm64-macos Verus there instead; see agent-vm's CONTRIBUTING.md).
 ARG VERUS_DIR=/opt/verus
 RUN --mount=type=bind,source=install-verus.sh,target=/tmp/install-verus.sh,ro \
     bash /tmp/install-verus.sh

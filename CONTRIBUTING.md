@@ -63,6 +63,11 @@ reviewed archive SHA-256 pins for both architectures. Installer defaults also
 require reviewed `script/test/fixtures/installer-egress/selections.tsv` updates
 and strict restricted-egress tests, never automatic allowlist broadening.
 
+Example images under `examples/layers/` are not part of the standard product.
+`contracts.sh` checks them statically; building them is manual until
+[#33](https://github.com/gregwebs/agent-vm-images/issues/33). Their pin policy and
+bump order are in [Example images](docs/image-source-ownership.md#example-images-exampleslayers).
+
 ## Contributor prerequisites and fast gates
 
 Build users need Docker only. Contributors running contracts need Bash, git, jq,
@@ -84,8 +89,11 @@ bash script/test/contracts.sh
 
 `contracts.sh [--guard-only]` works from any cwd. Default runs the explicitly
 listed hermetic suites, watchdog, transactional/gate/helper controls and
-finished-image oracle `--self-test`; both modes run syntax, warning-level
-shellcheck, Python AST, Node syntax, Rust test/fmt/clippy and pinned workflow lint.
+finished-image oracle `--self-test`, and `example-layers.sh --self-test`; both
+modes run syntax, warning-level shellcheck, Python AST, Node syntax, Rust
+test/fmt/clippy and pinned workflow lint, plus the example-image contract
+(`example-layers.sh`: Chrome capability/wrapper recipe text, parent/digest ARG
+shapes and checksum tokens, default-severity shellcheck of the listed example scripts).
 Do not discover and execute every `.sh`: installers are not host test entrypoints.
 The preserved Claude seed's literal JavaScript interpolation yields informational
 SC2016; warning-level lint does not rewrite reviewed runtime bytes to silence it.

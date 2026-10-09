@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the Rust toolchain this repo pins, with the clippy and rustfmt
+# Install the Rust toolchain agent-vm pins, with the clippy and rustfmt
 # components and the host *-unknown-linux-musl target. Runs both standalone
 # (as root on a Debian/Ubuntu host) and from
 # examples/layers/rust-dev/Dockerfile, which passes the pin and the install
@@ -21,7 +21,7 @@ export RUSTUP_HOME CARGO_HOME
 
 echo "==> install-rust: toolchain $RUST_TOOLCHAIN into $RUSTUP_HOME / $CARGO_HOME"
 
-# The official installer, as macos-build.md does: only the toolchain version is
+# The official installer, as agent-vm's macos-build.md does: only the toolchain version is
 # part of the build identity, not the rustup version that installs it.
 installer="$(mktemp)"
 trap 'rm -f "$installer"' EXIT

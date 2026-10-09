@@ -2,7 +2,7 @@
 # custom boot image. Build it FROM the default boot image (or any image
 # satisfying the boot image contract) with ordinary Docker, import it, and
 # select it — there is no launcher-side layering (#259). See
-# examples/layers/README.md and
+# examples/layers/README.md and agent-vm's
 # docs/adr/0035-consume-user-owned-boot-images.md.
 
 # `BASE_IMAGE` lets a caller build this example FROM a different boot image
@@ -11,8 +11,8 @@
 ARG BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de
 FROM ${BASE_IMAGE}
 
-# WB C/C++ build essentials. Ported verbatim from images/Dockerfile's former
-# DEFERRED block (rationale for each package lives in this file's git history /
+# WB C/C++ build essentials. Ported verbatim from agent-vm's former images/Dockerfile
+# DEFERRED block (rationale for each package lives in agent-vm's history of this file /
 # the ADR). Sourced from the union of debian/control Build-Depends across
 # wb-mqtt-serial, wb-mqtt-mbgate, wb-rules, wb-mqtt-confed and codestyle's
 # cpp/local/linux-devenv.sh + cpp/ci/clang-*-subdirs.sh.

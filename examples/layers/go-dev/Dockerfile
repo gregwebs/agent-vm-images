@@ -10,7 +10,7 @@
 #
 # It provides the pinned Go toolchain (go, gofmt, go vet, ...) plus the two
 # tools a Go project's edit/CI loop expects beyond it: golangci-lint and the
-# gopls language server. See examples/layers/README.md and
+# gopls language server. See examples/layers/README.md and agent-vm's
 # docs/adr/0035-consume-user-owned-boot-images.md.
 #
 # The four steps that need real shell live as standalone, independently
@@ -36,8 +36,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential \
  && rm -rf /var/lib/apt/lists/*
 
-# Pins. There is no second copy of these in the repo (this layer is the only
-# place agent-vm pins a Go toolchain), so the pin and its verification sitting
+# Pins. There is no second copy of these in the repo (this is the only
+# example here that pins a Go toolchain), so the pin and its verification sitting
 # together is the whole lockstep rule: install-go.sh and
 # install-golangci-lint.sh each check their prebuilt tarball against the digest
 # declared here, so a bumped version left beside a stale digest fails the build

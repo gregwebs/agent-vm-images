@@ -5,18 +5,34 @@ ordinary Docker. Each is a `Dockerfile` that starts `FROM ${BASE_IMAGE}` and
 adds tools the default image does not carry — compilers, cross-toolchains,
 Chromium, and so on. The explicit `agent-vm build` operation builds and imports one; launches never
 build or compose these directories. Select the finished result separately. See
-[Selecting the boot image](../../USAGE.md#selecting-the-boot-image) and
-[ADR-0035](../../docs/adr/0035-consume-user-owned-boot-images.md).
+[Selecting the boot image](https://github.com/gregwebs/agent-vm/blob/main/USAGE.md#selecting-the-boot-image) and
+[ADR-0035](https://github.com/gregwebs/agent-vm/blob/main/docs/adr/0035-consume-user-owned-boot-images.md).
 
-The directories under `examples/layers/` are examples, not activated by
-default. Maintained installers and standard-image sources live in the independent
-[image repository](https://github.com/gregwebs/agent-vm-images), which also has a
-[tool-free base extension example](https://github.com/gregwebs/agent-vm-images/tree/main/examples/base-extension).
-These examples require the Debian-based standard image's apt/Node facilities;
-the minimal boot contract alone is insufficient. Their default parent is the
-immutable v0.1.3 index, overrideable with `--build-arg BASE_IMAGE=…`.
+The directories under `examples/layers/` are examples, not activated by default.
+This repository also owns the maintained base/standard sources (`images/`) and a
+[tool-free base extension](../base-extension/README.md). These examples require the
+Debian-based standard image's apt/Node facilities; the minimal boot contract alone
+is insufficient. Their default parent is the immutable v0.1.3 standard index,
+overrideable with `--build-arg BASE_IMAGE=…`; no local base build is needed.
 
-Build an example and select its finished result:
+### Build from an agent-vm-images checkout
+
+Each example's directory is its own build context. Requires Docker with BuildKit
+(the Go and Rust examples bind-mount their scripts) and a running Linux daemon; see
+[Local FROM and builders](../../README.md#local-from-and-builders). From the
+repository root:
+
+```bash
+BUILDER="$(docker context show)"
+docker build --builder "$BUILDER" --platform linux/arm64 \
+  -t agent-vm-chrome:dev examples/layers/chrome-devtools
+```
+
+Substitute `go-dev`, `rust-dev` or `wirenboard-cpp`; use `linux/amd64` on x86-64.
+`agent-vm build` (below) builds the same context and also imports the result for
+launching.
+
+From this repository's root, build an example and select its finished result:
 
 ```sh
 agent-vm build --builder native-oci \
@@ -42,7 +58,7 @@ directly. These Debian-based examples are not portable to every minimal boot ima
 | Example | Adds |
 |---|---|
 | [`wirenboard-cpp`](wirenboard-cpp/) | WB C/C++ build-essentials (debhelper, clang-format/clang-tidy, libcurl/libgtest/libmodbus/libsystemd-dev, cmake/ninja, ...) plus the armhf/arm64 cross toolchains, qemu-user-static, and the sbuild/schroot/debootstrap path. |
-| [`rust-dev`](rust-dev/) | The Rust toolchain this repo pins (via `rust-toolchain.toml`, with clippy and rustfmt), the host musl target, the native build libraries `ci.yml` installs, shellcheck, and the pinned Verus release — enough to build, test, lint and verify agent-vm's Rust code in the guest. |
+| [`rust-dev`](rust-dev/) | The Rust toolchain [agent-vm](https://github.com/gregwebs/agent-vm) pins (via its `rust-toolchain.toml`, with clippy and rustfmt), the host musl target, the native build libraries agent-vm's `ci.yml` installs, shellcheck, and the pinned Verus release — enough to build, test, lint and verify agent-vm's Rust code in the guest. |
 | [`go-dev`](go-dev/) | The pinned Go toolchain (go, gofmt, go vet) plus the two tools a Go project's editor and CI loop expect beyond it, `golangci-lint` and the `gopls` language server — enough to build, test, lint and navigate a Go code base in the guest. |
 | [`chrome-devtools`](chrome-devtools/) | Chromium, Chrome DevTools MCP wrapper, scoped NSS CA trust, and the Chrome capability marker. |
 
@@ -51,13 +67,13 @@ directly. These Debian-based examples are not portable to every minimal boot ima
 `rust-dev` is the layer that lets an in-VM agent iterate on agent-vm's own
 Rust code. It installs, all under the world-readable `/opt`:
 
-- the **pinned Rust toolchain** from `rust-toolchain.toml` (`1.98.1` at the
+- the **pinned Rust toolchain** from agent-vm's `rust-toolchain.toml` (`1.98.1` at the
 time of writing) with the `clippy` and `rustfmt` components, plus the host
 `*-unknown-linux-musl` target the guest `agentd` build needs when building
 the vendored `msb` (agent-vm's own gates do not);
-- the native libraries `ci.yml` installs — `build-essential`, `pkg-config`,
+- the native libraries agent-vm's `ci.yml` installs — `build-essential`, `pkg-config`,
 `libcap-ng-dev`, `libdbus-1-dev` — plus `musl-tools` for that musl target, and
-`shellcheck` for `script/test/ci-contracts.sh`;
+`shellcheck` for agent-vm's `script/test/ci-contracts.sh`;
 - the **pinned Verus release** CI verifies with, on `linux/amd64` (see the
 Apple Silicon note below).
 
@@ -70,7 +86,7 @@ agent-vm build --builder native-oci \
 agent-vm claude --image agent-vm-rust-dev:dev
 ```
 
-Once booted, the guest can run the repo's Rust gates the way CI does. These
+Once booted, the guest can run agent-vm's Rust gates from an agent-vm checkout the way CI does. These
 gates need no guest `agentd` build first: agent-vm drives an external `msb`,
 and only `msb` embeds `agentd`.
 
@@ -96,23 +112,22 @@ toolchain instead.
 Upstream publishes Verus for `linux/amd64` and `macos/arm64`, but **not**
 `linux/arm64`. On an Apple Silicon host the guest is `linux/arm64`, so the
 layer skips Verus; run the host's `arm64-macos` Verus there instead
-(`CONTRIBUTING.md` § *Verifying contracts locally*). Everything else in the
+([agent-vm CONTRIBUTING](https://github.com/gregwebs/agent-vm/blob/main/CONTRIBUTING.md#verifying-contracts-locally-optional)). Everything else in the
 layer works on both architectures.
 
 ### Keeping the pins in lockstep
 
-The Dockerfile's `ARG RUST_TOOLCHAIN` is checked against
-`rust-toolchain.toml`'s canonical channel, and its `ARG VERUS_RELEASE` /
-`ARG VERUS_SHA256` against `.github/workflows/verus.yml`, by
-`script/check-rust-toolchain.sh` — the same check that enforces the repo's
-toolchain copies elsewhere. The checker also refuses a build whose Verus
-install script stopped verifying the digest. A pin bump edits the source of
-truth, then this directory, then runs the checker.
+agent-vm owns the Rust channel and the Verus release/digest; this Dockerfile
+mirrors them. Bump order and check coverage live in
+[Example image ownership](../../docs/image-source-ownership.md#example-images-exampleslayers).
+`script/test/example-layers.sh` guards checksum tokens and ARG shapes statically;
+native amd64 builds exercise Verus verification.
 
 The layer's build steps are committed as standalone scripts beside the
 Dockerfile — `install-rust.sh`, `install-verus.sh` and `verify-toolchain.sh`
 — and bind-mounted in at build time, so each can be read, reviewed and run on
-its own. They are covered by the CI shell guard in `script/test/ci-contracts.sh`.
+its own. They are guarded (`bash -n` and shellcheck) by `script/test/example-layers.sh`,
+which `script/test/contracts.sh` runs.
 
 ## Go development
 
@@ -175,7 +190,7 @@ build with `-mod=vendor`.
 
 ### Keeping the pins in lockstep
 
-This layer is the *only* place agent-vm pins a Go toolchain, so there is
+This is the *only* example here that pins a Go toolchain, so there is
 nothing to cross-check. The version and, for the two prebuilt downloads, the
 per-architecture digest are declared together in `Dockerfile`, and each
 installer verifies its tarball against that digest, so a bumped version left
@@ -194,14 +209,16 @@ agent-vm claude --image agent-vm-chrome:dev
 ```
 
 It installs Chromium and the Chrome DevTools MCP integration; see
-[USAGE.md](../../USAGE.md#chrome-devtools-mcp) for the runtime behavior. The
+[agent-vm USAGE](https://github.com/gregwebs/agent-vm/blob/main/USAGE.md#chrome-devtools-mcp) for the runtime behavior. The
 Dockerfile pre-warms the npm cache for root mode only: arbitrary non-root guest
 homes remain persistent but download on first use.
 
 ### Manual Chrome runtime check
 
-Static capability/wrapper agreement runs in launcher CI, but the former Chrome
-runtime workflow is retired. On a native Docker host, build this ordinary
+Image-content checks run in this repository's `script/test/example-layers.sh`.
+Agreement of the marker and wrapper paths with the launcher is agent-vm's check
+(see [Example image ownership](../../docs/image-source-ownership.md#example-images-exampleslayers)).
+No CI runs this image yet ([#24](https://github.com/gregwebs/agent-vm-images/issues/24)). On a native Docker host, build this ordinary
 Dockerfile with `docker build -t av-chrome-check examples/layers/chrome-devtools`,
 then check the dedicated account, sudo scope and headless browser:
 
@@ -209,9 +226,15 @@ then check the dedicated account, sudo scope and headless browser:
 docker run --rm av-chrome-check bash -c 'set -e; test "$(id -u chrome)" = 9999; visudo -cf /etc/sudoers.d/agent-vm-chrome; sudo -n -u chrome -H -- test -w /home/chrome/.pki/nssdb; sudo -n -u chrome -H -- chromium --headless --disable-gpu --dump-dom about:blank'
 ```
 
+Chromium's namespace sandbox needs a host that permits unprivileged user
+namespaces, or a setuid `chromium-sandbox` the Debian package does not install
+here. Where the container runtime blocks user namespaces, this command fails
+with `No usable sandbox!`; add `--no-sandbox` to that `chromium` command to
+smoke-test the browser, which does not exercise the sandbox.
+
 Also test an arbitrary numeric UID with writable HOME and the wrapper's NSS/CA
 handling before changing this example. Docker checks are not VM MCP integration
-proof; the custom-image native suite owns the launcher-side capability join.
+proof; agent-vm's custom-image native suite owns the launcher-side capability join.
 
 ## Combining examples
 
@@ -219,3 +242,10 @@ To combine two examples, build one `FROM` the other with ordinary Docker (a
 multistage or chained `docker build`), or copy the steps you need into one
 Dockerfile. There is no launcher-side layering: the finished image is the one
 you select.
+
+## Provenance
+
+Moved from agent-vm at `d5d8876` ([#23](https://github.com/gregwebs/agent-vm-images/issues/23));
+bare `ADR-NNNN`/`#NNN` references in these files name agent-vm records, and earlier
+history lives there. See
+[Example image ownership](../../docs/image-source-ownership.md#example-images-exampleslayers).
