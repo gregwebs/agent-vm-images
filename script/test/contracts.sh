@@ -22,7 +22,8 @@ if [ "$guard_only" = false ]; then
         opencode-installer dsh-prepare-lock dsh-verify pi-install pi-prepare-lock pi-verify \
         pi-wrapper shipped-installer-contracts tool-access vendored-installers upgrade-scripts \
         install-zellij host-watchdog transactional-publish standard-certification build-entrypoint \
-        release-content release-operations release-http ci-boot-bind ci-boot-runtime ci-boot-evidence; do
+        release-content release-operations release-http ci-boot-bind ci-boot-runtime ci-boot-evidence \
+        ci-boot-prepare; do
         echo "=== $suite ==="
         bash "script/test/$suite.sh"
     done
