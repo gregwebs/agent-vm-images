@@ -420,10 +420,14 @@ sleep: the step was killed with exit code 124 and the job stayed red.
 diagnostics and no `verification-amd64.json`. Any change to the timeout
 arrangement must still guarantee that the diagnostic tail reaches upload.
 
-**Pre-merge acceptance evidence:** at final pre-merge commit `5f6b942`, all
-three green modes produced the full 188-file evidence artifact, with all 18
-mandatory checks status 0 and every inventoried log independently
-hash/size-verified: push to `test/release-boot/0.1.3`, run **37856658989**
+**Pre-merge acceptance evidence:** the exercises below were run on this branch.
+The workflow, boot scripts and hermetic suites are byte-identical from `5f6b942`
+through the tip, and the positive exercise was re-run green on the later tip
+commits that add the automated test and this record (run **37860072774**, and
+run **37863421652** dispatched independently by the verifier). Each green mode
+produced the full 188-file evidence artifact, with all 18 mandatory checks
+status 0 and every inventoried log independently hash/size-verified: push to
+`test/release-boot/0.1.3`, run **37856658989**
 (7 m 06 s, 6,193,769 bytes); `workflow_dispatch` with `version=0.1.3` against
 the branch, run **37857953724**, artifact `boot-amd64-v0.1.3-37857953724-1`
 (6,194,276 bytes); and a throwaway read-only `workflow_call` caller with the
