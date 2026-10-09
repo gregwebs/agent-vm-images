@@ -6,8 +6,11 @@ name: Release standard image
 # Publication ref must be refs/heads/main of gregwebs/agent-vm-images. See
 # docs/standard-image-releases.md. A successful run creates an immutable,
 # digest-addressed PUBLIC PRERELEASE; it is never default-ready and is never
-# auto-promoted. Anonymous registry/archive consumption and native msb boots on
-# both architectures are separate, reviewed deployment gates.
+# auto-promoted. After publication, boot-amd64 runs the signed source's own
+# verify-release.sh --boot on a hosted amd64 runner (verify-release-boot.yml) and
+# uploads its evidence; a failure there leaves the prerelease published and
+# unpromotable. The arm64 msb boot and maintainer review/promotion remain
+# separate native and manual deployment gates.
 on:
   workflow_dispatch:
 
@@ -342,3 +345,15 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
           compression-level: 0
+
+  # Read-only post-publication amd64 boot gate. No secrets and no environment:
+  # anonymous consumption is the point. Holds the release concurrency group
+  # until it finishes, so a following dispatch queues behind it.
+  boot-amd64:
+    needs: [preflight, assemble]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/verify-release-boot.yml
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+      expected_source_sha: ${{ github.sha }}

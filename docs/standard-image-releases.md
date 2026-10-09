@@ -64,6 +64,10 @@ To publish:
    and, on the first release only, make the GHCR package public before
    approving — a new user-owned package defaults to private and anonymous
    consumption is required. `preflight` and `native` do not pause.
+4. After `assemble` publishes the prerelease, `boot-amd64` runs the hosted amd64
+   boot gate below. Red does not unpublish anything: **do not promote**. Inspect
+   its evidence artifact, then re-run the job or dispatch **Verify released
+   standard image boot (amd64)** for that version.
 
 ## Rehearsal before a merge
 
@@ -93,9 +97,21 @@ A green rehearsal is evidence, not a release. Nothing it produces is
 consumable, and the version is still published only by the `main` dispatch
 above.
 
+The build rehearsal cannot boot-verify a signed release because it signs nothing.
+Exercise the boot gate against an **already published** version instead:
+`git push origin HEAD:test/release-boot/<VERSION>` (optionally `/<name>`). It has
+only `contents: read`, no secrets. Push to this repository, not a fork, with a
+credential able to trigger Actions (not an ordinary workflow `GITHUB_TOKEN`
+push). Push is the reliable initial registration path; API/CLI branch dispatch
+may work after registration/first run, even before merge.
+
 ## Permissions and approval hosts
 
 - Top level is `contents: read`. Each job narrows or widens explicitly.
+- `boot-amd64` / `verify-release-boot.yml`: `contents: read` only, no secrets,
+  no environment, hosted `ubuntu-24.04`. `gh attestation verify` needs no token
+  for bundle verification; fresh-runner default TUF trust initialization remains
+  first-run acceptance.
 - `assemble` is the only job in the protected `image-release` environment, so
   a release needs a single review; `preflight` and `assemble` hold
   `contents: write` so the draft-inclusive Release list is authoritative, and
@@ -178,7 +194,8 @@ remains an explicit constraint.
   never prune to get tests passing.
 - Verify tooling needs a compatible `gh attestation` verifier, `skopeo` with
   OCI `--preserve-digests` and a real standalone `msb` runtime with matching
-  libkrun firmware for VM checks.
+  libkrun firmware for VM checks. CI uses the pinned runtime described in
+  Hosted amd64 boot verification; host operators provide and declare their own.
 
 Required native environment (set from the reviewed standalone distribution):
 
@@ -256,9 +273,12 @@ yields a passing `verification-ARCH.json`.
 Native batch verification on **both** architectures is a required completion
 gate before stable promotion:
 
-1. On a fresh amd64 and a fresh arm64 host, run the source-SHA-pinned
+1. On fresh amd64 and arm64 hosts, run the source-SHA-pinned
    `download-release.sh` / `verify-release.sh --boot` interfaces with fresh
    short private states, no GHCR credentials and a compatible standalone runtime.
+   A green `verify-release-boot.yml` run satisfies the amd64 leg: the hosted
+   runner is a fresh host with fresh private state and no GHCR credentials.
+   Arm64 still needs a fresh native arm64 host.
 2. Each run writes `verification-ARCH.json` plus hashed command/guest/probe logs
    recording source/version/run identity, the current attested `release.json`
    subject hash, index/child/config/layer identities, host/tools hashes, UID/GID
@@ -276,8 +296,10 @@ gate before stable promotion:
    verifier again to compare live index/platform version refs and both digest-downloaded
    graphs with those reviewed subjects (no rebuild/fallback). Any changed bytes,
    refs or missing/denied asset block promotion and require renewed verification
-   and maintainer review. Link the maintainer decision/evidence comment in the
-   existing Release notes before explicitly promoting the **same bytes**:
+   and maintainer review. For amd64, dispatch `verify-release-boot.yml` again
+   immediately before promotion; arm64 still needs a fresh native-host
+   verification. Link the maintainer decision/evidence comment in the existing
+   Release notes before explicitly promoting the **same bytes**:
 
    ```bash
    gh release edit vVERSION --prerelease=false --latest=false \
@@ -286,6 +308,154 @@ gate before stable promotion:
 
    Promotion replaces no asset and rebuilds nothing. If anything changed since
    review, repeat verification and review against the new bytes.
+
+## Hosted amd64 boot verification
+
+`verify-release-boot.yml` runs after publication in `release-standard.yml`, bound
+to that run's `GITHUB_SHA`; it also accepts `workflow_dispatch(version)` and
+pushes to `test/release-boot/<VERSION>[/<name>]`. All modes first invoke the local
+reusable `contracts.yml` (no inputs/secrets); duplicate contracts on release calls
+is intentional. Initial dispatch registration/UI depends on default-branch
+visibility; registered workflows may dispatch branch/tag versions via API/CLI.
+Failed contracts means boot **NOT RUN**, with no boot artifact.
+
+Two sibling clean checkouts keep responsibilities separate: `harness/` is the
+workflow commit, providing tools, runtime and initial authenticated download;
+`source/` is the authenticated `release.json.source_sha`, providing its own
+unchanged `verify-release.sh --boot`. No unauthenticated SHA selects code.
+Initial amd64 archive/SBOM transfers repeat in the signed verifier's
+`public-assets` check (v0.1.3's archive is 868,034,560 bytes per transfer).
+Opposite-architecture controls, both registry graphs, layouts and tars consume
+additional disk. Initial assets remain allocated when capacity is checked.
+
+On the disposable amd64 runner only, `prepare-ci-boot.sh` reclaims exactly
+`/usr/share/dotnet`, `/usr/local/lib/android`, `/opt/ghc`, and
+`/usr/local/share/boost` within ten minutes, then grants KVM:
+
+```bash
+echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+  | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger --name-match=kvm
+```
+
+It asserts readable/writable `/dev/kvm` and proves an `open(O_RDWR)`. Never run
+this host mutation on an operator machine. `ubuntu-24.04-arm` has no `/dev/kvm`:
+there is **no hosted arm64 leg**. Capacity failure remains failure, never prune.
+For v0.1.3 the verifier requires about 51.43 GiB free after initial download,
+plus successive roughly 25-GiB `/tmp` floors and measured daemon capacity;
+GitHub's documented standard-runner availability does not guarantee those floors.
+
+The reviewed latest published runtime is upstream microsandbox **v0.7.7**,
+not the launcher's msb. `tool-pins.json` pins SHA-256 for `msb-linux-x86_64` and
+`libkrunfw-linux-x86_64.so`; `install-ci-msb.sh` checks both hashes, version and
+linkage. agentd is embedded. The explicit declaration is:
+
+```text
+MSB_LIBKRUN_EMBEDDED=1
+MSB_LIBKRUN_VERSION=msb_krun 0.1.40 (statically linked into microsandbox v0.7.7)
+MSB_LIBKRUNFW_PATH=<runtime>/lib/libkrunfw.so.5.6.1
+```
+
+This proves boot under the **upstream runtime**, not launcher compatibility;
+agent-vm#286 owns that join. There is no source build or automatic latest lookup.
+
+### Bumping the runtime pin
+
+A pin bump is a reviewed source change, never an automatic CI lookup. For a new
+microsandbox release `vX`:
+
+1. Take asset SHA-256 digests for `msb-linux-x86_64` and
+   `libkrunfw-linux-x86_64.so` and cross-check `checksums.sha256`.
+2. Read `LIBKRUNFW_VERSION` in `crates/utils/lib/lib.rs` and `msb_krun` in
+   `Cargo.lock` at tag `vX`.
+3. Confirm `ldd` / `objdump -p` shows no libkrun. Otherwise switch to an honest
+   `MSB_LIBKRUN_PATH` declaration instead of embedded.
+4. Update the five runtime keys in `tool-pins.json`.
+5. Prove the pin with a `test/release-boot/<latest published VERSION>` run at
+   the proposed harness SHA before merge.
+
+### Retained evidence and budgets
+
+Artifact `boot-amd64-v<V>-<run>-<attempt>` is retained for 30 days:
+`verification/` holds the success record and hashed logs; `release/` holds
+metadata and bundles; `runtime/` holds KVM/capacity, msb provenance and verifier
+console logs. No image archives or layouts are uploaded. Exactly one original
+success record must match the staged record's hash and size; staged metadata is
+re-authenticated and bound to source/version/subject/platform/index. **Every**
+inventoried log is hash/size-verified. Copy or validation failure makes CI red
+even after a successful boot. Always-upload attempts remaining diagnostics;
+cancellation, runner loss or job timeout can prevent it. Missing evidence is
+never success or promotion input.
+
+The first measured hosted run was **37854354512** (job `boot-amd64`, commit
+`fe240ca`): per-phase wall-clock maxima were harness checkout ~1 s, bind <0.1 s,
+verifier tools 8.8 s, containerd 0.6 s, reclaim/KVM 53.6 s, runtime 1.0 s,
+download/authentication/source binding 43.1 s, signed source checkout/check
+0.9 s, native boot verifier 350.3 s (5 m 50 s), staging 0.3 s, staged validation
+6.5 s, upload 2.9 s and summary <0.1 s. Whole-job wall clock was **7 m 51 s**;
+the staged artifact was **6,194,500 bytes** (188 files). Retuned limits in
+minutes are checkout/bind 5+3, tools 20, containerd 5, reclaim/KVM 12, runtime
+10, download/authentication 20 (900-second whole-process watchdog), source
+checkout/check 5+3, verifier 60 (3300-second watchdog), stage 5, staged
+authentication/validation 10 (420-second watchdog), upload/summary 15+5.
+Phase limits sum to **178 minutes**, leaving **122 minutes** inside the
+**300-minute** job bound: 7 minutes for setup/post steps and transitions plus
+**115 minutes** of additional safety headroom. Contracts has its separate
+45-minute limit. Keep bounds at **at least 1.5× measured maxima**, including
+attestations and upload/summary, with upload/overhead headroom. Re-measure when
+the runtime pin, runner image or archive size changes materially; a materially
+larger release archive is grounds to re-measure and raise the verifier bound,
+not let it fail spuriously. Record phase maxima and maximum staged artifact
+size in hosted acceptance evidence. Never drop checks or shorten capacity
+floors to fit a budget; report a host/timing constraint and seek a larger/native
+host instead of weakening a gate. A forced phase-timeout exercise must prove
+the diagnostic tail reaches upload; run **37856686660** on throwaway branch
+`test/release-boot/9.9.8/forced-timeout` has now proved this. It replaced the
+download command with a 1-second whole-process watchdog around a 60-second
+sleep: the step was killed with exit code 124 and the job stayed red.
+`runtime/download-release.log` retained both `forced-phase-timeout` and
+`host-watchdog: command timed out after 1s; killing process group`. Artifact
+`boot-amd64-v9.9.8-37856686660-1` (3,818 bytes) was still uploaded with runtime
+diagnostics and no `verification-amd64.json`. Any change to the timeout
+arrangement must still guarantee that the diagnostic tail reaches upload.
+
+**Pre-merge acceptance evidence:** the exercises below were run on this branch.
+The workflow, boot scripts and hermetic suites are byte-identical from `5f6b942`
+through the tip, and the positive exercise was re-run green on the later tip
+commits that add the automated test and this record (run **37860072774**, and
+run **37863421652** dispatched independently by the verifier). Each green mode
+produced the full 188-file evidence artifact, with all 18 mandatory checks
+status 0 and every inventoried log independently hash/size-verified: push to
+`test/release-boot/0.1.3`, run **37856658989**
+(7 m 06 s, 6,193,769 bytes); `workflow_dispatch` with `version=0.1.3` against
+the branch, run **37857953724**, artifact `boot-amd64-v0.1.3-37857953724-1`
+(6,194,276 bytes); and a throwaway read-only `workflow_call` caller with the
+authenticated source SHA, run **37856665867** (`test/release-boot-call/good`,
+7 m 13 s). Dispatch against a non-default branch works here because the
+workflow is already registered; the initial-registration/UI limitation is the
+only reason the push trigger is the bootstrap path. The throwaway caller with
+all-zero `expected_source_sha`, run **37856669408**, failed before the
+signed-source checkout with `signed source 087f8bad… is not the expected 0000…`;
+its artifact retained release/runtime diagnostics and no success record.
+Unpublished version `9.9.9`, run **37856653846**, failed in the download step
+with `release download: HTTP transport failed (curl exit 22)` and no success
+record. Malformed branch `test/release-boot/latest`, run **37856655602**, was
+rejected by the whole-string semver bind in 8 s, before any provisioning or
+download. Staging cannot go green on a failure: every failed run above showed
+`evidence copy failed: …` from the fail-closed staging step and the job stayed
+red. The release call passes `expected_source_sha: ${{ github.sha }}`, so a
+version whose authenticated `release.json.source_sha` differs from the
+publishing run's commit is refused before any signed-source code is checked
+out or executed. The throwaway branches were deleted after evidence
+collection. The real `refs/heads/main` publication → `boot-amd64` integration
+is **NOT RUN** and cannot be exercised without publishing a version; it
+remains to be observed at the next real release.
+
+A green run is amd64 evidence for maintainer review, **not promotion**. Combine
+`verification/` with native arm64 evidence and run unchanged
+`content.py check-evidence`, which still requires both architectures. A failed
+post-publication boot leaves the immutable prerelease published and unpromoted.
 
 ## Evidence and independent cadence
 
@@ -298,7 +468,8 @@ architectures. Passing those proves transport mechanics only.
 
 Do not claim success for any phase that did not run. Native standard builds,
 live GHCR publication, public visibility, anonymous archive/SBOM consumption
-and both native `msb` boots are deployment gates: if the required native hosts
-or credentials are unavailable, the release stays a prerelease and
+and both `msb` boots are deployment gates. The amd64 boot runs in CI after
+publication; arm64 still needs a native host. Without both boot legs or the
+required credentials, the release stays a prerelease and
 [#264](https://github.com/gregwebs/agent-vm/issues/264) stays open. Packaging a
 launcher that consumes the release is [#265](https://github.com/gregwebs/agent-vm/issues/265).
