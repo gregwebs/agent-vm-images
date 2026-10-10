@@ -31,6 +31,27 @@ OPENCODE_VENDOR="$REPO_ROOT/images/tools/opencode/vendor"
 CLAUDE_VENDOR="$REPO_ROOT/images/tools/claude/vendor"
 WATCHDOG="$REPO_ROOT/script/test/host-watchdog.py"
 
+# Every bound the vendored installers request is capped to this inside the fake
+# timeout, so a hung native fixture costs seconds instead of minutes.
+FAKE_TIMEOUT_CAP_SECONDS=3
+# Mirrors run-report.sh's --kill-after: a TERM-ignoring probe may outlive the
+# cap by this much.
+PROBE_KILL_GRACE_SECONDS=5
+# Capped probes the codex hang path may wait out, both in
+# images/tools/codex/vendor/install.sh: `version_from_binary bin/codex`, then
+# its `codex` symlink fallback. A third probe fails the case below rather than
+# passing silently behind a spare slot.
+HANG_PROBE_ALLOWANCE=2
+HANG_WATCHDOG_HEADROOM=2
+# A hung native fixture sleeps this long; only an UNBOUNDED probe waits it out.
+FIXTURE_HANG_SECONDS=300
+# External backstop for the codex hang case. 8 s left under 1 s over two capped
+# probes and fired on a loaded host (#37). It is an empirical margin, not a
+# wall-clock guarantee; the guards below pin it between the capped-probe
+# allowance and the fixture hang. The guards read the argv actually executed.
+HANG_WATCHDOG_SECONDS=60
+HANG_WATCHDOG=(python3 "$WATCHDOG" "$HANG_WATCHDOG_SECONDS")
+
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/vendored-installers.XXXXXX")"
 chmod 0755 "$TEST_ROOT"
 trap 'rm -rf "$TEST_ROOT"' EXIT
@@ -52,6 +73,12 @@ fail() {
 }
 
 note() { echo "  $*"; }
+
+hang_wait_allowance=$((HANG_PROBE_ALLOWANCE * (FAKE_TIMEOUT_CAP_SECONDS + PROBE_KILL_GRACE_SECONDS)))
+[ "${HANG_WATCHDOG[2]}" -ge $((HANG_WATCHDOG_HEADROOM * hang_wait_allowance)) ] ||
+    fail "hang watchdog ${HANG_WATCHDOG[2]}s is under ${HANG_WATCHDOG_HEADROOM}x the ${hang_wait_allowance}s capped-probe allowance"
+[ "${HANG_WATCHDOG[2]}" -lt "$FIXTURE_HANG_SECONDS" ] ||
+    fail "hang watchdog ${HANG_WATCHDOG[2]}s must be below the ${FIXTURE_HANG_SECONDS}s fixture hang, or an unbounded probe cannot trip it"
 
 sha256_of() { # host-side hash, the same value the fake sha256sum must produce
     if command -v shasum >/dev/null 2>&1; then
@@ -127,11 +154,17 @@ case "${1:-}" in
     --kill-after=*) kill_after=$1; shift ;;
 esac
 bound="${1:-0}"
+# Provenance marker: the bound this fake timeout was asked for, captured before
+# the cap below, exported so the exec'd native inherits it (through this exec
+# and REAL_TIMEOUT). A native the installer calls without a bound never sees it,
+# which is what the hang case reads to prove an unbounded probe.
+FAKE_TIMEOUT_BOUND="$bound"
+export FAKE_TIMEOUT_BOUND
 if [ -n "${FAKE_TIMEOUT_LOG:-}" ]; then
     printf '%s\n' "$bound" >>"$FAKE_TIMEOUT_LOG"
 fi
 shift
-cap="${FAKE_TIMEOUT_CAP:-3}"
+cap="${FAKE_TIMEOUT_CAP:?fake timeout needs FAKE_TIMEOUT_CAP}"
 case "$bound" in
     '' | *[!0-9]*) ;;
     *) [ "$bound" -gt "$cap" ] && bound="$cap" ;;
@@ -172,13 +205,16 @@ printf 'codex-cli @VERSION@\n'
 if [ -n "${AGENT_VM_TRANSPORT_RECEIPT:-}" ]; then
   printf 'transport download 6\n' >"$AGENT_VM_TRANSPORT_RECEIPT"
 fi
+if [ -n "${FIXTURE_PID_LOG:-}" ]; then
+  printf '%s %s\n' "$$" "${FAKE_TIMEOUT_BOUND:-}" >>"$FIXTURE_PID_LOG"
+fi
 @HANG@exit @EXIT@
 SH
 )"
     body="${body//@VERSION@/$2}"
     body="${body//@EXIT@/$3}"
     if [ "$4" = 1 ]; then
-        body="${body//@HANG@/sleep 300$'\n'}"
+        body="${body//@HANG@/exec sleep $FIXTURE_HANG_SECONDS$'\n'}"
     else
         body="${body//@HANG@/}"
     fi
@@ -218,7 +254,7 @@ SH
     body="${body//@VERSION@/$2}"
     body="${body//@EXIT@/$3}"
     if [ "$4" = 1 ]; then
-        body="${body//@HANG@/sleep 300$'\n'}"
+        body="${body//@HANG@/sleep $FIXTURE_HANG_SECONDS$'\n'}"
     else
         body="${body//@HANG@/}"
     fi
@@ -348,7 +384,7 @@ run_codex() { # $1 slot, $2 vendor dir
         "FAKE_CURL_ROUTES=$CASE/routes"
         "FAKE_TIMEOUT_LOG=$CASE/timeout.log"
         "REAL_TIMEOUT=$REAL_TIMEOUT"
-        "FAKE_TIMEOUT_CAP=3"
+        "FAKE_TIMEOUT_CAP=$FAKE_TIMEOUT_CAP_SECONDS"
     )
     if [ -n "$CURL_TRANSPORT_CODE" ]; then e+=("FAKE_CURL_TRANSPORT_CODE=$CURL_TRANSPORT_CODE"); fi
     if [ -n "$SOFT" ]; then e+=("AGENT_INSTALL_SOFT_FAIL=$SOFT"); fi
@@ -395,7 +431,7 @@ run_claude() { # $1 slot, $2 vendor dir
         "FAKE_CURL_ROUTES=$CASE/routes"
         "FAKE_TIMEOUT_LOG=$CASE/timeout.log"
         "REAL_TIMEOUT=$REAL_TIMEOUT"
-        "FAKE_TIMEOUT_CAP=3"
+        "FAKE_TIMEOUT_CAP=$FAKE_TIMEOUT_CAP_SECONDS"
     )
     if [ -n "$CURL_TRANSPORT_CODE" ]; then e+=("FAKE_CURL_TRANSPORT_CODE=$CURL_TRANSPORT_CODE"); fi
     if [ -n "$SOFT" ]; then e+=("AGENT_INSTALL_SOFT_FAIL=$SOFT"); fi
@@ -576,25 +612,61 @@ PY
         "AGENT_VM_INSTALL_STATUS_DIR=$CASE/status"
         "AGENT_VM_VERSION_CODEX=rust-v$V"
         "AGENT_INSTALL_SOFT_FAIL=1"
+        "FIXTURE_PID_LOG=$CASE/hang.pids"
         "FAKE_CURL_LOG=$CASE/curl.log"
         "FAKE_CURL_ROUTES=$CASE/routes"
         "FAKE_TIMEOUT_LOG=$CASE/timeout.log"
         "REAL_TIMEOUT=$REAL_TIMEOUT"
-        "FAKE_TIMEOUT_CAP=3"
+        "FAKE_TIMEOUT_CAP=$FAKE_TIMEOUT_CAP_SECONDS"
     )
     set +e
-    RUN_OUT="$(python3 "$WATCHDOG" 8 env -i "${local_env[@]}" \
+    RUN_OUT="$("${HANG_WATCHDOG[@]}" env -i "${local_env[@]}" \
         sh "$RUN_INSTALL" codex "$CASE/status/codex" sh "$REPO_ROOT/images/tools/codex/install-codex.sh" 2>&1)"
     RUN_RC=$?
     set -e
+    # Probes the installer routed through its own 60 s bound. The same count
+    # bounds how many probes the path may make (checked after the rc branch).
+    probes="$(grep -c '^60$' "$CASE/timeout.log" || true)"
+    # Whichever bound fired must have reaped this case's hung natives; a
+    # survivor would leak a FIXTURE_HANG_SECONDS sleeper per run. Each native
+    # invocation records "<pid> <marker>" in hang.pids: the marker is the bound
+    # the fake timeout was asked for, empty for a native the installer called
+    # directly. Only a PID still running this fixture's sleeper is ours to kill;
+    # a reused PID belongs to an unrelated process.
+    [ -s "$CASE/hang.pids" ] || fail "codex $arch: the hung native never started: $RUN_OUT"
+    survivors=""
+    unmarked=0
+    while read -r pid marker; do
+        [ -n "$marker" ] || unmarked=1
+        [ "$(ps -o command= -p "$pid" 2>/dev/null || true)" = "sleep $FIXTURE_HANG_SECONDS" ] || continue
+        survivors="$survivors $pid"
+    done <"$CASE/hang.pids"
+    if [ -n "$survivors" ]; then
+        kill -9 $survivors 2>/dev/null || true
+        fail "codex $arch: hung native(s)$survivors survived the bound"
+    fi
     # C3: the production installer must bound its own native --version probe and
-    # fail hard BEFORE the external watchdog fires (rc 124 means it did not).
-    [ "$RUN_RC" -ne 124 ] ||
-        fail "codex $arch: the installer did not bound the hung native probe itself (watchdog fired): $RUN_OUT"
+    # fail hard BEFORE the external watchdog fires (rc 124 means the watchdog
+    # fired instead).
+    if [ "$RUN_RC" -eq 124 ]; then
+        # Only the bounded path sets the marker on the native it execs, so an
+        # unmarked invocation is proof the installer ran it without a bound --
+        # independently of how many entries timeout.log holds. Then 124 is the
+        # regression #37 detects, not a slow host. Only when the installer
+        # routed at least one probe through its 60 s bound AND every recorded
+        # native was bounded is 124 the slow-host race (no native escaped the
+        # cap; the watchdog beat the caps).
+        if [ "$probes" -ge 1 ] && [ "$unmarked" -eq 0 ]; then
+            fail "codex $arch: the ${HANG_WATCHDOG[2]}s watchdog fired after $probes probes were routed through the ${FAKE_TIMEOUT_CAP_SECONDS}s cap; host too slow or fixture defect: $RUN_OUT"
+        fi
+        fail "codex $arch: the installer did not bound the hung native probe itself (the ${HANG_WATCHDOG[2]}s watchdog fired; each probe is capped at ${FAKE_TIMEOUT_CAP_SECONDS}s): $RUN_OUT"
+    fi
     [ "$RUN_RC" -ne 0 ] || fail "codex $arch: a hung native must fail hard: $RUN_OUT"
     [ "$(status_of codex)" != installed ] || fail "codex $arch: a hung native recorded installed"
-    grep -q '^60$' "$CASE/timeout.log" ||
+    [ "$probes" -ge 1 ] ||
         fail "codex $arch: the installer did not route the native probe through timeout 60"
+    [ "$probes" -le "$HANG_PROBE_ALLOWANCE" ] ||
+        fail "codex $arch: $probes capped probes exceed HANG_PROBE_ALLOWANCE ($HANG_PROBE_ALLOWANCE); re-derive the hang watchdog"
     note "codex $arch: the installer bounds its native probe (timeout 60) and fails hard before the watchdog"
     SOFT=""
 done
