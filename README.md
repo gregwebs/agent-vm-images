@@ -6,6 +6,7 @@ Editable Docker sources, independent of the agent-vm launcher:
   utilities and zellij. No coding-agent CLI or fixed guest account.
 - **Standard:** the base plus dsh, Pi, Codex, OpenCode, Claude and Copilot;
   pinned pnpm and the Pi Claude bridge are also mandatory.
+- **Examples:** user-owned Dockerfiles built from the base or the released standard image; see [Examples](#examples).
 
 ```text
 images/Dockerfile → agent-vm-base:local
@@ -102,9 +103,19 @@ invalidates the trust RUN when they change. Builder/pull TLS trust is separate
 from RUN-layer trust: this secret cannot fix daemon registry TLS errors. There
 is no CA auto-detection, host-network mode or softened download failure.
 
+## Examples
+
+Ordinary user-owned Dockerfiles; each README is the canonical build guide.
+
+- [Base extension](examples/base-extension/README.md): tool-free, numeric-UID
+  extension `FROM` your local base build.
+- [Tool examples](examples/layers/README.md): `chrome-devtools`, `go-dev`, `rust-dev`
+  and `wirenboard-cpp`, each `FROM` the released, digest-pinned standard image with its
+  own directory as build context (moved from agent-vm; see
+  [example ownership](docs/image-source-ownership.md#example-images-exampleslayers)).
+
 ## Extend and contribute
 
-Build/run an ordinary numeric-UID [user-owned extension](examples/base-extension/README.md).
 Scripts installed outside HOME survive HOME mounts. Use non-login `bash -c`
 for agent commands: `bash -lc` can reset the image PATH through `/etc/profile`.
 
