@@ -17,6 +17,16 @@ PREFIX="${AGENT_VM_DSH_PREFIX:-/opt/agent-vm/dsh}"
 PREPARE_LOCK="${AGENT_VM_PREPARE_LOCK:-/tmp/prepare-lock.sh}"
 DSH_VERSION="${AGENT_VM_VERSION_DSH:-}"
 PNPM_VERSION="${AGENT_VM_VERSION_PNPM:-}"
+base_pnpm=$(jq -er '.version' /opt/agent-vm/pnpm/pin.json)
+[ -z "$PNPM_VERSION" ] || [ "$PNPM_VERSION" = "$base_pnpm" ] || {
+    echo 'install-dsh.sh: pnpm compatibility slot must equal base pin' >&2
+    exit 1
+}
+[ "$(jq -r '.dependencies.pnpm' "$PREFIX/package.json")" = "$base_pnpm" ] || {
+    echo 'install-dsh.sh: retained pnpm lock selection disagrees with base' >&2
+    exit 1
+}
+PNPM_VERSION=$base_pnpm
 
 [ -r "$PREPARE_LOCK" ] || {
     echo "install-dsh.sh: prepare-lock.sh not found at $PREPARE_LOCK" >&2
@@ -26,7 +36,8 @@ PNPM_VERSION="${AGENT_VM_VERSION_PNPM:-}"
 sh "$PREPARE_LOCK" "$PREFIX" "$DSH_VERSION" "$PNPM_VERSION"
 
 # `npm ci` installs exactly the (possibly prepared) committed tree into the
-# private prefix; dsh and pnpm are linked onto PATH by the Dockerfile below.
+# private prefix. Only dsh is linked onto PATH; duplicate pnpm is transitional
+# until #42 and must not shadow the base launcher.
 # `--ignore-scripts` mirrors the pi layer (no package here compiles on install).
 #
 # NODE_EXTRA_CA_CERTS points Node at the base's merged system bundle: Node

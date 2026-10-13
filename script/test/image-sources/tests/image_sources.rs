@@ -428,14 +428,13 @@ fn every_dsh_locked_package_carries_integrity() {
 
 const RECIPES: [&str; 6] = ["dsh", "pi", "codex", "opencode", "claude", "copilot"];
 
-/// Eight selection labels and their ARGs, all owned by one standard Dockerfile.
-const VERSION_SLOTS: [(&str, &str); 8] = [
+/// Seven standard-owned selections; pnpm is inherited from base.
+const VERSION_SLOTS: [(&str, &str); 7] = [
     ("codex", "AGENT_VERSION_CODEX"),
     ("opencode", "AGENT_VERSION_OPENCODE"),
     ("claude", "AGENT_VERSION_CLAUDE"),
     ("copilot", "AGENT_VERSION_COPILOT"),
     ("dsh", "AGENT_VERSION_DSH"),
-    ("pnpm", "AGENT_VERSION_PNPM"),
     ("pi", "AGENT_VERSION_PI"),
     ("pi-claude-bridge", "AGENT_VERSION_PI_CLAUDE_BRIDGE"),
 ];
@@ -675,9 +674,9 @@ fn multi_slot_args_are_empty_and_label_fallbacks_mirror_the_manifests() {
         "the dsh label fallback must mirror images/tools/dsh/package.json"
     );
     assert_eq!(
-        label_value(&dsh, "org.agent-vm.version.pnpm"),
-        format!("${{AGENT_VERSION_PNPM:-{pnpm_pin}}}"),
-        "the pnpm label fallback must mirror images/tools/dsh/package.json"
+        label_value(&read_text("images/Dockerfile"), "org.agent-vm.version.pnpm"),
+        pnpm_pin,
+        "the inherited base pnpm label must mirror the retained dsh pin"
     );
 
     let pi = standard_dockerfile();
@@ -706,7 +705,7 @@ fn every_shipped_version_label_is_present_exactly_once() {
     expected.sort();
     assert_eq!(
         seen, expected,
-        "the shipped version labels drifted from the eight-slot contract"
+        "the standard-owned version labels drifted from the seven-slot contract"
     );
 }
 
@@ -787,6 +786,7 @@ fn image_source_files() -> Vec<(PathBuf, Vec<u8>)> {
         root.join("tools"),
         root.join("standard"),
         root.join("recipe-contract"),
+        root.join("pnpm"),
     ];
     let mut out = Vec::new();
     while let Some(dir) = stack.pop() {
@@ -804,6 +804,12 @@ fn image_source_files() -> Vec<(PathBuf, Vec<u8>)> {
                 out.push((relative, contents));
             }
         }
+    }
+    for name in ["Dockerfile", "install-pnpm.sh"] {
+        out.push((
+            PathBuf::from(name),
+            std::fs::read(root.join(name)).expect("base source"),
+        ));
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
@@ -1176,4 +1182,163 @@ fn standard_blocks_and_mutations() {
         check_standard_blocks(&text.replacen("source=recipe-contract", "source=missing", 1))
             .is_err()
     );
+}
+
+#[test]
+fn base_pnpm_pin_and_launcher_ownership() {
+    let pin = read_json("images/pnpm/pin.json");
+    assert_eq!(pin["version"], "11.11.0");
+    assert_eq!(
+        pin["url"],
+        "https://registry.npmjs.org/pnpm/-/pnpm-11.11.0.tgz"
+    );
+    assert_eq!(
+        pin["sha512"],
+        "4463f65fd80ed80d69bc1d4bf163ee94f605c7380fc318bb5b2ebe15f8cd12d49c51a4d59e951b401e764d3b6ca751cbf51bc50ed7001a6bcb4935e684c34882"
+    );
+    assert_eq!(
+        pin["bundleSha256"],
+        "e8abc02d5fbffb8f9d8817d44d6eee84c379ea8d5006dd5aa8694bb5e4428d8a"
+    );
+    assert_eq!(
+        read_json("images/tools/dsh/package.json")["dependencies"]["pnpm"],
+        pin["version"]
+    );
+    assert!(!standard_dockerfile().contains("org.agent-vm.version.pnpm"));
+    assert!(!standard_dockerfile().contains(".bin/pnpm /usr/local/bin/pnpm"));
+    let launcher = read_text("images/pnpm/launcher.sh");
+    assert!(launcher.starts_with("#!/bin/sh\nset -eu\n"));
+    for (key, value) in [
+        ("MINIMUM_RELEASE_AGE", "1440"),
+        ("MINIMUM_RELEASE_AGE_STRICT", "true"),
+        ("MINIMUM_RELEASE_AGE_IGNORE_MISSING_TIME", "false"),
+        ("TRUST_POLICY", "no-downgrade"),
+        ("IGNORE_SCRIPTS", "true"),
+    ] {
+        assert!(launcher.contains(&format!(": \"${{PNPM_CONFIG_{key}:={value}}}\"")));
+        assert!(
+            launcher
+                .lines()
+                .filter(|line| line.starts_with("export "))
+                .any(|line| line
+                    .split_whitespace()
+                    .any(|word| word == format!("PNPM_CONFIG_{key}")))
+        );
+    }
+    assert_eq!(launcher.matches(":=").count(), 5);
+    assert!(launcher.contains("pnpm) exec /usr/bin/node /opt/agent-vm/pnpm/bin/pnpm.mjs \"$@\""));
+    assert!(
+        launcher.contains("pnx|pnpx) exec /usr/bin/node /opt/agent-vm/pnpm/bin/pnpx.mjs \"$@\"")
+    );
+    let bootstrap = read_text("images/pnpm/bootstrap.py");
+    assert!(!bootstrap.contains("patch"));
+    assert!(!bootstrap.contains("write_text"));
+}
+
+fn check_base_pnpm_sources(
+    base: &str,
+    standard: &str,
+    launcher: &str,
+    pin: &Value,
+) -> Result<(), String> {
+    let version = pin["version"].as_str().ok_or("missing base version")?;
+    if base.matches("org.agent-vm.version.pnpm=").count() != 1
+        || !base.contains(&format!("LABEL org.agent-vm.version.pnpm=\"{version}\""))
+        || standard.contains("org.agent-vm.version.pnpm")
+        || standard.contains(".bin/pnpm /usr/local/bin/pnpm")
+    {
+        return Err("pnpm selection/link ownership changed".into());
+    }
+    for recipe in [base, standard] {
+        for command in [
+            "/usr/bin/npm",
+            "/usr/bin/npx",
+            "/usr/local/bin/npm",
+            "/usr/local/bin/npx",
+        ] {
+            if recipe.contains(command) {
+                return Err("native npm/npx replacement".into());
+            }
+        }
+    }
+    for (key, value) in [
+        ("MINIMUM_RELEASE_AGE", "1440"),
+        ("MINIMUM_RELEASE_AGE_STRICT", "true"),
+        ("MINIMUM_RELEASE_AGE_IGNORE_MISSING_TIME", "false"),
+        ("TRUST_POLICY", "no-downgrade"),
+        ("IGNORE_SCRIPTS", "true"),
+    ] {
+        if !launcher.contains(&format!(": \"${{PNPM_CONFIG_{key}:={value}}}\""))
+            || !launcher
+                .lines()
+                .filter(|line| line.starts_with("export "))
+                .any(|line| {
+                    line.split_whitespace()
+                        .any(|word| word == format!("PNPM_CONFIG_{key}"))
+                })
+        {
+            return Err(format!("missing caller-preserving default/export: {key}"));
+        }
+    }
+    if !launcher.contains("pnx|pnpx) exec /usr/bin/node /opt/agent-vm/pnpm/bin/pnpx.mjs \"$@\"") {
+        return Err("alias dispatch changed".into());
+    }
+    if pin["sha512"]
+        != "4463f65fd80ed80d69bc1d4bf163ee94f605c7380fc318bb5b2ebe15f8cd12d49c51a4d59e951b401e764d3b6ca751cbf51bc50ed7001a6bcb4935e684c34882"
+        || pin["bundleSha256"] != "e8abc02d5fbffb8f9d8817d44d6eee84c379ea8d5006dd5aa8694bb5e4428d8a"
+    {
+        return Err("reviewed digests changed".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn base_pnpm_source_mutations_are_rejected() {
+    let base = read_text("images/Dockerfile");
+    let standard = standard_dockerfile();
+    let launcher = read_text("images/pnpm/launcher.sh");
+    let pin = read_json("images/pnpm/pin.json");
+    assert!(check_base_pnpm_sources(&base, &standard, &launcher, &pin).is_ok());
+    for mutated in [
+        launcher.replace("export PNPM_CONFIG_IGNORE_SCRIPTS", "# omitted export"),
+        launcher.replace(
+            ": \"${PNPM_CONFIG_IGNORE_SCRIPTS:=true}\"",
+            "PNPM_CONFIG_IGNORE_SCRIPTS=true",
+        ),
+        launcher.replace(
+            ": \"${PNPM_CONFIG_MINIMUM_RELEASE_AGE:=1440}\"",
+            "PNPM_CONFIG_MINIMUM_RELEASE_AGE=1440",
+        ),
+        launcher.replace(
+            "pnx|pnpx) exec /usr/bin/node /opt/agent-vm/pnpm/bin/pnpx.mjs",
+            "pnx|pnpx) exec /usr/bin/node /opt/agent-vm/pnpm/bin/pnpm.mjs",
+        ),
+    ] {
+        assert!(check_base_pnpm_sources(&base, &standard, &mutated, &pin).is_err());
+    }
+    for addition in [
+        "\nLABEL org.agent-vm.version.pnpm=\"11.11.0\"",
+        "\nRUN ln -s /opt/agent-vm/dsh/node_modules/.bin/pnpm /usr/local/bin/pnpm",
+        "\nRUN ln -s /usr/local/bin/pnpm /usr/bin/npm",
+        "\nRUN ln -s /usr/local/bin/pnx /usr/bin/npx",
+    ] {
+        assert!(
+            check_base_pnpm_sources(&base, &(standard.clone() + addition), &launcher, &pin)
+                .is_err()
+        );
+    }
+    assert!(
+        check_base_pnpm_sources(
+            &base.replace("pnpm=\"11.11.0\"", "pnpm=\"11.12.0\""),
+            &standard,
+            &launcher,
+            &pin
+        )
+        .is_err()
+    );
+    for key in ["version", "sha512", "bundleSha256"] {
+        let mut mutated = pin.clone();
+        mutated[key] = Value::String("mutated".into());
+        assert!(check_base_pnpm_sources(&base, &standard, &launcher, &mutated).is_err());
+    }
 }

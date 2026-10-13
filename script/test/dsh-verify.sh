@@ -75,10 +75,24 @@ SH
 }
 
 run_gate() {
+    mkdir "$CASE/fixture"
+    fixture_args=()
+    [ ! -e "$CASE/bin/pnpm" ] || fixture_args=("$CASE/bin/pnpm")
+    python3 "$REPO_ROOT/script/test/fixtures/pnpm/verifier-fixture.py" "$CASE/fixture" 11.7.0 "${fixture_args[@]}"
+    for alias in pnx pnpx; do ln -s pnpm "$CASE/bin/$alias"; done
+    if [ "${RAW_PNPM_SHADOW:-}" = 1 ]; then
+        rm "$CASE/bin/pnpm"
+        cp "$REPO_ROOT/script/test/fixtures/pnpm/shadow-pnpm.sh" "$CASE/bin/pnpm"
+        chmod 0755 "$CASE/bin/pnpm"
+    fi
     set +e
     RUN_OUTPUT="$(env -i \
         "PATH=$CASE/bin:$TEST_ROOT/prerequisites:/usr/bin:/bin" \
         "DSH_MANIFEST=$CASE/package.json" \
+        "AGENT_VM_FIXTURE_ROOT=$TEST_ROOT" \
+        "PNPM_FIXTURE_DESTINATION=$CASE/fixture" \
+        "PNPM_SOURCE_DIR=$CASE/fixture/pnpm-source" \
+        "PNPM_SHADOW_VERSION=11.7.0" \
         "AGENT_VM_CONTRACT_DIR=$CONTRACT" \
         "AGENT_VM_INSTALL_STATUS_DIR=$CASE/status" \
         "AGENT_VM_VERSION_DSH=${AGENT_VM_VERSION_DSH-}" \
@@ -88,6 +102,15 @@ run_gate() {
     RUN_STATUS=$?
     set -e
 }
+
+new_case raw-same-version-shadow
+write_dsh 'printf "0.0.0-fixture\n"'
+write_pnpm 'printf "11.7.0\n"'
+RAW_PNPM_SHADOW=1
+run_gate
+unset RAW_PNPM_SHADOW
+[[ $RUN_STATUS -ne 0 ]] || fail "same-version raw pnpm must fail identity audit"
+assert_contains "$RUN_OUTPUT" "unexpected first PATH candidate"
 
 # --- missing binaries: hard failure -----------------------------------------
 

@@ -55,6 +55,26 @@ class FakeClient:
         return self.responses.pop(0)
 
 
+class SelectionTests(unittest.TestCase):
+    def test_base_pin_is_authority_not_retained_dsh_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            shutil.copytree(ROOT / 'images', repo / 'images', ignore=shutil.ignore_patterns('__pycache__'))
+            with mock.patch.object(operations, 'ROOT', repo):
+                selected = operations.selections()
+                self.assertEqual(set(selected), content.SELECTIONS)
+                pin_path = repo / 'images/pnpm/pin.json'
+                pin = json.loads(pin_path.read_text())
+                pin['version'] = '12.1.2'
+                pin_path.write_text(json.dumps(pin))
+                self.assertEqual(operations.selections()['pnpm'], '12.1.2')
+                for bad in ('latest', '01.2.3', '1.2.3\n', None, 11):
+                    pin['version'] = bad
+                    pin_path.write_text(json.dumps(pin))
+                    with self.assertRaises(ValueError):
+                        operations.selections()
+
+
 class AuthorityTests(unittest.TestCase):
     def test_manifest_outcomes(self):
         cases = ((401, 'UNAUTHORIZED', 'UNAUTHORIZED'),

@@ -30,8 +30,8 @@ Usage: bash images/tools/dsh/upgrade-dsh.sh [VERSION] [--pnpm PNPM_VERSION]
 
 Pin ${PACKAGE} to VERSION, an exact version or a dist-tag (default: the
 registry's \`latest\` dist-tag), and update package.json + package-lock.json
-beside this script. pnpm keeps its current pin unless --pnpm is given
-(\`--pnpm latest\` resolves the dist-tag).
+beside this script. --pnpm may only name the reviewed base pin; it cannot
+select a different version or dist-tag.
 EOF
 }
 
@@ -82,12 +82,20 @@ require_tools jq npm
 
 current=$(jq -r --arg p "$PACKAGE" '.dependencies[$p]' "$DIR/package.json")
 current_pnpm=$(jq -r '.dependencies.pnpm' "$DIR/package.json")
-version=$(resolve_npm_version "$PACKAGE" "$version")
+base_pnpm=$(jq -er '.version | select(test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))' "$REPO_ROOT/images/pnpm/pin.json")
 if [ -n "$pnpm_version" ]; then
-    pnpm_version=$(resolve_npm_version pnpm "$pnpm_version")
+    [ "$pnpm_version" = "$base_pnpm" ] || {
+        echo 'error: --pnpm must equal the reviewed base pin' >&2
+        exit 1
+    }
 else
-    pnpm_version=$current_pnpm
+    [ "$current_pnpm" = "$base_pnpm" ] || {
+        echo 'error: retained pnpm pin disagrees with base; use --pnpm with reviewed base pin' >&2
+        exit 1
+    }
+    pnpm_version=$base_pnpm
 fi
+version=$(resolve_npm_version "$PACKAGE" "$version")
 
 echo "==> pinning ${PACKAGE}: ${current} -> ${version}"
 echo "==> pinning pnpm: ${current_pnpm} -> ${pnpm_version}"
@@ -98,7 +106,8 @@ trap 'if [ "$keep_recovery" = false ]; then rm -rf "$work"; fi' EXIT
 
 # Stage the manifest, lock and Dockerfile. prepare-lock.sh writes only the
 # staged copy; a failure leaves the committed files untouched.
-mkdir -p "$work/dsh"
+mkdir -p "$work/dsh" "$work/pnpm"
+cp "$REPO_ROOT/images/pnpm/pin.json" "$work/pnpm/pin.json"
 cp "$DIR/package.json" "$work/dsh/package.json"
 cp "$DIR/package-lock.json" "$work/dsh/package-lock.json"
 cp "$REPO_ROOT/images/standard/Dockerfile" "$work/Dockerfile"
@@ -121,13 +130,8 @@ staged_pnpm=$(jq -r '.dependencies.pnpm' "$work/dsh/package.json")
 # Move the LABEL fallbacks in lockstep. set_version_label fails unless each
 # label appears exactly once.
 set_version_label "$work/Dockerfile" dsh AGENT_VERSION_DSH "$version"
-set_version_label "$work/Dockerfile" pnpm AGENT_VERSION_PNPM "$pnpm_version"
 grep -Fq "org.agent-vm.version.dsh=\"\${AGENT_VERSION_DSH:-${version}}\"" "$work/Dockerfile" || {
     echo "error: the staged Dockerfile dsh label does not mirror ${version}" >&2
-    exit 1
-}
-grep -Fq "org.agent-vm.version.pnpm=\"\${AGENT_VERSION_PNPM:-${pnpm_version}}\"" "$work/Dockerfile" || {
-    echo "error: the staged Dockerfile pnpm label does not mirror ${pnpm_version}" >&2
     exit 1
 }
 

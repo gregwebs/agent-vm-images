@@ -33,6 +33,16 @@ status="$status_dir/dsh"
 
 want_dsh=$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$MANIFEST")
 want_pnpm=$(jq -r '.dependencies.pnpm' "$MANIFEST")
+base_pin=/opt/agent-vm/pnpm/pin.json
+if [ -n "${PNPM_FIXTURE_DESTINATION:-}" ]; then
+    python3 "${PNPM_SOURCE_DIR:-/tmp/pnpm-source}/bootstrap.py" --validate-fixture "$PNPM_FIXTURE_DESTINATION"
+    base_pin="$PNPM_FIXTURE_DESTINATION/opt/agent-vm/pnpm/pin.json"
+fi
+base_pnpm=$(jq -er '.version' "$base_pin")
+[ "$want_pnpm" = "$base_pnpm" ] || {
+    echo 'pnpm: retained dsh pin disagrees with base pin' >&2
+    exit 1
+}
 
 # The supplied slot has already been validated for exact syntax by
 # prepare-lock.sh. Here it must agree with what the manifest says will be
@@ -107,6 +117,7 @@ if [ "$got_pnpm" != "$want_pnpm" ]; then
     exit 1
 fi
 
+python3 "${PNPM_SOURCE_DIR:-/tmp/pnpm-source}/verify.py"
 echo "  dsh: $got_dsh (pnpm $got_pnpm)"
 
 # T5: the resolved commands and every directory on their paths must be usable

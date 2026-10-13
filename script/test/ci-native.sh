@@ -49,6 +49,7 @@ case "$phase" in
         done
         ;;
     audit)
+        timed pnpm-runtime bash script/test/pnpm-runtime.sh agent-vm-base:local agent-vm-standard:local --platform "$platform"
         timed standard-uid-t5 bash script/test/standard-image.sh agent-vm-base:local agent-vm-standard:local --platform "$platform"
         timed pi-runtime bash script/test/pi-runtime.sh agent-vm-base:local agent-vm-standard:local
         timed pi-audit-status bash script/test/standard-image.sh --pi-audit-status agent-vm-base:local --platform "$platform"

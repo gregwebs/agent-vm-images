@@ -57,8 +57,10 @@ PY
 
 require_installed
 check_path_identity
+sh "${PNPM_SOURCE_DIR:-/tmp/pnpm-source}/verify-pnpm.sh"
 for tool in dsh pi codex opencode claude copilot; do
     sh "$tools/$tool/verify-$tool.sh"
 done
+sh "${PNPM_SOURCE_DIR:-/tmp/pnpm-source}/verify-pnpm.sh"
 check_path_identity
 require_installed

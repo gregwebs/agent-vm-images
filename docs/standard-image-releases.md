@@ -82,7 +82,7 @@ git push origin HEAD:test/release-standard/<name>
 
 It runs the same `script/release/build-standard.sh` sequence as the release
 (base + standard build, canonical OCI export, Docker load, capacity sampling,
-SBOM, and all five native audits) on both architectures and uploads the per-arch
+SBOM, and all six native audits) on both architectures and uploads the per-arch
 evidence. It holds no publication authority at all: `contents: read` only, no
 GHCR login, no attestations and no Release, so it stops short of the registry
 push.
@@ -160,7 +160,7 @@ remains an explicit constraint.
   the archive files/parts and the SBOM; its bundle is
   `platform-ARCH-files.sigstore.json`.
 - `platform.json` is a strict schema containing the full image graph, the eight
-  committed selections, source SHA/version/product/arch, Docker reported
+  committed selections (pnpm from the base pin, not dsh manifest), source SHA/version/product/arch, Docker reported
   ID/driver/version plus canonical config digest, archive/part/SBOM
   names/sizes/hashes, `build_run_id`, `build_run_attempt` and the exact
   invocation URL. Assembly verifies its exact SHA-256 subject, signer

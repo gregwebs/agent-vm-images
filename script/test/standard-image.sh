@@ -204,7 +204,7 @@ DEFAULT_OPENCODE=$(committed_arg AGENT_VERSION_OPENCODE)
 DEFAULT_CLAUDE=$(committed_arg AGENT_VERSION_CLAUDE)
 DEFAULT_COPILOT=$(committed_arg AGENT_VERSION_COPILOT)
 DEFAULT_DSH=$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$REPO_ROOT/images/tools/dsh/package.json")
-DEFAULT_PNPM=$(jq -r '.dependencies.pnpm' "$REPO_ROOT/images/tools/dsh/package.json")
+DEFAULT_PNPM=$(jq -r '.version' "$REPO_ROOT/images/pnpm/pin.json")
 DEFAULT_PI=$(jq -r '.dependencies["@earendil-works/pi-coding-agent"]' "$REPO_ROOT/images/tools/pi/package.json")
 DEFAULT_BRIDGE=$(jq -r '.dependencies["pi-claude-bridge"]' "$REPO_ROOT/images/tools/pi/bridge/package.json")
 
@@ -231,6 +231,16 @@ assert_expected_selection() { # $1 image, $2 newline-separated suffix=value
         got="$(label_value "$img" "org.agent-vm.version.$suffix")"
         reason="$(expect_label "$img" "$suffix" "$value" "$got")" || fail "$reason"
     done <<<"$lines"
+}
+
+# Released artifacts have no local base image, but still expose all eight selections.
+assert_selection_label_sets() { # base standard artifact-mode
+    local want
+    want=$(for suffix in codex opencode claude copilot dsh pnpm pi pi-claude-bridge; do echo "org.agent-vm.version.$suffix"; done | sort)
+    if [ "$3" = false ]; then
+        [ "$(version_keys "$1")" = org.agent-vm.version.pnpm ] || { echo 'base must own exactly pnpm selection' >&2; return 1; }
+    fi
+    [ "$(version_keys "$2")" = "$want" ] || { echo 'standard must have exactly eight selection labels' >&2; return 1; }
 }
 
 # assert_recipe_labels IMG RECIPE [EXPECTED_LABELS_FILE] [STRICT]
@@ -742,6 +752,20 @@ assert_files_identical() { # $1 a, $2 b, $3 message
 # and the matching good state must pass. Run with `--self-test`.
 oracle_self_test() {
     local reason
+    (
+        version_keys() {
+            case "$1" in
+                fixture-base) echo org.agent-vm.version.pnpm ;;
+                fixture-standard) for suffix in codex opencode claude copilot dsh pnpm pi pi-claude-bridge; do echo "org.agent-vm.version.$suffix"; done | sort ;;
+                *) echo 'unexpected base query in artifact mode' >&2; return 1 ;;
+            esac
+        }
+        assert_selection_label_sets '' fixture-standard true || exit 1
+        assert_selection_label_sets fixture-base fixture-standard false || exit 1
+        if assert_selection_label_sets '' fixture-standard false 2>/dev/null; then exit 1; fi
+        version_keys() { echo org.agent-vm.version.pnpm; }
+        if assert_selection_label_sets '' fixture-standard true 2>/dev/null; then exit 1; fi
+    ) || fail 'artifact/local selection-label mode controls failed'
 
     check_report codex rust-v0.159.3 "" "report_b64=$(printf 'codex-cli 0.159.3\n' | blob)" >/dev/null ||
         fail "self-test: a matching codex report was rejected"
@@ -1160,8 +1184,7 @@ if [ "$artifact" = false ]; then
     BUILDER=$(docker context show)
     bash "$REPO_ROOT/script/test/require-daemon-builder.sh" || fail 'T5 fixtures require daemon-backed builder'
 fi
-want=$(for suffix in codex opencode claude copilot dsh pnpm pi pi-claude-bridge; do echo "org.agent-vm.version.$suffix"; done | sort)
-[ "$(version_keys "$STANDARD_IMAGE")" = "$want" ] || fail 'standard must have exactly eight selection labels'
+assert_selection_label_sets "$BASE_IMAGE" "$STANDARD_IMAGE" "$artifact" || fail 'selection labels mismatch'
 # shellcheck disable=SC2031 # self-test mutation is confined to its own subshell
 assert_expected_selection "$STANDARD_IMAGE" "$EXPECTED"
 if [ "$artifact" = false ]; then
@@ -1169,8 +1192,11 @@ if [ "$artifact" = false ]; then
 run_with_watchdog 180 docker_run --rm --platform "$platform" --network none "$BASE_IMAGE" bash -c '
 set -euo pipefail
 bash --version >/dev/null; node --version; python3 --version; zellij --version
-for tool in dsh pnpm pi codex opencode claude copilot; do if command -v "$tool"; then exit 1; fi; done
-test ! -e /usr/local/bin/pi; test ! -e /opt/agent-vm/pi; test ! -e /opt/agent-vm/pi-extensions' || fail 'base is not tool-free'
+test -f /usr/local/bin/pnpm; test ! -L /usr/local/bin/pnpm
+test "$(readlink /usr/local/bin/pnx)" = pnpm; test "$(readlink /usr/local/bin/pnpx)" = pnpm
+test "$(pnpm --version)" = 11.11.0
+for tool in dsh pi codex opencode claude copilot; do if command -v "$tool"; then exit 1; fi; done
+test ! -e /usr/local/bin/pi; test ! -e /opt/agent-vm/pi; test ! -e /opt/agent-vm/pi-extensions' || fail 'base coding-agent absence/pnpm checks failed'
 fi
 run_with_watchdog 180 docker_run --rm --platform "$platform" --network none "$STANDARD_IMAGE" bash -c 'set -euo pipefail; bash --version >/dev/null; node --version; python3 --version; zellij --version' || fail 'base facilities lost'
 for tool in codex opencode claude copilot dsh pi; do audit_image "$STANDARD_IMAGE" "$tool" 0; done

@@ -1,0 +1,132 @@
+# Node package defaults
+
+The base supplies **stock, unmodified pnpm 11.11.0** from a reviewed registry
+archive. [The module](../images/pnpm/README.md) owns exact provenance and update
+procedure. The prefix is root-owned, read/traverse for numeric UIDs, and outside
+HOME; it is image material, not writable user cache or global-install space.
+
+```text
+Before: base Node/npm/npx → standard private pnpm
+After:  base authenticated pristine pnpm → standard inherited launcher
+        /usr/local/bin/{pnpm,pnx,pnpx} → five env defaults → exec stock entrypoint
+        writable HOME → stock per-user cache/state/store
+```
+
+`pnpm` is the preferred/default install path, not a restriction. `pnx` and
+`pnpx` use upstream's dlx entrypoint; they execute the requested bin, not npm's
+npx. **Real npm/npx are untouched** and retain native lifecycle semantics.
+
+## Defaults and overrides
+
+| Uppercase environment key | Default |
+|---|---|
+| PNPM_CONFIG_MINIMUM_RELEASE_AGE | 1440 (minutes) |
+| PNPM_CONFIG_MINIMUM_RELEASE_AGE_STRICT | true |
+| PNPM_CONFIG_MINIMUM_RELEASE_AGE_IGNORE_MISSING_TIME | false |
+| PNPM_CONFIG_TRUST_POLICY | no-downgrade |
+| PNPM_CONFIG_IGNORE_SCRIPTS | true |
+
+Unset **or empty** values get defaults. Nonempty valid typed caller values win:
+numeric age `0` is valid; booleans must be literal `true`/`false`. Uppercase
+`PNPM_CONFIG_*` is the supported interface; pnpm also accepts lowercase
+`pnpm_config_*`, and either case overrides the default (invalid types do not).
+CLI beats env for one invocation, e.g.
+`pnpm --config.minimum-release-age=7 config get minimum-release-age`.
+Explicit minimumReleaseAge already implies strictness in this pinned version;
+the launcher still exports explicit STRICT=true. Young exact/ordinary frozen
+locked resolutions, missing registry time and metadata provenance downgrades
+are hard failures; there is no npm retry or soft healthy partial install. A
+range or `@latest` does **not** fail: it resolves to the newest *eligible*
+version, so a too-young newest release is skipped in favor of an older eligible
+one rather than rejecting. Registry provenance comparison is **not
+cryptographic attestation verification**.
+
+### Two maintainer-approved deviations from the literal issue
+
+1. **Direct overrides of these five settings require caller env or CLI.** The
+   launcher env tier outranks direct global/user YAML and project
+   `pnpm-workspace.yaml`/`.npmrc` assignments. Project age10 loses to image1440;
+   caller env9999 wins both; CLI7 wins env9999. Auxiliary project
+   `minimumReleaseAgeExclude`, `trustPolicyExclude`, and `trustLockfile: true`
+   can weaken or bypass age/trust checks **without changing the five values**.
+   These are explicit escape routes, not safe defaults. Ordinary/default cold
+   frozen installs still verify policy.
+2. **Unreadable HOME is unsupported.** Unknown UID inheriting `/root` can hit
+   stock early EACCES. There is no discovery adapter or fallback; runtime must
+   provide a writable HOME, as with `docker run --user 12345:23456 -e HOME=/tmp`.
+   Writable numeric-UID/HOME-overmount support is not arbitrary-HOME support.
+
+## Scripts and requested binaries
+
+ignoreScripts=true suppresses entry, dependency and project installation hooks,
+including dlx's auto-approved entry package. Stock dependency-build denial alone
+would not suppress dlx entry hooks. The requested bin still executes: choosing a
+bin is permission to execute it, independent of install-hook policy.
+
+Opt-in needs `PNPM_CONFIG_IGNORE_SCRIPTS=false` **and** narrow build approval.
+For local installs use an `allowBuilds` map approving the exact entry and
+its script-bearing dependencies in `pnpm-workspace.yaml`. Global installs do
+not read that invoking project's approval map; use the pinned global command's
+narrow approval flags, e.g.:
+
+```sh
+PNPM_CONFIG_IGNORE_SCRIPTS=false pnpm add -g \
+  --allow-build=fixture-hooks --allow-build=fixture-dependency fixture-hooks@1.0.0
+```
+
+For dlx (and pnx/pnpx), use `--allow-build=fixture-dependency` before the requested
+package together with `PNPM_CONFIG_IGNORE_SCRIPTS=false`; upstream auto-approves
+the entry. This explicit-approval evidence covers **registry** packages, which do
+run approved hooks; linked `file:` dependencies still fail
+`ERR_PNPM_IGNORED_BUILDS` under the same `ignore-scripts=false` + approval
+(stock pnpm linked-dependency behavior). Project `ignoreScripts: false` alone
+cannot override image env.
+An allowBuilds map is a separate approval input, not an override of the five
+settings. CLI overrides are not re-exported: a CLI ignore-scripts=false run can
+execute approved hooks while its bin/nested pnpm inherits IGNORE_SCRIPTS=true.
+Observations of exported values apply to bins spawned by that pnpm invocation,
+not global bins subsequently launched from the caller shell. Real npm does not
+consume PNPM-prefixed keys.
+
+## Writable native state and global bins
+
+Leave HOME, XDG values and config/auth discovery caller-owned. For global use:
+
+```sh
+export PNPM_HOME="$HOME/.local/share/pnpm"
+mkdir -p "$PNPM_HOME/bin"
+export PATH="$PNPM_HOME/bin:$PATH"
+pnpm bin -g
+export PATH="$(pnpm bin -g):$PATH"
+```
+
+A subprocess cannot change its parent's PATH. Stock path overrides remain
+available; explicit unwritable config/state choices fail visibly rather than
+triggering relocation. A writable HOME overmount hides old state/config but not
+the image launchers. No image-wide PNPM_HOME or shared mutable /opt cache is set.
+
+## Private registries and limits
+
+Registries missing timestamps need explicit exceptions for **both age and
+trust**, not just age0 or ignore-missing-time. A broader whole-invocation opt-out
+is `PNPM_CONFIG_MINIMUM_RELEASE_AGE_IGNORE_MISSING_TIME=true` together with
+`PNPM_CONFIG_TRUST_POLICY=off`; this weakens safety and should be exceptional.
+Scoped age/trust exclusions are preferable. The native fixture verifies:
+
+```sh
+PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE='["@private/*"]' \
+PNPM_CONFIG_TRUST_POLICY_EXCLUDE='["@private/*"]' \
+  pnpm install
+```
+
+These JSON arrays are parsed by stock 11.11.0. They scope both exceptions to
+the named private scope, without changing the five image defaults.
+
+Alternate managers, direct immutable entrypoint invocation, explicit env/CLI,
+auxiliary project exclusions/lock trust, non-registry dependencies, explicit run
+commands and manager switching bypass these preferences. Manager switching is an
+explicit escape, not a hidden one: `corepack enable`/`corepack pnpm` and running
+`/opt/agent-vm/pnpm/dist/pnpm.mjs` directly both skip the launcher defaults.
+These are preferences, not enforcement. Disabling scripts does
+not unbuild previously approved caches; script verification uses cold state.
+Package age and metadata provenance comparison are not complete security.

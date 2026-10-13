@@ -102,7 +102,8 @@ def main() -> int:
         check('load', tar=archive.stat().st_size)
         op.run(['docker', 'image', 'load', '--input', str(archive)], output=scratch / 'standard-load.log')
         op.docker_matches(layout, graph, standard)
-        audits = [(['standard-image.sh', base, standard, '--platform', 'linux/' + arch], 'finished-standard'),
+        audits = [(['pnpm-runtime.sh', base, standard, '--platform', 'linux/' + arch], 'pnpm-runtime'),
+                  (['standard-image.sh', base, standard, '--platform', 'linux/' + arch], 'finished-standard'),
                   (['pi-runtime.sh', base, standard], 'pi-runtime'),
                   (['standard-image.sh', '--pi-audit-status', base, '--platform', 'linux/' + arch], 'pi-access'),
                   (['standard-certification.sh'], 'certification-controls'),
