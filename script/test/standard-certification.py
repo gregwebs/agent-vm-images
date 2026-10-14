@@ -1,6 +1,8 @@
 import atexit, shutil
 from pathlib import Path
-import os,subprocess,tempfile
+import os,subprocess,sys,tempfile,importlib.util
+# Importing the fixture module must not leave a __pycache__ in the source tree.
+sys.dont_write_bytecode=True
 r=Path(__file__).resolve().parents[2]
 # The real verifier runs check-tool-access.py over host paths, which requires every
 # audited ancestor to be traversable by all. The release build points TMPDIR under
@@ -14,6 +16,11 @@ atexit.register(shutil.rmtree, tmp)
 records=tmp/'records'; records.mkdir(); tools=tmp/'tools'; commands=tmp/'bin'; commands.mkdir()
 names=['dsh','pi','pi-claude-bridge','codex','opencode','claude','copilot']; verifiers=['dsh','pi','codex','opencode','claude','copilot']
 def writeexe(p,s): p.parent.mkdir(parents=True,exist_ok=True); p.write_text(s); p.chmod(0o755)
+# Native fixtures are copied or appended byte-for-byte; variable paths/versions
+# travel as environment data instead of being interpolated into program bodies.
+FIXTURES=r/'script/test/fixtures/pnpm'
+def copyexe(p,src): p.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(src,p); p.chmod(0o755)
+def appendexe(p,s,src): p.write_bytes(s.encode()+Path(src).read_bytes()); p.chmod(0o755)
 for name in names: (records/name).write_text('installed\n')
 for tool in verifiers:
  writeexe(tools/tool/f'verify-{tool}.sh',f'#!/bin/sh\nset -eu\ntest -z "$AGENT_INSTALL_SOFT_FAIL"\nprintf "{tool}\\n" >> "$CALLS"\n')
@@ -22,6 +29,11 @@ prefix=tmp/'prefix'
 for name,folder in [('codex','.local'),('claude','.local'),('opencode','.opencode')]:
  p=prefix/folder/'bin'/name; p.parent.mkdir(parents=True,exist_ok=True); p.symlink_to(commands/name)
 env=dict(os.environ,AGENT_VM_CONTRACT_DIR=str(r/'images/recipe-contract'),AGENT_VM_TOOL_SOURCE_DIR=str(tools),AGENT_VM_INSTALL_STATUS_DIR=str(records),AGENT_INSTALL_SOFT_FAIL='1',AGENT_VM_CODEX_PREFIX=str(prefix),AGENT_VM_OPENCODE_PREFIX=str(prefix),AGENT_VM_CLAUDE_PREFIX=str(prefix),AGENT_VM_PI_WRAPPER=str(commands/'pi'),CALLS=str(tmp/'calls'),PATH=str(commands)+':'+os.environ['PATH'],AGENT_VM_VERSION_CODEX='rust-v0.159.3')
+spec=importlib.util.spec_from_file_location('pnpm_fixture',r/'script/test/fixtures/pnpm/verifier-fixture.py')
+fixture_module=importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture_module)
+fixture=tmp/'pnpm-fixture'; fixture.mkdir()
+source=fixture_module.stage(fixture,'11.11.0')
+env.update(AGENT_VM_FIXTURE_ROOT=str(tmp),PNPM_FIXTURE_DESTINATION=str(fixture),PNPM_SOURCE_DIR=str(source),PNPM_FIXTURE_VERSION='11.11.0',PNPM_MUTATION_TARGET=str(fixture/'usr/local/bin/pnpm'),PATH=str(fixture/'usr/local/bin')+':'+env['PATH'])
 count=0
 def run(ok, e=None,label='gate'):
  global count
@@ -48,6 +60,10 @@ for name in ['codex','opencode','claude','pi']:
  p.unlink(); p.symlink_to(shadow/'missing'); run(False,e,label=f'{name} dangling shadow')
  p.unlink(); p.symlink_to(p); run(False,e,label=f'{name} cyclic shadow')
  p.unlink(); writeexe(p,'#!/bin/sh\nexit 0\n'); p.chmod(0o644); run(False,e,label=f'{name} nonexecutable shadow'); p.unlink()
+# A raw same-version pnpm is not the reviewed launcher.
+p=shadow/'pnpm'; copyexe(p,FIXTURES/'shadow-pnpm.sh')
+run(False,dict(env,PATH=str(shadow)+':'+env['PATH'],PNPM_SHADOW_VERSION='11.11.0'),label='same-version raw pnpm shadow')
+p.unlink()
 # Post-verifier record and identity checks must detect late mutations.
 v=tools/'copilot/verify-copilot.sh'; original=v.read_text()
 writeexe(v,original+'printf "pending\\n" > "$AGENT_VM_INSTALL_STATUS_DIR/pi-claude-bridge"\n')
@@ -55,6 +71,9 @@ run(False,label='late bridge record mutation'); (records/'pi-claude-bridge').wri
 writeexe(v,original+'rm "$AGENT_VM_PI_WRAPPER"\n')
 run(False,label='late PATH target removal'); writeexe(commands/'pi','#!/bin/sh\nexit 0\n')
 writeexe(v,original+'echo plausible report\nexit 1\n'); run(False,label='verifier output then failure'); writeexe(v,original)
+pnpm_launcher=fixture/'usr/local/bin/pnpm'; pnpm_original=pnpm_launcher.read_bytes()
+appendexe(v,original,FIXTURES/'launcher-mutation.sh')
+run(False,label='late pnpm launcher mutation'); pnpm_launcher.write_bytes(pnpm_original); writeexe(v,original)
 # Real codex fixed-path verifier alone accepts a readable wrong-version PATH shadow;
 # final identity check must reject that same fixture before other fake verifiers.
 writeexe(commands/'codex',"#!/bin/sh\nprintf 'codex-cli 0.159.3\\n'\n")

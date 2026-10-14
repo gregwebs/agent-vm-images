@@ -23,24 +23,33 @@ version bump, Rust application build, submodule or launcher packaging is needed.
 
 ## Selection ownership and maintenance
 
-`images/standard/Dockerfile` is the one owner of eight ARGs and selection labels.
-Four exact nonempty installer defaults reference ARGs; dsh/pnpm, Pi and bridge
+`images/standard/Dockerfile` owns seven selection labels; base owns pnpm via
+`images/pnpm/pin.json` and a mirrored literal base label. Its deprecated standard
+AGENT_VERSION_PNPM is a compatibility assertion only (empty/equal accepted).
+Four exact nonempty installer defaults reference ARGs; dsh, Pi and bridge
 empty/equal slots reuse committed manifest/lock bytes. Literal label fallbacks
 mirror manifests. Labels record selection, not health. Unrelated slots/locks
 must not change when one owner is bumped.
 
 ```bash
 bash script/build/agent-versions.sh --write
-bash images/tools/dsh/upgrade-dsh.sh VERSION --pnpm PNPM_VERSION
+bash images/tools/dsh/upgrade-dsh.sh VERSION --pnpm 11.11.0
 bash images/tools/pi/upgrade-pi.sh VERSION
 bash images/tools/pi/bridge/upgrade-bridge.sh VERSION
 bash script/test/contracts.sh
 # Review central Dockerfile, relevant JSON/lock diff and vendor provenance.
-bash images/build.sh base
+bash images/build.sh base   # rebuild changed base before standard
 bash images/build.sh standard
 bash script/test/standard-image.sh agent-vm-base:local agent-vm-standard:local
 bash script/test/pi-runtime.sh agent-vm-base:local agent-vm-standard:local
 ```
+
+pnpm updates require reviewed exact URL, equivalent SHA-512/SRI and freshly
+extracted pristine-bundle SHA-256 together; never refresh checksums automatically.
+See [base pnpm maintenance](images/pnpm/README.md) and
+[runtime defaults](docs/node-package-defaults.md). dsh --pnpm can only equal the
+reviewed base pin, never independently select a version/dist-tag. Its duplicate
+npm lock package remains transitional until #42.
 
 The bumper resolves/validates all four upstream values before co-editing one
 scratch Dockerfile. Explicit developer latest queries are permitted; the bumper

@@ -114,10 +114,26 @@ lock="$PREFIX/package-lock.json"
     exit 1
 }
 
+# This temporary lock package is not a selection owner. Fixture pins live under
+# the same physically validated root; production always reads the immutable base.
+base_pin=/opt/agent-vm/pnpm/pin.json
+if [ "$prefix_phys" != "$production_prefix" ]; then
+    base_pin="$root_phys/pnpm/pin.json"
+    [ -f "$base_pin" ] && [ ! -L "$base_pin" ] && [ ! -L "$root_phys/pnpm" ] || {
+        echo 'prepare-lock.sh: missing regular fixture base pin' >&2
+        exit 1
+    }
+fi
+base_pnpm=$(jq -er '.version | select(type == "string" and test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))' "$base_pin")
 committed_dsh=$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$manifest")
 committed_pnpm=$(jq -r '.dependencies.pnpm' "$manifest")
 effective_dsh=${DSH_VERSION:-$committed_dsh}
 effective_pnpm=${PNPM_VERSION:-$committed_pnpm}
+
+[ "$effective_pnpm" = "$base_pnpm" ] || {
+    echo 'prepare-lock.sh: pnpm compatibility selection disagrees with base pin' >&2
+    exit 1
+}
 
 changed=0
 [ "$effective_dsh" != "$committed_dsh" ] && changed=1

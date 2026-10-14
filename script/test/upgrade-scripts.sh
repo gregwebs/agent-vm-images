@@ -193,7 +193,8 @@ new_case() {
         "$REPO_ROOT/images/tools/dsh/package.json" "$REPO_ROOT/images/tools/dsh/package-lock.json" \
         "$REPO_ROOT/images/tools/dsh/prepare-lock.sh" "$REPO_ROOT/images/tools/dsh/check-lock-update.js" \
         "$CASE/images/tools/dsh/"
-    mkdir -p "$CASE/images/standard"
+    mkdir -p "$CASE/images/standard" "$CASE/images/pnpm"
+    cp "$REPO_ROOT/images/pnpm/pin.json" "$CASE/images/pnpm/pin.json"
     cp "$REPO_ROOT/images/standard/Dockerfile" "$CASE/images/standard/Dockerfile"
     # Pristine snapshots: a failed run must leave the live files byte-identical.
     cp "$CASE/images/tools/pi/package.json" "$CASE/images/tools/pi/package-lock.json" "$CASE/expected/pi/"
@@ -392,7 +393,7 @@ assert_contains "$RUN_OUTPUT" "pinning @deepseek-ai/dsh: $DSH_PIN -> 0.1.9-rc.1"
 # The LABEL fallback mirrors the new manifest pin so a raw recipe build labels
 # the real default without a launcher-generated override.
 assert_label "$CASE/images/standard/Dockerfile" 'org.agent-vm.version.dsh="${AGENT_VERSION_DSH:-0.1.9-rc.1}"'
-assert_label "$CASE/images/standard/Dockerfile" 'org.agent-vm.version.pnpm="${AGENT_VERSION_PNPM:-11.11.0}"'
+! grep -q org.agent-vm.version.pnpm "$CASE/images/standard/Dockerfile" || fail "standard duplicates inherited pnpm label"
 
 # The layout the lock exists to freeze: a nested dsh-sandbox-local is a boot
 # failure, so the script must refuse rather than commit it.
@@ -463,14 +464,22 @@ assert_contains "$RUN_OUTPUT" "pinning @deepseek-ai/dsh: $DSH_PIN -> 0.1.9-rc.1"
 assert_label "$CASE/images/standard/Dockerfile" 'org.agent-vm.version.dsh="${AGENT_VERSION_DSH:-0.1.9-rc.1}"'
 
 new_case dsh-pnpm
-STUB_INSTALL_JQ='.packages[""].dependencies.pnpm = "12.0.0" | .packages["node_modules/pnpm"].version = "12.0.0"'
 run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_PIN" --pnpm 12.0.0
+assert_status_fail
+assert_contains "$RUN_OUTPUT" '--pnpm must equal the reviewed base pin'
+[[ ! -s "$CASE/npm.log" ]] || fail 'changed pnpm reached registry'
+assert_files_unchanged dsh
+
+new_case dsh-pnpm-equal
+run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_PIN" --pnpm "$PNPM_PIN"
 assert_status_ok
-assert_contains "$RUN_OUTPUT" "pinning pnpm: $PNPM_PIN -> 12.0.0"
-[[ "$(jq -r '.dependencies.pnpm' "$CASE/images/tools/dsh/package.json")" == "12.0.0" ]] \
-    || fail "the pnpm pin was not updated"
-assert_label "$CASE/images/standard/Dockerfile" 'org.agent-vm.version.pnpm="${AGENT_VERSION_PNPM:-12.0.0}"'
-assert_label "$CASE/images/standard/Dockerfile" 'org.agent-vm.version.dsh="${AGENT_VERSION_DSH:-0.1.5-rc.2}"'
+assert_files_unchanged dsh
+
+new_case dsh-pnpm-tag
+run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_PIN" --pnpm latest
+assert_status_fail
+[[ ! -s "$CASE/npm.log" ]] || fail 'pnpm tag reached registry'
+assert_files_unchanged dsh
 
 new_case dsh-publish-failure
 registry_add_version @deepseek-ai/dsh "$DSH_BUMP"

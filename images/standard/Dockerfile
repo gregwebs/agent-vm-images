@@ -7,10 +7,10 @@ LABEL org.opencontainers.image.description="dsh, Pi, Codex, OpenCode, Claude and
 
 # dsh
 ARG AGENT_VERSION_DSH=
+# Deprecated compatibility assertion only; selection is inherited from base.
 ARG AGENT_VERSION_PNPM=
 
-LABEL org.agent-vm.version.dsh="${AGENT_VERSION_DSH:-0.1.5-rc.2}" \
-      org.agent-vm.version.pnpm="${AGENT_VERSION_PNPM:-11.11.0}"
+LABEL org.agent-vm.version.dsh="${AGENT_VERSION_DSH:-0.1.5-rc.2}"
 
 COPY tools/dsh/package.json tools/dsh/package-lock.json /opt/agent-vm/dsh/
 RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
@@ -25,11 +25,11 @@ RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
     AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
     sh /tmp/recipe-contract/run-install.sh dsh /opt/agent-vm/install-status/dsh sh /tmp/install-dsh.sh
 
-RUN ln -s /opt/agent-vm/dsh/node_modules/.bin/dsh /usr/local/bin/dsh \
- && ln -s /opt/agent-vm/dsh/node_modules/.bin/pnpm /usr/local/bin/pnpm
+RUN ln -s /opt/agent-vm/dsh/node_modules/.bin/dsh /usr/local/bin/dsh
 
 RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/dsh/verify-dsh.sh,target=/tmp/verify-dsh.sh,ro \
+    --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
     AGENT_VM_VERSION_DSH="${AGENT_VERSION_DSH}" \
@@ -204,6 +204,7 @@ RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
 # Certification of the finished filesystem and its unmodified final PATH.
 RUN --mount=type=bind,source=standard/verify-standard.sh,target=/tmp/verify-standard.sh,ro \
     --mount=type=bind,source=tools,target=/tmp/standard-tools,ro \
+    --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
     --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \

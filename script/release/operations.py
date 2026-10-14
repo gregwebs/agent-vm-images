@@ -149,10 +149,14 @@ def selections() -> dict[str, str]:
             raise ValueError('invalid committed single-slot selection')
         selected[name] = matches[0]
     for name, path, dependency in (
-        ('dsh', 'dsh', '@deepseek-ai/dsh'), ('pnpm', 'dsh', 'pnpm'),
+        ('dsh', 'dsh', '@deepseek-ai/dsh'),
         ('pi', 'pi', '@earendil-works/pi-coding-agent'),
         ('pi-claude-bridge', 'pi/bridge', 'pi-claude-bridge')):
         selected[name] = c.read_json(ROOT / f'images/tools/{path}/package.json')['dependencies'][dependency]
+    pnpm = c.read_json(ROOT / 'images/pnpm/pin.json')['version']
+    if not isinstance(pnpm, str) or not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', pnpm):
+        raise ValueError('invalid committed base pnpm selection')
+    selected['pnpm'] = pnpm
     return selected
 
 

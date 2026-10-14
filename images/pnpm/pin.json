@@ -1,0 +1,9 @@
+{
+  "version": "11.11.0",
+  "url": "https://registry.npmjs.org/pnpm/-/pnpm-11.11.0.tgz",
+  "integrity": "sha512-RGP2X9gO2A1pvB1L8WPulPYFxzgPwxi7Wy6+FfjNEtScUaTVnpUbQB52TTtsp1HL9RvFDtcAGmvLSTXmhMNIgg==",
+  "sha512": "4463f65fd80ed80d69bc1d4bf163ee94f605c7380fc318bb5b2ebe15f8cd12d49c51a4d59e951b401e764d3b6ca751cbf51bc50ed7001a6bcb4935e684c34882",
+  "bundleSha256": "e8abc02d5fbffb8f9d8817d44d6eee84c379ea8d5006dd5aa8694bb5e4428d8a",
+  "upstreamTag": "v11.11.0",
+  "upstreamCommit": "19696e1f4957caa2813ce3beb026d9629e24e6e1"
+}

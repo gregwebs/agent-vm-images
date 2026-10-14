@@ -3,9 +3,9 @@
 Editable Docker sources, independent of the agent-vm launcher:
 
 - **Base:** Debian 13, Bash, Node 22, Python, Docker prerequisites, diagnostic
-  utilities and zellij. No coding-agent CLI or fixed guest account.
+  utilities, zellij and pinned pnpm. No coding-agent CLI or fixed guest account.
 - **Standard:** the base plus dsh, Pi, Codex, OpenCode, Claude and Copilot;
-  pinned pnpm and the Pi Claude bridge are also mandatory.
+  inherited base pnpm and the Pi Claude bridge are also mandatory.
 - **Examples:** user-owned Dockerfiles built from the base or the released standard image; see [Examples](#examples).
 
 ```text
@@ -119,6 +119,7 @@ Ordinary user-owned Dockerfiles; each README is the canonical build guide.
 Scripts installed outside HOME survive HOME mounts. Use non-login `bash -c`
 for agent commands: `bash -lc` can reset the image PATH through `/etc/profile`.
 
+- [Node package defaults and override limits](docs/node-package-defaults.md)
 - [Contributing and verification](CONTRIBUTING.md)
 - [Standard image releases](docs/standard-image-releases.md)
 - [Installer security, locks and runtime payloads](images/tools/README.md)

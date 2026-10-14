@@ -1,9 +1,10 @@
-# Tool-free source building block; install coding agents with standard/Dockerfile
+# Coding-agent-free source building block; install agents with standard/Dockerfile
 # or extend this base with an ordinary user-owned Dockerfile.
 FROM debian:13-slim
 
-LABEL org.opencontainers.image.title="agent-vm tool-free base"
-LABEL org.opencontainers.image.description="Tool-free Debian 13 building block with Node 22, Python, Docker prerequisites and diagnostic utilities."
+LABEL org.opencontainers.image.title="agent-vm coding-agent-free base"
+LABEL org.opencontainers.image.description="Debian 13 building block with Node 22, pnpm, Python, Docker prerequisites and diagnostic utilities."
+LABEL org.agent-vm.version.pnpm="11.11.0"
 LABEL org.opencontainers.image.source="https://github.com/gregwebs/agent-vm-images"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
@@ -59,6 +60,13 @@ RUN install -dm 755 /etc/apt/keyrings \
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
+
+# pnpm's reviewed pin owns the inherited selection; npm/npx remain Node's commands.
+RUN --mount=type=bind,source=install-pnpm.sh,target=/tmp/install-pnpm.sh,ro \
+    --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
+    --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+    AGENT_INSTALL_SOFT_FAIL= bash /tmp/install-pnpm.sh \
+ && sh /tmp/pnpm-source/verify-pnpm.sh
 
 # fuse-overlayfs accommodates downstream overlay-root guests. Docker is not
 # auto-started: runtime callers choose whether they need a daemon.

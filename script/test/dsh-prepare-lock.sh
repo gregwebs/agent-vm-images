@@ -63,6 +63,7 @@ if [ "${STUB_FAIL:-}" = 1 ]; then
     exit 7
 fi
 case "${1:-}" in
+    ci) ;;
     install)
         [ -n "${STUB_RESULT:-}" ] || { echo "stub npm: STUB_RESULT unset" >&2; exit 4; }
         [ -d "$STUB_RESULT" ] || { echo "stub npm: STUB_RESULT missing" >&2; exit 5; }
@@ -133,6 +134,8 @@ new_case() {
     CASE="$TEST_ROOT/$1"
     mkdir -p "$CASE/prefix/dsh" "$CASE/result" "$CASE/expected"
     write_committed "$CASE/prefix/dsh"
+    mkdir -p "$CASE/prefix/pnpm"
+    printf '{"version":"4.5.6"}\n' >"$CASE/prefix/pnpm/pin.json"
     cp "$CASE/prefix/dsh/package.json" "$CASE/prefix/dsh/package-lock.json" "$CASE/expected/"
     : >"$CASE/npm.log"
 }
@@ -186,6 +189,20 @@ assert_success
 npm_not_called
 assert_prefix_unchanged
 
+new_case base-mismatch
+run_prepare "" 4.6.0
+assert_failure
+assert_contains "$RUN_OUTPUT" "disagrees with base pin"
+npm_not_called
+assert_prefix_unchanged
+
+new_case stale-retained
+printf '{"version":"4.6.0"}\n' >"$CASE/prefix/pnpm/pin.json"
+run_prepare "" ""
+assert_failure
+npm_not_called
+assert_prefix_unchanged
+
 # --- one changed slot, other empty ------------------------------------------
 
 new_case dsh-only
@@ -203,6 +220,7 @@ npm_called
 assert_contains "$RUN_OUTPUT" "changed only"
 
 new_case pnpm-only
+printf '{"version":"4.6.0"}\n' >"$CASE/prefix/pnpm/pin.json"
 make_result "$CASE/result" 1.2.3 4.6.0
 STUB_RESULT="$CASE/result"
 run_prepare "" 4.6.0
@@ -214,6 +232,7 @@ npm_called
     || fail "the unselected dsh slot moved"
 
 new_case both
+printf '{"version":"4.6.0"}\n' >"$CASE/prefix/pnpm/pin.json"
 make_result "$CASE/result" 1.2.4 4.6.0
 STUB_RESULT="$CASE/result"
 run_prepare 1.2.4 4.6.0
@@ -279,6 +298,39 @@ assert_success
 npm_called
 [[ "$(jq -r '.packages["node_modules/shared-lib"].version' "$CASE/prefix/dsh/package-lock.json")" == "0.0.1" ]] \
     || fail "refresh-lock should have accepted the transitive refresh"
+
+# Owning install seam must reject conflicts before prepare/npm resolution.
+run_install() {
+    mkdir -p "$CASE/home"
+    sed "s|/opt/agent-vm/pnpm/pin.json|$CASE/prefix/pnpm/pin.json|" \
+        "$REPO_ROOT/images/tools/dsh/install-dsh.sh" >"$CASE/install.sh"
+    set +e
+    RUN_OUTPUT=$(env -i "PATH=$STUB_BIN:$NODE_DIR:$JQ_DIR:/usr/bin:/bin" \
+        "HOME=$CASE/home" "AGENT_VM_DSH_PREFIX=$CASE/prefix/dsh" \
+        "AGENT_VM_PREPARE_LOCK=$PREPARE" "AGENT_VM_FIXTURE_ROOT=$CASE/prefix" \
+        "STUB_LOG=$CASE/npm.log" "AGENT_VM_VERSION_PNPM=$1" \
+        sh "$CASE/install.sh" 2>&1)
+    RUN_STATUS=$?
+    set -e
+}
+new_case install-conflict
+run_install 4.6.0
+assert_failure
+assert_contains "$RUN_OUTPUT" "compatibility slot must equal base pin"
+npm_not_called
+assert_prefix_unchanged
+new_case install-retained-mismatch
+printf '{"version":"4.6.0"}\n' >"$CASE/prefix/pnpm/pin.json"
+run_install ""
+assert_failure
+assert_contains "$RUN_OUTPUT" "retained pnpm lock selection disagrees with base"
+npm_not_called
+assert_prefix_unchanged
+new_case install-equal
+run_install 4.5.6
+assert_success
+assert_prefix_unchanged
+assert_contains "$(cat "$CASE/npm.log")" "ci --ignore-scripts"
 
 # --- check-lock-update.js: direct negatives ---------------------------------
 # The negative locks are produced by hand and run through the checker with

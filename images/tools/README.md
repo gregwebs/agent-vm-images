@@ -14,7 +14,7 @@ Installers, verifiers and helpers are read-only bind mounts, not COPYed executab
 interfaces. No copies or sync script are needed. Only explicit runtime COPYs
 persist: locks/manifests, Pi wrapper/extensions, and seed hooks. All PATH changes
 are additive (`ENV PATH=<new>:${PATH}`). The base provides `/opt/agent` mode 0755,
-Node 22, fetch/diagnostic facilities, explicit optional trust and an empty
+Node 22, base-owned pnpm, fetch/diagnostic facilities, explicit optional trust and an empty
 `/opt/agent-vm/seed.d`; it ships no legacy `agent-vm-install` helper.
 
 ## Exact selections
@@ -26,7 +26,7 @@ Node 22, fetch/diagnostic facilities, explicit optional trust and an empty
 | claude | AGENT_VERSION_CLAUDE | 2.1.286 / SEMVER |
 | copilot | AGENT_VERSION_COPILOT | 1.0.90 / SEMVER |
 | dsh | AGENT_VERSION_DSH | manifest 0.1.5-rc.2 / SEMVER |
-| pnpm | AGENT_VERSION_PNPM | dsh manifest 11.11.0 / SEMVER |
+| pnpm (inherited base) | AGENT_VERSION_PNPM (compatibility only) | base pin.json 11.11.0 / SEMVER |
 | pi | AGENT_VERSION_PI | manifest 0.87.1 / SEMVER |
 | pi-claude-bridge | AGENT_VERSION_PI_CLAUDE_BRIDGE | bridge manifest 0.8.0 / SEMVER |
 
@@ -71,7 +71,8 @@ and after re-running all six verifiers. It compares the first lexically existing
 PATH candidate for Codex, OpenCode, Claude and Pi to their fixed-path verified
 files, before and after verification. Wrong executable shadows, dangling/cyclic
 links and unusable candidates fail rather than falling through. Symlinks to the
-same verified file pass. dsh/pnpm/Copilot already report through bare PATH names.
+same verified file pass. dsh/pnpm/Copilot already report through bare PATH names. Base pnpm verification
+also checks immutable launcher/alias identity before and after the agent gates.
 Access auditing includes command/interpreter/symlink ancestry and arbitrary-UID
 usability; readable mode bits alone are not version proof. Future customization
 after this gate is the image author's responsibility.
@@ -99,9 +100,12 @@ an assertion of fully reproducible OS or supply chain.
 The lock is functional, not only reproducibility. A floating dsh install can
 pull a newer `dsh-base` and nest `dsh-sandbox-local` under its node_modules,
 where the app's plugin loader cannot resolve it. The reviewed lock preserves
-app-root sandbox placement and every transitive integrity hash. pnpm is in the
-same lock because `dsh plugin ... add ...` forwards to it. Both binaries are
-linked into `/usr/local/bin`; neither exists in the base.
+app-root sandbox placement and every transitive integrity hash. pnpm remains in the
+same lock as a transitional compatibility constraint until #42. `dsh plugin`
+resolves the inherited base launcher via ordinary PATH; only dsh is linked from
+this private tree. Base pin and retained manifest must agree; standard cannot
+independently override pnpm. The stock distribution is unmodified; see the
+canonical [Node package defaults](../../docs/node-package-defaults.md).
 
 `npm ci --ignore-scripts` avoids upstream lifecycle execution. The reviewed
 lifecycle scripts only fetch prebuilds, restore mode bits or write metadata.

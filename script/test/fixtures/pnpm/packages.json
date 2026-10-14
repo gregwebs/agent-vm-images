@@ -1,0 +1,89 @@
+[
+  {
+    "name": "fixture-package",
+    "versions": [
+      {
+        "version": "1.0.0",
+        "ageHours": 72
+      },
+      {
+        "version": "1.1.0",
+        "ageHours": 1
+      }
+    ]
+  },
+  {
+    "name": "fixture-missing",
+    "versions": [
+      {
+        "version": "1.0.0",
+        "ageHours": null
+      }
+    ]
+  },
+  {
+    "name": "fixture-trust",
+    "versions": [
+      {
+        "version": "1.0.0",
+        "ageHours": 96,
+        "provenance": true
+      },
+      {
+        "version": "1.1.0",
+        "ageHours": 72
+      }
+    ]
+  },
+  {
+    "name": "fixture-corrupt",
+    "versions": [
+      {
+        "version": "1.0.0",
+        "ageHours": 72,
+        "corrupt": true
+      }
+    ]
+  },
+  {
+    "name": "fixture-dependency",
+    "versions": [
+      {
+        "version": "1.0.0",
+        "ageHours": 72
+      }
+    ]
+  },
+  {
+    "name": "fixture-hooks",
+    "versions": [
+      {
+        "version": "1.0.0",
+        "ageHours": 72,
+        "dependency": true
+      }
+    ]
+  },
+  {
+    "name": "@private/missing",
+    "versions": [
+      {
+        "version": "1.0.0",
+        "ageHours": null
+      }
+    ]
+  },
+  {
+    "name": "fixture-partial-time",
+    "versions": [
+      {
+        "version": "1.0.0",
+        "ageHours": 72
+      },
+      {
+        "version": "1.1.0",
+        "ageHours": null
+      }
+    ]
+  }
+]

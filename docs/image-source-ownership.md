@@ -34,7 +34,13 @@ launcher/submodule integration remains #265 and is not claimed here, and
 container/fixture checks do not demonstrate microsandbox boot or authenticated
 sessions.
 
-## Selective migration manifest
+## Current pnpm ownership
+
+Base owns `images/pnpm/`, authenticated bootstrap and the pnpm selection label.
+Standard inherits its immutable launcher; dsh retains its duplicate locked npm
+package only until #42, not as PATH owner. See [runtime defaults](node-package-defaults.md).
+
+## Selective migration manifest (historical)
 
 Source and destination paths are identical for these payloads (headers and
 READMEs may be adapted to their new owner):
