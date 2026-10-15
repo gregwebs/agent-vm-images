@@ -131,7 +131,7 @@ jobs:
           test -z "$(git -C source status --porcelain)"
       - name: Native amd64 boot verification with the signed source's own gate
         id: verify
-        timeout-minutes: 60
+        timeout-minutes: 90
         env:
           VERSION: ${{ steps.bind.outputs.version }}
           MSB: ${{ steps.msb.outputs.msb }}
@@ -143,7 +143,7 @@ jobs:
           MSB_LIBKRUN_EMBEDDED: '1'
         run: |
           set -euo pipefail
-          python3 harness/script/test/host-watchdog.py 3300 bash source/script/release/verify-release.sh \
+          python3 harness/script/test/host-watchdog.py 5100 bash source/script/release/verify-release.sh \
             --version "$VERSION" --arch amd64 --assets-dir "$ASSETS" --msb-bin "$MSB" --boot \
             2>&1 | tee "$RUNTIME_LOGS/verify-release.log"
           # Exit 0 without the record is not success.

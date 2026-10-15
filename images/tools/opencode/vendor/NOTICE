@@ -5,10 +5,10 @@ are derived from OpenCode's published installer and are redistributed here under
 the upstream project's license.
 
 - upstream project: `anomalyco/opencode` (https://github.com/anomalyco/opencode)
-- installer source: `https://opencode.ai/install`
-- pinned release: `v1.18.34`
-- retrieved: 2026-10-01
-- snapshot SHA-256: `fc3c1b2123f49b6df545a7622e5127d21cd794b15134fc3b66e1ca49f7fb297e`
+- installer source: `https://opencode.ai/v2/install`
+- pinned release: `v2.0.29`
+- retrieved: 2026-10-15
+- snapshot SHA-256: `6ef97e3d5b8782179efc2b04e6ce2e90ced23675df5792c9ea4f4a0465531865`
 - license: MIT License (SPDX: `MIT`)
 - copyright: Copyright (c) 2025 opencode
 

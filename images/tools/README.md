@@ -12,7 +12,7 @@ launcher catalog inputs.
 Canonical build/install audit helpers live in `images/recipe-contract/`.
 Installers, verifiers and helpers are read-only bind mounts, not COPYed executable
 interfaces. No copies or sync script are needed. Only explicit runtime COPYs
-persist: locks/manifests, Pi wrapper/extensions, and seed hooks. All PATH changes
+persist: locks/manifests, Pi wrapper/extensions, seed hooks, and the OpenCode adapter/configuration/pnpm inputs. All PATH changes
 are additive (`ENV PATH=<new>:${PATH}`). The base provides `/opt/agent` mode 0755,
 Node 22, base-owned pnpm, fetch/diagnostic facilities, explicit optional trust and an empty
 `/opt/agent-vm/seed.d`; it ships no legacy `agent-vm-install` helper.
@@ -22,19 +22,20 @@ Node 22, base-owned pnpm, fetch/diagnostic facilities, explicit optional trust a
 | Label suffix | Docker ARG | Committed selection / spelling |
 |---|---|---|
 | codex | AGENT_VERSION_CODEX | rust-v0.159.3 / rust-vSEMVER |
-| opencode | AGENT_VERSION_OPENCODE | v1.18.34 / vSEMVER |
+| opencode | AGENT_VERSION_OPENCODE | v2.0.29 / v2.SEMVER |
 | claude | AGENT_VERSION_CLAUDE | 2.1.286 / SEMVER |
 | copilot | AGENT_VERSION_COPILOT | 1.0.90 / SEMVER |
 | dsh | AGENT_VERSION_DSH | manifest 0.1.5-rc.2 / SEMVER |
 | pnpm (inherited base) | AGENT_VERSION_PNPM (compatibility only) | base pin.json 11.11.0 / SEMVER |
 | pi | AGENT_VERSION_PI | manifest 0.87.1 / SEMVER |
+| opencode-claude | AGENT_VERSION_OPENCODE_CLAUDE | plugin manifest 1.4.1 / SEMVER |
 | pi-claude-bridge | AGENT_VERSION_PI_CLAUDE_BRIDGE | bridge manifest 0.8.0 / SEMVER |
 
 Single-slot defaults are exact nonempty ARGs; empty values, dist-tags, ranges,
 URLs and malformed versions fail before network access. Locked slots have empty
-ARGs intentionally. Empty/equal slots reuse committed JSON/lock bytes without
+ARGs intentionally. Empty/equal slots reuse committed manifest/lock/configuration bytes during preparation without
 registry resolution; literal LABEL fallbacks mirror manifests because Docker
-cannot execute jq in LABEL. These eight `org.agent-vm.version.*` labels record
+cannot execute jq in LABEL. These nine `org.agent-vm.version.*` labels record
 **selection, not health**. There is no build-time latest query.
 
 An explicit different exact locked selection prepares a build-local lock; it
@@ -64,10 +65,11 @@ Copilot never soften partial npm trees.
 soft-fail ARG, skip flag or successful partial product exists. Each standard
 block requires its bounded exact report, access audit and `installed` record.
 Pi records `pi` and `pi-claude-bridge`; dsh records both dsh/pnpm health in `dsh`.
-That is seven records for eight selections. Bridge absence is not success.
+That is eight agent records for nine selections, including `opencode-claude`.
+Bridge or plugin absence is not success.
 
 The mandatory build-only final gate checks strict `installed\n` records before
-and after re-running all six verifiers. It compares the first lexically existing
+and after re-running all seven agent verifiers (excluding separate pnpm verification calls). It compares the first lexically existing
 PATH candidate for Codex, OpenCode, Claude and Pi to their fixed-path verified
 files, before and after verification. Wrong executable shadows, dangling/cyclic
 links and unusable candidates fail rather than falling through. Symlinks to the
@@ -88,11 +90,12 @@ certification remains hard regardless of optional plugin availability.
 ## Trust limits and reviewed locks
 
 Vendored snapshot + patch + runnable copy keep installer edits reviewable:
-[Codex](codex/vendor/README.md), [OpenCode](opencode/vendor/README.md),
-[Claude](claude/vendor/README.md). Exact upstream assets still arrive over the
-network. Vendor manifests detect corruption, not independent signing or upstream
-replacement of an exact-version asset. OpenCode has no independent archive
-checksum; its trust is TLS plus exact tag. These are explicit trust limits, not
+[Codex](codex/vendor/README.md), [OpenCode](opencode/vendor/README.md) with
+[runtime notes](opencode/README.md), [Claude](claude/vendor/README.md). Exact
+upstream assets still arrive over the network. Vendor manifests detect
+corruption, not independent signing or upstream replacement of an exact-version
+asset. OpenCode has no independent archive
+checksum; its trust is TLS plus exact registry tarball URL. These are explicit trust limits, not
 an assertion of fully reproducible OS or supply chain.
 
 ### dsh and pnpm
@@ -111,8 +114,13 @@ canonical [Node package defaults](../../docs/node-package-defaults.md).
 lifecycle scripts only fetch prebuilds, restore mode bits or write metadata.
 The dsh gate checks nonempty exact output: `import.meta.main` is undefined on
 Node older than 22.19, where dsh can exit 0 printing nothing. Exit status alone
-would certify a broken CLI. No community OAuth/subscription plugins or new host
-credential readers are baked in.
+would certify a broken CLI. No community OAuth/subscription plugins or new host credential readers are
+baked in, with one named exception: **`@openchamber/opencode-claude` only**.
+It delegates to the installed Claude CLI via the Agent SDK without reading,
+copying, storing or replaying Claude credentials. Credential-replay plugins
+remain prohibited. This is not a general exemption for CLI-delegating plugins;
+any further exception requires a maintainer decision. See the
+[OpenCode runtime and maintenance contract](opencode/README.md#image-owned-claude-plugin).
 
 ### Pi integrity
 
@@ -175,3 +183,26 @@ the downstream runtime. For historical rationale see the pinned upstream
 [bridge ADR](https://github.com/gregwebs/agent-vm/blob/3ec78eebb7bdf743c93942a6ed2e5510de15c52d/docs/adr/0023-image-owned-pi-extension-packages.md)
 and [dsh ADR](https://github.com/gregwebs/agent-vm/blob/3ec78eebb7bdf743c93942a6ed2e5510de15c52d/docs/adr/0022-dsh-tool-layer.md).
 Those links explain runtime choices, not per-tool artifact contracts here.
+
+### OpenCode pnpm installation
+
+The private plugin project is installed through the base pnpm 11.11.0 launcher,
+frozen, production-only, without optional platform binaries or lifecycle scripts.
+Its separate build-only runner treats every nonzero, timeout, signal, policy,
+integrity or capture failure as hard, regardless of inherited soft-fail settings.
+It does not share npm's classified transport protocol. Only behavioral
+verification writes `opencode-claude`'s `installed\n` record.
+
+The base's five safety defaults remain intact; ambient manager/registry/policy
+bypasses and project hooks are rejected. Empty/equal preparation makes no registry
+request; a frozen install still requests age/provenance metadata. The disposable
+external store and invocation HOME/XDG state are removed in the same RUN.
+`node_modules/.pnpm` is installed runtime content and must remain. Physical and
+logical symlink paths are audited under all four numeric UID/GID pairs after
+external-store removal. The separate fourth egress profile accounts for frozen
+metadata verification without broadening native installer rules. That profile
+admits registry metadata, provenance bundles and the three locked tarballs, and
+only those: every pnpm invocation in this layer suppresses the update notifier,
+so a build never spends a round trip on a version notice, and the profile says
+exactly what the install needs. Denying the provenance bundles would instead mean
+weakening the trust policy the base mandates.

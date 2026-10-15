@@ -88,13 +88,13 @@ run_install() {
 
 new_case success
 SOFT=
-run_install v1.18.34
+run_install v2.0.29
 [[ $RUN_STATUS -eq 0 ]] || fail "a clean install must pass: $RUN_OUTPUT"
 [[ -f "$CASE/ran" ]] || fail "the vendored installer must run on a valid slot"
 [[ -L "$CASE/link/opencode" ]] || fail "the hook must publish the /usr/local/bin link"
 [[ ! -e "$CASE/status/opencode" ]] || fail "the hook must not write installed itself"
 
-for bad in latest '1.18.34' 'v1.18' 'v1.18.34 ' '^1.18.34'; do
+for bad in v1.18.34 v3.0.0 latest '2.0.29' 'v1.18' 'v2.0.29 ' '^2.0.29'; do
     new_case "reject-$(printf '%s' "$bad" | tr -c 'A-Za-z0-9' '_')"
     SOFT=
     run_install "$bad"
@@ -111,7 +111,7 @@ new_case transport-soft
 FAKE_EXIT=75
 FAKE_RECEIPT='transport download 6'
 SOFT=1
-run_install v1.18.34
+run_install v2.0.29
 [[ $RUN_STATUS -eq 0 ]] || fail "a classified transport failure must soften: $RUN_OUTPUT"
 [[ "$(cat "$CASE/status/opencode")" == "absent-transport 6" ]] ||
     fail "softened install must write an absence record"
@@ -123,7 +123,7 @@ new_case transport-no-soft
 FAKE_EXIT=75
 FAKE_RECEIPT='transport download 6'
 SOFT=
-run_install v1.18.34
+run_install v2.0.29
 [[ $RUN_STATUS -ne 0 ]] || fail "a transport failure without soft-fail must be hard"
 [[ ! -e "$CASE/status/opencode" ]] || fail "a hard failure must not leave an absence record"
 unset FAKE_EXIT FAKE_RECEIPT SOFT
@@ -132,7 +132,7 @@ new_case bare-75
 FAKE_EXIT=75
 FAKE_RECEIPT=''
 SOFT=1
-run_install v1.18.34
+run_install v2.0.29
 [[ $RUN_STATUS -ne 0 ]] || fail "an arbitrary 75 must be hard"
 unset FAKE_EXIT FAKE_RECEIPT SOFT
 
@@ -140,7 +140,7 @@ new_case unknown-failure
 FAKE_EXIT=3
 FAKE_RECEIPT=''
 SOFT=1
-run_install v1.18.34
+run_install v2.0.29
 [[ $RUN_STATUS -ne 0 ]] || fail "an unknown installer exit must be hard"
 unset FAKE_EXIT FAKE_RECEIPT SOFT
 
@@ -149,7 +149,7 @@ FAKE_EXIT=75
 FAKE_RECEIPT='transport download 6'
 SOFT=1
 NO_RECEIPT=1
-run_install v1.18.34
+run_install v2.0.29
 [[ $RUN_STATUS -ne 0 ]] || fail "a 75 without a receipt path must be hard"
 unset FAKE_EXIT FAKE_RECEIPT SOFT NO_RECEIPT
 
@@ -182,95 +182,125 @@ run_gate() {
     set -e
 }
 
-WANT=v1.18.34
+WANT=v2.0.29
 new_gate_case ok
 make_opencode <<'SH'
 #!/bin/sh
-printf '1.18.34\n'
+printf 'opencode v2.0.29\n'
 SH
 run_gate
 [[ $RUN_STATUS -eq 0 ]] || fail "the pinned version must pass: $RUN_OUTPUT"
 [[ "$(cat "$CASE/status/opencode")" == "installed" ]] ||
     fail "a passing gate must record installed"
 
-WANT=v1.18.34
+# Keep wire bytes outside generated shell syntax; verify the fixture itself.
+for wire in bare old extra tab no-newline; do
+    new_gate_case "wire-$wire"
+    case "$wire" in
+        bare) printf '2.0.29\n' >"$CASE/wire" ;;
+        old) printf 'opencode v1.18.34\n' >"$CASE/wire" ;;
+        extra) printf 'opencode v2.0.29\n\n' >"$CASE/wire" ;;
+        tab) printf 'opencode v2.0.29\t\n' >"$CASE/wire" ;;
+        no-newline) printf 'opencode v2.0.29' >"$CASE/wire" ;;
+    esac
+    # Use an environment path rather than interpolating fixture bytes as code.
+    printf '#!/bin/sh\ncat "$WIRE_FILE"\n' >"$GATE_BIN"
+    chmod 0755 "$GATE_BIN"
+    export WIRE_FILE="$CASE/wire"
+    "$GATE_BIN" >"$CASE/emitted"
+    cmp "$CASE/wire" "$CASE/emitted" || fail 'fixture changed wire bytes'
+    run_gate
+    [[ $RUN_STATUS -ne 0 ]] || fail "invalid exact report passed: $wire"
+done
+unset WIRE_FILE
+
+WANT=v2.0.29
 new_gate_case mismatch
 make_opencode <<'SH'
 #!/bin/sh
-printf '1.18.33\n'
+printf 'opencode v2.0.28\n'
 SH
 run_gate
 [[ $RUN_STATUS -ne 0 ]] || fail "a wrong installed version must fail"
 
-WANT=v1.18.34
+WANT=v2.0.29
 new_gate_case prefix
 make_opencode <<'SH'
 #!/bin/sh
-printf '1.18.340\n'
+printf 'opencode v2.0.290\n'
 SH
 run_gate
-[[ $RUN_STATUS -ne 0 ]] || fail "1.18.340 must not satisfy a 1.18.34 pin"
+[[ $RUN_STATUS -ne 0 ]] || fail "2.0.290 must not satisfy a 2.0.29 pin"
 
-WANT=v1.18.34
+WANT=v2.0.29
 new_gate_case leading-warning
 make_opencode <<'SH'
 #!/bin/sh
-printf 'warning: expected 1.18.34\n'
-printf '1.18.34\n'
+printf 'warning: expected 2.0.29\n'
+printf 'opencode v2.0.29\n'
 SH
 run_gate
 [[ $RUN_STATUS -ne 0 ]] || fail "a leading warning line must not be accepted"
 
 # B1: a contradictory bare version on stderr must not certify the slot.
-WANT=v1.18.34
+WANT=v2.0.29
 new_gate_case stderr-contradictory
 make_opencode <<'SH'
 #!/bin/sh
-printf '1.18.34\n'
+printf 'opencode v2.0.29\n'
 printf '9.9.9\n' >&2
 SH
 run_gate
 [[ $RUN_STATUS -ne 0 ]] || fail "a contradictory version on stderr must fail"
 
+new_gate_case stderr-new-contradictory
+make_opencode <<'SH'
+#!/bin/sh
+printf 'opencode v2.0.29\n'
+printf 'opencode v2.0.28\n' >&2
+SH
+run_gate
+[[ $RUN_STATUS -ne 0 ]] || fail 'a contradictory v2 banner on stderr must fail'
+
 # C2: a NUL inside the report must be rejected, not erased by substitution.
-WANT=v1.18.34
+WANT=v2.0.29
 new_gate_case nul-in-report
 make_opencode <<'SH'
 #!/bin/sh
-printf '1.18.\00034\n'
+printf 'opencode v2.0.\00034\n'
 SH
 run_gate
 [[ $RUN_STATUS -ne 0 ]] || fail "a NUL inside the report must fail"
 
 # SP5: an unterminated trailing line (no final newline) must still fail.
-WANT=v1.18.34
+WANT=v2.0.29
 new_gate_case unterminated-trailing
 make_opencode <<'SH'
 #!/bin/sh
-printf '1.18.34\nUNRECOGNIZED TRAILING REPORT'
+printf 'opencode v2.0.29\nUNRECOGNIZED TRAILING REPORT'
 SH
 run_gate
 [[ $RUN_STATUS -ne 0 ]] || fail "an unterminated trailing report line must be rejected"
 
-WANT=v1.18.34
+WANT=v2.0.29
 new_gate_case nonzero
 make_opencode <<'SH'
 #!/bin/sh
-printf '1.18.34\n'
+printf 'opencode v2.0.29\n'
 exit 1
 SH
 run_gate
 [[ $RUN_STATUS -ne 0 ]] || fail "printing the expected version then exiting nonzero must fail"
 assert_contains "$RUN_OUTPUT" "exited 1"
 
-WANT=v1.18.34
+WANT=v2.0.29
 new_gate_case absent
 printf 'absent-transport 6\n' >"$CASE/status/opencode"
 run_gate
 [[ $RUN_STATUS -eq 0 ]] || fail "a recorded absence must be accepted: $RUN_OUTPUT"
 
 # SP2: a dangling symlink is PRESENT; an absence record must not waive it.
-WANT=v1.18.34
+WANT=v2.0.29
 new_gate_case dangling
 printf 'absent-transport 6\n' >"$CASE/status/opencode"
 ln -s nowhere "$GATE_BIN"
@@ -278,28 +308,28 @@ run_gate
 [[ $RUN_STATUS -ne 0 ]] || fail "a dangling command symlink must fail despite the absence record"
 
 # SP2: an absence line inside a malformed multi-line record is not valid.
-WANT=v1.18.34
+WANT=v2.0.29
 new_gate_case malformed-record
 printf 'absent-transport 6\njunk\n' >"$CASE/status/opencode"
 run_gate
 [[ $RUN_STATUS -ne 0 ]] || fail "a multi-line absence record must not be accepted"
 
-WANT=v1.18.34
+WANT=v2.0.29
 new_gate_case missing
 run_gate
 [[ $RUN_STATUS -ne 0 ]] || fail "a missing command with no record must fail"
 
-WANT=v1.18.34
+WANT=v2.0.29
 new_gate_case pending
 printf 'pending\n' >"$CASE/status/opencode"
 run_gate
 [[ $RUN_STATUS -ne 0 ]] || fail "a pending record must not be accepted as absence"
 
-WANT=v1.18.34
+WANT=v2.0.29
 new_gate_case private-path
 make_opencode <<'SH'
 #!/bin/sh
-printf '1.18.34\n'
+printf 'opencode v2.0.29\n'
 SH
 chmod 0700 "$CASE/prefix/.opencode/bin"
 run_gate

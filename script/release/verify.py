@@ -147,13 +147,13 @@ class Verification:
                     time.sleep(1)
                 else:
                     raise ValueError('native msb ping timed out')
-                argv = [str(self.msb), 'exec', '--no-tty', '--timeout', '3m', name, '--',
+                argv = [str(self.msb), 'exec', '--no-tty', '--timeout', '10m', name, '--',
                         'sh' if fixture else 'bash', '-c', probe]
                 if not fixture:
                     selected = op.selections()
                     argv += ['released-agent-probe', *pair.split(':'), *[selected[x] for x in
-                        ('codex', 'opencode', 'claude', 'copilot', 'dsh', 'pnpm', 'pi', 'pi-claude-bridge')]]
-                self.command(argv, env=env, timeout=200)
+                        ('codex', 'opencode', 'claude', 'copilot', 'dsh', 'pnpm', 'pi', 'pi-claude-bridge', 'opencode-claude')]]
+                self.command(argv, env=env, timeout=660)
             finally:
                 if created:
                     self.command([str(self.msb), 'stop', '--timeout', '15', name], env=env)
@@ -327,7 +327,7 @@ def main() -> int:
             verify.command([str(msb), 'image', 'inspect', '--format', 'json', 'av264:wrong'], env=env, rejection=True)
         verify.check('wrong-architecture', reject_other)
         if args.boot:
-            probe = (op.ROOT / 'script/test/fixtures/released-agent-probe.sh').read_text()
+            probe = subprocess.check_output([sys.executable, str(op.ROOT / 'script/test/render-released-agent-probe.py')], timeout=10).decode()
             for route, (env, local_ref) in routes.items():
                 verify.check('msb-' + route + '-boot', lambda env=env, local_ref=local_ref:
                              verify.boot(local_ref, env, pairs=pairs, probe=probe))

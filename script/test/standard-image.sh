@@ -176,6 +176,7 @@ recipe_keys() { # $1 recipe -> label suffixes
     case "$1" in
         codex) printf '%s\n' codex ;;
         opencode) printf '%s\n' opencode ;;
+        opencode-claude) printf '%s\n' opencode-claude ;;
         claude) printf '%s\n' claude ;;
         copilot) printf '%s\n' copilot ;;
         dsh) printf '%s\n' dsh pnpm ;;
@@ -188,6 +189,7 @@ suffix_arg() { # $1 label suffix -> build ARG name
     case "$1" in
         codex) printf '%s\n' AGENT_VERSION_CODEX ;;
         opencode) printf '%s\n' AGENT_VERSION_OPENCODE ;;
+        opencode-claude) printf '%s\n' AGENT_VERSION_OPENCODE_CLAUDE ;;
         claude) printf '%s\n' AGENT_VERSION_CLAUDE ;;
         copilot) printf '%s\n' AGENT_VERSION_COPILOT ;;
         dsh) printf '%s\n' AGENT_VERSION_DSH ;;
@@ -206,12 +208,14 @@ DEFAULT_COPILOT=$(committed_arg AGENT_VERSION_COPILOT)
 DEFAULT_DSH=$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$REPO_ROOT/images/tools/dsh/package.json")
 DEFAULT_PNPM=$(jq -r '.version' "$REPO_ROOT/images/pnpm/pin.json")
 DEFAULT_PI=$(jq -r '.dependencies["@earendil-works/pi-coding-agent"]' "$REPO_ROOT/images/tools/pi/package.json")
+DEFAULT_OPENCODE_CLAUDE=$(jq -r '.dependencies["@openchamber/opencode-claude"]' "$REPO_ROOT/images/tools/opencode/plugins/package.json")
 DEFAULT_BRIDGE=$(jq -r '.dependencies["pi-claude-bridge"]' "$REPO_ROOT/images/tools/pi/bridge/package.json")
 
 default_selection() { # $1 recipe -> newline-separated suffix=value
     case "$1" in
         codex) printf '%s\n' "codex=$DEFAULT_CODEX" ;;
         opencode) printf '%s\n' "opencode=$DEFAULT_OPENCODE" ;;
+        opencode-claude) printf '%s\n' "opencode-claude=$DEFAULT_OPENCODE_CLAUDE" ;;
         claude) printf '%s\n' "claude=$DEFAULT_CLAUDE" ;;
         copilot) printf '%s\n' "copilot=$DEFAULT_COPILOT" ;;
         dsh) printf '%s\n' "dsh=$DEFAULT_DSH" "pnpm=$DEFAULT_PNPM" ;;
@@ -233,14 +237,14 @@ assert_expected_selection() { # $1 image, $2 newline-separated suffix=value
     done <<<"$lines"
 }
 
-# Released artifacts have no local base image, but still expose all eight selections.
+# Released artifacts have no local base image, but still expose all nine selections.
 assert_selection_label_sets() { # base standard artifact-mode
     local want
-    want=$(for suffix in codex opencode claude copilot dsh pnpm pi pi-claude-bridge; do echo "org.agent-vm.version.$suffix"; done | sort)
+    want=$(for suffix in codex opencode claude copilot dsh pnpm pi pi-claude-bridge opencode-claude; do echo "org.agent-vm.version.$suffix"; done | sort)
     if [ "$3" = false ]; then
         [ "$(version_keys "$1")" = org.agent-vm.version.pnpm ] || { echo 'base must own exactly pnpm selection' >&2; return 1; }
     fi
-    [ "$(version_keys "$2")" = "$want" ] || { echo 'standard must have exactly eight selection labels' >&2; return 1; }
+    [ "$(version_keys "$2")" = "$want" ] || { echo 'standard must have exactly nine selection labels' >&2; return 1; }
 }
 
 # assert_recipe_labels IMG RECIPE [EXPECTED_LABELS_FILE] [STRICT]
@@ -562,6 +566,7 @@ if any(not (b in (9, 10) or 32 <= b <= 126) for b in data):
     sys.exit(1)
 patterns = {
     "codex": rb"codex-cli [0-9A-Za-z.+-]+",
+    "opencode": rb"(?:opencode v|v?)[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*",
     "claude": rb"[0-9][0-9A-Za-z.+-]* \(Claude Code\)",
     "copilot": rb"GitHub Copilot CLI .*",
 }
@@ -587,7 +592,7 @@ check_report() { # $1 recipe, $2 label0 value, $3 label1 value, $4 output
     else
         case "$recipe" in
             codex) expected="codex-cli ${v0#rust-v}" ;;
-            opencode) expected="${v0#v}" ;;
+            opencode) expected="opencode $v0" ;;
             claude) expected="$v0 (Claude Code)" ;;
             dsh | pi) expected="$v0" ;;
             *) printf 'unknown recipe %s' "$recipe"; return 1 ;;
@@ -756,7 +761,7 @@ oracle_self_test() {
         version_keys() {
             case "$1" in
                 fixture-base) echo org.agent-vm.version.pnpm ;;
-                fixture-standard) for suffix in codex opencode claude copilot dsh pnpm pi pi-claude-bridge; do echo "org.agent-vm.version.$suffix"; done | sort ;;
+                fixture-standard) for suffix in codex opencode claude copilot dsh pnpm pi pi-claude-bridge opencode-claude; do echo "org.agent-vm.version.$suffix"; done | sort ;;
                 *) echo 'unexpected base query in artifact mode' >&2; return 1 ;;
             esac
         }
@@ -924,6 +929,20 @@ audit_image() { # $1 image, $2 recipe, $3 strict-label-exactness (default 1)
     echo "  $recipe: labels ok; reports/T5/status ok as 0:0, 12345:23456, 12345:45678 and 54321:12345"
 }
 
+audit_opencode_plugins() {
+    local image=$1 pair selection
+    selection=$(printf '%s\n' "$EXPECTED" | sed -n 's/^opencode-claude=//p')
+    assert_expected_selection "$image" "$EXPECTED"
+    for pair in 0:0 12345:23456 12345:45678 54321:12345; do
+        run_with_watchdog 180 docker_run --rm --platform "$platform" --network none --cap-drop ALL \
+            --user "$pair" --tmpfs /home/probe:rw,exec,mode=1777 -e HOME=/home/probe \
+            -v "$REPO_ROOT/images/tools/opencode:/opencode-source:ro" \
+            -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
+            -v "$REPO_ROOT/script/test:/audit:ro" \
+            --entrypoint bash "$image" /audit/opencode-guest-audit.sh /opencode-source /audit/opencode-audit.py "$selection" || return $?
+    done
+}
+
 image_file() { # $1 image, $2 absolute path in image, $3 out file
     local rc=0
     run_with_watchdog "$RUNTIME_WATCHDOG_SECONDS" \
@@ -1080,7 +1099,7 @@ t5_negatives() {
 # --- chain -------------------------------------------------------------------
 
 # Validate selections independently of image labels; overrides audit, never install.
-EXPECTED=$(for tool in codex opencode claude copilot dsh pi; do default_selection "$tool"; done)
+EXPECTED=$(for tool in codex opencode claude copilot dsh pi opencode-claude; do default_selection "$tool"; done)
 for entry in ${expect_overrides[@]+"${expect_overrides[@]}"}; do
     suffix=${entry%%=*}; value=${entry#*=}
     [ "$entry" != "$suffix" ] || fail 'expect requires suffix=version'
@@ -1107,6 +1126,15 @@ check_locks() {
             reason=$(assert_files_identical "$REPO_ROOT/$committed/$file" "$TMP/extracted" "$project $file drifted") || fail "$reason"
         done
     done
+    mkdir -p "$TMP/opencode-inputs"
+    for file in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
+        image_file "$image" "/opt/agent-vm/opencode-plugins/$file" "$TMP/opencode-inputs/$file"
+        if [ "$(printf '%s\n' "$EXPECTED" | sed -n 's/^opencode-claude=//p')" = "$DEFAULT_OPENCODE_CLAUDE" ]; then
+            cmp "$REPO_ROOT/images/tools/opencode/plugins/$file" "$TMP/opencode-inputs/$file" || fail "OpenCode $file drifted"
+        fi
+    done
+    python3 "$REPO_ROOT/script/test/opencode-input-audit.py" "$TMP/opencode-inputs" "$(printf '%s\n' "$EXPECTED" | sed -n 's/^opencode-claude=//p')"
+
 }
 
 # Drive the real audit call sites with complete wire captures, not predicates alone.
@@ -1115,6 +1143,7 @@ oracle_wiring_self_test() {
     label_value() {
         case "$2" in
             *version.codex) printf '%s\n' "$DEFAULT_CODEX" ;;
+            *version.opencode-claude) printf '%s\n' "$DEFAULT_OPENCODE_CLAUDE" ;;
             *version.opencode) printf '%s\n' "$DEFAULT_OPENCODE" ;;
             *version.claude) printf '%s\n' "$DEFAULT_CLAUDE" ;;
             *version.copilot) printf '%s\n' "$DEFAULT_COPILOT" ;;
@@ -1156,6 +1185,7 @@ oracle_wiring_self_test() {
     image_file() {
         local committed
         case "$2" in
+            */opencode-plugins/*) committed=images/tools/opencode/plugins ;;
             */pi-packages/*) committed=images/tools/pi/bridge ;;
             */pi/*) committed=images/tools/pi ;;
             */dsh/*) committed=images/tools/dsh ;;
@@ -1165,6 +1195,11 @@ oracle_wiring_self_test() {
     check_locks img || fail 'healthy extracted lock wire rejected'
     image_file() { printf drift >"$3"; }
     if ( check_locks img ) >/dev/null 2>&1; then fail 'lock wire drift accepted'; fi
+    local AUDIT_RC=0
+    run_with_watchdog() { return "$AUDIT_RC"; }
+    audit_opencode_plugins img || fail 'plugin audit success was dropped'
+    AUDIT_RC=1
+    if ( audit_opencode_plugins img ) >/dev/null 2>&1; then fail 'plugin audit failure was masked'; fi
     echo 'finished-image wire mutations rejected'
 }
 
@@ -1179,7 +1214,7 @@ if [ "$pi_audit" = true ]; then
     echo 'standard-image --pi-audit-status: OK'
     exit 0
 fi
-for required in docker jq python3; do command -v "$required" >/dev/null || fail "$required required"; done
+for required in docker jq python3 node; do command -v "$required" >/dev/null || fail "$required required"; done
 if [ "$artifact" = false ]; then
     BUILDER=$(docker context show)
     bash "$REPO_ROOT/script/test/require-daemon-builder.sh" || fail 'T5 fixtures require daemon-backed builder'
@@ -1201,17 +1236,18 @@ fi
 run_with_watchdog 180 docker_run --rm --platform "$platform" --network none "$STANDARD_IMAGE" bash -c 'set -euo pipefail; bash --version >/dev/null; node --version; python3 --version; zellij --version' || fail 'base facilities lost'
 for tool in codex opencode claude copilot dsh pi; do audit_image "$STANDARD_IMAGE" "$tool" 0; done
 check_locks "$STANDARD_IMAGE"
+audit_opencode_plugins "$STANDARD_IMAGE"
 bash "$REPO_ROOT/script/test/seed-hooks.sh" "$STANDARD_IMAGE"
 if [ "$artifact" = false ]; then
     t5_negatives
 else
-    probe=$(cat "$REPO_ROOT/script/test/fixtures/released-agent-probe.sh")
+    probe=$(python3 "$REPO_ROOT/script/test/render-released-agent-probe.py")
     for pair in "$(id -u):$(id -g)" 12345:23456 54321:34567; do
-        run_with_watchdog 600 docker_run --rm --platform "$platform" --network none --cap-drop ALL \
+        run_with_watchdog 660 docker_run --rm --platform "$platform" --network none --cap-drop ALL \
             --user "$pair" --tmpfs /home/probe:rw,exec,mode=1777 -e HOME=/home/probe \
             --entrypoint bash "$STANDARD_IMAGE" -c "$probe" released-agent-probe \
             "${pair%:*}" "${pair#*:}" "$DEFAULT_CODEX" "$DEFAULT_OPENCODE" "$DEFAULT_CLAUDE" \
-            "$DEFAULT_COPILOT" "$DEFAULT_DSH" "$DEFAULT_PNPM" "$DEFAULT_PI" "$DEFAULT_BRIDGE"
+            "$DEFAULT_COPILOT" "$DEFAULT_DSH" "$DEFAULT_PNPM" "$DEFAULT_PI" "$DEFAULT_BRIDGE" "$DEFAULT_OPENCODE_CLAUDE"
     done
 fi
 echo 'finished standard image acceptance passed'

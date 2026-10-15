@@ -17,7 +17,7 @@
 #   --overrides   also run the committed exact alternate selection per tool
 #   --observe     capture mode: log every URL and forward it (builds the
 #                 allowlist; not an acceptance run)
-#   --tool TOOL   only codex|opencode|claude (repeatable)
+#   --tool TOOL   only codex|opencode|claude|opencode-plugins (repeatable)
 #   --platform P  Docker platform (default: the host's)
 #
 # Tier: real Docker + real network. It downloads real release assets, so it is
@@ -92,7 +92,7 @@ case "$platform" in
 esac
 
 if [ "${#tools[@]}" -eq 0 ]; then
-    tools=(codex opencode claude)
+    tools=(codex opencode claude opencode-plugins)
 fi
 
 for required in docker jq python3; do
@@ -244,21 +244,21 @@ write_config() { # $1 = tool, $2 = version, $3 = out file
                        "channel", "/install\\.sh$", "releases/download/latest"]
             }' >"$out"
             ;;
+        opencode-plugins)
+            node "$REPO_ROOT/images/tools/opencode/plugins/check-lock.mjs" "$REPO_ROOT/images/tools/opencode/plugins" >/dev/null
+            python3 "$FIXTURES/opencode-plugins.py" "$REPO_ROOT/images/tools/opencode/plugins/package.json" >"$out"
+            ;;
         opencode)
             numeric="$(escape_re "${version#v}")"
             local oc_target
             case "$arch" in
                 aarch64) oc_target="linux-arm64" ;;
-                x86_64) oc_target="linux-x64" ;;
+                x86_64) oc_target="linux-x64 linux-x64-baseline" ;;
             esac
             jq -n --arg v "$numeric" --arg t "$oc_target" '{
-                allow: [
-                    {host: "github.com",
-                     path: ("^/anomalyco/opencode/releases/download/v" + $v
-                            + "/opencode-" + $t + "\\.tar\\.gz$")}
-                ],
-                deny: ["/latest", "releases/latest", "opencode\\.ai/install",
-                       "releases/download/latest", "channel"]
+                allow: ($t | split(" ") | map(. as $target | {host: "registry.npmjs.org",
+                         path: ("^/@opencode/cli-" + $target + "/-/cli-" + $target + "-" + $v + "\\.tgz$")})),
+                deny: ["/latest", "opencode\\.ai/(v2/)?install", "@opencode-ai", "channel"]
             }' >"$out"
             ;;
         claude)
@@ -301,6 +301,42 @@ run_allowlist_negatives() { # $1 tool, $2 version
     mkdir -p "$TMP/allowlog"
     : >"$TMP/allowlog/egress.log"
     case "$tool" in
+        opencode-plugins)
+            # One positive per allow entry: a typo in a profile path must not hide.
+            printf '%s\t1\n' 'https://registry.npmjs.org/@openchamber%2Fopencode-claude' \
+                'https://registry.npmjs.org/@anthropic-ai%2Fclaude-agent-sdk' \
+                'https://registry.npmjs.org/zod' \
+                'https://registry.npmjs.org/@anthropic-ai%2Fclaude-agent-sdk-darwin-arm64' \
+                'https://registry.npmjs.org/@anthropic-ai%2Fclaude-agent-sdk-darwin-x64' \
+                'https://registry.npmjs.org/@anthropic-ai%2Fclaude-agent-sdk-linux-arm64' \
+                'https://registry.npmjs.org/@anthropic-ai%2Fclaude-agent-sdk-linux-arm64-musl' \
+                'https://registry.npmjs.org/@anthropic-ai%2Fclaude-agent-sdk-linux-x64' \
+                'https://registry.npmjs.org/@anthropic-ai%2Fclaude-agent-sdk-linux-x64-musl' \
+                'https://registry.npmjs.org/@anthropic-ai%2Fclaude-agent-sdk-win32-arm64' \
+                'https://registry.npmjs.org/@anthropic-ai%2Fclaude-agent-sdk-win32-x64' >>"$cases"
+            printf '%s\t1\n' 'https://registry.npmjs.org/@openchamber/opencode-claude/-/opencode-claude-1.4.1.tgz' \
+                'https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk/-/claude-agent-sdk-0.3.281.tgz' \
+                'https://registry.npmjs.org/zod/-/zod-4.6.7.tgz' >>"$cases"
+            # Provenance bundles, fetched while pnpm enforces the base trust policy.
+            printf '%s\t1\n' 'https://registry.npmjs.org/-/npm/v1/attestations/@openchamber/opencode-claude@1.4.1' \
+                'https://registry.npmjs.org/-/npm/v1/attestations/@anthropic-ai/claude-agent-sdk@0.3.281' \
+                'https://registry.npmjs.org/-/npm/v1/attestations/zod@4.6.7' \
+                'https://registry.npmjs.org/-/npm/v1/attestations/@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.281' \
+                'https://registry.npmjs.org/-/npm/v1/attestations/@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.281' \
+                'https://registry.npmjs.org/-/npm/v1/attestations/@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.281' \
+                'https://registry.npmjs.org/-/npm/v1/attestations/@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.281' \
+                'https://registry.npmjs.org/-/npm/v1/attestations/@anthropic-ai/claude-agent-sdk-linux-x64@0.3.281' \
+                'https://registry.npmjs.org/-/npm/v1/attestations/@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.281' \
+                'https://registry.npmjs.org/-/npm/v1/attestations/@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.281' \
+                'https://registry.npmjs.org/-/npm/v1/attestations/@anthropic-ai/claude-agent-sdk-win32-x64@0.3.281' >>"$cases"
+            printf '%s\t0\n' 'http://registry.npmjs.org/zod' 'https://registry.npmjs.org:444/zod' \
+                'https://registry.npmjs.org/zod?token=REVIEW-TOKEN' 'https://registry.npmjs.org/pnpm' \
+                'https://registry.npmjs.org/zod/-/zod-4.6.8.tgz' \
+                'https://registry.npmjs.org/-/npm/v1/attestations/zod@4.6.8' \
+                'https://registry.npmjs.org/-/npm/v1/attestations/evil-package@1.0.0' \
+                'https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-linux-arm64/-/claude-agent-sdk-linux-arm64-0.3.281.tgz' >>"$cases"
+            printf '%s\t0\tPOST\n' 'https://registry.npmjs.org/zod' >>"$cases"
+            ;;
         codex)
             numeric="${version#rust-v}"
             sep="${numeric//./\/}"
@@ -321,10 +357,14 @@ run_allowlist_negatives() { # $1 tool, $2 version
                 aarch64) oc_target="linux-arm64" ;;
                 x86_64) oc_target="linux-x64" ;;
             esac
-            printf '%s\t1\n' "https://github.com/anomalyco/opencode/releases/download/v$numeric/opencode-$oc_target.tar.gz" >>"$cases"
-            printf '%s\t0\n' "https://github.com/anomalyco/opencode/releases/download/v$sep/opencode-$oc_target.tar.gz" >>"$cases"
-            printf '%s\t0\n' "https://github.com/anomalyco/opencode/releases/download/v$adjacent/opencode-$oc_target.tar.gz" >>"$cases"
-            printf '%s\t0\n' "https://github.com/anomalyco/opencode/releases/download/v$numeric/opencode-$oc_target.tar.gz?sig=REVIEW-SIGNED-SECRET&token=REVIEW-TOKEN" >>"$cases" ;;
+            printf '%s\t1\n' "https://registry.npmjs.org/@opencode/cli-$oc_target/-/cli-$oc_target-$numeric.tgz" >>"$cases"
+            printf '%s\t0\n' "https://registry.npmjs.org/@opencode/cli-$oc_target/-/cli-$oc_target-$sep.tgz" >>"$cases"
+            printf '%s\t0\n' "https://registry.npmjs.org/@opencode/cli-$oc_target/-/cli-$oc_target-$adjacent.tgz" >>"$cases"
+            printf '%s\t0\n' "https://registry.npmjs.org/@opencode/cli-$oc_target/-/cli-$oc_target-$numeric.tgz?token=REVIEW-TOKEN" >>"$cases"
+            printf '%s\t0\n' "https://registry.npmjs.org/@opencode/cli-$oc_target" \
+                "https://registry.npmjs.org/@opencode-ai/cli-$oc_target/-/cli-$oc_target-$numeric.tgz" \
+                "https://registry.npmjs.org/@opencode/cli-$oc_target/-/cli-other-$numeric.tgz" \
+                'https://opencode.ai/v2/install' 'https://opencode.ai/update/api/latest/cli/npm' >>"$cases" ;;
         claude)
             numeric="$version"
             sep="${numeric//./\/}"
@@ -360,17 +400,17 @@ spec.loader.exec_module(addon)
 
 
 class Req:
-    def __init__(self, url):
+    def __init__(self, url, method="GET"):
         parts = urlsplit(url)
         self.pretty_url = url
         self.pretty_host = parts.hostname
         self.path = parts.path + (("?" + parts.query) if parts.query else "")
-        self.method = "GET"
+        self.method = method
 
 
 class Flow:
-    def __init__(self, url):
-        self.request = Req(url)
+    def __init__(self, url, method="GET"):
+        self.request = Req(url, method)
         self.response = None
 
 
@@ -380,8 +420,9 @@ with open("/addon/cases.tsv", encoding="utf-8") as handle:
         line = line.rstrip("\n")
         if not line:
             continue
-        url, expect = line.rsplit("\t", 1)
-        flow = Flow(url)
+        fields = line.split("\t")
+        url, expect = fields[:2]
+        flow = Flow(url, fields[2] if len(fields) == 3 else "GET")
         addon.request(flow)
         allowed = flow.response is None
         if allowed != (expect == "1"):
@@ -559,7 +600,7 @@ $(report_script "$tool")" >"$out" 2>&1
     report="$(sed -n '/^--- REPORT ---$/,$p' "$out" | tail -n +2 | head -n 1)"
     case "$tool" in
         codex) expect="codex-cli ${version#rust-v}" ;;
-        opencode) expect="${version#v}" ;;
+        opencode) expect="opencode $version" ;;
         claude) expect="$version" ;;
     esac
     case "$report" in
@@ -613,8 +654,40 @@ run_denial_mutation() {
     echo "    mutation denied and logged as required"
 }
 
+run_plugin_profile() {
+    local cfg="$TMP/config.json" marker rc=0
+    run_allowlist_negatives opencode-plugins committed
+    write_config opencode-plugins committed "$cfg"
+    start_proxy "$cfg"
+    marker=$(mark_log)
+    CURRENT_LABEL=opencode-plugins
+    CURRENT_MARKER=$marker
+    # Cold private HOME/XDG/store are allocated by the owning hook. No cache mount.
+    run_with_watchdog 660 docker run --rm --name "$RUN_ID-plugin-$RANDOM" --platform "$platform" --network "$NET_INTERNAL" \
+        -v "$TMP/certs/mitmproxy-ca-cert.pem:/mitm/ca.pem:ro" \
+        -v "$REPO_ROOT/images/tools/opencode:/source:ro" \
+        -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
+        -e "HTTPS_PROXY=http://$PROXY:8080" -e "HTTP_PROXY=http://$PROXY:8080" \
+        -e NODE_EXTRA_CA_CERTS=/mitm/ca.pem \
+        -e AGENT_VM_CONTRACT_DIR=/contract -e AGENT_VM_OPENCODE_SOURCE_DIR=/source \
+        --entrypoint sh "$BASE_IMAGE" -c '
+            set -eu
+            mkdir -p /opt/agent-vm/opencode-plugins
+            cp /source/plugins/package.json /source/plugins/pnpm-lock.yaml /source/plugins/pnpm-workspace.yaml /source/plugins/pnpm-inputs.sha256 /source/plugins/index.js /opt/agent-vm/opencode-plugins/
+            AGENT_INSTALL_SOFT_FAIL= sh /source/install-opencode-plugins.sh
+            node --input-type=module -e "import(\"/opt/agent-vm/opencode-plugins/index.js\")"
+        ' >"$TMP/plugin-run.log" 2>&1 || rc=$?
+    capture_evidence opencode-plugins "$marker"
+    if grep -q '^DENY ' <(since_marker "$marker"); then fail 'plugin attempted denied egress'; fi
+    [ "$rc" -eq 0 ] || { tail -40 "$TMP/plugin-run.log" >&2; fail "plugin profile failed: $rc"; }
+}
+
 status=0
 for tool in "${tools[@]}"; do
+    if [ "$tool" = opencode-plugins ]; then
+        run_plugin_profile
+        continue
+    fi
     while IFS= read -r version; do
         [ -n "$version" ] || continue
         write_config "$tool" "$version" "$TMP/config.json"

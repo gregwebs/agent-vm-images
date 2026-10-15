@@ -75,6 +75,29 @@ class SelectionTests(unittest.TestCase):
                         operations.selections()
 
 
+class OpenCodeGuestProbeTests(unittest.TestCase):
+    def test_nine_selections_and_nested_probe_timeouts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            instance = verify.Verification.__new__(verify.Verification)
+            instance.root = Path(directory)
+            instance.arch = 'arm64'
+            instance.sequence = 1
+            instance.msb = Path('/fixture/msb')
+            instance.command = mock.Mock(return_value=b'')
+            with mock.patch.object(verify.capacity, 'check_space'), \
+                 mock.patch.object(verify.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)):
+                instance.boot('fixture:standard', {'MSB_HOME': directory}, pairs=['12345:23456'], probe='payload')
+            calls = [call for call in instance.command.call_args_list if call.args[0][1] == 'exec']
+            self.assertEqual(len(calls), 1)
+            argv = calls[0].args[0]
+            self.assertEqual(argv[argv.index('--timeout') + 1], '10m')
+            arguments = argv[argv.index('released-agent-probe') + 1:]
+            self.assertEqual(len(arguments), 11)
+            self.assertEqual(arguments[:2], ['12345', '23456'])
+            self.assertEqual(arguments[-1], operations.selections()['opencode-claude'])
+            self.assertEqual(calls[0].kwargs['timeout'], 660)
+
+
 class AuthorityTests(unittest.TestCase):
     def test_manifest_outcomes(self):
         cases = ((401, 'UNAUTHORIZED', 'UNAUTHORIZED'),

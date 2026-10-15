@@ -23,10 +23,10 @@ version bump, Rust application build, submodule or launcher packaging is needed.
 
 ## Selection ownership and maintenance
 
-`images/standard/Dockerfile` owns seven selection labels; base owns pnpm via
+`images/standard/Dockerfile` owns eight selection labels; base owns pnpm via
 `images/pnpm/pin.json` and a mirrored literal base label. Its deprecated standard
 AGENT_VERSION_PNPM is a compatibility assertion only (empty/equal accepted).
-Four exact nonempty installer defaults reference ARGs; dsh, Pi and bridge
+Four exact nonempty installer defaults reference ARGs; dsh, Pi, bridge and OpenCode-plugin
 empty/equal slots reuse committed manifest/lock bytes. Literal label fallbacks
 mirror manifests. Labels record selection, not health. Unrelated slots/locks
 must not change when one owner is bumped.
@@ -36,12 +36,14 @@ bash script/build/agent-versions.sh --write
 bash images/tools/dsh/upgrade-dsh.sh VERSION --pnpm 11.11.0
 bash images/tools/pi/upgrade-pi.sh VERSION
 bash images/tools/pi/bridge/upgrade-bridge.sh VERSION
+bash images/tools/opencode/plugins/upgrade-plugins.sh VERSION # requires pnpm 11.11.0
 bash script/test/contracts.sh
 # Review central Dockerfile, relevant JSON/lock diff and vendor provenance.
 bash images/build.sh base   # rebuild changed base before standard
 bash images/build.sh standard
 bash script/test/standard-image.sh agent-vm-base:local agent-vm-standard:local
 bash script/test/pi-runtime.sh agent-vm-base:local agent-vm-standard:local
+bash script/test/opencode-runtime.sh agent-vm-base:local agent-vm-standard:local
 ```
 
 pnpm updates require reviewed exact URL, equivalent SHA-512/SRI and freshly
@@ -117,7 +119,7 @@ bash script/test/standard-image.sh --self-test
 
 Rust guards retain lock/parser mutation checks and narrow source-presence checks;
 static strings do not certify actual installation. The real final-certification
-suite tests strict seven-record bytes and a genuine fixed-path Codex verifier
+suite tests strict eight-record bytes and a genuine fixed-path Codex verifier
 with a wrong-version PATH shadow that the final gate must reject.
 
 ## Expensive acceptance and CI
@@ -130,7 +132,7 @@ substitutes for full native amd64 and arm64 evidence.
 `standard-image.sh BASE STANDARD [--platform linux/ARCH] [--expect suffix=version …]`
 audits finished images, not builds. Expectations derive from committed sources,
 not labels. Exact overrides require independent `--expect`; labels and reports
-must agree. It checks seven records, exact wire reports, four numeric UID/GID
+must agree. It checks eight records, exact wire reports, four numeric UID/GID
 pairs, Pi warning/provider registration, committed unchanged locks, synthetic
 Claude/Pi seeds and disposable T5 negatives. Docker CMD does not run seeds
 implicitly. `pi-runtime.sh BASE STANDARD` retains deeper credential-free runtime
@@ -145,7 +147,7 @@ content check fails independently; CI runs it in the native audit phase.
 
 ```bash
 bash script/test/shipped-installer-network.sh agent-vm-base:local --platform linux/arm64
-# Strict defaults: all three vendored installers plus denied-latest control.
+# Strict defaults: all three vendored installers, the separate pnpm plugin profile and denied-latest control.
 # --overrides adds tracked exact alternates; --observe is NEVER acceptance.
 # Redacted request evidence (one log per selection plus the mutation) is written
 # under target/ci-logs/installer-egress-<run>/ and uploaded; a run that writes no
@@ -218,3 +220,21 @@ pass, merge remains blocked, even if contracts pass. Publication is
 [#264](https://github.com/gregwebs/agent-vm/issues/264) and is described in
 [standard image releases](docs/standard-image-releases.md); launcher/submodule
 integration is [#265](https://github.com/gregwebs/agent-vm/issues/265).
+
+## OpenCode plugin maintenance
+
+The [OpenCode integration](images/tools/opencode/README.md#image-owned-claude-plugin)
+is a new pnpm consumer, not a migration of dsh, Pi, bridge or Copilot (#42 remains
+open). Host lock maintenance requires actual pnpm **11.11.0**; pnpm 12 must not
+regenerate the lock. Empty/equal preparation validates committed YAML without a
+manager or registry call; frozen installation still verifies registry metadata.
+The hard-only runner never emits a transport receipt or retries with npm.
+
+Eight required agent records and seven agent verifiers exclude the separate
+base-pnpm identity/verification calls. Nine selection labels include base pnpm;
+the plugin manifest's packageManager field creates no additional selection.
+The four strict-egress profiles retain the native installers' narrower contracts;
+the plugin profile permits only eleven exact package documents and three exact
+tarballs, with HTTPS/443/GET/no query and no redirect learning. Both native full
+builds, the real launcher policy controls and all runtime/egress audits remain
+merge prerequisites. Do not substitute hermetic fake-manager controls for them.

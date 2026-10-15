@@ -41,6 +41,10 @@ if [ "$(printf '%s' "$numeric" | wc -l | tr -d ' ')" -ne 0 ] ||
     echo "install-opencode.sh: not an exact semver version: '$version'" >&2
     exit 1
 fi
+case "$numeric" in
+    2.*) ;;
+    *) echo "install-opencode.sh: only major 2 is reviewed: '$version'" >&2; exit 1 ;;
+esac
 [ -r "$VENDOR/install.sh" ] || {
     echo "install-opencode.sh: vendored installer missing at $VENDOR/install.sh" >&2
     exit 1

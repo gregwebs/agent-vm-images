@@ -108,7 +108,7 @@ RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
     sh /tmp/verify-codex.sh
 
 # opencode
-ARG AGENT_VERSION_OPENCODE=v1.18.34
+ARG AGENT_VERSION_OPENCODE=v2.0.29
 
 LABEL org.agent-vm.version.opencode="${AGENT_VERSION_OPENCODE}"
 
@@ -201,6 +201,33 @@ RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
     sh /tmp/verify-copilot.sh
 
+# Locked OpenCode Claude integration; runtime owns no package-manager state.
+ARG AGENT_VERSION_OPENCODE_CLAUDE=
+LABEL org.agent-vm.version.opencode-claude="${AGENT_VERSION_OPENCODE_CLAUDE:-1.4.1}"
+COPY tools/opencode/plugins/package.json /opt/agent-vm/opencode-plugins/package.json
+COPY tools/opencode/plugins/pnpm-lock.yaml /opt/agent-vm/opencode-plugins/pnpm-lock.yaml
+COPY tools/opencode/plugins/pnpm-workspace.yaml /opt/agent-vm/opencode-plugins/pnpm-workspace.yaml
+COPY tools/opencode/plugins/pnpm-inputs.sha256 /opt/agent-vm/opencode-plugins/pnpm-inputs.sha256
+COPY tools/opencode/plugins/index.js /opt/agent-vm/opencode-plugins/index.js
+COPY tools/opencode/opencode.json /opt/agent-vm/opencode/opencode.json
+ENV OPENCODE_CONFIG=/opt/agent-vm/opencode/opencode.json
+
+RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+    --mount=type=bind,source=tools/opencode,target=/tmp/opencode-source,ro \
+    AGENT_INSTALL_SOFT_FAIL= \
+    AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
+    AGENT_VM_OPENCODE_SOURCE_DIR=/tmp/opencode-source \
+    AGENT_VM_VERSION_OPENCODE_CLAUDE="${AGENT_VERSION_OPENCODE_CLAUDE}" \
+    sh /tmp/recipe-contract/run-install.sh opencode-claude /opt/agent-vm/install-status/opencode-claude sh /tmp/opencode-source/install-opencode-plugins.sh
+
+RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+    --mount=type=bind,source=tools/opencode,target=/tmp/opencode-source,ro \
+    AGENT_INSTALL_SOFT_FAIL= \
+    AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
+    AGENT_VM_OPENCODE_SOURCE_DIR=/tmp/opencode-source \
+    AGENT_VM_VERSION_OPENCODE_CLAUDE="${AGENT_VERSION_OPENCODE_CLAUDE}" \
+    sh /tmp/opencode-source/verify-opencode-plugins.sh
+
 # Certification of the finished filesystem and its unmodified final PATH.
 RUN --mount=type=bind,source=standard/verify-standard.sh,target=/tmp/verify-standard.sh,ro \
     --mount=type=bind,source=tools,target=/tmp/standard-tools,ro \
@@ -217,5 +244,6 @@ RUN --mount=type=bind,source=standard/verify-standard.sh,target=/tmp/verify-stan
     AGENT_VM_VERSION_OPENCODE="${AGENT_VERSION_OPENCODE}" \
     AGENT_VM_VERSION_CLAUDE="${AGENT_VERSION_CLAUDE}" \
     AGENT_VM_VERSION_COPILOT="${AGENT_VERSION_COPILOT}" \
+    AGENT_VM_VERSION_OPENCODE_CLAUDE="${AGENT_VERSION_OPENCODE_CLAUDE}" \
     AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
     sh /tmp/verify-standard.sh

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 APP=opencode
+SOURCE_APP=opencode
 
-# The classified download helper lives in the bind-mounted recipe contract.
-: "${AGENT_VM_CONTRACT_DIR:?the opencode installer needs AGENT_VM_CONTRACT_DIR}"
+: "${AGENT_VM_CONTRACT_DIR:?requires AGENT_VM_CONTRACT_DIR}"
 
 MUTED='\033[0;2m'
 RED='\033[0;31m'
@@ -18,13 +18,13 @@ Usage: install.sh [options]
 
 Options:
     -h, --help              Display this help message
-    -v, --version <version> Install a specific version (e.g., 1.0.180)
+    -v, --version <version> Install a specific version (e.g., 0.0.0-beta-17236)
     -b, --binary <path>     Install from a local binary instead of downloading
         --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, etc.)
 
 Examples:
-    curl -fsSL https://opencode.ai/install | bash
-    curl -fsSL https://opencode.ai/install | bash -s -- --version 1.0.180
+    curl -fsSL https://opencode.ai/v2/install | bash
+    curl -fsSL https://opencode.ai/v2/install | bash -s -- --version 0.0.0-beta-17236
     ./install --binary /path/to/opencode
 EOF
 }
@@ -102,20 +102,23 @@ else
       fi
     fi
 
+    # Git Bash and MSYS2 run as emulated x64 on Windows ARM64, so `uname -m` reports x86_64.
+    # The host CPU still shows in the `uname -s` suffix and in PROCESSOR_IDENTIFIER.
+    if [ "$os" = "windows" ] && [ "$arch" = "x64" ]; then
+      if [[ "$raw_os" == *-ARM64 || "${PROCESSOR_IDENTIFIER:-}" == ARM* ]]; then
+        arch="arm64"
+      fi
+    fi
+
     combo="$os-$arch"
     case "$combo" in
-      linux-x64|linux-arm64|darwin-x64|darwin-arm64|windows-x64)
+      linux-x64|linux-arm64|darwin-x64|darwin-arm64|windows-x64|windows-arm64)
         ;;
       *)
         echo -e "${RED}Unsupported OS/Arch: $os/$arch${NC}"
         exit 1
         ;;
     esac
-
-    archive_ext=".zip"
-    if [ "$os" = "linux" ]; then
-      archive_ext=".tar.gz"
-    fi
 
     is_musl=false
     if [ "$os" = "linux" ]; then
@@ -168,30 +171,24 @@ else
       target="$target-musl"
     fi
 
-    filename="$APP-$target$archive_ext"
-
-
-    if [ "$os" = "linux" ]; then
-        if ! command -v tar >/dev/null 2>&1; then
-             echo -e "${RED}Error: 'tar' is required but not installed.${NC}"
-             exit 1
-        fi
-    else
-        if ! command -v unzip >/dev/null 2>&1; then
-            echo -e "${RED}Error: 'unzip' is required but not installed.${NC}"
-            exit 1
-        fi
+    if ! command -v tar >/dev/null 2>&1; then
+        echo -e "${RED}Error: 'tar' is required but not installed.${NC}"
+        exit 1
     fi
 
     if [ -z "$requested_version" ]; then
-        echo -e "${RED}Error: this build requires an exact version (VERSION)${NC}" >&2
+        echo "Error: an exact VERSION is required" >&2
         exit 1
     fi
-    # Strip a leading 'v' if present. The exact asset download is the authority,
-    # so there is no channel lookup and no existence HEAD probe.
-    requested_version="${requested_version#v}"
-    url="https://github.com/anomalyco/opencode/releases/download/v${requested_version}/$filename"
-    specific_version=$requested_version
+    specific_version="${requested_version#v}"
+    package_name="@opencode/cli-$target"
+
+    filename="cli-$target-$specific_version.tgz"
+    url="https://registry.npmjs.org/$package_name/-/$filename"
+    binary_name="$SOURCE_APP"
+    if [ "$os" = "windows" ]; then
+        binary_name="$SOURCE_APP.exe"
+    fi
 fi
 
 print_message() {
@@ -209,33 +206,56 @@ print_message() {
 }
 
 download_and_install() {
-    print_message info "\n${MUTED}Installing ${NC}opencode ${MUTED}version: ${NC}$specific_version"
-    # Private scratch with a trap covering failure/success/signals, so a
-    # classified transport failure (or any other error under set -e) cannot
-    # leave download leftovers behind for the degraded image to ship.
-    scratch_dir="$(mktemp -d "${TMPDIR:-/tmp}/opencode_install.XXXXXX")"
-    trap 'rm -rf "$scratch_dir"' EXIT INT TERM HUP
-    local tmp_dir="$scratch_dir"
-    mkdir -p "$tmp_dir"
+    print_message info "\n${MUTED}Installing ${NC}$APP ${MUTED}version: ${NC}$specific_version"
+    tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/opencode_install.XXXXXX")
+    trap 'rm -rf "$tmp_dir"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
 
-    # Classified exact-asset download: a transport failure is a receipt + 75
-    # (propagated by set -e to the owning hook); everything else is hard.
     sh "${AGENT_VM_CONTRACT_DIR}/download.sh" "$url" "$tmp_dir/$filename"
 
-    if [ "$os" = "linux" ]; then
-        tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
-    else
-        unzip -q "$tmp_dir/$filename" -d "$tmp_dir"
+    tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
+    local installed_binary="$APP"
+    if [ "$os" = "windows" ]; then
+        installed_binary="$APP.exe"
     fi
-
-    mv "$tmp_dir/opencode" "$INSTALL_DIR"
-    chmod 755 "${INSTALL_DIR}/opencode"
+    mv "$tmp_dir/package/bin/$binary_name" "$INSTALL_DIR/$installed_binary"
+    chmod 755 "$INSTALL_DIR/$installed_binary"
+    rm -rf "$tmp_dir"
 }
 
 install_from_binary() {
-    print_message info "\n${MUTED}Installing ${NC}opencode ${MUTED}from: ${NC}$binary_path"
-    cp "$binary_path" "${INSTALL_DIR}/opencode"
-    chmod 755 "${INSTALL_DIR}/opencode"
+    print_message info "\n${MUTED}Installing ${NC}$APP ${MUTED}from: ${NC}$binary_path"
+    local installed_binary="$APP"
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) installed_binary="$APP.exe" ;;
+    esac
+    cp "$binary_path" "$INSTALL_DIR/$installed_binary"
+    chmod 755 "$INSTALL_DIR/$installed_binary"
+}
+
+install_legacy_shim() {
+    local shim_os="${os:-}"
+    if [[ -z "$shim_os" ]]; then
+        case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*) shim_os="windows" ;;
+        esac
+    fi
+    rm -f "$INSTALL_DIR/opencode2" "$INSTALL_DIR/opencode2.exe" "$INSTALL_DIR/opencode2.cmd"
+    if [[ "$shim_os" == "windows" ]]; then
+        cat > "$INSTALL_DIR/opencode2.cmd" <<'EOF'
+@echo off
+"%~dp0opencode.exe" %*
+exit /b %errorlevel%
+EOF
+        return
+    fi
+    cat > "$INSTALL_DIR/opencode2" <<'EOF'
+#!/bin/sh
+exec "$(dirname "$0")/opencode" "$@"
+EOF
+    chmod 755 "$INSTALL_DIR/opencode2"
 }
 
 if [ -n "$binary_path" ]; then
@@ -243,6 +263,7 @@ if [ -n "$binary_path" ]; then
 else
     download_and_install
 fi
+install_legacy_shim
 
 
 add_to_path() {
@@ -341,6 +362,6 @@ echo -e ""
 echo -e "cd <project>  ${MUTED}# Open directory${NC}"
 echo -e "opencode      ${MUTED}# Run command${NC}"
 echo -e ""
-echo -e "${MUTED}For more information visit ${NC}https://opencode.ai/docs"
+echo -e "${MUTED}For more information visit ${NC}https://opencode.ai/v2/docs"
 echo -e ""
 echo -e ""

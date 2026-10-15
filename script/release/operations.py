@@ -151,7 +151,8 @@ def selections() -> dict[str, str]:
     for name, path, dependency in (
         ('dsh', 'dsh', '@deepseek-ai/dsh'),
         ('pi', 'pi', '@earendil-works/pi-coding-agent'),
-        ('pi-claude-bridge', 'pi/bridge', 'pi-claude-bridge')):
+        ('pi-claude-bridge', 'pi/bridge', 'pi-claude-bridge'),
+        ('opencode-claude', 'opencode/plugins', '@openchamber/opencode-claude')):
         selected[name] = c.read_json(ROOT / f'images/tools/{path}/package.json')['dependencies'][dependency]
     pnpm = c.read_json(ROOT / 'images/pnpm/pin.json')['version']
     if not isinstance(pnpm, str) or not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', pnpm):

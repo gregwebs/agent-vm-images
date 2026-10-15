@@ -45,9 +45,10 @@ def _redact(url):
     are retained only privately in the in-memory allowlist (review F5).
     """
     parts = urlsplit(url)
-    if not parts.query:
-        return url
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, "<redacted>", ""))
+    host = parts.hostname or ""
+    if parts.port:
+        host += ":" + str(parts.port)
+    return urlunsplit((parts.scheme, host, parts.path, "<redacted>" if parts.query else "", ""))
 
 
 def _log(entry):
@@ -65,6 +66,11 @@ def _block(flow, reason, url):
 
 def request(flow):
     url = flow.request.pretty_url
+    if _CFG.get("https_only"):
+        parts = urlsplit(url)
+        if parts.scheme != "https" or parts.port not in (None, 443) or parts.query or parts.username or parts.password or parts.fragment:
+            _block(flow, "https-443-no-query-required", url)
+            return
     for pattern in DENY:
         if pattern.search(url):
             _block(flow, "deny-pattern", url)
@@ -94,6 +100,11 @@ def response(flow):
     if MODE == "observe":
         return
     url = flow.request.pretty_url
+    if _CFG.get("deny_redirects") and flow.response.status_code in (301, 302, 303, 307, 308):
+        _block(flow, "redirect", url)
+        return
+    if not _CFG.get("learn_redirects", True):
+        return
     if url not in _allowed_urls:
         return
     status = flow.response.status_code

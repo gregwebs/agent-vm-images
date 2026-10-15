@@ -237,3 +237,33 @@ package) is unrelated to this pin.
 
 Not covered by CI here yet: example image builds ([#33](https://github.com/gregwebs/agent-vm-images/issues/33))
 and Chrome runtime checks ([#24](https://github.com/gregwebs/agent-vm-images/issues/24)).
+
+## Maintained OpenCode 2 additions
+
+These are new maintained sources, not changes to the historical transfer above.
+The plugin is a new pnpm consumer; existing dsh/Pi/bridge/Copilot migration stays
+with #42. Ownership covers:
+
+- Runtime payloads: `images/tools/opencode/opencode.json`,
+  `images/tools/opencode/plugins/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,index.js}`.
+- OpenCode build/maintenance helpers:
+  `images/tools/opencode/install-opencode-plugins.sh`, `check-claude-runtime.mjs`,
+  `probe-opencode.py`, `check-claude-payload.mjs`, `verify-opencode-plugins.sh`,
+  `plugins/{check-lock.mjs,pin-pnpm-inputs.mjs,prepare-lock.sh,upgrade-plugins.sh}` and extended `README.md`.
+- Shared build-only helpers: `images/recipe-contract/{run-pnpm.sh,check-pnpm-environment.mjs}`.
+- Pinned install inputs: `images/tools/opencode/plugins/pnpm-inputs.sha256` records the reviewed bytes of
+  `package.json`, `pnpm-lock.yaml` and `pnpm-workspace.yaml`. The build verifies those bytes rather than
+  interpreting YAML, so the contract layer owns no third-party parser distribution; `check-lock.mjs`
+  verifies the pins and still asserts the manifest policy structurally, and `pin-pnpm-inputs.mjs`
+  (developer-only, never copied into an image) is the only writer. The manifest is pinned so the
+  reported selection cannot disagree with the pinned lockfile.
+- Tests: `script/test/{opencode-pnpm-prepare-lock.sh,opencode-pnpm-install.sh,opencode-pnpm-upgrade.sh,opencode-plugins-verify.sh,opencode-plugins-verify.py,opencode-probe.py,opencode-egress.py,pnpm-inputs.mjs,run-pnpm.sh}`.
+- Independent audit/runtime/release helpers:
+  `script/test/{opencode-audit.py,opencode-audit-tests.py,opencode-access-files.py,opencode-input-audit.py,opencode-guest-audit.sh,opencode-runtime.sh,opencode-runtime-mutations.py,opencode-pnpm-policy.py,render-released-agent-probe.py}`.
+- Fixtures: `script/test/fixtures/{opencode-server.py,opencode-query.js,opencode-compose.sh}` and
+  `script/test/fixtures/installer-egress/opencode-plugins.py`.
+
+The existing standard recipe, final gate, certification/wire/version/upgrade
+suites, Rust source guards, egress addon/selections, release selection plumbing,
+rendered guest probe and explicitly enumerated contracts/native CI remain their
+existing owners. No executable maintenance helper ships in the image.
