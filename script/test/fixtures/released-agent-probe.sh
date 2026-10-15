@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Credential-free probe supplied verbatim to Docker and native msb guests.
 set -euo pipefail
-[ "$#" -eq 10 ] || { echo 'probe requires UID GID and eight source-derived selections' >&2; exit 2; }
-uid=$1 gid=$2 codex=$3 opencode=$4 claude=$5 copilot=$6 dsh=$7 pnpm=$8 pi=$9 bridge=${10}
+[ "$#" -eq 11 ] || { echo 'probe requires UID GID and nine source-derived selections' >&2; exit 2; }
+uid=$1 gid=$2 codex=$3 opencode=$4 claude=$5 copilot=$6 dsh=$7 pnpm=$8 pi=$9 bridge=${10} opencode_claude=${11}
 [ "$(id -u)" = "$uid" ] && [ "$(id -g)" = "$gid" ]
 : "${HOME:?fresh writable HOME required}"
 printf 'numeric uid probe\n' > "$HOME/agent-vm-probe"
 tmp=$(mktemp -d "$HOME/probe.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
+# OPENCODE_PROBE_SOURCES
 export PI_TELEMETRY=0 PI_SKIP_VERSION_CHECK=1
 for tool in codex opencode claude copilot dsh pi pnpm; do
     timeout --kill-after=5s 60 "$tool" --version > "$tmp/$tool.out" 2> "$tmp/$tool.err"
@@ -18,7 +19,7 @@ from pathlib import Path
 root = Path(sys.argv[1])
 codex, opencode, claude, copilot, dsh, pnpm, pi = sys.argv[2:]
 expected = {'codex': 'codex-cli ' + codex.removeprefix('rust-v'),
-            'opencode': opencode.removeprefix('v'), 'claude': claude + ' (Claude Code)',
+            'opencode': 'opencode ' + opencode, 'claude': claude + ' (Claude Code)',
             'dsh': dsh, 'pnpm': pnpm, 'pi': pi}
 for tool, value in expected.items():
     assert (root / (tool + '.out')).read_bytes() == (value + '\n').encode(), tool + ' exact report'
@@ -28,9 +29,9 @@ assert all(x in (b'', b"Run 'copilot update' to check for updates.") for x in li
 for tool in (*expected, 'copilot'):
     data = (root / (tool + '.err')).read_bytes()
     assert all(x in (9, 10) or 32 <= x <= 126 for x in data), tool + ' stderr'
-    assert not any(re.fullmatch(rb'(codex-cli .*|GitHub Copilot CLI .*|.* \(Claude Code\)|v?[0-9]+\.[0-9]+\.[0-9]+.*)', x)
+    assert not any(re.fullmatch(rb'(codex-cli .*|GitHub Copilot CLI .*|.* \(Claude Code\)|opencode v[0-9]+\.[0-9]+\.[0-9]+.*|v?[0-9]+\.[0-9]+\.[0-9]+.*)', x)
                    for x in data.splitlines()), tool + ' conflicting stderr'
-for tool in ('codex', 'opencode', 'claude', 'copilot', 'dsh', 'pi', 'pi-claude-bridge'):
+for tool in ('codex', 'opencode', 'claude', 'copilot', 'dsh', 'pi', 'pi-claude-bridge', 'opencode-claude'):
     assert Path('/opt/agent-vm/install-status', tool).read_bytes() == b'installed\n', tool + ' status'
 PY
 for project in dsh pi pi-packages; do
@@ -66,4 +67,8 @@ for line in lines:
 assert len(marks) == 1 and re.fullmatch(r'RELEASE-BRIDGE models=[1-9][0-9]*', marks[0])
 assert any('agent-vm: signing in here' in line for line in lines)
 PY
+mkdir -p "$tmp/location/nested"
+timeout --kill-after=5 25 node "$tmp/check-claude-runtime.mjs" /opt/agent-vm/opencode-plugins /opt/agent/.local/bin/claude >"$tmp/runtime.json"
+timeout --kill-after=5 80 python3 "$tmp/probe-opencode.py" capture --binary /opt/agent/.opencode/bin/opencode --state-root "$tmp" --directory "$tmp/location/nested" --timeout 60 >"$tmp/evidence.json"
+python3 "$tmp/opencode-audit.py" --evidence "$tmp/evidence.json" --runtime "$tmp/runtime.json" --version "$opencode_claude" --status /opt/agent-vm/install-status/opencode-claude --directory "$tmp/location/nested"
 printf 'released standard probe passed uid=%s gid=%s\n' "$uid" "$gid"

@@ -159,7 +159,7 @@ remains an explicit constraint.
   registry. A file-provenance attestation covers the frozen `platform.json`,
   the archive files/parts and the SBOM; its bundle is
   `platform-ARCH-files.sigstore.json`.
-- `platform.json` is a strict schema containing the full image graph, the eight
+- `platform.json` is a strict schema containing the full image graph, the nine
   committed selections (pnpm from the base pin, not dsh manifest), source SHA/version/product/arch, Docker reported
   ID/driver/version plus canonical config digest, archive/part/SBOM
   names/sizes/hashes, `build_run_id`, `build_run_attempt` and the exact
@@ -397,7 +397,7 @@ download/authentication/source binding 43.1 s, signed source checkout/check
 the staged artifact was **6,194,500 bytes** (188 files). Retuned limits in
 minutes are checkout/bind 5+3, tools 20, containerd 5, reclaim/KVM 12, runtime
 10, download/authentication 20 (900-second whole-process watchdog), source
-checkout/check 5+3, verifier 60 (3300-second watchdog), stage 5, staged
+checkout/check 5+3, verifier 90 (5100-second watchdog), stage 5, staged
 authentication/validation 10 (420-second watchdog), upload/summary 15+5.
 Phase limits sum to **178 minutes**, leaving **122 minutes** inside the
 **300-minute** job bound: 7 minutes for setup/post steps and transitions plus

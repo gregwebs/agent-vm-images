@@ -2,9 +2,9 @@
 
 `install.upstream.sh` is a verbatim snapshot of OpenCode's published installer:
 
-- source: `https://opencode.ai/install`
-- retrieved: 2026-10-01
-- SHA-256: `fc3c1b2123f49b6df545a7622e5127d21cd794b15134fc3b66e1ca49f7fb297e`
+- source: `https://opencode.ai/v2/install`
+- retrieved: 2026-10-15
+- SHA-256: `6ef97e3d5b8782179efc2b04e6ce2e90ced23675df5792c9ea4f4a0465531865`
 
 It is provenance, not an executable guard target, and is never run.
 
@@ -24,29 +24,23 @@ snapshot renamed `install.sh`.
 
 The snapshot is pinned; the exact release archive it downloads is fetched at
 build time. Upstream publishes no separate checksum for the archive, so integrity
-comes from TLS plus the exact-version tag, not independent signing. `chmod`/mode
+comes from TLS plus the exact-version registry tarball URL, not independent signing. `chmod`/mode
 repairs keep the result usable by any uid; they are not a supply-chain guarantee.
 
 ## Patch hunks
 
-1. **Exact version only.** An empty `VERSION` is rejected instead of falling back
-   to the GitHub `latest` release, and the `latest` lookup, its `specific_version`
-   parse and the release-existence HEAD probe are removed. The exact asset URL is
-   the authority.
-2. **`download_and_install` routes through the shared classified helper**
-   (`images/recipe-contract/download.sh`), so a transport failure is a receipt + 75 and every
-   other failure is hard. The progress-download machinery it replaced
-   (`download_with_progress`, `print_progress`, `unbuffered_sed`) is removed.
-3. **The already-installed skip is removed.** `check_version` no longer exits 0
-   when a matching command happens to be present, so an inherited command cannot
-   mask a skipped install.
-4. **Upstream lint fixes folded in:** the `GITHUB_PATH` redirect is quoted.
-5. **Private scratch with trap cleanup.** `download_and_install` uses
-   `mktemp -d` under `TMPDIR` (a private, random `opencode_install.XXXXXX`)
-   plus an EXIT/INT/TERM/HUP trap, so a classified transport failure (or any
-   other error under `set -e`) removes the download scratch instead of leaving
-   `opencode_install_*` leftovers for a degraded image to ship.
+1. Require the recipe contract and an exact version. Remove the latest lookup,
+   package-existence probes and old-scope fallback; use only `@opencode`.
+2. Route the download through `images/recipe-contract/download.sh`. Remove the
+   progress helpers and inherited-command version probe.
+3. Use private scratch with exit cleanup and terminating signal traps.
+4. Quote the `GITHUB_PATH` redirect.
 
-The owning recipe is `images/standard/Dockerfile`, with read-only canonical
-helper mounts. Installer audit suites are pending migration in the follow-up
-pass; the referenced test paths are planned interfaces, not current evidence.
+The v2 archive layout is `package/bin/opencode`. Preserve the upstream
+`opencode2` forwarding shim. TLS and an exact tarball URL are the archive trust
+boundary: this route does not consume registry integrity or independent signing.
+
+The owning recipe is `images/standard/Dockerfile`. The hermetic
+`script/test/opencode-installer.sh` checks patch reproduction and the owning
+hook; `script/test/vendored-installers.sh` exercises the runnable installer.
+Native restricted-egress evidence is a separate acceptance requirement.

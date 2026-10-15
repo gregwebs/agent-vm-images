@@ -316,26 +316,26 @@ make_opencode_case() { # $1 name, $2 arch, $3 version
         *) fail "unknown arch $2" ;;
     esac
     local stage="$CASE/assets/stage-oc-$RANDOM" body
-    mkdir -p "$stage"
+    mkdir -p "$stage/package/bin"
     body="$(cat <<'SH'
 #!/bin/sh
-printf '%s\n' "@VERSION@"
+printf '%s\n' "opencode v@VERSION@"
 SH
 )"
     body="${body//@VERSION@/$3}"
-    printf '%s\n' "$body" >"$stage/opencode"
-    chmod 0755 "$stage/opencode"
-    (cd "$stage" && tar -czf "$CASE/assets/opencode.tgz" opencode)
+    printf '%s\n' "$body" >"$stage/package/bin/opencode"
+    chmod 0755 "$stage/package/bin/opencode"
+    (cd "$stage" && tar -czf "$CASE/assets/opencode.tgz" package)
     rm -rf "$stage"
     # Route every filename the installer may compute on a glibc or musl host,
     # with or without the AVX2-baseline suffix, to the same synthetic archive.
     local variant
     for variant in \
-        "opencode-linux-$OPENCODE_ARCH" \
-        "opencode-linux-$OPENCODE_ARCH-baseline" \
-        "opencode-linux-$OPENCODE_ARCH-musl" \
-        "opencode-linux-$OPENCODE_ARCH-baseline-musl"; do
-        route "$variant.tar.gz" "$CASE/assets/opencode.tgz"
+        "cli-linux-$OPENCODE_ARCH" \
+        "cli-linux-$OPENCODE_ARCH-baseline" \
+        "cli-linux-$OPENCODE_ARCH-musl" \
+        "cli-linux-$OPENCODE_ARCH-baseline-musl"; do
+        route "$variant-$3.tgz" "$CASE/assets/opencode.tgz"
     done
 }
 
@@ -676,7 +676,7 @@ done
 # =============================================================================
 echo "== opencode (real vendored install.sh) =="
 for arch in x86_64 aarch64; do
-    V=1.18.34
+    V=2.0.29
 
     make_opencode_case "opencode-$arch-ok" "$arch" "$V"
     run_opencode "v$V" "$OPENCODE_VENDOR"
@@ -685,12 +685,15 @@ for arch in x86_64 aarch64; do
     [ -x "$CASE/prefix/.opencode/bin/opencode" ] ||
         fail "opencode $arch: the binary was not installed"
     [ -L "$CASE/link/opencode" ] || fail "opencode $arch: the PATH link was not published"
-    [ "$("$CASE/link/opencode")" = "$V" ] || fail "opencode $arch: installed binary reports wrong version"
+    [ "$("$CASE/link/opencode")" = "opencode v$V" ] || fail "opencode $arch: installed binary reports wrong version"
+    [ "$("$CASE/prefix/.opencode/bin/opencode2" --version)" = "opencode v$V" ] ||
+        fail "opencode2 must forward to the installed command"
     [ "$(status_of opencode)" = pending ] || fail "opencode $arch: status is $(status_of opencode)"
     note "opencode $arch: clean install extracted the exact asset and linked the command"
 
     make_opencode_case "opencode-$arch-latest" "$arch" "$V"
-    mutate_vendor "$OPENCODE_VENDOR" "$CASE/mutant" 's#releases/download/v#releases/download/latest/#'
+    mutate_vendor "$OPENCODE_VENDOR" "$CASE/mutant" 's#https://registry.npmjs.org/\$package_name/-/\$filename#https://opencode.ai/update/api/latest/cli/npm#'
+    ! cmp -s "$OPENCODE_VENDOR/install.sh" "$CASE/mutant/install.sh" || fail "latest mutation changed no bytes"
     run_opencode "v$V" "$CASE/mutant"
     expect_hard "opencode $arch latest mutation"
     expect_denied "opencode $arch latest mutation"

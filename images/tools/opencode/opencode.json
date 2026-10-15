@@ -1,0 +1,5 @@
+{
+  "plugins": [
+    "/opt/agent-vm/opencode-plugins"
+  ]
+}

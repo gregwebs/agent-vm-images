@@ -19,7 +19,8 @@ version=$(actionlint -version | head -n 1)
 timeout --version | grep -q 'GNU coreutils' || { echo 'GNU timeout required (macOS: coreutils gnubin on PATH)' >&2; exit 1; }
 if [ "$guard_only" = false ]; then
     for suite in agent-versions claude-installer codex-installer copilot-installer copilot-verify \
-        opencode-installer dsh-prepare-lock dsh-verify pi-install pi-prepare-lock pi-verify \
+        opencode-installer opencode-pnpm-prepare-lock opencode-pnpm-install opencode-pnpm-upgrade \
+        opencode-plugins-verify run-pnpm dsh-prepare-lock dsh-verify pi-install pi-prepare-lock pi-verify \
         pi-wrapper shipped-installer-contracts tool-access vendored-installers upgrade-scripts \
         install-zellij install-pnpm host-watchdog transactional-publish standard-certification build-entrypoint \
         release-content release-operations release-http ci-boot-bind ci-boot-runtime ci-boot-evidence \
@@ -27,6 +28,11 @@ if [ "$guard_only" = false ]; then
         echo "=== $suite ==="
         bash "script/test/$suite.sh"
     done
+    node script/test/pnpm-inputs.mjs
+    python3 script/test/opencode-probe.py
+    python3 script/test/opencode-audit-tests.py
+    python3 script/test/opencode-egress.py
+    python3 script/test/render-released-agent-probe.py --self-test
     bash script/test/pnpm-defaults.sh --hermetic
     bash script/test/standard-image.sh --self-test
     bash script/test/example-layers.sh --self-test
@@ -53,6 +59,12 @@ assert not list(Path('images/tools').glob('*/contract')), 'tool-local helpers mu
 assert not list(Path('images/tools').glob('*/Dockerfile')), 'no per-tool products'
 PY
 node --check images/tools/dsh/check-lock-update.js
+for source in images/recipe-contract/check-pnpm-environment.mjs \
+    images/tools/opencode/check-claude-runtime.mjs images/tools/opencode/check-claude-payload.mjs images/tools/opencode/plugins/check-lock.mjs \
+    images/tools/opencode/plugins/pin-pnpm-inputs.mjs \
+    images/tools/opencode/plugins/index.js; do
+    node --check "$source"
+done
 (cd script/test/image-sources && cargo test --locked && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings)
 actionlint .github/workflows/contracts.yml .github/workflows/build-local.yml .github/workflows/installer-network.yml .github/workflows/release-standard.yml .github/workflows/release-rehearsal.yml .github/workflows/release-transports.yml .github/workflows/verify-release-boot.yml
 echo 'image contracts passed'

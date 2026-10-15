@@ -15,7 +15,7 @@ export AGENT_VM_CONTRACT_DIR AGENT_VM_INSTALL_STATUS_DIR
 tools="${AGENT_VM_TOOL_SOURCE_DIR:-/tmp/standard-tools}"
 
 require_installed() {
-    for name in dsh pi pi-claude-bridge codex opencode claude copilot; do
+    for name in dsh pi pi-claude-bridge codex opencode claude copilot opencode-claude; do
         if record=$(python3 "$AGENT_VM_CONTRACT_DIR/install-status.py" record "$AGENT_VM_INSTALL_STATUS_DIR/$name"); then
             if [ "$record" = installed ]; then continue; fi
         fi
@@ -61,6 +61,9 @@ sh "${PNPM_SOURCE_DIR:-/tmp/pnpm-source}/verify-pnpm.sh"
 for tool in dsh pi codex opencode claude copilot; do
     sh "$tools/$tool/verify-$tool.sh"
 done
+AGENT_VM_OPENCODE_SOURCE_DIR="$tools/opencode"
+export AGENT_VM_OPENCODE_SOURCE_DIR AGENT_VM_VERSION_OPENCODE_CLAUDE
+sh "$tools/opencode/verify-opencode-plugins.sh"
 sh "${PNPM_SOURCE_DIR:-/tmp/pnpm-source}/verify-pnpm.sh"
 check_path_identity
 require_installed

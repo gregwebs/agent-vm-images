@@ -4,7 +4,7 @@
 # release and stages the reviewed exact default in its Dockerfile.
 #
 # No network and no repository writes: a fake `curl` (GitHub + the claude
-# channel) and a fake `npm` (copilot's dist-tag) answer from environment
+# channel) and a fake `npm` (OpenCode and Copilot dist-tags) answer from environment
 # variables, and every run targets a `--repo-root` fixture tree of four
 # Dockerfiles with one `ARG AGENT_VERSION_*=<old>` line each. The real `jq` is
 # used, since the JSON extraction is part of what is under test.
@@ -27,12 +27,12 @@ BASH_BIN="${BASH:-/bin/bash}"
 # Upstream responses the fake curl/npm serve by default. The fixture Dockerfile
 # defaults below are different, so the happy path rewrites all four.
 DEFAULT_CODEX='{"tag_name":"rust-v0.30.0"}'
-DEFAULT_OPENCODE='{"tag_name":"v1.2.3"}'
+DEFAULT_OPENCODE='2.2.3'
 DEFAULT_CLAUDE='1.0.100'
 DEFAULT_COPILOT='0.1.30'
 
 FIXTURE_OLD_CODEX='rust-v0.29.9'
-FIXTURE_OLD_OPENCODE='v1.2.2'
+FIXTURE_OLD_OPENCODE='v2.2.2'
 FIXTURE_OLD_CLAUDE='1.0.99'
 FIXTURE_OLD_COPILOT='0.1.29'
 
@@ -74,7 +74,6 @@ printf '%s\n' "$*" >>"${STUB_LOG:-/dev/null}"
 [[ "${STUB_CURL_FAIL:-}" == 1 ]] && exit 1
 case "$url" in
     *openai/codex*) printf '%s' "${STUB_CODEX-}" ;;
-    *anomalyco/opencode*) printf '%s' "${STUB_OPENCODE-}" ;;
     *claude-code-releases/latest*) printf '%s' "${STUB_CLAUDE-}" ;;
     *) echo "stub curl: unexpected url: $url" >&2; exit 22 ;;
 esac
@@ -84,7 +83,11 @@ cat >"$STUB_BIN/npm" <<'SH'
 set -euo pipefail
 printf '%s\n' "$*" >>"${STUB_LOG:-/dev/null}"
 [[ "${STUB_NPM_FAIL:-}" == 1 ]] && exit 1
-printf '%s\n' "${STUB_COPILOT-}"
+case "$*" in
+    'view @opencode/cli dist-tags.latest') printf '%s\n' "${STUB_OPENCODE-}" ;;
+    'view @github/copilot dist-tags.latest') printf '%s\n' "${STUB_COPILOT-}" ;;
+    *) exit 1 ;;
+esac
 SH
 # Partial-write injection distinguishes publication from backup restoration.
 cat >"$STUB_BIN/cp" <<'SH'
@@ -245,7 +248,7 @@ GITHUB_OUTPUT="$CASE/github_output"
 run_agent_versions
 [[ $RUN_STATUS -eq 0 ]] || fail "the happy path must succeed: $RUN_STDERR"
 assert_contains "$RUN_OUTPUT" "codex ${FIXTURE_OLD_CODEX} -> rust-v0.30.0"
-assert_contains "$RUN_OUTPUT" "opencode ${FIXTURE_OLD_OPENCODE} -> v1.2.3"
+assert_contains "$RUN_OUTPUT" "opencode ${FIXTURE_OLD_OPENCODE} -> v2.2.3"
 assert_contains "$RUN_OUTPUT" "claude ${FIXTURE_OLD_CLAUDE} -> 1.0.100"
 assert_contains "$RUN_OUTPUT" "copilot ${FIXTURE_OLD_COPILOT} -> 0.1.30"
 assert_contains "$RUN_OUTPUT" "images/standard/Dockerfile"
@@ -277,7 +280,7 @@ assert_all_args_unchanged() {
         || fail "copilot Dockerfile changed on rejection"
 }
 assert_arg_rewritten codex rust-v0.30.0
-assert_arg_rewritten opencode v1.2.3
+assert_arg_rewritten opencode v2.2.3
 assert_arg_rewritten claude 1.0.100
 assert_arg_rewritten copilot 0.1.30
 assert_not_contains "$(cat "$FIXTURE_ROOT/images/standard/Dockerfile")" "$FIXTURE_OLD_CODEX"
@@ -295,7 +298,7 @@ assert_contains "$(cat "$CASE/log")" "Authorization: Bearer secret-token"
 
 new_case already-current
 STUB_CODEX='{"tag_name":"rust-v0.29.9"}'
-STUB_OPENCODE='{"tag_name":"v1.2.2"}'
+STUB_OPENCODE='2.2.2'
 STUB_CLAUDE='1.0.99'
 STUB_COPILOT='0.1.29'
 run_agent_versions
@@ -350,7 +353,7 @@ assert_status_fail
 assert_contains "$RUN_COMBINED" "codex version is not exact semver: 'rust-v1.2'"
 
 new_case opencode-null
-STUB_OPENCODE='{"tag_name":null}'
+STUB_OPENCODE='null'
 run_agent_versions
 assert_status_fail
 assert_contains "$RUN_COMBINED" "opencode version empty/null"
@@ -362,10 +365,19 @@ assert_status_fail
 assert_contains "$RUN_COMBINED" "opencode version empty/null"
 
 new_case opencode-no-prefix
-STUB_OPENCODE='{"tag_name":"1.2.3"}'
+STUB_OPENCODE='v2.2.3'
 run_agent_versions
 assert_status_fail
-assert_contains "$RUN_COMBINED" "opencode tag is not v<semver>: '1.2.3'"
+assert_contains "$RUN_COMBINED" "opencode version is not exact semver"
+
+for bad in '1.2.3' '3.0.0' '2.2' '^2.2.3' '2.2.3 ' '2.2.3
+2.2.4'; do
+    new_case "opencode-bad-$(printf '%s' "$bad" | tr -c 'A-Za-z0-9' '_')"
+    STUB_OPENCODE="$bad"
+    run_agent_versions
+    assert_status_fail
+    assert_all_args_unchanged
+done
 
 new_case claude-empty
 STUB_CLAUDE=''
@@ -472,10 +484,10 @@ assert_contains "$RUN_COMBINED" "copilot version is not exact semver: '1.2.3+.b'
 assert_all_args_unchanged
 
 new_case opencode-prerelease-leading-zero
-STUB_OPENCODE='{"tag_name":"v1.2.3-01"}'
+STUB_OPENCODE='2.2.3-01'
 run_agent_versions
 assert_status_fail
-assert_contains "$RUN_COMBINED" "opencode version is not exact semver: 'v1.2.3-01'"
+assert_contains "$RUN_COMBINED" "opencode version is not exact semver: '2.2.3-01'"
 assert_all_args_unchanged
 
 new_case codex-prerelease-leading-zero
@@ -498,13 +510,13 @@ assert_all_args_unchanged
 
 new_case canonical-prerelease-build-accepted
 STUB_CODEX='{"tag_name":"rust-v1.2.3-alpha.1.2"}'
-STUB_OPENCODE='{"tag_name":"v1.2.3-rc.1+build.01"}'
+STUB_OPENCODE='2.2.3-rc.1+build.01'
 STUB_CLAUDE='1.2.3-rc.1'
 STUB_COPILOT='1.2.3+build.01'
 run_agent_versions
 [[ $RUN_STATUS -eq 0 ]] || fail "canonical version ids must be accepted: $RUN_STDERR"
 assert_arg_rewritten codex rust-v1.2.3-alpha.1.2
-assert_arg_rewritten opencode v1.2.3-rc.1+build.01
+assert_arg_rewritten opencode v2.2.3-rc.1+build.01
 assert_arg_rewritten claude 1.2.3-rc.1
 assert_arg_rewritten copilot 1.2.3+build.01
 
@@ -522,7 +534,7 @@ new_case npm-fail
 STUB_NPM_FAIL=1
 run_agent_versions
 assert_status_fail
-assert_contains "$RUN_COMBINED" "copilot version lookup failed"
+assert_contains "$RUN_COMBINED" "opencode version lookup failed"
 
 # --- Dockerfile guards: missing, duplicate and unwritable -------------------
 

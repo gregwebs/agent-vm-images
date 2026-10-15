@@ -130,3 +130,24 @@ explicit escape, not a hidden one: `corepack enable`/`corepack pnpm` and running
 These are preferences, not enforcement. Disabling scripts does
 not unbuild previously approved caches; script verification uses cold state.
 Package age and metadata provenance comparison are not complete security.
+
+## Maintained OpenCode consumer
+
+The [OpenCode Claude project](../images/tools/opencode/README.md#image-owned-claude-plugin)
+is the first new standard-image pnpm consumer. It uses the actual base launcher,
+a reviewed v9 `pnpm-lock.yaml`, isolated unhoisted modules, a frozen production
+install, `--no-optional`, and disabled scripts/hooks. It grants no build approval,
+age/trust exclusion, lock-trust bypass or alternate-manager fallback. Maintained
+preparation/installation rejects ambient package-manager overrides except exact
+base defaults. This does not remove the runtime caller escape routes above.
+
+The external content-addressed store and private HOME/XDG state are disposable;
+the installed `.pnpm` virtual store is not. The plugin's two direct dependencies
+share one SDK instance and one Zod peer/dependency instance. Two reviewed missing
+SDK peers remain absent; the runtime probe, handoff and real CLI initialization
+prove this version-specific choice rather than general peer compatibility.
+Frozen installation can request metadata even when preparation reused bytes.
+Policy, lock/configuration, integrity and network failures all stay hard through
+`images/recipe-contract/run-pnpm.sh`; no receipt is written. Existing dsh/Pi/bridge/
+Copilot npm paths remain #42 work. The shared runner/parser and isolated-layout
+checks support that future work without claiming the migration complete.

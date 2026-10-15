@@ -1,0 +1,12 @@
+packages:
+  - .
+autoInstallPeers: false
+strictPeerDependencies: false
+nodeLinker: isolated
+hoist: false
+enableGlobalVirtualStore: false
+pmOnFail: error
+sideEffectsCache: false
+allowBuilds: {}
+overrides:
+  zod: 4.6.7

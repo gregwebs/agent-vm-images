@@ -12,7 +12,7 @@
 #
 # It resolves exactly the four sources the single-slot installers install from:
 #   - codex:    openai/codex releases/latest tag -> canonical `rust-v<semver>`
-#   - opencode: anomalyco/opencode releases/latest tag -> canonical `v<semver>`
+#   - opencode: npm `@opencode/cli` latest -> canonical `v2.<semver remainder>`
 #   - claude:   downloads.claude.ai native channel `/latest` -> bare `<semver>`
 #   - copilot:  npm `@github/copilot` latest -> bare `<semver>`
 # dsh and pi are lock-backed layers with EMPTY version ARGs; their pins (and
@@ -152,12 +152,13 @@ canonicalize() { # $1 = tool, $2 = raw
             printf 'rust-v%s\n' "$body"
             ;;
         opencode)
-            case "$raw" in
-                v*) body="${raw#v}" ;;
-                *) fail "opencode tag is not v<semver>: '${raw}'" ;;
-            esac
+            body="$raw"
             printf '%s' "$body" | grep -Eq "$opencode_re" ||
                 fail "opencode version is not exact semver: '${raw}'"
+            case "$body" in
+                2.*) ;;
+                *) fail "opencode requires reviewed major 2: '${raw}'" ;;
+            esac
             printf 'v%s\n' "$body"
             ;;
         claude)
@@ -178,8 +179,8 @@ canonicalize() { # $1 = tool, $2 = raw
 
 raw_codex="$(github_latest_tag openai/codex)" \
     || fail "codex version lookup failed (openai/codex releases/latest)"
-raw_opencode="$(github_latest_tag anomalyco/opencode)" \
-    || fail "opencode version lookup failed (anomalyco/opencode releases/latest)"
+raw_opencode="$(npm view @opencode/cli dist-tags.latest)" \
+    || fail "opencode version lookup failed (npm @opencode/cli)"
 raw_claude="$(curl -fsSL https://downloads.claude.ai/claude-code-releases/latest)" \
     || fail "claude version lookup failed (downloads.claude.ai/claude-code-releases/latest)"
 raw_copilot="$(npm view @github/copilot dist-tags.latest)" \

@@ -428,8 +428,8 @@ fn every_dsh_locked_package_carries_integrity() {
 
 const RECIPES: [&str; 6] = ["dsh", "pi", "codex", "opencode", "claude", "copilot"];
 
-/// Seven standard-owned selections; pnpm is inherited from base.
-const VERSION_SLOTS: [(&str, &str); 7] = [
+/// Eight standard-owned selections; pnpm is inherited from base.
+const VERSION_SLOTS: [(&str, &str); 8] = [
     ("codex", "AGENT_VERSION_CODEX"),
     ("opencode", "AGENT_VERSION_OPENCODE"),
     ("claude", "AGENT_VERSION_CLAUDE"),
@@ -437,6 +437,7 @@ const VERSION_SLOTS: [(&str, &str); 7] = [
     ("dsh", "AGENT_VERSION_DSH"),
     ("pi", "AGENT_VERSION_PI"),
     ("pi-claude-bridge", "AGENT_VERSION_PI_CLAUDE_BRIDGE"),
+    ("opencode-claude", "AGENT_VERSION_OPENCODE_CLAUDE"),
 ];
 
 fn standard_dockerfile() -> String {
@@ -648,7 +649,10 @@ fn single_slot_recipes_pin_an_exact_default_and_reference_it_in_the_label() {
         let value = dockerfile_arg(&text, arg);
         match *label {
             "codex" => assert_exact_slot(&value, "rust-v"),
-            "opencode" => assert_exact_slot(&value, "v"),
+            "opencode" => {
+                assert_exact_slot(&value, "v");
+                assert!(value.starts_with("v2."), "OpenCode major 2 only");
+            }
             _ => assert_exact_slot(&value, ""),
         }
         assert_eq!(
@@ -705,7 +709,7 @@ fn every_shipped_version_label_is_present_exactly_once() {
     expected.sort();
     assert_eq!(
         seen, expected,
-        "the standard-owned version labels drifted from the seven-slot contract"
+        "the standard-owned version labels drifted from the eight-slot contract"
     );
 }
 
@@ -898,7 +902,8 @@ fn shipped_recipes_extend_path_additively() {
 
 #[test]
 fn no_shipped_recipe_resolves_upstream_latest() {
-    const FORBIDDEN: [&str; 6] = [
+    const FORBIDDEN: [&str; 7] = [
+        "/update/api/latest",
         "releases/latest",
         "/latest/download",
         "dist-tags.latest",
@@ -1340,5 +1345,108 @@ fn base_pnpm_source_mutations_are_rejected() {
         let mut mutated = pin.clone();
         mutated[key] = Value::String("mutated".into());
         assert!(check_base_pnpm_sources(&base, &standard, &launcher, &mutated).is_err());
+    }
+}
+
+#[test]
+fn opencode_pnpm_inputs_are_pinned_bytes() {
+    use serde_json::json;
+    let manifest = read_json("images/tools/opencode/plugins/package.json");
+    let sdk = "@anthropic-ai/claude-agent-sdk";
+    let plugin = "@openchamber/opencode-claude";
+    let version = manifest["dependencies"][plugin].as_str().unwrap();
+    assert!(is_exact_semver(version));
+    assert_eq!(
+        manifest,
+        json!({"name":"agent-vm-guest-opencode-plugins", "version":"0.0.0", "private":true,
+            "type":"module", "packageManager":"pnpm@11.11.0", "dependencies":{sdk:"0.3.281",plugin:version}})
+    );
+    // The two pnpm inputs are reviewed bytes rather than interpreted YAML, so the
+    // contract layer owns no parser distribution and a build never re-pins what it
+    // verifies. The digests are recomputed independently by the node and Python
+    // oracles; here the pin's contract and this layer's ownership are asserted.
+    let mut names = Vec::new();
+    for line in read_text("images/tools/opencode/plugins/pnpm-inputs.sha256").lines() {
+        let (digest, name) = line
+            .split_once("  ")
+            .unwrap_or_else(|| panic!("pin line is not '<digest>  <name>': {line:?}"));
+        assert_eq!(line.split("  ").count(), 2, "{line:?}");
+        assert_eq!(digest.len(), 64, "{line:?}");
+        assert!(
+            digest
+                .chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            "{line:?}"
+        );
+        names.push(name.to_string());
+    }
+    names.sort();
+    assert_eq!(
+        names,
+        ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]
+    );
+    for file in ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"] {
+        assert!(
+            repo_path(&format!("images/tools/opencode/plugins/{file}")).is_file(),
+            "missing {file}"
+        );
+    }
+    assert!(
+        !repo_path("images/recipe-contract/vendor/yaml").exists(),
+        "the contract layer must not carry a parser distribution"
+    );
+    assert!(!repo_path("images/recipe-contract/pnpm-input.mjs").exists());
+    let dockerfile = standard_dockerfile();
+    assert_eq!(
+        dockerfile_arg(&dockerfile, "AGENT_VERSION_OPENCODE_CLAUDE"),
+        ""
+    );
+    assert_eq!(
+        label_value(&dockerfile, "org.agent-vm.version.opencode-claude"),
+        format!("${{AGENT_VERSION_OPENCODE_CLAUDE:-{version}}}")
+    );
+    assert!(dockerfile.contains(
+        "COPY tools/opencode/plugins/pnpm-inputs.sha256 /opt/agent-vm/opencode-plugins/pnpm-inputs.sha256"
+    ));
+    assert!(
+        !dockerfile.contains("pin-pnpm-inputs.mjs"),
+        "the developer-only re-pin tool must not be copied into an image"
+    );
+    let pnpm = read_json("images/pnpm/pin.json");
+    assert_eq!(
+        manifest["packageManager"],
+        format!("pnpm@{}", pnpm["version"].as_str().unwrap())
+    );
+    let install = read_text("images/tools/opencode/install-opencode-plugins.sh");
+    for required in [
+        "/usr/local/bin/pnpm",
+        "--frozen-lockfile --prod --no-optional",
+        "--ignore-scripts --ignore-pnpmfile --pm-on-fail=error",
+        "--package-import-method=copy",
+        "run-pnpm.sh",
+        "check-pnpm-environment.mjs",
+    ] {
+        assert!(install.contains(required), "missing {required}");
+    }
+    for forbidden in [
+        "npm ci",
+        "npm install",
+        "pnx",
+        "corepack",
+        "trust-lockfile",
+        "trust-policy=off",
+    ] {
+        assert!(!install.contains(forbidden), "forbidden {forbidden}");
+    }
+    for file in [
+        "images/tools/opencode/opencode.json",
+        "images/tools/opencode/probe-opencode.py",
+        "images/tools/opencode/check-claude-runtime.mjs",
+        "images/tools/opencode/verify-opencode-plugins.sh",
+        "images/recipe-contract/run-pnpm.sh",
+        "images/tools/opencode/plugins/pnpm-inputs.sha256",
+        "images/tools/opencode/plugins/pin-pnpm-inputs.mjs",
+    ] {
+        assert!(repo_path(file).is_file(), "missing {file}");
     }
 }

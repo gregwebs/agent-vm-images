@@ -14,7 +14,7 @@ os.umask(0o022)
 tmp=Path(tempfile.mkdtemp(prefix='gate.', dir='/tmp')); tmp.chmod(0o755)
 atexit.register(shutil.rmtree, tmp)
 records=tmp/'records'; records.mkdir(); tools=tmp/'tools'; commands=tmp/'bin'; commands.mkdir()
-names=['dsh','pi','pi-claude-bridge','codex','opencode','claude','copilot']; verifiers=['dsh','pi','codex','opencode','claude','copilot']
+names=['dsh','pi','pi-claude-bridge','codex','opencode','claude','copilot','opencode-claude']; verifiers=['dsh','pi','codex','opencode','claude','copilot']
 def writeexe(p,s): p.parent.mkdir(parents=True,exist_ok=True); p.write_text(s); p.chmod(0o755)
 # Native fixtures are copied or appended byte-for-byte; variable paths/versions
 # travel as environment data instead of being interpolated into program bodies.
@@ -24,6 +24,7 @@ def appendexe(p,s,src): p.write_bytes(s.encode()+Path(src).read_bytes()); p.chmo
 for name in names: (records/name).write_text('installed\n')
 for tool in verifiers:
  writeexe(tools/tool/f'verify-{tool}.sh',f'#!/bin/sh\nset -eu\ntest -z "$AGENT_INSTALL_SOFT_FAIL"\nprintf "{tool}\\n" >> "$CALLS"\n')
+writeexe(tools/'opencode/verify-opencode-plugins.sh', '#!/bin/sh\nset -eu\nprintf "opencode-claude\\n" >> "$CALLS"\n')
 for name in ['codex','opencode','claude','pi']: writeexe(commands/name,'#!/bin/sh\nexit 0\n')
 prefix=tmp/'prefix'
 for name,folder in [('codex','.local'),('claude','.local'),('opencode','.opencode')]:
@@ -42,8 +43,8 @@ def run(ok, e=None,label='gate'):
  count+=1
  print(f'{label}: expected {"pass" if ok else "nonzero"}, status={result.returncode}')
  return result
-run(True,label='installed + all six gates, inherited soft input cleared')
-assert (tmp/'calls').read_text().splitlines()==verifiers
+run(True,label='installed + all seven agent gates, inherited soft input cleared')
+assert (tmp/'calls').read_text().splitlines()==verifiers+['opencode-claude']
 for name in names:
  for data in [None,b'pending\n',b'absent-pi\n',b'absent-transport 60\n',b'installed',b'installed\ninstalled\n',b'installed\x00\n']:
   p=records/name
@@ -74,6 +75,10 @@ writeexe(v,original+'echo plausible report\nexit 1\n'); run(False,label='verifie
 pnpm_launcher=fixture/'usr/local/bin/pnpm'; pnpm_original=pnpm_launcher.read_bytes()
 appendexe(v,original,FIXTURES/'launcher-mutation.sh')
 run(False,label='late pnpm launcher mutation'); pnpm_launcher.write_bytes(pnpm_original); writeexe(v,original)
+v=tools/'opencode/verify-opencode-plugins.sh'; plugin_original=v.read_text()
+writeexe(v,plugin_original+'printf "pending\\n" > "$AGENT_VM_INSTALL_STATUS_DIR/opencode-claude"\n')
+run(False,label='late plugin record mutation'); (records/'opencode-claude').write_text('installed\n')
+writeexe(v,plugin_original+'exit 1\n'); run(False,label='plugin verifier failure'); writeexe(v,plugin_original)
 # Real codex fixed-path verifier alone accepts a readable wrong-version PATH shadow;
 # final identity check must reject that same fixture before other fake verifiers.
 writeexe(commands/'codex',"#!/bin/sh\nprintf 'codex-cli 0.159.3\\n'\n")
