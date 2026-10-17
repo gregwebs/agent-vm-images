@@ -1,0 +1,103 @@
+{
+  "selection": {
+    "kind": "dsh",
+    "version": "0.1.5-rc.1"
+  },
+  "packages": [
+    {
+      "id": {
+        "name": "@deepseek-ai/cordis-plugin-loader",
+        "version": "1.0.3"
+      },
+      "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      "tarball": "https://registry.npmjs.org/@deepseek-ai/cordis-plugin-loader/-/cordis-plugin-loader-1.0.3.tgz",
+      "peers": {
+        "@deepseek-ai/cordis": "4.0.2"
+      },
+      "optionalPeers": []
+    },
+    {
+      "id": {
+        "name": "@deepseek-ai/cordis",
+        "version": "4.0.2"
+      },
+      "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      "tarball": "https://registry.npmjs.org/@deepseek-ai/cordis/-/cordis-4.0.2.tgz",
+      "peers": {},
+      "optionalPeers": []
+    },
+    {
+      "id": {
+        "name": "@deepseek-ai/dsh",
+        "version": "0.1.5-rc.1"
+      },
+      "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      "tarball": "https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-0.1.5-rc.1.tgz",
+      "peers": {},
+      "optionalPeers": []
+    }
+  ],
+  "snapshots": [
+    {
+      "id": {
+        "packageId": {
+          "name": "@deepseek-ai/cordis-plugin-loader",
+          "version": "1.0.3"
+        },
+        "peerContext": [
+          {
+            "packageId": {
+              "name": "@deepseek-ai/cordis",
+              "version": "4.0.2"
+            },
+            "peerContext": [],
+            "key": "@deepseek-ai/cordis@4.0.2"
+          }
+        ],
+        "key": "@deepseek-ai/cordis-plugin-loader@1.0.3(@deepseek-ai/cordis@4.0.2)"
+      },
+      "edges": [
+        {
+          "name": "@deepseek-ai/cordis",
+          "target": "@deepseek-ai/cordis@4.0.2",
+          "optional": false
+        }
+      ]
+    },
+    {
+      "id": {
+        "packageId": {
+          "name": "@deepseek-ai/cordis",
+          "version": "4.0.2"
+        },
+        "peerContext": [],
+        "key": "@deepseek-ai/cordis@4.0.2"
+      },
+      "edges": []
+    },
+    {
+      "id": {
+        "packageId": {
+          "name": "@deepseek-ai/dsh",
+          "version": "0.1.5-rc.1"
+        },
+        "peerContext": [],
+        "key": "@deepseek-ai/dsh@0.1.5-rc.1"
+      },
+      "edges": [
+        {
+          "name": "@deepseek-ai/cordis-plugin-loader",
+          "target": "@deepseek-ai/cordis-plugin-loader@1.0.3(@deepseek-ai/cordis@4.0.2)",
+          "optional": false
+        }
+      ]
+    }
+  ],
+  "importer": [
+    {
+      "name": "@deepseek-ai/dsh",
+      "target": "@deepseek-ai/dsh@0.1.5-rc.1",
+      "optional": false
+    }
+  ]
+}

@@ -408,4 +408,5 @@ chmod 0600 "$case_dir/tree/index.ts"
 expect_fail "not readable by all" --content "$case_dir/tree/index.ts"
 
 PYTHONDONTWRITEBYTECODE=1 python3 "$REPO_ROOT/script/test/pnpm-access.py"
+PYTHONDONTWRITEBYTECODE=1 python3 "$REPO_ROOT/script/test/tool-access-tree.py"
 echo "tool-access black-box tests passed"

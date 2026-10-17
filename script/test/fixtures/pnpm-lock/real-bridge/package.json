@@ -1,0 +1,6 @@
+{
+  "name": "bounded-real-bridge-fixture",
+  "private": true,
+  "packageManager": "pnpm@11.11.0",
+  "dependencies": {"pi-claude-bridge": "0.1.0"}
+}

@@ -238,3 +238,54 @@ the plugin profile permits only eleven exact package documents and three exact
 tarballs, with HTTPS/443/GET/no query and no redirect learning. Both native full
 builds, the real launcher policy controls and all runtime/egress audits remain
 merge prerequisites. Do not substitute hermetic fake-manager controls for them.
+
+
+## Bounded pnpm primitives
+
+#42 PR 1 adds build-only graph/access interfaces, not an agent migration. Read
+[ownership](docs/image-source-ownership.md#bounded-pnpm-primitives-42-pr-1) and the
+[parser ADR](docs/adr/0001-build-only-pnpm-graph-parser.md). Node is required for
+the bounded CLI; no host YAML install or package-manager invocation is needed:
+
+```sh
+node images/recipe-contract/pnpm-lock.mjs check dsh script/test/fixtures/pnpm-lock/tiny-dsh
+node images/recipe-contract/pnpm-lock.mjs graph bridge script/test/fixtures/pnpm-lock/real-bridge
+node script/test/pnpm-vendor.mjs
+node script/test/pnpm-lock-inputs.mjs
+bash script/test/tool-access.sh
+bash script/test/standard-node-consumers.sh --self-test
+bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer primitives --platform linux/arm64
+```
+
+`pin KIND PREFIX` deliberately rewrites only three-input SHA-256 consistency
+pins after full structural/policy validation; builds must never re-pin failures.
+Fixtures retain independent expected graphs and a real pnpm 11.11.0 emitted v9
+lock. Never use host pnpm 12 for any lock work. Vendor files are digest-checked,
+not linted/rewritten; Rust inventory guards run without Node. `contracts.sh`
+explicitly runs vendor/parser and harness self-tests, without Docker/network.
+
+`check-tool-access.py [--content | --tree] TARGET...` accepts explicit tree
+directories (bare names beneath cwd, not PATH). It audits every physical entry
+and symlink hop, rejects external targets/ACLs/special files and preserves lexical
+ancestry. Tree readability does not prove bins executable: run normal command/
+interpreter/native audits too. OpenCode's independent payload oracle stays intact.
+
+The focused smoke needs an existing native Linux base and daemon-backed Docker
+builder (a Darwin client is supported), Python, Node22/pnpm in base and functional
+setpriv/Linux access xattrs/MKNOD. No apt/acl/setfacl prerequisite or base rebuild.
+It requires 768 MiB free on daemon writable-layer and owned fixture-volume
+filesystems: 512 MiB retained reserve plus a maximum 256 MiB setup allocation.
+This threshold is **not** the full product's 25 GiB floor. Setup grants MKNOD only
+to its own short-lived container; final four UID/GID probes have zero capabilities
+and no attached networks. HOME overmounts are declared at create. ACL/device
+creation/readback/removal and repaired positives are mandatory, never skips.
+Owned logs/provenance are retained in `target/ci-logs/pnpm-primitives-*/`.
+The overall watchdog is 1800s, individual runtime probes at most 180s.
+
+Only `--consumer primitives` exists in this slice; dsh/pi/copilot return usage2.
+A local base with matching pnpm bytes but no whole-source provenance provides
+diagnostic smoke only. Both clean native CI rows must still build/audit the full
+unchanged standard product at the proposed SHA, including current strict egress.
+Do not attempt a full local build below the product capacity floor or prune
+images to make room. The [failure ADR](docs/adr/0002-pnpm-terminal-failure-boundary.md)
+records the proposed later bridge narrowing; no production receipt changes here.

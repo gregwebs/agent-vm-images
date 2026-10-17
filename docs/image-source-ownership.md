@@ -253,7 +253,7 @@ with #42. Ownership covers:
 - Shared build-only helpers: `images/recipe-contract/{run-pnpm.sh,check-pnpm-environment.mjs}`.
 - Pinned install inputs: `images/tools/opencode/plugins/pnpm-inputs.sha256` records the reviewed bytes of
   `package.json`, `pnpm-lock.yaml` and `pnpm-workspace.yaml`. The build verifies those bytes rather than
-  interpreting YAML, so the contract layer owns no third-party parser distribution; `check-lock.mjs`
+  interpreting YAML; OpenCode does not import the shared build-only graph parser. `check-lock.mjs`
   verifies the pins and still asserts the manifest policy structurally, and `pin-pnpm-inputs.mjs`
   (developer-only, never copied into an image) is the only writer. The manifest is pinned so the
   reported selection cannot disagree with the pinned lockfile.
@@ -267,3 +267,25 @@ The existing standard recipe, final gate, certification/wire/version/upgrade
 suites, Rust source guards, egress addon/selections, release selection plumbing,
 rendered guest probe and explicitly enumerated contracts/native CI remain their
 existing owners. No executable maintenance helper ships in the image.
+
+
+## Bounded pnpm primitives (#42, PR 1)
+
+`images/recipe-contract/pnpm-lock.mjs` and its authenticated
+`vendor/yaml/` distribution are build-only data validators, not runtime payloads.
+The [parser ADR](adr/0001-build-only-pnpm-graph-parser.md) owns the trust/update
+boundary and alternatives. OpenCode retains its independent byte-only checker.
+No dsh/Pi/bridge/Copilot consumer, production lock, failure producer or standard
+recipe changes in this slice; their current npm contracts above remain live.
+
+The public check/graph/pin CLI, hostile fixtures, explicit vendor inventory tests,
+generic access `--tree` and primitive-only native harness are prerequisite
+interfaces, not consumer acceptance. The exact future workspace configs must be
+regenerated and cold-installed in their owning slices. Rust owns source/path
+boundaries without Node subprocesses; Node owns vendor digest/mutation checks.
+See [contributor commands](../CONTRIBUTING.md#bounded-pnpm-primitives).
+
+The [terminal-failure ADR](adr/0002-pnpm-terminal-failure-boundary.md) records why
+pnpm remains hard-only and the proposed bridge-only loss of degraded transport
+classification. Maintainer acknowledgement on #42 is required before PR 3 removes
+that producer. No receipt clearing or adapter retirement occurs in PR 1.
