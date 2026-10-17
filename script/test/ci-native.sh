@@ -49,6 +49,7 @@ case "$phase" in
         done
         ;;
     audit)
+        timed node-primitives bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer primitives --platform "$platform"
         timed pnpm-runtime bash script/test/pnpm-runtime.sh agent-vm-base:local agent-vm-standard:local --platform "$platform"
         timed standard-uid-t5 bash script/test/standard-image.sh agent-vm-base:local agent-vm-standard:local --platform "$platform"
         timed opencode-runtime bash script/test/opencode-runtime.sh agent-vm-base:local agent-vm-standard:local

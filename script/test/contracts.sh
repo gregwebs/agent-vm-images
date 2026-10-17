@@ -28,6 +28,9 @@ if [ "$guard_only" = false ]; then
         echo "=== $suite ==="
         bash "script/test/$suite.sh"
     done
+    node script/test/pnpm-vendor.mjs
+    node script/test/pnpm-lock-inputs.mjs
+    bash script/test/standard-node-consumers.sh --self-test
     node script/test/pnpm-inputs.mjs
     python3 script/test/opencode-probe.py
     python3 script/test/opencode-audit-tests.py
@@ -59,7 +62,8 @@ assert not list(Path('images/tools').glob('*/contract')), 'tool-local helpers mu
 assert not list(Path('images/tools').glob('*/Dockerfile')), 'no per-tool products'
 PY
 node --check images/tools/dsh/check-lock-update.js
-for source in images/recipe-contract/check-pnpm-environment.mjs \
+for source in images/recipe-contract/pnpm-lock.mjs script/test/pnpm-vendor.mjs script/test/pnpm-lock-inputs.mjs \
+    images/recipe-contract/check-pnpm-environment.mjs \
     images/tools/opencode/check-claude-runtime.mjs images/tools/opencode/check-claude-payload.mjs images/tools/opencode/plugins/check-lock.mjs \
     images/tools/opencode/plugins/pin-pnpm-inputs.mjs \
     images/tools/opencode/plugins/index.js; do

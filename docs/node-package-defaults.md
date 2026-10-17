@@ -151,3 +151,14 @@ Policy, lock/configuration, integrity and network failures all stay hard through
 `images/recipe-contract/run-pnpm.sh`; no receipt is written. Existing dsh/Pi/bridge/
 Copilot npm paths remain #42 work. The shared runner/parser and isolated-layout
 checks support that future work without claiming the migration complete.
+
+
+## Build-only graph primitives
+
+The [bounded parser ADR](adr/0001-build-only-pnpm-graph-parser.md) documents
+build-only validation for future image-owned install migrations. It never
+installs, resolves selections or weakens the five defaults. OpenCode keeps its
+byte-only checker; dsh/Pi/bridge/Copilot still use current npm paths until their
+owning slices. The [failure ADR](adr/0002-pnpm-terminal-failure-boundary.md)
+records the evidence and acknowledgement gate for a proposed later bridge
+transport-contract narrowing; every current pnpm failure remains hard.

@@ -1,0 +1,56 @@
+{
+  "lockfileVersion": "9.0",
+  "settings": {
+    "autoInstallPeers": true,
+    "excludeLinksFromLockfile": false
+  },
+  "overrides": {
+    "@deepseek-ai/dsh>@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-loader": "1.0.3",
+    "@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-timer": "1.1.4",
+    "@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-include": "1.0.7"
+  },
+  "importers": {
+    ".": {
+      "dependencies": {
+        "@deepseek-ai/dsh": {
+          "specifier": "0.1.5-rc.2",
+          "version": "0.1.5-rc.2"
+        }
+      }
+    }
+  },
+  "packages": {
+    "@deepseek-ai/dsh@0.1.5-rc.2": {
+      "resolution": {
+        "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+      }
+    },
+    "@deepseek-ai/cordis-plugin-loader@1.0.3": {
+      "resolution": {
+        "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+      },
+      "peerDependencies": {
+        "@deepseek-ai/cordis": "4.0.2"
+      }
+    },
+    "@deepseek-ai/cordis@4.0.2": {
+      "resolution": {
+        "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+      }
+    }
+  },
+  "snapshots": {
+    "@deepseek-ai/dsh@0.1.5-rc.2": {
+      "dependencies": {
+        "@deepseek-ai/cordis-plugin-loader": "1.0.3(@deepseek-ai/cordis@4.0.2)"
+      }
+    },
+    "@deepseek-ai/cordis-plugin-loader@1.0.3(@deepseek-ai/cordis@4.0.2)": {
+      "dependencies": {
+        "@deepseek-ai/cordis": "4.0.2"
+      }
+    },
+    "@deepseek-ai/cordis@4.0.2": {}
+  }
+}

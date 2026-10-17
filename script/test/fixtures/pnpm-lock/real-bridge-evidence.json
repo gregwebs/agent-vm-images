@@ -1,0 +1,21 @@
+{
+  "selection": {"kind":"bridge","version":"0.1.0"},
+  "importer": [{"name":"pi-claude-bridge","target":"pi-claude-bridge@0.1.0(zod@4.6.7)","optional":false}],
+  "archive": {
+    "name":"pi-claude-bridge","version":"0.1.0",
+    "integrity":"sha512-Pw8Uya69wG5RACuWiZhCoxi4m3HdL2q4neoR7JBr7nlehMtW22g1j0tV9PNssk1FC4KQgBdkuhTcOy8mH5N1ZQ=="
+  },
+  "scopedArchive": {
+    "name":"@anthropic-ai/sdk","version":"0.73.0",
+    "integrity":"sha512-URURVzhxXGJDGUGFunIOtBlSl7KWvZiAAKY/ttTkZAkXT9bTPqdk2eK0b8qqSxXpikh3QKPnPYpiyX98zf5ebw=="
+  },
+  "snapshot":"pi-claude-bridge@0.1.0(zod@4.6.7)",
+  "edges":[
+    {"name":"@anthropic-ai/claude-agent-sdk","target":"@anthropic-ai/claude-agent-sdk@0.2.141(zod@4.6.7)","optional":false},
+    {"name":"@anthropic-ai/sdk","target":"@anthropic-ai/sdk@0.73.0(zod@4.6.7)","optional":false},
+    {"name":"cc-session-io","target":"cc-session-io@0.1.2","optional":false},
+    {"name":"change-case","target":"change-case@5.4.4","optional":false}
+  ],
+  "optionalSnapshot":"@anthropic-ai/sdk@0.73.0(zod@4.6.7)",
+  "optionalEdge":{"name":"zod","target":"zod@4.6.7","optional":true}
+}

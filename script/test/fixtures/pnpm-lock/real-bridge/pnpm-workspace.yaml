@@ -1,0 +1,10 @@
+packages: [.]
+autoInstallPeers: false
+strictPeerDependencies: false
+nodeLinker: hoisted
+enableGlobalVirtualStore: false
+pmOnFail: error
+sideEffectsCache: false
+allowBuilds: {}
+extendNodePath: false
+ignoredOptionalDependencies: ['@anthropic-ai/claude-agent-sdk-*']

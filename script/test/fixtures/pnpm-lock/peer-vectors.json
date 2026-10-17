@@ -1,0 +1,4 @@
+[
+  {"snapshot":"@deepseek-ai/cordis-plugin-loader@1.0.3(@deepseek-ai/cordis@4.0.2)","peer":"@deepseek-ai/cordis","wanted":"4.0.2","resolved":"4.0.2","valid":true},
+  {"snapshot":"@deepseek-ai/cordis-plugin-loader@1.0.3(@deepseek-ai/cordis@4.0.4)","peer":"@deepseek-ai/cordis","wanted":"4.0.2","resolved":"4.0.4","valid":false}
+]

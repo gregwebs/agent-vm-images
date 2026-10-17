@@ -4,7 +4,7 @@
 Canonical source: images/recipe-contract/check-tool-access.py
 Bind-mounted directly by images/standard/Dockerfile; no tool-local copies.
 
-Usage: check-tool-access.py [--content] TARGET [TARGET ...]
+Usage: check-tool-access.py [--content | --tree] TARGET [TARGET ...]
 
 Each TARGET is a bare command name (resolved on PATH) or a path. Resolves the
 path component by component, following symlinks, and requires the *all-class*
@@ -29,6 +29,11 @@ With `--content`, instead of the executable predicate the final target only has
 to be readable by all ((mode & 0o444) == 0o444) and no shebang interpreter is
 resolved. That is how a recipe audits required *data* it ships (a bridge source,
 a mandatory extension) whose ancestors must still be traversable by every uid.
+
+With `--tree`, each TARGET is an explicit directory beneath cwd, never a PATH
+command. Every physical directory/file needs all-class read/traverse or read,
+respectively. Each subordinate symlink hop must stay inside the authorized
+physical root. Tree access does not certify executables or their interpreters.
 
 This is deliberately stricter than "other execute": Unix permission selection
 does not fall through from owner/group to other, so only all-class bits prove
@@ -74,12 +79,14 @@ class Resolver:
     def __init__(self):
         self.dirs = []
         self.symlinks = 0
+        self.waypoints = []
 
     def _dir(self, path, reason):
         self.dirs.append((path, reason))
 
-    def resolve(self, path):
+    def resolve(self, path, directory_root=False):
         self.symlinks = 0
+        self.waypoints = []
         if path.startswith("/"):
             components = path.split("/")[1:]
         else:
@@ -98,12 +105,15 @@ class Resolver:
                 if len(resolved) <= 1:
                     continue
                 self._dir("/".join(resolved), "directory before ..")
+                self.waypoints.append(("/".join(resolved) or "/", "directory"))
                 resolved = resolved[:-1]
+                self.waypoints.append(("/".join(resolved) or "/", "parent"))
                 continue
             cand = "/".join(resolved + [comp]) or "/"
             st = _lstat(cand)
             if st is None:
                 raise Violation(cand, "does not exist")
+            self.waypoints.append((cand, "link" if stat.S_ISLNK(st.st_mode) else "entry"))
             if stat.S_ISLNK(st.st_mode):
                 self.symlinks += 1
                 if self.symlinks > MAX_SYMLINKS:
@@ -114,6 +124,7 @@ class Resolver:
                 target = os.readlink(cand)
                 parts = target.split("/")
                 if target.startswith("/"):
+                    self.waypoints.append(("/", "absolute"))
                     resolved = [""]
                     parts = parts[1:]
                 pending = [p for p in parts if p != ""] + pending
@@ -125,6 +136,12 @@ class Resolver:
                 resolved = resolved + [comp]
                 continue
             return cand, st
+        if directory_root:
+            final = "/".join(resolved) or "/"
+            st = _lstat(final)
+            if st is None:
+                raise Violation(final, "does not exist")
+            return final, st
         raise Violation(path, "resolves to no final component")
 
 
@@ -377,6 +394,71 @@ def audit_content(command):
     return final
 
 
+def _tree_directory(path):
+    _check_dir(path)
+    if (_lstat(path).st_mode & 0o555) != 0o555:
+        raise Violation(path, "directory is not readable/traversable by all")
+
+
+def _tree_containment(resolver, root):
+    entered = False
+    for waypoint, kind in resolver.waypoints:
+        if kind == "absolute":
+            # Absolute in-root paths must traverse outside ancestors, but may
+            # not resolve an outside link or leave the tree after entering it.
+            entered = False
+            continue
+        contained = waypoint == root or waypoint.startswith(root.rstrip("/") + "/")
+        if contained:
+            entered = True
+        elif entered or kind in ("link", "parent") or not root.startswith(waypoint.rstrip("/") + "/"):
+            raise Violation(waypoint, "symlink waypoint escapes tree root")
+
+
+def audit_tree(target):
+    resolver = Resolver()
+    root, st = resolver.resolve(target, directory_root=True)
+    for directory, _reason in resolver.dirs:
+        _check_dir(directory)
+    _check_dir("/")
+    if not stat.S_ISDIR(st.st_mode):
+        raise Violation(root, "tree root is not a directory")
+    pending = [root]
+    visited = set()
+    while pending:
+        current = pending.pop()
+        st = _lstat(current)
+        if st is None:
+            raise Violation(current, "does not exist")
+        if stat.S_ISLNK(st.st_mode):
+            edge = Resolver()
+            final, st = edge.resolve(current, directory_root=True)
+            for directory, _reason in edge.dirs:
+                _check_dir(directory)
+            _tree_containment(edge, root)
+            if not (final == root or final.startswith(root.rstrip("/") + "/")):
+                raise Violation(final, "symlink target escapes tree root")
+            current = final
+        _check_acl(current)
+        if stat.S_ISDIR(st.st_mode):
+            _tree_directory(current)
+            identity = (st.st_dev, st.st_ino)
+            if identity in visited:
+                continue
+            visited.add(identity)
+            try:
+                with os.scandir(current) as entries:
+                    pending.extend(entry.path for entry in entries)
+            except OSError as error:
+                raise Violation(current, "cannot enumerate tree: %s" % error) from error
+        elif stat.S_ISREG(st.st_mode):
+            if (st.st_mode & 0o444) != 0o444:
+                raise Violation(current, "not readable by all (mode %o)" % (st.st_mode & 0o7777))
+        else:
+            raise Violation(current, "special file in tree")
+    return root
+
+
 def resolve_command(command, env_path=None):
     if "/" in command:
         return command
@@ -397,12 +479,15 @@ def resolve_command(command, env_path=None):
 def main(argv):
     quiet = False
     content = False
+    tree = False
     targets = []
     for arg in argv:
         if arg == "--quiet":
             quiet = True
         elif arg == "--content":
             content = True
+        elif arg == "--tree":
+            tree = True
         elif arg in ("-h", "--help"):
             print(__doc__.strip())
             return 0
@@ -411,9 +496,9 @@ def main(argv):
             return 2
         else:
             targets.append(arg)
-    if not targets:
+    if not targets or (content and tree):
         print(
-            "usage: check-tool-access.py [--content] TARGET [TARGET ...]",
+            "usage: check-tool-access.py [--content | --tree] TARGET [TARGET ...]",
             file=sys.stderr,
         )
         return 2
@@ -422,7 +507,9 @@ def main(argv):
     completed = set()
     for target in targets:
         try:
-            if content:
+            if tree:
+                final = audit_tree(target)
+            elif content:
                 final = audit_content(target)
             else:
                 final = audit(target, active, completed)

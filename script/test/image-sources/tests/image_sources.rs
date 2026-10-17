@@ -1361,10 +1361,9 @@ fn opencode_pnpm_inputs_are_pinned_bytes() {
         json!({"name":"agent-vm-guest-opencode-plugins", "version":"0.0.0", "private":true,
             "type":"module", "packageManager":"pnpm@11.11.0", "dependencies":{sdk:"0.3.281",plugin:version}})
     );
-    // The two pnpm inputs are reviewed bytes rather than interpreted YAML, so the
-    // contract layer owns no parser distribution and a build never re-pins what it
-    // verifies. The digests are recomputed independently by the node and Python
-    // oracles; here the pin's contract and this layer's ownership are asserted.
+    // OpenCode keeps three reviewed byte inputs and never adopts the shared
+    // graph parser. Digests are checked by explicit Node/Python suites; Rust
+    // owns inventory/path/source boundaries without importing or executing Node.
     let mut names = Vec::new();
     for line in read_text("images/tools/opencode/plugins/pnpm-inputs.sha256").lines() {
         let (digest, name) = line
@@ -1391,11 +1390,19 @@ fn opencode_pnpm_inputs_are_pinned_bytes() {
             "missing {file}"
         );
     }
-    assert!(
-        !repo_path("images/recipe-contract/vendor/yaml").exists(),
-        "the contract layer must not carry a parser distribution"
-    );
-    assert!(!repo_path("images/recipe-contract/pnpm-input.mjs").exists());
+    check_pnpm_primitive_inventory();
+    for file in [
+        "images/tools/opencode/plugins/check-lock.mjs",
+        "images/tools/opencode/plugins/pin-pnpm-inputs.mjs",
+        "images/tools/opencode/plugins/prepare-lock.sh",
+        "images/tools/opencode/plugins/upgrade-plugins.sh",
+        "images/tools/opencode/install-opencode-plugins.sh",
+    ] {
+        assert!(
+            check_opencode_parser_boundary(&read_text(file)).is_ok(),
+            "{file}"
+        );
+    }
     let dockerfile = standard_dockerfile();
     assert_eq!(
         dockerfile_arg(&dockerfile, "AGENT_VERSION_OPENCODE_CLAUDE"),
@@ -1448,5 +1455,96 @@ fn opencode_pnpm_inputs_are_pinned_bytes() {
         "images/tools/opencode/plugins/pin-pnpm-inputs.mjs",
     ] {
         assert!(repo_path(file).is_file(), "missing {file}");
+    }
+}
+
+fn check_opencode_parser_boundary(source: &str) -> Result<(), String> {
+    for forbidden in ["pnpm-lock.mjs", "vendor/yaml"] {
+        if source.contains(forbidden) {
+            return Err(format!("OpenCode must not adopt {forbidden}"));
+        }
+    }
+    Ok(())
+}
+
+fn check_pnpm_primitive_inventory() {
+    use std::collections::BTreeSet;
+    let vendor = repo_path("images/recipe-contract/vendor/yaml");
+    let mut expected = BTreeSet::new();
+    for line in read_text("images/recipe-contract/vendor/yaml/upstream.sha256").lines() {
+        let (_, relative) = line.split_once("  ").expect("retained-file manifest line");
+        assert!(
+            relative == "LICENSE"
+                || relative == "package.json"
+                || (relative.starts_with("dist/") && relative.ends_with(".js"))
+        );
+        assert!(!Path::new(relative).is_absolute());
+        assert!(
+            Path::new(relative)
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+        );
+        assert!(
+            expected.insert(relative.to_string()),
+            "duplicate retained path"
+        );
+    }
+    expected.extend(["README.md".to_string(), "upstream.sha256".to_string()]);
+    fn inventory(root: &Path, directory: &Path, paths: &mut BTreeSet<String>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let file_type = entry.file_type().unwrap();
+            assert!(!file_type.is_symlink(), "vendor symlink substitution");
+            if file_type.is_dir() {
+                inventory(root, &entry.path(), paths);
+            } else {
+                assert!(file_type.is_file());
+                paths.insert(
+                    entry
+                        .path()
+                        .strip_prefix(root)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_string(),
+                );
+            }
+        }
+    }
+    let mut actual = BTreeSet::new();
+    inventory(&vendor, &vendor, &mut actual);
+    assert_eq!(actual, expected);
+    assert!(
+        read_text("images/recipe-contract/pnpm-lock.mjs").contains("./vendor/yaml/dist/index.js")
+    );
+    for file in [
+        "images/recipe-contract/pnpm-lock.mjs",
+        "script/test/pnpm-vendor.mjs",
+        "script/test/pnpm-lock-inputs.mjs",
+    ] {
+        assert!(repo_path(file).is_file(), "missing primitive {file}");
+    }
+    for recipe in ["images/Dockerfile", "images/standard/Dockerfile"] {
+        for line in read_text(recipe).lines() {
+            if line.trim_start().starts_with("COPY ") || line.trim_start().starts_with("ADD ") {
+                assert!(
+                    !line.contains("recipe-contract"),
+                    "build helpers must not become runtime payloads"
+                );
+                assert!(!line.contains("pnpm-lock.mjs") && !line.contains("vendor/yaml"));
+            }
+        }
+    }
+}
+
+#[test]
+fn opencode_rejects_parser_adoption_mutations() {
+    let checker = read_text("images/tools/opencode/plugins/check-lock.mjs");
+    assert!(check_opencode_parser_boundary(&checker).is_ok());
+    for import in [
+        "import './pnpm-lock.mjs';",
+        "import YAML from '../../../recipe-contract/vendor/yaml/dist/index.js';",
+    ] {
+        assert!(check_opencode_parser_boundary(&format!("{checker}\n{import}")).is_err());
     }
 }
