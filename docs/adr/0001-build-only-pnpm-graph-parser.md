@@ -31,12 +31,28 @@ incomplete. Host PyYAML introduces host-dependent behavior and an undeclared
 runtime dependency. pnpm-internal parsing couples a security boundary to manager
 implementation details. A small authenticated vendor provides a stable AST seam.
 
+A pinned pnpm install of yaml (committed package.json and lock, installed once into
+a build layer) was considered and rejected on footprint, not policy. It would meet
+the repository's exact-pin rules and #42's "no npm installation" acceptance, because
+yaml@2.9.0 has no dependencies and one tarball. The decisive difference is how
+recipe-contract reaches the build: every consumer's RUN step receives it through a
+read-only bind mount and leaves no layer behind, whereas an installed node_modules
+must occupy a real image layer to be visible to those later, separate RUN steps.
+That either ships a build-only dependency in every image or needs removal
+bookkeeping the bind-mount pattern exists to avoid; installing it inside each
+consumer step instead would repeat network access per consumer. It would also add a
+strict-egress route and an install step before host maintenance scripts, which
+currently need only node. Recorded here so the option is not silently reopened.
+
 ## Consequences
 
 Untrusted YAML needs byte/depth limits, duplicate/tag/anchor rejection and closed
-consumer policies. Pins are consistency records, not review approval; re-pinning
-cannot excuse structural/policy failures. Exact peer checks use each snapshot's
-actual context, not a matching archive elsewhere. Fixtures prove primitive
+consumer policies. Vendoring costs roughly 480 KiB across 78 files in the build
+context and repository history; it costs no runtime bytes, because the directory is
+only ever bind-mounted and never COPYed into an image. Pins are consistency
+records, not review approval; re-pinning cannot excuse structural/policy failures.
+Exact peer checks use each snapshot's actual context, not a matching archive
+elsewhere. Fixtures prove primitive
 behavior only; later slices must regenerate exact configs and cold-install real
 consumers before claiming runtime compatibility. dsh's later graph freeze is
 weaker than its current location freeze and requires explicit review.
