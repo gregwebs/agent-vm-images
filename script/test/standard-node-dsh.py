@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
+import tempfile
 
 spec = importlib.util.spec_from_file_location('consumers', Path(__file__).with_name('standard-node-consumers.py'))
 base = importlib.util.module_from_spec(spec)
@@ -176,17 +178,24 @@ class Invocation(base.Invocation):
         self.docker('network', 'disconnect', 'bridge', main)
         if json.loads(self.docker('inspect', '--format', '{{json .NetworkSettings.Networks}}', main)):
             raise base.Failure('network attachments remain before offline runtime')
-        image_root = self.logs / 'image-root'
-        (image_root / 'opt/agent-vm').mkdir(parents=True)
-        (image_root / 'usr/local/bin').mkdir(parents=True)
-        # Preserve the absolute fixture link verbatim. This virtual-only alias
-        # maps its invocation prefix to the image root, never to host /opt.
-        (image_root / 'fixtures').mkdir()
-        (image_root / 'fixtures/image-root').symlink_to('/')
-        self.docker('cp', main + ':' + PREFIX, str(image_root / 'opt/agent-vm/dsh'))
-        self.docker('cp', main + ':' + COMMAND, str(image_root / 'usr/local/bin/dsh'))
-        self.command('python3', str(ROOT / 'script/test/standard-node-layout.py'), '--consumer', 'dsh',
-                     '--root', str(image_root), '--platform', self.platform, '--expect-version', self.version)
+        # The oracle reads a disposable extraction, not evidence: it holds a link
+        # to `/` that mirrors the container's fixture alias, and an evidence
+        # uploader that follows links would walk the host root. Keep it outside
+        # the evidence root and drop it as soon as the oracle has reported.
+        image_root = Path(tempfile.mkdtemp(prefix='dsh-image-root-'))
+        try:
+            (image_root / 'opt/agent-vm').mkdir(parents=True)
+            (image_root / 'usr/local/bin').mkdir(parents=True)
+            # Preserve the absolute fixture link verbatim. This virtual-only alias
+            # maps its invocation prefix to the image root, never to host /opt.
+            (image_root / 'fixtures').mkdir()
+            (image_root / 'fixtures/image-root').symlink_to('/')
+            self.docker('cp', main + ':' + PREFIX, str(image_root / 'opt/agent-vm/dsh'))
+            self.docker('cp', main + ':' + COMMAND, str(image_root / 'usr/local/bin/dsh'))
+            self.command('python3', str(ROOT / 'script/test/standard-node-layout.py'), '--consumer', 'dsh',
+                         '--root', str(image_root), '--platform', self.platform, '--expect-version', self.version)
+        finally:
+            shutil.rmtree(image_root, ignore_errors=True)
         seen = set()
         for uid, gid in base.PAIRS:
             home = '/root' if uid == 0 else f'/runtime-homes/u{uid}g{gid}'

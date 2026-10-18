@@ -76,5 +76,10 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: build-local-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/ci-logs/
+          # An extraction used by the layout oracle carries a link to `/` (the
+          # container's fixture alias), and the uploader follows links: never let
+          # a working tree like that into the artifact. Evidence is the reports.
+          path: |
+            target/ci-logs/
+            !target/ci-logs/**/image-root/**
           if-no-files-found: warn
