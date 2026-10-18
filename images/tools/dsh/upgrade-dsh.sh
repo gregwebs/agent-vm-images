@@ -24,7 +24,12 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ -z "${NODE_OPTIONS-}${NODE_PATH-}${BUN_OPTIONS-}" ] || fail 'runtime injection is unsupported'
-[ "${GITHUB_ACTIONS-}" != true ] || fail 'developer upgrade cannot run in GitHub Actions'
+# A developer upgrade contacts the real registry and must never run in CI. The
+# fixture harness proves the same code path against a fake manager, so the
+# refusal is scoped to the real manager rather than to every invocation.
+if [ "${GITHUB_ACTIONS-}" = true ] && [ -z "${AGENT_VM_FIXTURE_PNPM-}" ]; then
+    fail 'developer upgrade cannot run in GitHub Actions'
+fi
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$DIR/../../.." && pwd -P)"
 # shellcheck source=/dev/null
