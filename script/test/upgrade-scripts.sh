@@ -35,14 +35,9 @@ BASH_BIN="${BASH:-/bin/bash}"
 # The committed pins the fixture registry resolves to, so a re-pin is a no-op.
 PI_PIN="$(jq -r '.dependencies["@earendil-works/pi-coding-agent"]' "$REPO_ROOT/images/tools/pi/package.json")"
 DSH_PIN="$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$REPO_ROOT/images/tools/dsh/package.json")"
-PNPM_PIN="$(jq -r '.dependencies.pnpm' "$REPO_ROOT/images/tools/dsh/package.json")"
+PNPM_PIN="$(jq -r .version "$REPO_ROOT/images/pnpm/pin.json")"
 BRIDGE_PIN="$(jq -r '.dependencies["pi-claude-bridge"]' "$REPO_ROOT/images/tools/pi/bridge/package.json")"
 PNPM_BUMP=12.0.0
-# A published dsh version distinct from the committed pin, so the post-update
-# guards actually run: an equal pin reuses the committed lock without invoking
-# npm, which would make a mutated lock fixture unreachable.
-DSH_BUMP=0.1.9-rc.1
-DSH_BUMP_JQ='.packages[""].dependencies["@deepseek-ai/dsh"] = "0.1.9-rc.1" | .packages["node_modules/@deepseek-ai/dsh"].version = "0.1.9-rc.1"'
 PI_BUMP=0.87.2
 BRIDGE_BUMP=0.8.1
 
@@ -190,7 +185,8 @@ new_case() {
         "$REPO_ROOT/images/tools/pi/bridge/prepare-lock.sh" \
         "$CASE/images/tools/pi/bridge/"
     cp "$REPO_ROOT/images/tools/dsh/upgrade-dsh.sh" \
-        "$REPO_ROOT/images/tools/dsh/package.json" "$REPO_ROOT/images/tools/dsh/package-lock.json" \
+        "$REPO_ROOT/images/tools/dsh/package.json" "$REPO_ROOT/images/tools/dsh/pnpm-lock.yaml" \
+        "$REPO_ROOT/images/tools/dsh/pnpm-workspace.yaml" "$REPO_ROOT/images/tools/dsh/pnpm-inputs.sha256" \
         "$REPO_ROOT/images/tools/dsh/prepare-lock.sh" "$REPO_ROOT/images/tools/dsh/check-lock-update.js" \
         "$CASE/images/tools/dsh/"
     mkdir -p "$CASE/images/standard" "$CASE/images/pnpm"
@@ -199,7 +195,8 @@ new_case() {
     # Pristine snapshots: a failed run must leave the live files byte-identical.
     cp "$CASE/images/tools/pi/package.json" "$CASE/images/tools/pi/package-lock.json" "$CASE/expected/pi/"
     cp "$CASE/images/tools/pi/bridge/package.json" "$CASE/images/tools/pi/bridge/package-lock.json" "$CASE/expected/bridge/"
-    cp "$CASE/images/tools/dsh/package.json" "$CASE/images/tools/dsh/package-lock.json" "$CASE/expected/dsh/"
+    cp "$CASE/images/tools/dsh/package.json" "$CASE/images/tools/dsh/pnpm-lock.yaml" \
+        "$CASE/images/tools/dsh/pnpm-workspace.yaml" "$CASE/images/tools/dsh/pnpm-inputs.sha256" "$CASE/expected/dsh/"
     # Dockerfile snapshots: the LABEL mirrors must not change on a failed run
     # either, and the bridge bump edits the PARENT pi Dockerfile.
     cp "$CASE/images/standard/Dockerfile" "$CASE/expected/pi/Dockerfile"
@@ -359,145 +356,8 @@ recovery=$(printf '%s\n' "$RUN_OUTPUT" | sed -n 's/^error: recovery material ret
 [[ -f "$recovery/publish-backup/2" ]] || fail 'recovery directory deleted'
 cmp "$recovery/publish-backup/2" "$CASE/expected/pi/Dockerfile" || fail 'backup lost'
 
-# --- dsh: re-pin, failure modes, dist-tag bump, layout refusal, pnpm --------
-
-new_case dsh-repin
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_PIN"
-assert_status_ok
-assert_contains "$RUN_OUTPUT" "pinning @deepseek-ai/dsh: $DSH_PIN -> $DSH_PIN"
-assert_files_unchanged dsh
-
-new_case dsh-unpublished
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" 9.9.9
-assert_status_fail
-assert_contains "$RUN_OUTPUT" "@deepseek-ai/dsh@9.9.9 is not a published version"
-assert_not_contains "$RUN_OUTPUT" "could not query"
-assert_files_unchanged dsh
-
-new_case dsh-viewfail
-STUB_VIEW_FAIL=1
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_PIN"
-assert_status_fail
-assert_contains "$RUN_OUTPUT" "npm could not query @deepseek-ai/dsh"
-assert_not_contains "$RUN_OUTPUT" "not a published version"
-assert_files_unchanged dsh
-
-new_case dsh-disttag-bump
-registry_add_version @deepseek-ai/dsh 0.1.9-rc.1 next
-STUB_INSTALL_JQ='.packages[""].dependencies["@deepseek-ai/dsh"] = "0.1.9-rc.1" | .packages["node_modules/@deepseek-ai/dsh"].version = "0.1.9-rc.1"'
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" next
-assert_status_ok
-assert_contains "$RUN_OUTPUT" "pinning @deepseek-ai/dsh: $DSH_PIN -> 0.1.9-rc.1"
-[[ "$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$CASE/images/tools/dsh/package.json")" == "0.1.9-rc.1" ]] \
-    || fail "the dsh pin was not updated"
-# The LABEL fallback mirrors the new manifest pin so a raw recipe build labels
-# the real default without a launcher-generated override.
-assert_label "$CASE/images/standard/Dockerfile" 'org.agent-vm.version.dsh="${AGENT_VERSION_DSH:-0.1.9-rc.1}"'
-! grep -q org.agent-vm.version.pnpm "$CASE/images/standard/Dockerfile" || fail "standard duplicates inherited pnpm label"
-
-# The layout the lock exists to freeze: a nested dsh-sandbox-local is a boot
-# failure, so the script must refuse rather than commit it.
-new_case dsh-sandbox
-registry_add_version @deepseek-ai/dsh "$DSH_BUMP"
-STUB_INSTALL_JQ="$DSH_BUMP_JQ | .packages[\"node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-base/node_modules/@deepseek-ai/dsh-sandbox-local\"] = .packages[\"node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-sandbox-local\"]"
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_BUMP"
-assert_status_fail
-assert_contains "$RUN_OUTPUT" "dsh-sandbox-local is nested under dsh-base/node_modules"
-assert_files_unchanged dsh
-
-# The post-update pin/integrity guard (the same invariants cargo test checks)
-# must not be vacuous: a stale node_modules version and a dropped integrity are
-# each refused.
-new_case dsh-pin-mismatch
-registry_add_version @deepseek-ai/dsh "$DSH_BUMP"
-STUB_INSTALL_JQ='.packages[""].dependencies["@deepseek-ai/dsh"] = "0.1.9-rc.1" | .packages["node_modules/@deepseek-ai/dsh"].version = "0.0.0"'
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_BUMP"
-assert_status_fail
-assert_contains "$RUN_OUTPUT" "fails the pin/integrity checks"
-assert_files_unchanged dsh
-
-new_case dsh-integrity
-registry_add_version @deepseek-ai/dsh "$DSH_BUMP"
-STUB_INSTALL_JQ="$DSH_BUMP_JQ | del(.packages[\"node_modules/@deepseek-ai/dsh\"].integrity)"
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_BUMP"
-assert_status_fail
-assert_contains "$RUN_OUTPUT" "fails the pin/integrity checks"
-assert_files_unchanged dsh
-
-# dsh-sandbox-local must exist where dsh resolves it: absent entirely, at a
-# wrong-but-not-dsh-base path, and with a good copy *plus* a stray one (the
-# per-line check must reject the whole set, not accept the good line).
-new_case dsh-sandbox-absent
-registry_add_version @deepseek-ai/dsh "$DSH_BUMP"
-STUB_INSTALL_JQ="$DSH_BUMP_JQ | del(.packages[\"node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-sandbox-local\"])"
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_BUMP"
-assert_status_fail
-assert_contains "$RUN_OUTPUT" "dsh-sandbox-local is not installed where dsh resolves it"
-assert_files_unchanged dsh
-
-new_case dsh-sandbox-stray
-registry_add_version @deepseek-ai/dsh "$DSH_BUMP"
-STUB_INSTALL_JQ="$DSH_BUMP_JQ | .packages[\"node_modules/monorepo/node_modules/@deepseek-ai/dsh-sandbox-local\"] = .packages[\"node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-sandbox-local\"] | del(.packages[\"node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-sandbox-local\"])"
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_BUMP"
-assert_status_fail
-assert_contains "$RUN_OUTPUT" "dsh-sandbox-local is not installed where dsh resolves it"
-assert_files_unchanged dsh
-
-new_case dsh-sandbox-two
-registry_add_version @deepseek-ai/dsh "$DSH_BUMP"
-STUB_INSTALL_JQ="$DSH_BUMP_JQ | .packages[\"node_modules/monorepo/node_modules/@deepseek-ai/dsh-sandbox-local\"] = .packages[\"node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-sandbox-local\"]"
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_BUMP"
-assert_status_fail
-assert_contains "$RUN_OUTPUT" "dsh-sandbox-local is not installed where dsh resolves it"
-assert_files_unchanged dsh
-
-# An exact version that is published but not any dist-tag resolves through the
-# local `versions` membership test, not the dist-tag lookup.
-new_case dsh-exact
-registry_add_version @deepseek-ai/dsh 0.1.9-rc.1
-STUB_INSTALL_JQ='.packages[""].dependencies["@deepseek-ai/dsh"] = "0.1.9-rc.1" | .packages["node_modules/@deepseek-ai/dsh"].version = "0.1.9-rc.1"'
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" 0.1.9-rc.1
-assert_status_ok
-assert_contains "$RUN_OUTPUT" "pinning @deepseek-ai/dsh: $DSH_PIN -> 0.1.9-rc.1"
-[[ "$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$CASE/images/tools/dsh/package.json")" == "0.1.9-rc.1" ]] \
-    || fail "the dsh pin was not updated to the exact version"
-assert_label "$CASE/images/standard/Dockerfile" 'org.agent-vm.version.dsh="${AGENT_VERSION_DSH:-0.1.9-rc.1}"'
-
-new_case dsh-pnpm
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_PIN" --pnpm 12.0.0
-assert_status_fail
-assert_contains "$RUN_OUTPUT" '--pnpm must equal the reviewed base pin'
-[[ ! -s "$CASE/npm.log" ]] || fail 'changed pnpm reached registry'
-assert_files_unchanged dsh
-
-new_case dsh-pnpm-equal
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_PIN" --pnpm "$PNPM_PIN"
-assert_status_ok
-assert_files_unchanged dsh
-
-new_case dsh-pnpm-tag
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_PIN" --pnpm latest
-assert_status_fail
-[[ ! -s "$CASE/npm.log" ]] || fail 'pnpm tag reached registry'
-assert_files_unchanged dsh
-
-new_case dsh-publish-failure
-registry_add_version @deepseek-ai/dsh "$DSH_BUMP"
-STUB_INSTALL_JQ="$DSH_BUMP_JQ"
-STUB_CP_FAIL_DEST="$CASE/images/standard/Dockerfile"
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_BUMP"
-assert_status_fail
-assert_contains "$RUN_OUTPUT" "restoring attempted files inclusively"
-assert_files_unchanged dsh
-
-STUB_ROLLBACK_FAIL=1
-run_upgrade "$CASE/images/tools/dsh/upgrade-dsh.sh" "$DSH_BUMP"
-[[ $RUN_STATUS == 3 ]] || fail 'rollback failure did not return 3'
-assert_contains "$RUN_OUTPUT" 'recovery material retained at '
-assert_not_contains "$RUN_OUTPUT" '==> pinned '
-recovery=$(printf '%s\n' "$RUN_OUTPUT" | sed -n 's/^error: recovery material retained at //p')
-[[ -f "$recovery/publish-backup/2" ]] || fail 'recovery directory deleted'
-cmp "$recovery/publish-backup/2" "$CASE/expected/dsh/Dockerfile" || fail 'backup lost'
+# --- dsh: independent four-input/pnpm and staged native-gate plumbing -------
+python3 "$REPO_ROOT/script/test/dsh-upgrade.py"
 
 # --- bridge: re-pin, failure modes, dist-tag bump, peer line, refusal -------
 

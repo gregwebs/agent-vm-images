@@ -21,11 +21,15 @@ class Registry:
     def __init__(self) -> None:
         self.tarballs: dict[str, bytes] = {}
         self.documents: dict[str, bytes] = {}
+        # Served paths, so a caller can prove its request reached this registry
+        # instead of failing somewhere a generic network error could explain.
+        self.requests: list[str] = []
         registry = self
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 path = unquote(self.path.split('?', 1)[0]).lstrip('/')
+                registry.requests.append(path)
                 body = registry.tarballs.get(path, registry.documents.get(path))
                 if body is None:
                     self.send_error(404)

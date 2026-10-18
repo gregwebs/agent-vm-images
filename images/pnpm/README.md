@@ -18,9 +18,14 @@ See the canonical [runtime guide](../../docs/node-package-defaults.md).
 
 Review the new exact upstream artifact, release source and MIT notices; obtain
 and independently recompute SHA-512/SRI and fresh extracted-bundle SHA-256.
-Update all pin fields together and the base's literal pnpm label. Update dsh's
-retained compatibility lock only to the already-reviewed base selection (until
-#42 removes that duplicate). Do not automatically trust registry metadata or
+Update all pin fields together and the base's literal pnpm label. Base remains
+the only pnpm selection and launcher owner. Migrated dsh asserts
+`pnpm@11.11.0` in `packageManager` and has no private pnpm dependency. A base
+update must review every consumer's `packageManager` assertion and lock
+together; do not update dsh independently with `--pnpm`. Host lock work uses the
+authenticated distribution, not a newer host manager; see
+[dsh maintenance](../../CONTRIBUTING.md#dsh-maintenance-and-graph-freeze).
+Do not automatically trust registry metadata or
 refresh digests. Rebuild base before standard, run hermetic/artifact probes and
 both native full builds/runtime/strict-egress gates. Never certify an old tag
 left by a failed rebuild.

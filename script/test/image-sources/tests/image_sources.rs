@@ -42,14 +42,6 @@ fn dsh_pin() -> String {
         .to_string()
 }
 
-/// The manifest/lock pair a lockfile gate reads. Named fields rather than two
-/// adjacent `&Value` parameters, so a manifest/lock swap cannot compile
-/// (`CODING_STANDARDS.md` → *Types*).
-struct PackageFiles<'a> {
-    manifest: &'a Value,
-    lock: &'a Value,
-}
-
 /// One pinned package: the manifest that declares it, the dependency key and
 /// the lock's resolved package key. Named fields rather than three adjacent
 /// `&str` selectors (`CODING_STANDARDS.md` → *Types*).
@@ -57,20 +49,6 @@ struct PinSpec<'a> {
     manifest_relative: &'a str,
     dependency: &'a str,
     package_key: &'a str,
-}
-
-/// The dsh lock installs the pnpm the manifest pins; `dsh plugin` needs pnpm and
-/// the Dockerfile links it out of this same lock.
-fn check_pnpm_installed(files: PackageFiles) -> Result<(), String> {
-    let pnpm = files.manifest["dependencies"]["pnpm"]
-        .as_str()
-        .ok_or_else(|| "the dsh manifest does not pin pnpm".to_string())?;
-    if files.lock["packages"]["node_modules/pnpm"]["version"].as_str() != Some(pnpm) {
-        return Err(format!(
-            "the lock does not install the pinned pnpm ({pnpm})"
-        ));
-    }
-    Ok(())
 }
 
 /// Every non-root entry in a committed lock carries `integrity`. A freshly
@@ -387,39 +365,475 @@ fn the_bridge_install_passes_npm_ci_the_mandatory_flags() {
 }
 
 // ---------------------------------------------------------------------------
-// Pinned dsh layer: full integrity, and pnpm installed
+// Pinned dsh layer: one reviewed pnpm project read through the shared CLI
 // ---------------------------------------------------------------------------
+
+/// The four reviewed dsh inputs. A named field rather than a bare `PathBuf`
+/// argument, so a pi/bridge prefix cannot be passed to a dsh gate by mistake.
+struct DshProjectFiles {
+    prefix: PathBuf,
+}
+
+impl DshProjectFiles {
+    fn committed() -> Self {
+        Self {
+            prefix: repo_path("images/tools/dsh"),
+        }
+    }
+
+    fn carries_npm_lock(&self) -> bool {
+        self.prefix.join("package-lock.json").exists()
+    }
+}
+
+/// One resolved archive as the graph module reported it.
+struct DshArchive {
+    name: String,
+    version: String,
+    integrity: String,
+    tarball: String,
+}
+
+/// One resolved snapshot: the full peer-context identity key.
+struct DshSnapshot {
+    key: String,
+}
+
+/// One importer/root dependency edge.
+struct DshEdge {
+    name: String,
+    target: String,
+}
+
+/// A typed read of `pnpm-lock.mjs graph dsh`. A syntax adapter, never a second
+/// parser: the shared module owns YAML, pins and the effective-peer rules
+/// (`docs/adr/0001-build-only-pnpm-graph-parser.md`), so Rust only types what it
+/// printed and asserts independently authored expectations over it.
+struct DshGraph {
+    version: String,
+    packages: Vec<DshArchive>,
+    snapshots: Vec<DshSnapshot>,
+    importer: Vec<DshEdge>,
+}
+
+fn graph_report_field(value: &Value, path: &[&str]) -> Result<String, String> {
+    let mut current = value;
+    for key in path {
+        current = current
+            .get(*key)
+            .ok_or_else(|| format!("graph report has no {}", path.join(".")))?;
+    }
+    current
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("graph report field {} is not a string", path.join(".")))
+}
+
+impl DshGraph {
+    fn from_value(value: &Value) -> Result<Self, String> {
+        match graph_report_field(value, &["selection", "kind"])?.as_str() {
+            "dsh" => {}
+            other => return Err(format!("graph report is for {other}, not dsh")),
+        }
+        let mut packages = Vec::new();
+        for entry in value
+            .get("packages")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "graph report has no packages array".to_string())?
+        {
+            packages.push(DshArchive {
+                name: graph_report_field(entry, &["id", "name"])?,
+                version: graph_report_field(entry, &["id", "version"])?,
+                integrity: graph_report_field(entry, &["integrity"])?,
+                tarball: graph_report_field(entry, &["tarball"])?,
+            });
+        }
+        let mut snapshots = Vec::new();
+        for entry in value
+            .get("snapshots")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "graph report has no snapshots array".to_string())?
+        {
+            snapshots.push(DshSnapshot {
+                key: graph_report_field(entry, &["id", "key"])?,
+            });
+        }
+        let mut importer = Vec::new();
+        for entry in value
+            .get("importer")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "graph report has no importer array".to_string())?
+        {
+            importer.push(DshEdge {
+                name: graph_report_field(entry, &["name"])?,
+                target: graph_report_field(entry, &["target"])?,
+            });
+        }
+        Ok(Self {
+            version: graph_report_field(value, &["selection", "version"])?,
+            packages,
+            snapshots,
+            importer,
+        })
+    }
+
+    fn packages_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a DshArchive> {
+        self.packages.iter().filter(move |entry| entry.name == name)
+    }
+
+    fn package(&self, name: &str, version: &str) -> Option<&DshArchive> {
+        self.packages
+            .iter()
+            .find(|entry| entry.name == name && entry.version == version)
+    }
+
+    fn carries(&self, name: &str) -> bool {
+        self.packages.iter().any(|entry| entry.name == name)
+    }
+}
+
+fn run_graph_cli(verb: &str, prefix: &Path) -> Result<String, String> {
+    let module = repo_path("images/recipe-contract/pnpm-lock.mjs");
+    let output = std::process::Command::new("node")
+        .arg(&module)
+        .arg(verb)
+        .arg("dsh")
+        .arg(prefix)
+        .output()
+        .map_err(|error| format!("cannot run {}: {error}", module.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "pnpm-lock.mjs {verb} rejected {}: {}",
+            prefix.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|_| "pnpm-lock.mjs emitted non-UTF-8 output".to_string())
+}
+
+/// The `check` verb re-verifies the reviewed input digests and every effective
+/// peer, so its exact report is the selection version.
+fn check_dsh_inputs(project: &DshProjectFiles) -> Result<String, String> {
+    run_graph_cli("check", &project.prefix)
+}
+
+fn read_dsh_graph(project: &DshProjectFiles) -> Result<DshGraph, String> {
+    let text = run_graph_cli("graph", &project.prefix)?;
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|error| format!("graph report is not JSON: {error}"))?;
+    DshGraph::from_value(&value)
+}
+
+/// A disposable copy of the four reviewed inputs. Mutation controls need the
+/// intended structural gate to be the one that rejects, so the fixture can
+/// recompute the pin file as test data after an edit.
+struct DshFixture {
+    directory: PathBuf,
+    project: DshProjectFiles,
+}
+
+impl DshFixture {
+    const INPUTS: [&'static str; 4] = [
+        "package.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "pnpm-inputs.sha256",
+    ];
+
+    fn copy(label: &str) -> Self {
+        let directory =
+            std::env::temp_dir().join(format!("image-sources-dsh-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("fixture directory");
+        for file in Self::INPUTS {
+            std::fs::copy(
+                repo_path(&format!("images/tools/dsh/{file}")),
+                directory.join(file),
+            )
+            .expect("copy reviewed input");
+        }
+        Self {
+            directory: directory.clone(),
+            project: DshProjectFiles { prefix: directory },
+        }
+    }
+
+    fn rewrite(&self, file: &str, edit: impl FnOnce(&str) -> String) {
+        let path = self.directory.join(file);
+        let before = std::fs::read_to_string(&path).expect("read fixture input");
+        let after = edit(&before);
+        assert_ne!(
+            after, before,
+            "{file}: the mutation must change the fixture"
+        );
+        std::fs::write(&path, after).expect("write fixture input");
+    }
+
+    fn repin(&self) {
+        const SCRIPT: &str = "const fs=require('node:fs'),crypto=require('node:crypto'),path=require('node:path');const prefix=process.argv[1];fs.writeFileSync(path.join(prefix,'pnpm-inputs.sha256'),['package.json','pnpm-lock.yaml','pnpm-workspace.yaml'].map(file=>crypto.createHash('sha256').update(fs.readFileSync(path.join(prefix,file))).digest('hex')+'  '+file+'\\n').join(''));";
+        let output = std::process::Command::new("node")
+            .arg("-e")
+            .arg(SCRIPT)
+            .arg(&self.directory)
+            .output()
+            .expect("run node to re-pin the fixture");
+        assert!(
+            output.status.success(),
+            "fixture re-pin failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+impl Drop for DshFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+/// Every case recomputes the fixture pins, so a stale digest can never be the
+/// reason a mutation is rejected; the expected diagnostic proves the intended
+/// rule fired.
+fn rejected_mutation(label: &str, mutate: impl FnOnce(&DshFixture), expected: &str) {
+    let fixture = DshFixture::copy(label);
+    mutate(&fixture);
+    fixture.repin();
+    let error = match read_dsh_graph(&fixture.project) {
+        Ok(_) => panic!("{label}: the mutated dsh project must not validate"),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains(expected),
+        "{label}: expected {expected:?} in the rejection, got {error:?}"
+    );
+}
+
+fn is_full_sha512(integrity: &str) -> bool {
+    let Some(body) = integrity.strip_prefix("sha512-").map(str::as_bytes) else {
+        return false;
+    };
+    body.len() == 88
+        && body.ends_with(b"==")
+        && body[..86]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'+' || *byte == b'/')
+}
+
+/// Rewrite one lock mapping block selected by its header line. Selecting by
+/// header keeps a mutation from silently hitting a different package that
+/// happens to share the same inner lines.
+fn edit_yaml_block(text: &str, header: &str, edit: impl FnOnce(&str) -> String) -> String {
+    let start = text
+        .find(header)
+        .unwrap_or_else(|| panic!("missing block {header:?}"));
+    let end = start + text[start..].find("\n\n").expect("block end");
+    let block = &text[start..end];
+    let mutated = edit(block);
+    assert_ne!(mutated, block, "the block mutation must change {header:?}");
+    format!("{}{}{}", &text[..start], mutated, &text[end..])
+}
+
+/// Effective peers are per snapshot: an exact declaration must match the
+/// resolved edge, and a correct version existing elsewhere is not evidence.
+/// Every case re-pins the mutated fixture, so a stale digest can never be the
+/// reason a mutation is rejected.
+#[test]
+fn dsh_graph_and_effective_peer_mutations_are_rejected() {
+    let graph = read_dsh_graph(&DshProjectFiles::committed())
+        .expect("the reviewed dsh inputs form a valid graph");
+    let schemastery: Vec<&str> = graph
+        .packages_named("@deepseek-ai/schemastery")
+        .map(|entry| entry.version.as_str())
+        .collect();
+    assert_eq!(
+        schemastery,
+        ["3.18.2", "3.18.4"],
+        "the peer mutation needs the correct version to exist globally"
+    );
+
+    rejected_mutation(
+        "package-manager",
+        |fixture| {
+            fixture.rewrite("package.json", |text| {
+                text.replacen("pnpm@11.11.0", "pnpm@11.10.0", 1)
+            });
+        },
+        "pnpm@11.11.0",
+    );
+
+    rejected_mutation(
+        "missing-integrity",
+        |fixture| {
+            fixture.rewrite("pnpm-lock.yaml", |text| {
+                edit_yaml_block(text, "  '@deepseek-ai/dsh@0.1.5-rc.2':\n", |block| {
+                    let mut lines: Vec<String> = block.lines().map(str::to_string).collect();
+                    let index = lines
+                        .iter()
+                        .position(|line| line.trim_start().starts_with("resolution:"))
+                        .expect("the archive declares a resolution");
+                    lines[index] = "    resolution: {}".to_string();
+                    lines.join("\n")
+                })
+            });
+        },
+        "missing key: integrity",
+    );
+
+    rejected_mutation(
+        "bad-integrity",
+        |fixture| {
+            fixture.rewrite("pnpm-lock.yaml", |text| {
+                edit_yaml_block(
+                    text,
+                    "  '@deepseek-ai/dsh-sandbox-local@0.1.5-rc.3':\n",
+                    |block| block.replacen("sha512-ma3IB1EervDxQvaZRi5VIozCb+qbWF89i6p8uRdBLpnJHzLcuI/AKI7S3Hkcvuy2JQEUmWTaiaq4Eil8GY9JNQ==", "sha512-short", 1),
+                )
+            });
+        },
+        "full sha512 required",
+    );
+
+    rejected_mutation(
+        "wrong-effective-peer",
+        |fixture| {
+            fixture.rewrite("pnpm-lock.yaml", |text| {
+                edit_yaml_block(
+                    text,
+                    "  '@deepseek-ai/dsh-settings@0.1.5-rc.3':\n",
+                    |block| {
+                        block.replacen(
+                            "'@deepseek-ai/schemastery': 3.18.2",
+                            "'@deepseek-ai/schemastery': 3.18.4",
+                            1,
+                        )
+                    },
+                )
+            });
+        },
+        "peer @deepseek-ai/schemastery wanted 3.18.4, got @deepseek-ai/schemastery@3.18.2",
+    );
+
+    rejected_mutation(
+        "orphan",
+        |fixture| {
+            fixture.rewrite("pnpm-lock.yaml", |text| {
+                let archive = format!(
+                    "packages:\n\n  'orphan-fixture@1.0.0':\n    resolution: {{integrity: sha512-{}}}\n\n",
+                    "A".repeat(86) + "=="
+                );
+                let with_archive = text.replacen("packages:\n\n", &archive, 1);
+                with_archive.replacen(
+                    "snapshots:\n\n",
+                    "snapshots:\n\n  'orphan-fixture@1.0.0': {}\n\n",
+                    1,
+                )
+            });
+        },
+        "orphan",
+    );
+
+    rejected_mutation(
+        "absent-sandbox",
+        |fixture| {
+            fixture.rewrite("pnpm-lock.yaml", |text| {
+                edit_yaml_block(
+                    text,
+                    "  '@deepseek-ai/dsh-sandbox-local@0.1.5-rc.3':\n",
+                    |_| String::new(),
+                )
+            });
+        },
+        "dsh-sandbox-local",
+    );
+}
 
 #[test]
 fn the_pinned_dsh_version_agrees_across_the_manifest_and_the_lockfile() {
-    let lock = read_json("images/tools/dsh/package-lock.json");
-    check_pin_agrees(
-        &lock,
-        PinSpec {
-            manifest_relative: "images/tools/dsh/package.json",
-            dependency: "@deepseek-ai/dsh",
-            package_key: "node_modules/@deepseek-ai/dsh",
-        },
-    )
-    .expect("the dsh pin agrees with its lock");
+    let project = DshProjectFiles::committed();
     let manifest = read_json("images/tools/dsh/package.json");
-    check_pnpm_installed(PackageFiles {
-        manifest: &manifest,
-        lock: &lock,
-    })
-    .expect("the lock installs the pinned pnpm");
+    assert_eq!(manifest["name"], "agent-vm-dsh-layer");
+    assert_eq!(manifest["private"], true);
+    let dependencies = manifest["dependencies"]
+        .as_object()
+        .expect("the dsh manifest declares dependencies");
+    let roots: Vec<&str> = dependencies.keys().map(String::as_str).collect();
+    assert_eq!(roots, ["@deepseek-ai/dsh"], "the dsh project has one root");
+    assert!(
+        manifest.get("devDependencies").is_none(),
+        "the dsh project declares no development root"
+    );
+    let base = read_json("images/pnpm/pin.json")["version"]
+        .as_str()
+        .expect("the base pin carries a version")
+        .to_string();
+    assert_eq!(
+        manifest["packageManager"],
+        format!("pnpm@{base}"),
+        "packageManager asserts the base pin instead of selecting a second manager"
+    );
+
+    let graph = read_dsh_graph(&project).expect("the reviewed dsh inputs form a valid graph");
+    assert_eq!(
+        graph.version,
+        dsh_pin(),
+        "the manifest, the image label and the graph select one version"
+    );
+    assert_eq!(
+        check_dsh_inputs(&project).expect("the CLI verifies every reviewed dsh input"),
+        format!("{}\n", dsh_pin())
+    );
+    assert_eq!(graph.importer.len(), 1, "one imported root");
+    let root = &graph.importer[0];
+    assert_eq!(root.name, "@deepseek-ai/dsh");
+    assert!(
+        root.target
+            .starts_with(&format!("@deepseek-ai/dsh@{}", dsh_pin())),
+        "the imported root resolves to the pinned version: {}",
+        root.target
+    );
+    assert!(
+        graph.snapshots.iter().any(|entry| entry.key == root.target),
+        "the imported root is a graph snapshot"
+    );
+    assert!(
+        !project.carries_npm_lock(),
+        "the dsh project owns no npm lock after the migration"
+    );
 }
 
 #[test]
 fn every_dsh_locked_package_carries_integrity() {
-    let lock = read_json("images/tools/dsh/package-lock.json");
-    assert!(
-        lock["packages"]
-            .as_object()
-            .is_some_and(|packages| packages.contains_key("node_modules/@deepseek-ai/dsh")),
-        "the dsh lock must actually carry dsh"
+    let graph = read_dsh_graph(&DshProjectFiles::committed())
+        .expect("the reviewed dsh inputs form a valid graph");
+    assert!(!graph.packages.is_empty(), "the report carries the graph");
+    let dsh = graph
+        .package("@deepseek-ai/dsh", &dsh_pin())
+        .expect("the graph carries the selected dsh root");
+    // Independently authored from the release metadata in the ticket, not from
+    // this graph's own output.
+    assert_eq!(
+        dsh.integrity,
+        "sha512-8Xc8hCQHcIWRmTCVU/xZdp6/qMsWMeAd2ObChKDEsfhUPJFXx6H0lgeb1DxUMD86HZrrVN+1bCvn1ppjZ/fOxw=="
     );
-    check_lock_integrity(&lock).expect("every dsh lock entry carries integrity");
+    assert_eq!(
+        dsh.tarball, "https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-0.1.5-rc.2.tgz",
+        "only the canonical npmjs resolver is allowed"
+    );
+    assert!(
+        graph.carries("@deepseek-ai/dsh-sandbox-local"),
+        "the private hoist's sandbox owner is part of the payload"
+    );
+    let missing: Vec<&str> = graph
+        .packages
+        .iter()
+        .filter(|entry| !is_full_sha512(&entry.integrity))
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these graph packages carry no full sha512 integrity: {missing:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -668,9 +1082,9 @@ fn multi_slot_args_are_empty_and_label_fallbacks_mirror_the_manifests() {
     let dsh = standard_dockerfile();
     assert_eq!(dockerfile_arg(&dsh, "AGENT_VERSION_DSH"), "");
     assert_eq!(dockerfile_arg(&dsh, "AGENT_VERSION_PNPM"), "");
-    let pnpm_pin = read_json("images/tools/dsh/package.json")["dependencies"]["pnpm"]
+    let base_pnpm = read_json("images/pnpm/pin.json")["version"]
         .as_str()
-        .expect("the dsh manifest pins pnpm")
+        .expect("the base pin carries a version")
         .to_string();
     assert_eq!(
         label_value(&dsh, "org.agent-vm.version.dsh"),
@@ -679,8 +1093,8 @@ fn multi_slot_args_are_empty_and_label_fallbacks_mirror_the_manifests() {
     );
     assert_eq!(
         label_value(&read_text("images/Dockerfile"), "org.agent-vm.version.pnpm"),
-        pnpm_pin,
-        "the inherited base pnpm label must mirror the retained dsh pin"
+        base_pnpm,
+        "the inherited base pnpm label must mirror the base pin"
     );
 
     let pi = standard_dockerfile();
@@ -953,6 +1367,10 @@ fn exact_image_install_hooks_exist() {
         "dsh/verify-dsh.sh",
         "dsh/prepare-lock.sh",
         "dsh/check-lock-update.js",
+        "dsh/check-runtime.mjs",
+        "dsh/probe-dsh.py",
+        "dsh/project.py",
+        "dsh/derive-cordis-overrides.mjs",
         "pi/install-pi.sh",
         "pi/install-pi-packages.sh",
         "pi/verify-pi.sh",
@@ -1066,20 +1484,19 @@ fn image_source_guards_reject_mutations() {
         "an aliased bridge package must fail the gate"
     );
 
-    // A pnpm pin that disagrees with the dsh lock must fail the pnpm gate.
-    let dsh_manifest = {
-        let mut manifest = read_json("images/tools/dsh/package.json");
-        manifest["dependencies"]["pnpm"] = Value::String("0.0.0-mutated".to_string());
-        manifest
+    // A dsh input whose bytes no longer match the reviewed pins must fail the
+    // graph gate before any structural claim is made about it.
+    let stale = DshFixture::copy("stale-pin");
+    stale.rewrite("package.json", |text| {
+        text.replacen("\"0.1.5-rc.2\"", "\"0.1.5-rc.1\"", 1)
+    });
+    let error = match read_dsh_graph(&stale.project) {
+        Ok(_) => panic!("a stale dsh input pin must fail the graph gate"),
+        Err(error) => error,
     };
-    let dsh_lock = read_json("images/tools/dsh/package-lock.json");
     assert!(
-        check_pnpm_installed(PackageFiles {
-            manifest: &dsh_manifest,
-            lock: &dsh_lock,
-        })
-        .is_err(),
-        "a pnpm pin that disagrees with the lock must fail the gate"
+        error.contains("package.json: bytes differ from reviewed pin"),
+        "the digest gate, not a downstream rule, must reject a stale input: {error:?}"
     );
 
     // A recipe `ENV PATH` that drops `${PATH}` must fail the additive-path gate.
@@ -1122,6 +1539,75 @@ fn image_source_guards_reject_mutations() {
     );
 }
 
+/// The `sh <script>` command each recipe phase must run. dsh is the migrated
+/// pnpm consumer, so both of its files come from the bound source directory.
+fn dsh_or_npm_invocations(tool: &str) -> [(&'static str, String); 2] {
+    if tool == "dsh" {
+        [
+            ("install", "sh /tmp/dsh-source/install-dsh.sh".to_string()),
+            ("verify", "sh /tmp/dsh-source/verify-dsh.sh".to_string()),
+        ]
+    } else {
+        [
+            ("install", format!("sh /tmp/install-{tool}.sh")),
+            ("verify", format!("sh /tmp/verify-{tool}.sh")),
+        ]
+    }
+}
+
+/// The dsh block binds its own helper/validator/pnpm sources because the layer
+/// is a reviewed pnpm project, not a single copied installer.
+fn check_dsh_source_block(active: &str) -> Result<(), String> {
+    let copy = "COPY tools/dsh/package.json tools/dsh/pnpm-lock.yaml tools/dsh/pnpm-workspace.yaml tools/dsh/pnpm-inputs.sha256 /opt/agent-vm/dsh/";
+    if active.matches(copy).count() != 1 {
+        return Err("dsh needs exactly one four-input COPY".into());
+    }
+    for (phase, script) in [
+        ("install", "sh /tmp/dsh-source/install-dsh.sh"),
+        ("verify", "sh /tmp/dsh-source/verify-dsh.sh"),
+    ] {
+        let instruction = active
+            .lines()
+            .find(|line| line.contains(script))
+            .ok_or_else(|| format!("missing {phase}-dsh invocation"))?;
+        for token in [
+            "--mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro",
+            "--mount=type=bind,source=tools/dsh,target=/tmp/dsh-source,ro",
+            "--mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro",
+            "AGENT_INSTALL_SOFT_FAIL=",
+            "AGENT_VM_DSH_SOURCE_DIR=/tmp/dsh-source",
+            "PNPM_SOURCE_DIR=/tmp/pnpm-source",
+        ] {
+            if !instruction.split_whitespace().any(|word| word == token) {
+                return Err(format!("dsh {phase} RUN misses {token}"));
+            }
+        }
+    }
+    let link =
+        "ln -s /opt/agent-vm/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bin/dsh";
+    let link_run = active
+        .lines()
+        .find(|line| line.contains(link))
+        .ok_or("missing the dsh direct bin link")?;
+    if active.matches(link).count() != 1 {
+        return Err("dsh needs exactly one direct bin link".into());
+    }
+    for guard in [
+        "test ! -e /usr/local/bin/dsh",
+        "test ! -L /usr/local/bin/dsh",
+    ] {
+        if !link_run.contains(guard) {
+            return Err(format!("dsh link RUN misses {guard}"));
+        }
+    }
+    if active.contains(".bin/dsh") {
+        return Err(
+            "dsh must link the installed lib entrypoint, not a generated .bin wrapper".into(),
+        );
+    }
+    Ok(())
+}
+
 // Narrow presence checks over active continued instructions, not a layer parser.
 fn check_standard_blocks(text: &str) -> Result<(), String> {
     let active = text
@@ -1139,12 +1625,13 @@ fn check_standard_blocks(text: &str) -> Result<(), String> {
         return Err("standard must have one FROM".into());
     }
     for tool in RECIPES {
-        for phase in ["install", "verify"] {
-            if !active.contains(&format!("sh /tmp/{phase}-{tool}.sh")) {
+        for (phase, script) in dsh_or_npm_invocations(tool) {
+            if !active.contains(&script) {
                 return Err(format!("missing {phase}-{tool} invocation"));
             }
         }
     }
+    check_dsh_source_block(&active)?;
     if !active.contains("sh /tmp/verify-standard.sh") {
         return Err("missing final gate".into());
     }
@@ -1177,15 +1664,53 @@ fn standard_blocks_and_mutations() {
     for tool in RECIPES {
         assert!(!repo_path(&format!("images/tools/{tool}/Dockerfile")).exists());
         assert!(!repo_path(&format!("images/tools/{tool}/contract")).exists());
-        for phase in ["install", "verify"] {
-            let mutated = text.replace(&format!("sh /tmp/{phase}-{tool}.sh"), "true");
-            assert!(check_standard_blocks(&mutated).is_err());
+        for (phase, script) in dsh_or_npm_invocations(tool) {
+            assert!(text.contains(&script), "{phase}-{tool} must be invoked");
+            assert!(
+                check_standard_blocks(&text.replacen(&script, "true", 1)).is_err(),
+                "{phase}-{tool}"
+            );
         }
     }
     assert!(check_standard_blocks(&text.replace("sh /tmp/verify-standard.sh", "true")).is_err());
     assert!(
         check_standard_blocks(&text.replacen("source=recipe-contract", "source=missing", 1))
             .is_err()
+    );
+    // Every dsh RUN must bind its reviewed sources; the runtime verifier cannot
+    // borrow another RUN's mount (or the final gate's) and stay certified.
+    for mount in [
+        "--mount=type=bind,source=tools/dsh,target=/tmp/dsh-source,ro",
+        "--mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro",
+    ] {
+        let mutated = text.replace(mount, "--mount=type=bind,source=missing,ro");
+        assert_ne!(mutated, text, "the mutation must change the mount");
+        assert!(check_standard_blocks(&mutated).is_err(), "missing {mount}");
+    }
+    let without_soft_unset = text.replacen(
+        "AGENT_INSTALL_SOFT_FAIL= \\\n",
+        "AGENT_INSTALL_SOFT_FAIL=1 \\\n",
+        1,
+    );
+    assert_ne!(without_soft_unset, text);
+    assert!(
+        check_standard_blocks(&without_soft_unset).is_err(),
+        "a soft-fail input must be rejected"
+    );
+    let link = "RUN test ! -e /usr/local/bin/dsh && test ! -L /usr/local/bin/dsh && \\\n    ln -s /opt/agent-vm/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bin/dsh\n";
+    assert!(text.contains(link), "the direct link RUN is discoverable");
+    assert!(
+        check_standard_blocks(&text.replacen(link, "RUN true\n", 1)).is_err(),
+        "a missing direct bin link must be rejected"
+    );
+    assert!(
+        check_standard_blocks(&text.replacen(
+            "ln -s /opt/agent-vm/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bin/dsh",
+            "ln -s /opt/agent-vm/dsh/node_modules/.bin/dsh /usr/local/bin/dsh",
+            1,
+        ))
+        .is_err(),
+        "a generated .bin wrapper must be rejected"
     );
 }
 
@@ -1206,8 +1731,32 @@ fn base_pnpm_pin_and_launcher_ownership() {
         "e8abc02d5fbffb8f9d8817d44d6eee84c379ea8d5006dd5aa8694bb5e4428d8a"
     );
     assert_eq!(
-        read_json("images/tools/dsh/package.json")["dependencies"]["pnpm"],
-        pin["version"]
+        read_json("images/tools/dsh/package.json")["packageManager"],
+        format!(
+            "pnpm@{}",
+            pin["version"]
+                .as_str()
+                .expect("the base pin carries a version")
+        ),
+        "the dsh manifest asserts the base pin instead of selecting a manager"
+    );
+    let manifest = read_json("images/tools/dsh/package.json");
+    assert!(
+        manifest["dependencies"].get("pnpm").is_none(),
+        "the dsh project must not depend on pnpm"
+    );
+    let graph = read_dsh_graph(&DshProjectFiles::committed())
+        .expect("the reviewed dsh inputs form a valid graph");
+    assert!(
+        !graph.carries("pnpm"),
+        "the dsh graph must not carry a private pnpm"
+    );
+    assert!(
+        !graph
+            .snapshots
+            .iter()
+            .any(|entry| entry.key.starts_with("pnpm@")),
+        "no dsh snapshot may be a pnpm identity"
     );
     assert!(!standard_dockerfile().contains("org.agent-vm.version.pnpm"));
     assert!(!standard_dockerfile().contains(".bin/pnpm /usr/local/bin/pnpm"));
@@ -1362,8 +1911,9 @@ fn opencode_pnpm_inputs_are_pinned_bytes() {
             "type":"module", "packageManager":"pnpm@11.11.0", "dependencies":{sdk:"0.3.281",plugin:version}})
     );
     // OpenCode keeps three reviewed byte inputs and never adopts the shared
-    // graph parser. Digests are checked by explicit Node/Python suites; Rust
-    // owns inventory/path/source boundaries without importing or executing Node.
+    // graph parser. Its digests are checked by explicit Node/Python suites, so
+    // Rust owns only its inventory/path/source boundaries; the dsh graph guards
+    // are the ones that run the shared CLI as a syntax adapter.
     let mut names = Vec::new();
     for line in read_text("images/tools/opencode/plugins/pnpm-inputs.sha256").lines() {
         let (digest, name) = line

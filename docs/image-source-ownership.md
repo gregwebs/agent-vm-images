@@ -37,8 +37,15 @@ sessions.
 ## Current pnpm ownership
 
 Base owns `images/pnpm/`, authenticated bootstrap and the pnpm selection label.
-Standard inherits its immutable launcher; dsh retains its duplicate locked npm
-package only until #42, not as PATH owner. See [runtime defaults](node-package-defaults.md).
+dsh now owns its four pnpm inputs (`package.json`, `pnpm-lock.yaml`,
+`pnpm-workspace.yaml`, `pnpm-inputs.sha256`) and its build-only preparation,
+comparison, override-derivation, install and runtime-check helpers; it inherits
+the base launcher without a private pnpm package. Pi, bridge and Copilot retain
+their current npm paths pending their #42 slices. Historical transfer entries
+below are historical, not current install instructions. See
+[runtime defaults](node-package-defaults.md),
+[ADR 0003](adr/0003-dsh-graph-freeze.md) and the
+[migration ledger](standard-pnpm-migration.md).
 
 ## Selective migration manifest (historical)
 
@@ -57,7 +64,9 @@ READMEs may be adapted to their new owner):
 - `images/tools/dsh/prepare-lock.sh`
 - `images/tools/dsh/check-lock-update.js`
 - `images/tools/dsh/package.json`
-- `images/tools/dsh/package-lock.json`
+- `images/tools/dsh/package-lock.json` — historical: deleted in #51 when dsh
+  moved to the four pnpm inputs; the reviewed bytes remain in git history at
+  `6c51509e949ea643b82515f5c8a53acd122861c0`
 - `images/tools/pi/install-pi.sh`
 - `images/tools/pi/install-pi-packages.sh`
 - `images/tools/pi/verify-pi.sh`
@@ -241,8 +250,8 @@ and Chrome runtime checks ([#24](https://github.com/gregwebs/agent-vm-images/iss
 ## Maintained OpenCode 2 additions
 
 These are new maintained sources, not changes to the historical transfer above.
-The plugin is a new pnpm consumer; existing dsh/Pi/bridge/Copilot migration stays
-with #42. Ownership covers:
+The plugin is a new pnpm consumer; existing Pi/bridge/Copilot migration stays
+with #42 (dsh moved in #51, below). Ownership covers:
 
 - Runtime payloads: `images/tools/opencode/opencode.json`,
   `images/tools/opencode/plugins/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,index.js}`.
@@ -269,20 +278,58 @@ rendered guest probe and explicitly enumerated contracts/native CI remain their
 existing owners. No executable maintenance helper ships in the image.
 
 
+## dsh pnpm migration (#51, PR 2 of 4 for #42)
+
+dsh is now an image-owned pnpm project. Its owning sources are:
+
+- Reviewed inputs: `images/tools/dsh/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,pnpm-inputs.sha256}`.
+- Preparation, installation and verification: `images/tools/dsh/{prepare-lock.sh,install-dsh.sh,verify-dsh.sh}`.
+- Build-only helpers: `images/tools/dsh/{project.py,check-lock-update.js,derive-cordis-overrides.mjs,upgrade-project.mjs,host-manager.py,check-runtime.mjs,probe-dsh.py}`.
+  `project.py` owns filesystem authorization and handled-failure four-file
+  publication and is not a lock parser; it authorizes the contract directory
+  **before** anything in it is executed (the environment checker included) and
+  accepts exactly three shapes: the production build mount `/tmp/recipe-contract`
+  with a `/opt/agent-vm/dsh` prefix, a directory inside an authorized fixture
+  root, or the checkout's own tracked `images/recipe-contract` with prefixes below
+  that checkout or inside the invocation's scratch root
+  (`AGENT_VM_SCRATCH_ROOT`, the developer-upgrade spelling of the same capability,
+  which never claims a fixture root it does not have); `check-lock-update.js` and
+  `upgrade-project.mjs` are adapters over the shared graph module and delegate
+  contract-directory authorization to `project.py contract-dir`;
+  `host-manager.py` represents the authenticated stock manager as argv for host
+  maintenance (`project.py manager`). None of these ship in the image.
+- Maintenance: `images/tools/dsh/upgrade-dsh.sh` (transactional four-input and
+  central-Dockerfile publication, Cordis proposal/approval).
+- Tests: `script/test/{dsh-prepare-lock.sh,dsh-verify.sh,dsh-project.py,dsh-upgrade.py,upgrade-scripts.sh,standard-node-layout.py,standard-node-policy.sh,standard-node-policy.py,standard-node-policy-self-test.py,standard-node-consumers.sh,standard-node-consumers.py,standard-node-dsh.py}`,
+  fixtures `script/test/fixtures/{dsh/*,standard-node-dsh.py,standard-node-policy.py}`
+  and derivation/update lock fixtures under `script/test/fixtures/pnpm-lock/`.
+- Rules and evidence: [ADR 0003](adr/0003-dsh-graph-freeze.md) and the
+  [migration ledger](standard-pnpm-migration.md).
+
+Two implementations answer different questions and must not be merged: the
+production graph validator (`images/recipe-contract/pnpm-lock.mjs`) parses the
+reviewed lock and enforces policy, identity and per-context peers; the
+independent Python filesystem oracle (`script/test/standard-node-layout.py`)
+reads only a virtual extraction of a finished image and resolves the installed
+files, links and manifests with no production parser import. Neither replaces
+the runtime probes.
+
 ## Bounded pnpm primitives (#42, PR 1)
 
 `images/recipe-contract/pnpm-lock.mjs` and its authenticated
 `vendor/yaml/` distribution are build-only data validators, not runtime payloads.
 The [parser ADR](adr/0001-build-only-pnpm-graph-parser.md) owns the trust/update
 boundary and alternatives. OpenCode retains its independent byte-only checker.
-No dsh/Pi/bridge/Copilot consumer, production lock, failure producer or standard
-recipe changes in this slice; their current npm contracts above remain live.
+PR 1 (historical) changed no consumer, production lock, failure producer or
+standard recipe. dsh has since adopted the parser in #51 (above); Pi, bridge and
+Copilot still use their current npm paths until their own slices.
 
 The public check/graph/pin CLI, hostile fixtures, explicit vendor inventory tests,
 generic access `--tree` and primitive-only native harness are prerequisite
 interfaces, not consumer acceptance. The exact future workspace configs must be
 regenerated and cold-installed in their owning slices. Rust owns source/path
-boundaries without Node subprocesses; Node owns vendor digest/mutation checks.
+boundaries and runs this CLI as a syntax adapter for the migrated dsh project;
+Node owns graph, vendor digest and mutation checks.
 See [contributor commands](../CONTRIBUTING.md#bounded-pnpm-primitives).
 
 The [terminal-failure ADR](adr/0002-pnpm-terminal-failure-boundary.md) records why

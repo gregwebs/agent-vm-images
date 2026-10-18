@@ -135,7 +135,9 @@ reset_fixture() {
     printf 'LABEL org.agent-vm.version.pi="${AGENT_VERSION_PI:-0.87.1}"\n' >>"$FIXTURE_ROOT/images/standard/Dockerfile"
     mkdir -p "$FIXTURE_ROOT/images/pnpm" "$FIXTURE_ROOT/images/tools/dsh"
     cp "$REPO_ROOT/images/pnpm/pin.json" "$FIXTURE_ROOT/images/pnpm/pin.json"
-    cp "$REPO_ROOT/images/tools/dsh/package.json" "$REPO_ROOT/images/tools/dsh/package-lock.json" "$FIXTURE_ROOT/images/tools/dsh/"
+    cp "$REPO_ROOT"/images/tools/dsh/package.json "$REPO_ROOT"/images/tools/dsh/pnpm-lock.yaml \
+        "$REPO_ROOT"/images/tools/dsh/pnpm-workspace.yaml "$REPO_ROOT"/images/tools/dsh/pnpm-inputs.sha256 \
+        "$FIXTURE_ROOT/images/tools/dsh/"
     cp "$FIXTURE_ROOT/images/standard/Dockerfile" "$CASE/original"
 }
 
@@ -175,7 +177,11 @@ run_agent_versions() {
         "GITHUB_OUTPUT=${GITHUB_OUTPUT-}" \
         "$BASH_BIN" "$SCRIPT" ${ARGS[@]+"${ARGS[@]}"} 2>"$CASE/stderr")"
     RUN_STATUS=$?
-    for unchanged in images/pnpm/pin.json images/tools/dsh/package.json images/tools/dsh/package-lock.json; do
+    # The dsh layer is one reviewed pnpm project, so all four inputs plus the
+    # base pin are frozen against a bump owned by other layers.
+    for unchanged in images/pnpm/pin.json images/tools/dsh/package.json \
+        images/tools/dsh/pnpm-lock.yaml images/tools/dsh/pnpm-workspace.yaml \
+        images/tools/dsh/pnpm-inputs.sha256; do
         cmp -s "$REPO_ROOT/$unchanged" "$FIXTURE_ROOT/$unchanged" || fail "agent bump changed $unchanged"
     done
     RUN_STDERR="$(cat "$CASE/stderr")"

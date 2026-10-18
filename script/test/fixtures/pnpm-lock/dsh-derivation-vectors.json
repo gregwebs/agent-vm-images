@@ -1,0 +1,58 @@
+{
+  "overrides": {
+    "@deepseek-ai/dsh>@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-include": "1.0.7",
+    "@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-loader": "1.0.3",
+    "@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-timer": "1.1.4"
+  },
+  "declarations": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/cordis-plugin-include": "1.0.7",
+    "@deepseek-ai/cordis-plugin-loader": "1.0.3",
+    "@deepseek-ai/cordis-plugin-timer": "^1.1.4"
+  },
+  "kinds": {
+    "@deepseek-ai/cordis": "exact-peer",
+    "@deepseek-ai/cordis-plugin-timer": "range-peer"
+  },
+  "reject": [
+    "old-overrides-present",
+    "no-selection-satisfies",
+    "unsatisfiable-range",
+    "ambiguous-family-selection",
+    "reviewed-not-a-candidate",
+    "committed-not-a-candidate",
+    "missing-family",
+    "unprovable-range",
+    "extra-family",
+    "forged-map",
+    "extra-map",
+    "duplicate-map",
+    "stale-map"
+  ],
+  "proposal": "bare sorted four-selector JSON map with final newline; no source mutation",
+  "twoSelections": {
+    "fixture": "derivation-two-selections",
+    "overrides": {
+      "@deepseek-ai/dsh>@deepseek-ai/cordis": "4.0.2",
+      "@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-include": "1.0.7",
+      "@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-loader": "1.0.3",
+      "@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-timer": "1.1.4"
+    },
+    "timerSelections": [
+      "1.1.4",
+      "1.1.7"
+    ],
+    "derivedTimer": "1.1.4",
+    "rule": "dependency edges are reachability evidence only: a lockfile records no dependency specifier, so a distinct dependency target is never an exact declaration; the family's tentative selections are solved together with every peer declaration whose own package survives the map, one solution derives the pin, and more than one solution uses the reviewed value (the explicit `--cordis-overrides` map passed into derivation, else the committed map) only while it is one of the surviving candidates"
+  },
+  "candidates": {
+    "rule": "candidates = the family's tentative selections in some assignment that satisfies every live peer declaration; exact declarations filter, range declarations constrain, pruned instances do not constrain; a tie is broken by the map passed into derivation (approved `--cordis-overrides`, else committed) and only while that value is one of the candidates",
+    "unique": "hmr declares the exact timer peer 1.1.4, so 1.1.7 is filtered out and 1.1.4 derives",
+    "ambiguousWithReviewed": "1.1.4 and 1.1.7 both satisfy every declaration; the committed timer 1.1.4 is one of them, so the unchanged map re-pins 1.1.4 (no-op re-pin)",
+    "ambiguousWithApproved": "the same graph with `--cordis-overrides` naming 1.1.7 decides it and the adapter returns 1.1.7; the approved map outranks the committed one",
+    "ambiguousWithoutReviewed": "the same graph without a reviewed or approved value stops: 'ambiguous family selection: ... candidates: 1.1.4, 1.1.7 ... pass --cordis-overrides after review'",
+    "reviewedNotACandidate": "a reviewed (approved or committed) value that is not a candidate cannot invent one: '... candidates: 1.1.4, 1.1.7; reviewed value 1.1.5 is not one of the candidates'",
+    "noneSatisfying": "a declaration no tentative selection satisfies ('>=1.1.5 <1.1.7') stops and names the unmet declaration instead of choosing a version"
+  }
+}

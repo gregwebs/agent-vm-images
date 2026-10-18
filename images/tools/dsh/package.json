@@ -1,9 +1,9 @@
 {
   "name": "agent-vm-dsh-layer",
   "private": true,
-  "description": "Committed dependency pin for the dsh tool layer (see README.md). npm ci installs exactly this tree.",
+  "description": "Image-owned dsh dependency pin; see ../README.md. Base pnpm installs the reviewed frozen graph.",
+  "packageManager": "pnpm@11.11.0",
   "dependencies": {
-    "@deepseek-ai/dsh": "0.1.5-rc.2",
-    "pnpm": "11.11.0"
+    "@deepseek-ai/dsh": "0.1.5-rc.2"
   }
 }

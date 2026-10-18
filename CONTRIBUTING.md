@@ -49,15 +49,16 @@ bash script/test/opencode-runtime.sh agent-vm-base:local agent-vm-standard:local
 pnpm updates require reviewed exact URL, equivalent SHA-512/SRI and freshly
 extracted pristine-bundle SHA-256 together; never refresh checksums automatically.
 See [base pnpm maintenance](images/pnpm/README.md) and
-[runtime defaults](docs/node-package-defaults.md). dsh --pnpm can only equal the
-reviewed base pin, never independently select a version/dist-tag. Its duplicate
-npm lock package remains transitional until #42.
+[runtime defaults](docs/node-package-defaults.md). dsh `--pnpm` and
+`AGENT_VERSION_PNPM` accept only empty or the reviewed base pin, never an
+independent version or dist-tag; see [dsh maintenance](#dsh-maintenance-and-graph-freeze).
 
 The bumper resolves/validates all four upstream values before co-editing one
 scratch Dockerfile. Explicit developer latest queries are permitted; the bumper
 refuses GitHub Actions. Builds consume committed selections and never call bump
-scripts. Lock upgrades retain dsh sandbox/layout and location-freeze review, Pi
-sibling hashes/full-tree checks and separate bridge peer-alias omission checks.
+scripts. Lock upgrades retain dsh graph-freeze review (retained records and
+sandbox reachability, not npm locations), Pi sibling hashes/full-tree checks and
+separate bridge peer-alias omission checks.
 Shared-file edits are sequential developer operations, not parallel maintenance.
 
 Local transactional replacement backs up every destination before publishing.
@@ -79,6 +80,63 @@ Example images under `examples/layers/` are not part of the standard product.
 [#33](https://github.com/gregwebs/agent-vm-images/issues/33). Their pin policy and
 bump order are in [Example images](docs/image-source-ownership.md#example-images-exampleslayers).
 
+## dsh maintenance and graph freeze
+
+dsh uses four reviewed pnpm inputs (`package.json`, `pnpm-lock.yaml`,
+`pnpm-workspace.yaml`, `pnpm-inputs.sha256`) and the inherited base manager.
+`--pnpm` and `AGENT_VERSION_PNPM` accept only empty or the base pin;
+`packageManager` is an assertion, not another selection. Host image maintenance
+requires authenticated pnpm **11.11.0**, never a PATH `pnpm` 12. Empty/equal
+preparation checks all four file bytes and the graph without starting a package
+manager. Changed exact dsh selections freeze retained identities and peer-context
+snapshots, but may replace transitives within dsh's own closure; they are not
+fully transitive-frozen. Read [ADR 0003](docs/adr/0003-dsh-graph-freeze.md) and
+the [migration ledger](docs/standard-pnpm-migration.md).
+
+Cordis overrides are derived without the old map before any final resolution. A
+changed map stops an ordinary upgrade. Use
+`bash images/tools/dsh/upgrade-dsh.sh VERSION --propose-cordis-overrides /tmp/dsh-cordis.json`,
+review the exact requirements/delta, then
+`bash images/tools/dsh/upgrade-dsh.sh VERSION --cordis-overrides /tmp/dsh-cordis.json`.
+The supplied map must match independent derivation; real native install/web/
+subprocess gates run before publication. A failed compatible changed-selection
+leg remains blocked, not a synthetic success. The four inputs and central
+Dockerfile publish transactionally; rollback status 3 retains recovery material
+and requires recovery before further work.
+
+Lock work on a host without the Linux launcher (macOS) authenticates the stock
+distribution instead of using PATH pnpm: extract the reviewed archive with
+`images/pnpm/bootstrap.py` into invocation-owned scratch, run that
+`package/bin/pnpm.mjs` with an absolute Node path, and export the five defaults
+plus a private HOME/XDG. That is authenticated stock 11.11.0 and claims no
+launcher identity. The upgrade script does this internally; run it, do not
+reconstruct the argv by hand. The five image defaults arrive through the exported
+environment plus the explicit policy flags on every manager call, and the
+resolving call is `install --lockfile-only --no-frozen-lockfile`, which
+re-verifies the emitted lock.
+
+```bash
+bash script/test/dsh-prepare-lock.sh
+bash script/test/dsh-verify.sh
+python3 script/test/dsh-project.py
+/bin/bash script/test/upgrade-scripts.sh
+python3 script/test/standard-node-layout.py --self-test
+bash script/test/standard-node-policy.sh --self-test
+bash script/test/standard-node-consumers.sh --self-test
+node script/test/pnpm-lock-inputs.mjs
+```
+
+Focused real runs need a native base image and take the dsh handler, the changed
+`0.1.5-rc.1` candidate and the policy matrix separately. A stale local base makes
+them diagnostic; only clean native amd64 **and** arm64 runs at the proposed SHA
+are acceptance:
+
+```bash
+bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer dsh --platform linux/arm64
+bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer dsh --version 0.1.5-rc.1 --platform linux/arm64
+bash script/test/standard-node-policy.sh agent-vm-base:local --consumer dsh --platform linux/arm64
+```
+
 ## Contributor prerequisites and fast gates
 
 Build users need Docker only. Contributors running contracts need Bash, git, jq,
@@ -99,8 +157,10 @@ bash script/test/contracts.sh
 ```
 
 `contracts.sh [--guard-only]` works from any cwd. Default runs the explicitly
-listed hermetic suites, watchdog, transactional/gate/helper controls and
-finished-image oracle `--self-test`, and `example-layers.sh --self-test`; both
+listed hermetic suites, watchdog, transactional/gate/helper controls, the
+dsh project authorization/publisher unit table, the independent layout oracle
+`--self-test`, the policy harness `--self-test`, the finished-image oracle
+`--self-test`, and `example-layers.sh --self-test`; both
 modes run syntax, warning-level shellcheck, Python AST, Node syntax, Rust
 test/fmt/clippy and pinned workflow lint, plus the example-image contract
 (`example-layers.sh`: Chrome capability/wrapper recipe text, parent/digest ARG
@@ -159,8 +219,11 @@ CI uses read-only permissions, pinned actions and checkout without persisted
 credentials. `contracts.yml` is PR/push/manual and reusable via `workflow_call`;
 both expensive workflows invoke it as a local prerequisite job (`needs`).
 `build-local.yml` builds/audits one full product on native `ubuntu-24.04` amd64
-and `ubuntu-24.04-arm`; 330-minute jobs separately bound setup, 180-minute builds
-and 90-minute audits. `installer-network.yml` runs strict default PR audits on
+and `ubuntu-24.04-arm`. Every bounded step plus the evidence upload fits the job:
+20 minutes prerequisites + 20 minutes capacity/builder + 180 minutes build +
+120 minutes audit + 10 minutes upload = 350 minutes inside a 360-minute job, and
+each host watchdog is shorter than its own step bound so a step timeout cannot
+pre-empt the audit's measured budget. `installer-network.yml` runs strict default PR audits on
 both native architectures, with separate 60-minute base / 90-minute audit bounds
 and 180-minute job limits. Optional alternates are manual only. macOS CI is
 explicitly deferred; Bash 3.2 checks are local. `release-transports.yml` runs
@@ -242,7 +305,8 @@ merge prerequisites. Do not substitute hermetic fake-manager controls for them.
 
 ## Bounded pnpm primitives
 
-#42 PR 1 adds build-only graph/access interfaces, not an agent migration. Read
+#42 PR 1 adds build-only graph/access interfaces; PR 2 migrates dsh on top of
+them ([dsh maintenance](#dsh-maintenance-and-graph-freeze)). Read
 [ownership](docs/image-source-ownership.md#bounded-pnpm-primitives-42-pr-1) and the
 [parser ADR](docs/adr/0001-build-only-pnpm-graph-parser.md). Node is required for
 the bounded CLI; no host YAML install or package-manager invocation is needed:
@@ -261,7 +325,8 @@ bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer primi
 pins after full structural/policy validation; builds must never re-pin failures.
 Fixtures retain independent expected graphs and a real pnpm 11.11.0 emitted v9
 lock. Never use host pnpm 12 for any lock work. Vendor files are digest-checked,
-not linted/rewritten; Rust inventory guards run without Node. `contracts.sh`
+not linted/rewritten; Rust inventory guards run without Node, while the dsh graph
+guards run this CLI as a syntax adapter. `contracts.sh`
 explicitly runs vendor/parser and harness self-tests, without Docker/network.
 
 `check-tool-access.py [--content | --tree] TARGET...` accepts explicit tree
@@ -282,7 +347,12 @@ creation/readback/removal and repaired positives are mandatory, never skips.
 Owned logs/provenance are retained in `target/ci-logs/pnpm-primitives-*/`.
 The overall watchdog is 1800s, individual runtime probes at most 180s.
 
-Only `--consumer primitives` exists in this slice; dsh/pi/copilot return usage2.
+`--consumer primitives` and `--consumer dsh` exist in this slice; pi/copilot
+return usage2 (dsh accepts `--version EXACT` for the reviewed changed candidate).
+The native audit phase runs both focused dsh legs and the policy matrix, records
+every leg in `target/ci-logs/durations.txt` and fails if the measured phase
+exceeds its predeclared budget (1.5× headroom under the 120-minute step
+watchdog) instead of quietly consuming the watchdog.
 A local base with matching pnpm bytes but no whole-source provenance provides
 diagnostic smoke only. Both clean native CI rows must still build/audit the full
 unchanged standard product at the proposed SHA, including current strict egress.

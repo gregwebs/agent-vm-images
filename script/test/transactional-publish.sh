@@ -17,7 +17,10 @@ elif [[ "$dest" == "${FAIL_DEST:-}" ]]; then
     printf partial >"$dest"
     chmod 600 "$dest"
     exit 8
-elif [[ "$dest" == "${BACKUP_FAIL:-}" ]]; then
+elif [[ -n "${BACKUP_FAIL:-}" && "$dest" == "$CASE/backup/"* &&
+        ( "${dest##*/}" == "${BACKUP_FAIL##*/}" || "${dest##*/}" == ".tmp${BACKUP_FAIL##*/}" ) ]]; then
+    # A backup is written to a temporary sibling and renamed, so the injected
+    # failure must match either name to keep testing the same branch.
     exit 7
 fi
 exec /bin/cp "$@"
@@ -62,6 +65,12 @@ assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode) == stat.S_IMODE(os.stat(sys.ar
 PYMODE
                 fi
             done
+            if [[ "$kind" == backup ]]; then
+                # A backup appears under its final name only once it is complete, and
+                # a failed copy leaves nothing behind: no restore can ever read a
+                # partially written backup.
+                [[ ! -e "$CASE/backup/0" && ! -e "$CASE/backup/.tmp0" ]] || fail 'failed backup left a file behind'
+            fi
             if [[ "$kind" == rollback ]]; then
                 grep -F "$CASE/backup/$position" "$CASE/stderr" >/dev/null || fail 'backup path missing'
                 cmp "$CASE/backup/$position" "$CASE/orig$position" || fail 'recovery bytes lost'
@@ -73,4 +82,13 @@ done
 if publish_transactional 2>/dev/null; then fail 'empty arguments accepted'; else [[ $? == 2 ]]; fi
 if publish_transactional "$work/duplicate" a b c b 2>/dev/null; then fail 'duplicate accepted'; else [[ $? == 2 ]]; fi
 [[ ! -e "$work/duplicate" ]] || fail 'usage modified filesystem'
+# The backup phase is recorded only after every destination is backed up, so a
+# caller can distinguish an interrupted backup phase from an interrupted publish.
+CASE="$work/complete"
+mkdir "$CASE"
+printf 'original\n' >"$CASE/d"
+printf 'new\n' >"$CASE/s"
+publish_transactional "$CASE/backup" "$CASE/s" "$CASE/d" || fail 'atomic backup publication failed'
+[[ -f "$CASE/backup/.complete" && -f "$CASE/backup/0" ]] || fail 'backup completion was not recorded'
+[[ ! -e "$CASE/backup/.tmp0" ]] || fail 'a temporary backup survived a completed rename'
 echo 'transactional publication controls passed'

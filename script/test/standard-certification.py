@@ -26,10 +26,16 @@ for tool in verifiers:
  writeexe(tools/tool/f'verify-{tool}.sh',f'#!/bin/sh\nset -eu\ntest -z "$AGENT_INSTALL_SOFT_FAIL"\nprintf "{tool}\\n" >> "$CALLS"\n')
 writeexe(tools/'opencode/verify-opencode-plugins.sh', '#!/bin/sh\nset -eu\nprintf "opencode-claude\\n" >> "$CALLS"\n')
 for name in ['codex','opencode','claude','pi']: writeexe(commands/name,'#!/bin/sh\nexit 0\n')
+# dsh is not installed by a package manager .bin wrapper: the image links
+# /usr/local/bin/dsh straight at the installed lib entrypoint, so the identity
+# tuple compares that target (and a same-version copy is a different file).
+dsh_prefix=tmp/'dsh'; dsh_target=dsh_prefix/'node_modules/@deepseek-ai/dsh/lib/bin.js'
+writeexe(dsh_target,'#!/usr/bin/env node\n')
+(commands/'dsh').symlink_to(dsh_target)
 prefix=tmp/'prefix'
 for name,folder in [('codex','.local'),('claude','.local'),('opencode','.opencode')]:
  p=prefix/folder/'bin'/name; p.parent.mkdir(parents=True,exist_ok=True); p.symlink_to(commands/name)
-env=dict(os.environ,AGENT_VM_CONTRACT_DIR=str(r/'images/recipe-contract'),AGENT_VM_TOOL_SOURCE_DIR=str(tools),AGENT_VM_INSTALL_STATUS_DIR=str(records),AGENT_INSTALL_SOFT_FAIL='1',AGENT_VM_CODEX_PREFIX=str(prefix),AGENT_VM_OPENCODE_PREFIX=str(prefix),AGENT_VM_CLAUDE_PREFIX=str(prefix),AGENT_VM_PI_WRAPPER=str(commands/'pi'),CALLS=str(tmp/'calls'),PATH=str(commands)+':'+os.environ['PATH'],AGENT_VM_VERSION_CODEX='rust-v0.159.3')
+env=dict(os.environ,AGENT_VM_CONTRACT_DIR=str(r/'images/recipe-contract'),AGENT_VM_TOOL_SOURCE_DIR=str(tools),AGENT_VM_INSTALL_STATUS_DIR=str(records),AGENT_INSTALL_SOFT_FAIL='1',AGENT_VM_CODEX_PREFIX=str(prefix),AGENT_VM_OPENCODE_PREFIX=str(prefix),AGENT_VM_CLAUDE_PREFIX=str(prefix),AGENT_VM_DSH_PREFIX=str(dsh_prefix),AGENT_VM_PI_WRAPPER=str(commands/'pi'),CALLS=str(tmp/'calls'),PATH=str(commands)+':'+os.environ['PATH'],AGENT_VM_VERSION_CODEX='rust-v0.159.3')
 spec=importlib.util.spec_from_file_location('pnpm_fixture',r/'script/test/fixtures/pnpm/verifier-fixture.py')
 fixture_module=importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture_module)
 fixture=tmp/'pnpm-fixture'; fixture.mkdir()
@@ -53,7 +59,7 @@ for name in names:
   run(False,label=f'{name} record {data!r}')
   p.write_text('installed\n')
 shadow=tmp/'shadow'; shadow.mkdir()
-for name in ['codex','opencode','claude','pi']:
+for name in ['dsh','codex','opencode','claude','pi']:
  p=shadow/name; writeexe(p,'#!/bin/sh\nprintf "wrong-version\\n"\n')
  e=dict(env,PATH=str(shadow)+':'+env['PATH'])
  result=run(False,e,label=f'distinct readable {name} shadow'); assert str(p) in result.stderr
@@ -71,6 +77,9 @@ writeexe(v,original+'printf "pending\\n" > "$AGENT_VM_INSTALL_STATUS_DIR/pi-clau
 run(False,label='late bridge record mutation'); (records/'pi-claude-bridge').write_text('installed\n')
 writeexe(v,original+'rm "$AGENT_VM_PI_WRAPPER"\n')
 run(False,label='late PATH target removal'); writeexe(commands/'pi','#!/bin/sh\nexit 0\n')
+writeexe(v,original+'rm "$AGENT_VM_DSH_PREFIX/node_modules/@deepseek-ai/dsh/lib/bin.js"\n')
+run(False,label='late dsh target removal')
+writeexe(dsh_target,'#!/usr/bin/env node\n')
 writeexe(v,original+'echo plausible report\nexit 1\n'); run(False,label='verifier output then failure'); writeexe(v,original)
 pnpm_launcher=fixture/'usr/local/bin/pnpm'; pnpm_original=pnpm_launcher.read_bytes()
 appendexe(v,original,FIXTURES/'launcher-mutation.sh')

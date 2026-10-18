@@ -2,6 +2,7 @@
 """Bounded host orchestration for the primitive-only native probe."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import signal
 import subprocess
@@ -11,6 +12,10 @@ import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
+# Evidence lives under the build root. AGENT_VM_EVIDENCE_ROOT exists only so the
+# fake-Docker self-tests can redirect it: a directory under target/ci-logs is a
+# claim about a real run, and a fake run must not be able to make that claim.
+EVIDENCE_ROOT = Path(os.environ.get('AGENT_VM_EVIDENCE_ROOT') or ROOT / 'target/ci-logs')
 PRIMITIVE_MIN_FREE_KIB = 524288
 PRIMITIVE_SETUP_BUDGET_KIB = 262144
 # Real evidence lines are a few KiB. This ceiling is shared by both pipes of one
@@ -122,7 +127,7 @@ class Invocation:
         self.image = image
         self.requested = requested
         self.token = 'pnpm-primitives-' + uuid.uuid4().hex
-        self.logs = ROOT / 'target/ci-logs' / self.token
+        self.logs = EVIDENCE_ROOT / self.token
         self.logs.mkdir(parents=True)
         self.scratch = self.logs / 'invocation'
         self.scratch.mkdir()
@@ -437,6 +442,9 @@ class Invocation:
 
 
 def main(args):
+    if any(args[index:index + 2] == ['--consumer', 'dsh'] for index in range(len(args))):
+        import runpy
+        return runpy.run_path(str(Path(__file__).with_name('standard-node-dsh.py')))['main'](args)
     try:
         image, requested = arguments(args)
     except ValueError as error:

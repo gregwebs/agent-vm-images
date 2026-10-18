@@ -11,7 +11,10 @@ AGENT_INSTALL_SOFT_FAIL=
 export AGENT_INSTALL_SOFT_FAIL
 AGENT_VM_CONTRACT_DIR="${AGENT_VM_CONTRACT_DIR:-/tmp/recipe-contract}"
 AGENT_VM_INSTALL_STATUS_DIR="${AGENT_VM_INSTALL_STATUS_DIR:-/opt/agent-vm/install-status}"
-export AGENT_VM_CONTRACT_DIR AGENT_VM_INSTALL_STATUS_DIR
+# The dsh verifier resolves its own helpers from its directory, but its pnpm
+# identity checks need the mount name; exporting keeps one source for both.
+PNPM_SOURCE_DIR="${PNPM_SOURCE_DIR:-/tmp/pnpm-source}"
+export AGENT_VM_CONTRACT_DIR AGENT_VM_INSTALL_STATUS_DIR PNPM_SOURCE_DIR
 tools="${AGENT_VM_TOOL_SOURCE_DIR:-/tmp/standard-tools}"
 
 require_installed() {
@@ -25,7 +28,10 @@ require_installed() {
 }
 
 check_path_identity() {
+    # The dsh target is the installed lib entrypoint the image links directly;
+    # a generated .bin wrapper or a same-version copy is a different file.
     python3 - \
+        "${AGENT_VM_DSH_PREFIX:-/opt/agent-vm/dsh}/node_modules/@deepseek-ai/dsh/lib/bin.js" \
         "${AGENT_VM_CODEX_PREFIX:-/opt/agent}/.local/bin/codex" \
         "${AGENT_VM_OPENCODE_PREFIX:-/opt/agent}/.opencode/bin/opencode" \
         "${AGENT_VM_CLAUDE_PREFIX:-/opt/agent}/.local/bin/claude" \
@@ -34,7 +40,7 @@ import os
 import stat
 import sys
 
-for name, verified in zip(("codex", "opencode", "claude", "pi"), sys.argv[1:]):
+for name, verified in zip(("dsh", "codex", "opencode", "claude", "pi"), sys.argv[1:]):
     candidate = next(
         (os.path.join(directory, name)
          for directory in os.environ.get("PATH", "").split(os.pathsep)
@@ -57,13 +63,13 @@ PY
 
 require_installed
 check_path_identity
-sh "${PNPM_SOURCE_DIR:-/tmp/pnpm-source}/verify-pnpm.sh"
+sh "$PNPM_SOURCE_DIR/verify-pnpm.sh"
 for tool in dsh pi codex opencode claude copilot; do
     sh "$tools/$tool/verify-$tool.sh"
 done
 AGENT_VM_OPENCODE_SOURCE_DIR="$tools/opencode"
 export AGENT_VM_OPENCODE_SOURCE_DIR AGENT_VM_VERSION_OPENCODE_CLAUDE
 sh "$tools/opencode/verify-opencode-plugins.sh"
-sh "${PNPM_SOURCE_DIR:-/tmp/pnpm-source}/verify-pnpm.sh"
+sh "$PNPM_SOURCE_DIR/verify-pnpm.sh"
 check_path_identity
 require_installed

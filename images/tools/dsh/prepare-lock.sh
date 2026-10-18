@@ -1,40 +1,39 @@
 #!/bin/sh
-# Prepare the combined dsh + pnpm lock for the explicit version slots.
+# Empty/equal inputs are immutable; changed dsh selections use a staged graph.
+# --refresh-lock is developer-only and never bypasses policy or exact peers.
 #
-# Usage:
-#   prepare-lock.sh PREFIX DSH_VERSION PNPM_VERSION [--refresh-lock]
+# Usage: prepare-lock.sh PREFIX DSH_VERSION PNPM_VERSION [--refresh-lock]
 #
-# DSH_VERSION and PNPM_VERSION are each either an exact npm version or empty.
-# Empty means "keep the committed pin"; a value equal to the committed pin is
-# treated the same way. In that case this script only re-checks the local
-# invariants and exits, leaving the committed manifest and lock byte-identical
-# and making NO registry request.
+# PREFIX owns the four reviewed inputs. Each version is exact or empty (empty
+# keeps the committed selection). PNPM_VERSION accepts only empty or the base
+# pin, because the base image owns the manager selection and launcher.
 #
-# When a slot changes it stages an incremental copy (the committed lock is the
-# starting point, so unrelated transitive pins do not move), updates only the
-# changed `dependencies` entries, runs `npm install --package-lock-only`, and
-# validates the result before replacing the committed files in PREFIX.
-#
-# Validation is the build-mode location freeze in the sibling
-# check-lock-update.js (see its header). `--refresh-lock` is a DEVELOPER-ONLY
-# escape hatch: it still runs the pin/integrity/layout invariants but skips the
-# location freeze, permitting a reviewed transitive refresh. Ordinary and
-# release builds never pass it.
-#
-# PREFIX is the production installation prefix, or -- only in tests -- a
-# canonical child of AGENT_VM_FIXTURE_ROOT. The prefix is resolved physically
-# before anything is written, so a symlink cannot redirect the staged replace.
+# Empty or equal selections start no package manager at all: they re-check the
+# committed bytes, structure and effective peers. A changed selection stages the
+# old lock plus the changed manifest, resolves a fresh graph under the owning
+# policy, validates structure, effective peers and the update rules, writes
+# build-local pins, and only then publishes all four files transactionally.
 set -eu
 
 usage() {
-    echo "usage: prepare-lock.sh PREFIX DSH_VERSION PNPM_VERSION [--refresh-lock]" >&2
+    echo 'usage: prepare-lock.sh PREFIX DSH_VERSION PNPM_VERSION [--refresh-lock]' >&2
 }
+
+fail() {
+    echo "prepare-lock.sh: $*" >&2
+    exit 1
+}
+
+# A Node preload would make every later check untrustworthy, so refuse injected
+# runtime options before any Node process starts.
+[ -z "${NODE_OPTIONS-}" ] || fail 'NODE_OPTIONS is not supported'
+[ -z "${NODE_PATH-}" ] || fail 'NODE_PATH is not supported'
+[ -z "${BUN_OPTIONS-}" ] || fail 'BUN_OPTIONS is not supported'
 
 if [ "$#" -lt 3 ]; then
     usage
     exit 2
 fi
-
 PREFIX=$1
 DSH_VERSION=$2
 PNPM_VERSION=$3
@@ -42,8 +41,11 @@ shift 3
 
 refresh=0
 while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --refresh-lock) refresh=1 ;;
+    case $1 in
+        --refresh-lock)
+            [ "$refresh" -eq 0 ] || { usage; exit 2; }
+            refresh=1
+            ;;
         *)
             usage
             exit 2
@@ -52,15 +54,12 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
-self_dir=$(cd "$(dirname "$0")" && pwd)
-CHECK="${AGENT_VM_CHECK_LOCK:-$self_dir/check-lock-update.js}"
+self_dir=$(cd "$(dirname "$0")" && pwd -P)
+PROJECT=$self_dir/project.py
 
+# Canonical semver only: a multi-line range or a leading-zero component must not
+# reach the manager as if it were an exact selection.
 exact_version() {
-    # Require one line first: `grep` is line-oriented, so a multi-line range
-    # whose FIRST line (or any line) looks exact -- e.g. "0.1.5-rc.1\n||\n>=..."
-    # -- would otherwise be accepted and handed to npm as a range. Then require
-    # the whole value to match the canonical semver grammar, which forbids
-    # leading-zero numeric components AND leading-zero numeric prerelease ids.
     [ "$(printf '%s' "$1" | wc -l | tr -d ' ')" -eq 0 ] || return 1
     printf '%s' "$1" |
         grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
@@ -68,140 +67,149 @@ exact_version() {
 
 for slot in "$DSH_VERSION" "$PNPM_VERSION"; do
     [ -n "$slot" ] || continue
-    exact_version "$slot" || {
-        echo "prepare-lock.sh: not an exact npm version: '$slot'" >&2
-        exit 1
-    }
+    exact_version "$slot" || fail "not an exact version: '$slot'"
 done
 
-# Physical-prefix gate: production path, or a canonical child of the fixture
-# root the test harness owns. Anything else -- especially a path that resolves
-# outside the fixture root -- is refused before any write.
-[ -d "$PREFIX" ] || {
-    echo "prepare-lock.sh: prefix is not a directory: $PREFIX" >&2
-    exit 1
-}
-prefix_phys=$(cd "$PREFIX" && pwd -P)
-production_prefix="/opt/agent-vm/dsh"
-if [ "$prefix_phys" != "$production_prefix" ]; then
-    fixture_root="${AGENT_VM_FIXTURE_ROOT:-}"
-    [ -n "$fixture_root" ] || {
-        echo "prepare-lock.sh: refusing non-production prefix $PREFIX without AGENT_VM_FIXTURE_ROOT" >&2
-        exit 1
-    }
-    [ -d "$fixture_root" ] || {
-        echo "prepare-lock.sh: AGENT_VM_FIXTURE_ROOT is not a directory: $fixture_root" >&2
-        exit 1
-    }
-    root_phys=$(cd "$fixture_root" && pwd -P)
-    case "$prefix_phys" in
-        "$root_phys"/*) ;;
-        *)
-            echo "prepare-lock.sh: prefix $prefix_phys is outside the fixture root $root_phys" >&2
-            exit 1
-            ;;
-    esac
-fi
+# Authorization first: the prefix, its inputs, the base pin and the scratch
+# parent are all validated before anything is created or written.
+facts=$(python3 "$PROJECT" authorize "$PREFIX") || exit 1
+base_pin=$(printf '%s\n' "$facts" | jq -er '.basePin') || fail 'authorization returned no base pin'
+# Ambient configuration is rejected before HOME is replaced; caller HOME/XDG is
+# deliberately ignored because the manager never sees it.
+python3 "$PROJECT" guard "$PREFIX" || exit 1
+
+PNPM_SOURCE=${PNPM_SOURCE_DIR:-$self_dir/../../pnpm}
+[ -f "$PNPM_SOURCE/read-pin-version.py" ] || fail "cannot locate the reviewed pnpm sources at $PNPM_SOURCE"
+base_pnpm=$(python3 "$PNPM_SOURCE/read-pin-version.py" "$base_pin") || fail 'cannot read the base pin'
+[ "$base_pnpm" = '11.11.0' ] || fail "unsupported base manager selection: $base_pnpm"
+[ -z "$PNPM_VERSION" ] || [ "$PNPM_VERSION" = "$base_pnpm" ] ||
+    fail 'pnpm compatibility selection disagrees with base pin'
 
 manifest="$PREFIX/package.json"
-lock="$PREFIX/package-lock.json"
-[ -f "$manifest" ] || {
-    echo "prepare-lock.sh: no committed manifest at $manifest" >&2
-    exit 1
-}
-[ -f "$lock" ] || {
-    echo "prepare-lock.sh: no committed lock at $lock" >&2
-    exit 1
-}
-
-# This temporary lock package is not a selection owner. Fixture pins live under
-# the same physically validated root; production always reads the immutable base.
-base_pin=/opt/agent-vm/pnpm/pin.json
-if [ "$prefix_phys" != "$production_prefix" ]; then
-    base_pin="$root_phys/pnpm/pin.json"
-    [ -f "$base_pin" ] && [ ! -L "$base_pin" ] && [ ! -L "$root_phys/pnpm" ] || {
-        echo 'prepare-lock.sh: missing regular fixture base pin' >&2
-        exit 1
-    }
-fi
-base_pnpm=$(jq -er '.version | select(type == "string" and test("^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))' "$base_pin")
-committed_dsh=$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$manifest")
-committed_pnpm=$(jq -r '.dependencies.pnpm' "$manifest")
+package_manager=$(jq -er '.packageManager' "$manifest") || fail 'committed manifest has no packageManager'
+[ "$package_manager" = "pnpm@$base_pnpm" ] ||
+    fail "manifest packageManager $package_manager disagrees with base pin $base_pnpm"
+committed_dsh=$(jq -er '.dependencies["@deepseek-ai/dsh"]' "$manifest") || fail 'committed manifest selects no dsh version'
 effective_dsh=${DSH_VERSION:-$committed_dsh}
-effective_pnpm=${PNPM_VERSION:-$committed_pnpm}
 
-[ "$effective_pnpm" = "$base_pnpm" ] || {
-    echo 'prepare-lock.sh: pnpm compatibility selection disagrees with base pin' >&2
-    exit 1
-}
+# The contract directory executes policy (its graph module, its manager envelope),
+# so project.py authorizes it before any of it is spawned. The build mount is
+# named by AGENT_VM_CONTRACT_DIR; a host checkout keeps its own tracked copy.
+CONTRACT=$(python3 "$PROJECT" contract-dir "$PREFIX") || exit 1
+[ -f "$CONTRACT/pnpm-lock.mjs" ] || fail "cannot locate the graph module in $CONTRACT"
 
 changed=0
-[ "$effective_dsh" != "$committed_dsh" ] && changed=1
-[ "$effective_pnpm" != "$committed_pnpm" ] && changed=1
-
-# The pin/integrity/layout invariants the cargo guards and the old upgrade
-# script both enforced, now in one place. Runs on whatever lock is handed to it.
-validate_lock() {
-    jq -e --arg d "$effective_dsh" --arg p "$effective_pnpm" '
-        .packages as $pk
-        | ($pk[""].dependencies["@deepseek-ai/dsh"] == $d)
-        and ($pk[""].dependencies.pnpm == $p)
-        and ($pk["node_modules/@deepseek-ai/dsh"].version == $d)
-        and ($pk["node_modules/pnpm"].version == $p)
-        and ([$pk | to_entries[] | select(.key != "" and (.value.integrity | not))] | length == 0)
-    ' "$1" >/dev/null
-}
-
-# dsh-sandbox-local must sit where dsh's plugin loader resolves it: directly
-# under the root node_modules, or directly under dsh's own node_modules.
-check_sandbox() {
-    sandbox=$(jq -r '.packages | keys[] | select(endswith("/@deepseek-ai/dsh-sandbox-local"))' "$1")
-    allowed='^node_modules/(@deepseek-ai/dsh/node_modules/)?@deepseek-ai/dsh-sandbox-local$'
-    if printf '%s\n' "$sandbox" | grep -q 'dsh-base/node_modules/'; then
-        echo "prepare-lock.sh: dsh-sandbox-local is nested under dsh-base/node_modules," >&2
-        echo "                 which dsh's plugin loader cannot resolve:" >&2
-        printf '                   %s\n' "$sandbox" >&2
-        exit 1
-    fi
-    if [ -z "$sandbox" ] || printf '%s\n' "$sandbox" | grep -qvE "$allowed"; then
-        echo "prepare-lock.sh: dsh-sandbox-local is not installed where dsh resolves it:" >&2
-        printf '                   %s\n' "${sandbox:-<absent>}" >&2
-        exit 1
-    fi
-}
+[ "$effective_dsh" = "$committed_dsh" ] || changed=1
+[ "$refresh" -eq 0 ] || changed=1
 
 if [ "$changed" -eq 0 ]; then
-    validate_lock "$lock" || {
-        echo "prepare-lock.sh: the committed dsh lock fails the pin/integrity checks" >&2
-        exit 1
-    }
-    check_sandbox "$lock"
-    echo "prepare-lock.sh: dsh $effective_dsh / pnpm $effective_pnpm unchanged; committed lock reused"
+    # Comparing the committed project with itself proves all four bytes, the
+    # structure, the effective peers and the base assertions without a manager.
+    node "$self_dir/check-lock-update.js" "$PREFIX" "$PREFIX" '' || exit 1
+    echo "prepare-lock.sh: dsh $effective_dsh unchanged; reviewed inputs reused"
     exit 0
 fi
 
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT INT TERM HUP
+work=$(python3 "$PROJECT" scratch "$PREFIX") || exit 1
+stage=$work/prefix
+# Status 3 (incomplete rollback) must retain the whole scratch: removing the
+# staged graph or the recovery material would destroy the evidence.
+keep=0
+cleanup() {
+    status=$?
+    if [ "$keep" -eq 0 ] &&
+        ! python3 "$PROJECT" cleanup "$work" >/dev/null 2>&1; then
+        echo 'prepare-lock.sh: invocation scratch cleanup failed' >&2
+        [ "$status" -ne 0 ] || status=1
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
-jq --arg d "$effective_dsh" --arg p "$effective_pnpm" \
-    '.dependencies["@deepseek-ai/dsh"] = $d | .dependencies.pnpm = $p' \
-    "$manifest" >"$work/package.json"
-cp "$lock" "$work/package-lock.json"
+mkdir "$stage"
+cp "$PREFIX/pnpm-lock.yaml" "$PREFIX/pnpm-workspace.yaml" "$PREFIX/pnpm-inputs.sha256" "$stage/"
+jq --arg d "$effective_dsh" '.dependencies["@deepseek-ai/dsh"] = $d' "$manifest" >"$stage/package.json" ||
+    fail 'cannot stage the changed manifest'
+# The workspace is staged even when byte-identical: resolution must run against
+# the reviewed workspace, never an ambient one.
 
-echo "prepare-lock.sh: dsh $committed_dsh -> $effective_dsh, pnpm $committed_pnpm -> $effective_pnpm"
-(cd "$work" && npm install --ignore-scripts --package-lock-only --no-audit --no-fund --loglevel=error)
+# Every manager call owns private state so no caller or image cache is read or
+# written, and the five policy defaults are explicit rather than inherited.
+HOME=$work/home
+XDG_CONFIG_HOME=$work/config
+XDG_CACHE_HOME=$work/cache
+XDG_DATA_HOME=$work/data
+XDG_STATE_HOME=$work/state
+TMPDIR=$work/tmp
+export HOME XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME TMPDIR
+export PNPM_CONFIG_MINIMUM_RELEASE_AGE=1440
+export PNPM_CONFIG_MINIMUM_RELEASE_AGE_STRICT=true
+export PNPM_CONFIG_MINIMUM_RELEASE_AGE_IGNORE_MISSING_TIME=false
+export PNPM_CONFIG_TRUST_POLICY=no-downgrade
+export PNPM_CONFIG_IGNORE_SCRIPTS=true
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$TMPDIR"
 
+# project.py owns manager selection: the fixed base launcher, or an authorized
+# fixture fake. Reading its argv back line by line keeps spaces intact.
+manager=$(python3 "$PROJECT" manager "$PREFIX") || exit 1
+set --
+while IFS= read -r word; do
+    set -- "$@" "$word"
+done <<EOF
+$manager
+EOF
+[ "$#" -ge 1 ] || fail 'authorization returned no manager argv'
+
+# Every manager call, including the identity check, carries the policy flags: a
+# caller pnpmfile or an ambient registry must never influence even `--version`.
+timeout --kill-after=5 20 "$@" --version --pm-on-fail=error --config.update-notifier=false \
+    --ignore-pnpmfile --registry=https://registry.npmjs.org/ >"$work/version.out" 2>"$work/version.err" || fail 'manager version check failed'
+[ "$(cat "$work/version.out")" = "$base_pnpm" ] || fail "manager is not the base pin $base_pnpm"
+
+echo "prepare-lock.sh: dsh $committed_dsh -> $effective_dsh via $*"
+status=0
+(cd "$stage" && sh "$CONTRACT/run-pnpm.sh" "$work/resolve.ndjson" -- \
+    "$@" install --lockfile-only --no-frozen-lockfile \
+    --config.minimum-release-age=1440 \
+    --config.minimum-release-age-strict=true \
+    --config.minimum-release-age-ignore-missing-time=false \
+    --config.trust-policy=no-downgrade --ignore-scripts \
+    --ignore-pnpmfile --pm-on-fail=error --config.update-notifier=false \
+    --registry=https://registry.npmjs.org/ \
+    --package-import-method=copy --store-dir "$work/store") || status=$?
+# A signal reaches the owning shell unchanged instead of becoming a plain failure.
+case $status in
+    0) ;;
+    130 | 143 | 129) exit "$status" ;;
+    *) fail 'staged resolution failed' ;;
+esac
+# Lock-only generation must not create an installed tree in the staged project.
+[ ! -e "$stage/node_modules" ] || fail 'lock-only generation created node_modules'
+
+# Pins are written only after the staged structure and every effective exact
+# peer validate; the following check re-reads them as reviewed bytes.
+node "$CONTRACT/pnpm-lock.mjs" pin dsh "$stage" || fail 'staged graph failed structural validation'
+node "$CONTRACT/pnpm-lock.mjs" check dsh "$stage" || fail 'staged graph failed pinned-input validation'
 if [ "$refresh" -eq 1 ]; then
-    validate_lock "$work/package-lock.json" || {
-        echo "prepare-lock.sh: the refreshed lock fails the pin/integrity checks" >&2
-        exit 1
-    }
-    check_sandbox "$work/package-lock.json"
+    node "$self_dir/check-lock-update.js" "$PREFIX" "$stage" "$DSH_VERSION" --refresh-lock || exit 1
 else
-    node "$CHECK" "$manifest" "$lock" "$work/package.json" "$work/package-lock.json" \
-        "$DSH_VERSION" "$PNPM_VERSION" || exit 1
+    node "$self_dir/check-lock-update.js" "$PREFIX" "$stage" "$DSH_VERSION" || exit 1
 fi
 
-cp "$work/package.json" "$manifest"
-cp "$work/package-lock.json" "$lock"
-echo "prepare-lock.sh: wrote the prepared dsh lock"
+status=0
+python3 "$PROJECT" publish "$stage" "$PREFIX" || status=$?
+case $status in
+    0) ;;
+    3)
+        keep=1
+        echo 'prepare-lock.sh: publication rollback is incomplete; staged inputs and recovery retained' >&2
+        exit 3
+        ;;
+    *)
+        fail 'publication failed; committed inputs were restored and staged graph discarded'
+        ;;
+esac
+echo "prepare-lock.sh: published four dsh inputs for $effective_dsh"

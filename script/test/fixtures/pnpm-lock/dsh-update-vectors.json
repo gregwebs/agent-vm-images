@@ -1,0 +1,13 @@
+{
+  "beforeVersion": "0.1.5-rc.2",
+  "afterVersion": "0.1.5-rc.1",
+  "retainedIntegrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+  "beforeOnly": ["leaf@1.0.0"],
+  "afterOnly": ["leaf@2.0.0"],
+  "peerSummary": {"exact": 1, "totalOptionalMissing": 0, "cordisExact": 1, "unsatisfied": 0},
+  "opaque": "0123456789abcdef0123456789abcdef",
+  "malformed": ["", "0123456789abcdef", "0123456789ABCDEF0123456789ABCDEF", "0123456789abcdef0123456789abcdeg"],
+  "retainedArchiveMutations": ["integrity", "tarball", "engines", "optional", "peerDependencies", "peerDependenciesMeta", "os", "cpu", "libc", "deprecated", "hasBin"],
+  "retainedSnapshotMutations": ["dependencies", "optionalDependencies", "transitivePeerDependencies", "optional"],
+  "reject": ["orphan-archive", "orphan-snapshot", "dangling-optional", "dangling-context", "extra-importer", "dev-root", "manifest-field", "settings", "workspace", "overrides", "pnpm", "no-sandbox", "dsh-prefix-collision"]
+}

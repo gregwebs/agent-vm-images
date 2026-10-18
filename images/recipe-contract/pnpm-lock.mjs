@@ -8,7 +8,13 @@ import YAML from "./vendor/yaml/dist/index.js";
 
 /** @typedef {string & {readonly exactVersion: unique symbol}} ExactVersion */
 /** @typedef {{name:string, version:ExactVersion}} PackageId */
-/** @typedef {{packageId:PackageId, peerContext:SnapshotId[], key:string}} SnapshotId */
+/** @typedef {{opaque:true,key:string}} OpaquePeerContext */
+/** @typedef {{opaque?:false,packageId:PackageId, peerContext:(SnapshotId|OpaquePeerContext)[], key:string}} SnapshotId */
+/** @typedef {Omit<LockedProject,'selection'> & {selection:{kind:'dsh',version:ExactVersion},tentative:true}} TentativeDshProject */
+/** @typedef {{mode:'equal'|'changed'|'refresh',beforeVersion:ExactVersion,afterVersion:ExactVersion,addedArchives:string[],removedArchives:string[],retainedArchives:string[],addedSnapshots:string[],removedSnapshots:string[],retainedSnapshots:string[]}} DshUpdateComparison */
+/** @typedef {{exact:number,totalOptionalMissing:number,cordisExact:number,unsatisfied:0}} ExactPeerSummary */
+/** @typedef {{selector:string,version:string,package:string,packageVersion:ExactVersion,integrity:string,peer:string,kind:'exact-peer'|'range-peer'|'dependency'}} CordisRequirement */
+/** @typedef {{overrides:Record<string,ExactVersion>,requirements:CordisRequirement[],delta:{selector:string,before:ExactVersion|null,after:ExactVersion}[]}} DshCordisDerivation */
 /** @typedef {{kind:'dsh'|'pi'|'bridge', version:ExactVersion}} Selection */
 /** @typedef {{id:PackageId, integrity:string, tarball:string, peers:Record<string,string>, optionalPeers:string[]}} Archive */
 /** @typedef {{name:string, target:string, optional:boolean}} Edge */
@@ -42,6 +48,42 @@ function name(value) {
   assert.ok(registryName.test(str) && !str.includes("\n") && str.length <= 214, `not registry package name: ${str}`);
   return str;
 }
+
+/** Version syntax a peer range may use: partials, wildcards, comparators and
+ * `||` alternatives. Anything outside it is a review stop, never a silent skip. */
+const partial = "(?:0|[1-9][0-9]*|[xX*])(?:\\.(?:0|[1-9][0-9]*|[xX*])){0,2}(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?";
+// `>= 4.11` (operator, space, partial) is a normal npm range, so a comparator
+// may separate its operator from its version by whitespace.
+const comparatorTerm = `(?:\\^|~|>=|<=|>|<|=)?\\s*${partial}`;
+const comparatorSet = new RegExp(`^${comparatorTerm}(?:\\s+${comparatorTerm})*$`);
+const hyphenRange = new RegExp(`^${partial}\\s+-\\s+${partial}$`);
+
+/** @param {string} wanted @returns {string|null} the exact version it pins, or null */
+function exactDeclaration(wanted) {
+  // `=X`, `= X`, `vX` and surrounding whitespace all pin one version. The
+  // alternative spelling is stripped and re-trimmed before the exact test, so a
+  // spaced comparator form cannot fall through to the range grammar and escape
+  // the exact-peer oracle.
+  const pin = wanted.trim().replace(/^=\s*/, "").trim().replace(/^v/, "");
+  return exact.test(pin) ? pin : null;
+}
+
+/** @param {string} wanted @returns {boolean} */
+function rangeDeclaration(wanted) {
+  const spec = wanted.trim();
+  if (spec === "") return false;
+  return spec.split(/\s*\|\|\s*/).every(alternative => {
+    const trimmed = alternative.trim();
+    return trimmed !== '' && (hyphenRange.test(trimmed) || comparatorSet.test(trimmed));
+  });
+}
+
+/** @param {string} wanted @returns {'exact'|'range'} */
+function peerSpecClass(wanted) {
+  if (exactDeclaration(wanted) !== null) return "exact";
+  assert.ok(rangeDeclaration(wanted), `unknown peer specification: ${wanted}`);
+  return "range";
+}
 function keys(value, allowed, required = []) {
   for (const key of Object.keys(value)) assert.ok(allowed.includes(key), `unexpected key: ${key}`);
   for (const key of required) assert.ok(Object.hasOwn(value, key), `missing key: ${key}`);
@@ -51,11 +93,25 @@ function kindRoot(kind) {
   return roots[kind];
 }
 function boundedBytes(file) {
-  const stat = fs.lstatSync(file);
-  assert.ok(stat.isFile() && stat.size <= MAX_BYTES, `${file}: must be a regular file <=16 MiB`);
-  const data = fs.readFileSync(file);
-  assert.ok(data.length <= MAX_BYTES, "input grew beyond size bound");
-  return data;
+  assert.ok(fs.lstatSync(file).isFile(), `${file}: must be a regular file`);
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  try {
+    const stat = fs.fstatSync(fd);
+    assert.ok(stat.isFile() && stat.size <= MAX_BYTES, `${file}: must be a regular file <=16 MiB`);
+    const data = Buffer.alloc(stat.size + 1);
+    let length = 0;
+    while (length < data.length) {
+      const read = fs.readSync(fd,data,length,data.length-length,null);
+      if (!read) break;
+      length += read;
+    }
+    assert.ok(length <= stat.size, "input grew beyond size bound");
+    return data.subarray(0,length);
+  } finally { fs.closeSync(fd); }
+}
+function hasEntry(file) {
+  try { fs.lstatSync(file); return true; }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
 }
 function boundedRead(file) {
   return new TextDecoder("utf-8", { fatal: true }).decode(boundedBytes(file));
@@ -99,10 +155,14 @@ function snapshotId(key) {
     const peerContext = [];
     while (key[offset] === "(") {
       offset++;
-      peerContext.push(parseId(depth + 1));
+      const opaque = /^([0-9a-f]{32})\)/.exec(key.slice(offset));
+      if (opaque) {
+        peerContext.push({ opaque: true, key: opaque[1] });
+        offset += opaque[1].length;
+      } else peerContext.push(parseId(depth + 1));
       assert.equal(key[offset++], ")", `malformed peer suffix: ${key}`);
     }
-    assert.equal(new Set(peerContext.map(peer => peer.packageId.name)).size, peerContext.length, `ambiguous peer context: ${key}`);
+    assert.equal(new Set(peerContext.map(peer => peer.opaque ? `opaque:${peer.key}` : `package:${peer.packageId.name}`)).size, peerContext.length, `ambiguous peer context: ${key}`);
     return { packageId, peerContext, key: key.slice(start, offset) };
   }
   const result = parseId(0);
@@ -113,7 +173,7 @@ const archiveKey = id => `${id.name}@${id.version}`;
 const sorted = values => values.sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
 const canonicalEdges = edges => edges.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : Number(a.optional) - Number(b.optional));
 
-function validateWorkspace(workspace, kind) {
+function validateWorkspace(workspace, kind, tentative = false, report = false) {
   const common = {
     packages: ["."], autoInstallPeers: kind !== "bridge", strictPeerDependencies: false,
     enableGlobalVirtualStore: false, pmOnFail: "error", sideEffectsCache: false,
@@ -127,7 +187,11 @@ function validateWorkspace(workspace, kind) {
   } : { nodeLinker: "hoisted", ignoredOptionalDependencies: ["@anthropic-ai/claude-agent-sdk-*"] };
   keys(workspace, [...Object.keys(common), ...Object.keys(policy), ...(kind === "dsh" ? ["overrides"] : [])], [...Object.keys(common), ...Object.keys(policy)]);
   for (const [key, value] of Object.entries({ ...common, ...policy })) assert.deepEqual(workspace[key], value, `workspace policy: ${key}`);
-  if (kind === "dsh") {
+  if (kind === "dsh" && tentative) {
+    assert.equal(workspace.overrides, undefined, "tentative derivation must remove old overrides");
+  } else if (kind === "dsh" && !(report && workspace.overrides === undefined)) {
+    // A report may describe a graph with no overrides (the negative leg's own
+    // re-resolution), so the map is validated whenever it is present.
     const overrides = record(workspace.overrides);
     keys(overrides, overrideNames, overrideNames);
     for (const value of Object.values(overrides)) version(value);
@@ -149,10 +213,15 @@ function digest(prefix, file) { return crypto.createHash("sha256").update(bounde
 
 /** @param {{prefix:string,kind:'dsh'|'pi'|'bridge',verifyPins?:boolean}} options @returns {LockedProject} */
 export function readProject({ prefix, kind, verifyPins: checkPins = true }) {
+  return readProjectInputs({prefix, kind, checkPins, tentative: false});
+}
+
+// This capability is private to derivation; ordinary validation can never skip peers.
+function readProjectInputs({prefix, kind, checkPins, tentative, report = false}) {
   const root = kindRoot(kind);
   if (checkPins) verifyPins(prefix);
   for (const file of [".npmrc", ".pnpmfile.cjs", ".pnpmfile.js", ".pnpmfile.mjs", "pnpmfile.cjs", "package-lock.json"])
-    assert.ok(!fs.existsSync(path.join(prefix, file)), `unreviewed input: ${file}`);
+    assert.ok(!hasEntry(path.join(prefix, file)), `unreviewed input: ${file}`);
   const manifest = parse(path.join(prefix, "package.json"), true);
   keys(manifest, ["name", "version", "private", "type", "description", "license", "packageManager", "dependencies"], ["name", "private", "packageManager", "dependencies"]);
   name(manifest.name);
@@ -165,7 +234,7 @@ export function readProject({ prefix, kind, verifyPins: checkPins = true }) {
   keys(dependencies, [root], [root]);
   const selection = { kind, version: version(dependencies[root]) };
   const workspace = parse(path.join(prefix, "pnpm-workspace.yaml"));
-  validateWorkspace(workspace, kind);
+  validateWorkspace(workspace, kind, tentative, report);
   const lock = parse(path.join(prefix, "pnpm-lock.yaml"));
   keys(lock, ["lockfileVersion", "settings", "overrides", "ignoredOptionalDependencies", "importers", "packages", "snapshots"], ["lockfileVersion", "settings", "importers", "packages", "snapshots"]);
   assert.equal(String(lock.lockfileVersion), "9.0", "requires v9 lock");
@@ -239,20 +308,62 @@ export function readProject({ prefix, kind, verifyPins: checkPins = true }) {
     return { id, edges: canonicalEdges(edges) };
   });
   const project = { manifest, workspace, lock, packages, snapshots, importer: [{ name: root, target: rootId.key, optional: false }], prefix, selection };
+  if (tentative) {
+    assert.equal(kind, "dsh");
+    validateGraph(project, selection);
+    validateContextEdges(project);
+    return { ...project, tentative: true };
+  }
+  if (report) {
+    // Report-only reader: structure and context edges are still enforced, so a
+    // peer report always describes a well-formed graph; only the exact-peer
+    // assertion is left to the caller. Reached solely by this module's `peers`
+    // verb, never by a check, pin, install or publication path.
+    validateGraph(project, selection);
+    validateContextEdges(project);
+    return project;
+  }
   validateProject(project, selection);
   return project;
 }
 
 /** @param {LockedProject} project @param {Selection} selection */
 export function validateProject(project, selection) {
+  assert.ok(!project.tentative, "tentative graph is not a locked project");
+  validateGraph(project, selection);
+  if (selection.kind === "dsh") checkExactPeers(project);
+  validateContextEdges(project);
+}
+
+function resolveContext(context, snapshots, source) {
+  if (context.opaque) return undefined;
+  if (snapshots.has(context.key)) return snapshots.get(context.key);
+  const matches = [...snapshots.values()].filter(snapshot => archiveKey(snapshot.id.packageId) === context.key);
+  assert.ok(matches.length <= 1, `${source}: ambiguous peer context ${context.key}`);
+  assert.equal(matches.length, 1, `${source}: dangling peer context ${context.key}`);
+  return matches[0];
+}
+
+function validateContextEdges(project) {
+  const snapshots = new Map(project.snapshots.map(snapshot => [snapshot.id.key,snapshot]));
+  for (const owner of project.snapshots) for (const context of owner.id.peerContext) {
+    if (context.opaque) continue;
+    const provider = resolveContext(context,snapshots,owner.id.key);
+    const edge = owner.edges.find(edge => edge.name === context.packageId.name);
+    if (edge) assert.equal(provider.id.key,edge.target,`${owner.id.key}: ambiguous context ${context.key}`);
+  }
+}
+
+function validateGraph(project, selection) {
   assert.deepEqual(selection, project.selection, "selection differs from manifest");
   const snapshots = new Map(project.snapshots.map(snapshot => [snapshot.id.key, snapshot]));
   for (const snapshot of project.snapshots) {
-    const pendingContexts = [...snapshot.id.peerContext];
+    const pendingContexts = snapshot.id.peerContext.map(context => ({context, owner:snapshot}));
     while (pendingContexts.length) {
-      const context = pendingContexts.pop();
-      assert.ok(snapshots.has(context.key), `${snapshot.id.key}: dangling peer context ${context.key}`);
-      pendingContexts.push(...context.peerContext);
+      const {context, owner} = pendingContexts.pop();
+      const provider = resolveContext(context, snapshots, owner.id.key);
+      if (context.opaque) continue;
+      pendingContexts.push(...context.peerContext.map(nested => ({context:nested, owner:provider})));
     }
   }
   const seen = new Set();
@@ -268,31 +379,57 @@ export function validateProject(project, selection) {
   assert.equal(seen.size, snapshots.size, "orphan snapshot");
   const archiveIds = new Set(project.snapshots.map(snapshot => archiveKey(snapshot.id.packageId)));
   assert.equal(archiveIds.size, project.packages.length, "orphan archive");
-  if (selection.kind === "dsh") checkExactPeers(project);
+  if (selection.kind === "dsh") {
+    assert.ok(project.packages.every(pkg => pkg.id.name !== "pnpm") && project.snapshots.every(snapshot => snapshot.id.packageId.name !== "pnpm"), "dsh cannot own pnpm");
+    assert.ok(project.snapshots.some(snapshot => snapshot.id.packageId.name === "@deepseek-ai/dsh-sandbox-local" && seen.has(snapshot.id.key)), "dsh sandbox must be reachable");
+  }
 }
 
-/** @param {LockedProject} project */
-export function checkExactPeers(project) {
+/** Peer satisfaction without throwing, so a caller can report the numbers and
+ * decide for itself. Each entry names the declaration it could not satisfy.
+ * @param {LockedProject} project
+ * @returns {{exact:number,totalOptionalMissing:number,cordisExact:number,unsatisfied:string[]}} */
+export function exactPeerReport(project) {
   const archives = new Map(project.packages.map(pkg => [archiveKey(pkg.id), pkg]));
   let cordisExactPeers = 0;
+  let exactPeers = 0;
+  let optionalMissing = 0;
+  const unsatisfied = [];
+  const snapshots = new Map(project.snapshots.map(snapshot => [snapshot.id.key, snapshot]));
   for (const snapshot of project.snapshots) {
     const pkg = archives.get(archiveKey(snapshot.id.packageId));
     for (const [peer, wanted] of Object.entries(pkg.peers)) {
-      if (!exact.test(wanted)) continue; // Deliberately not a general semver solver.
+      const pinned = exactDeclaration(wanted);
+      // A declared range is a compatibility constraint, not an exact pin; any
+      // syntax outside the range grammar could hide an exact pin, so it stops here.
+      if (peerSpecClass(wanted) === "range") continue;
+      exactPeers++;
       if (peer === "@deepseek-ai/cordis") cordisExactPeers++;
       const edge = snapshot.edges.find(edge => edge.name === peer);
-      const context = snapshot.id.peerContext.find(id => id.packageId.name === peer);
+      const context = snapshot.id.peerContext.find(id => !id.opaque && id.packageId.name === peer);
       const got = edge ? snapshotId(edge.target).packageId : undefined;
       const diagnostic = `${snapshot.id.key}: peer ${peer} wanted ${wanted}, got ${got ? archiveKey(got) : "missing"}`;
       if (!got) {
-        assert.ok(pkg.optionalPeers.includes(peer) && !context, diagnostic);
+        if (pkg.optionalPeers.includes(peer) && !context) optionalMissing++;
+        else unsatisfied.push(diagnostic);
         continue;
       }
-      assert.ok(got.name === peer && got.version === wanted, diagnostic);
-      if (context) assert.equal(context.key, edge.target, `${diagnostic}; ambiguous context`);
+      if (!(got.name === peer && got.version === pinned)) unsatisfied.push(diagnostic);
+      else if (context && resolveContext(context, snapshots, snapshot.id.key).id.key !== edge.target) {
+        unsatisfied.push(`${diagnostic}; ambiguous context`);
+      }
     }
   }
-  assert.ok(cordisExactPeers > 0, "dsh must cover declared exact Cordis peers");
+  return {exact: exactPeers, totalOptionalMissing: optionalMissing, cordisExact: cordisExactPeers, unsatisfied};
+}
+
+/** @param {LockedProject} project @returns {ExactPeerSummary} */
+export function checkExactPeers(project) {
+  const report = exactPeerReport(project);
+  assert.equal(report.unsatisfied.length, 0, report.unsatisfied.join("; "));
+  assert.ok(report.cordisExact > 0, "dsh must cover declared exact Cordis peers");
+  return {exact: report.exact, totalOptionalMissing: report.totalOptionalMissing,
+          cordisExact: report.cordisExact, unsatisfied: 0};
 }
 
 /** @param {{prefix:string,kind:'dsh'|'pi'|'bridge'}} options */
@@ -314,19 +451,289 @@ export function writeInputPins({ prefix, kind }) {
   }
 }
 
+
+/**
+ * @param {{before:LockedProject,after:LockedProject,requestedVersion:string,refresh?:boolean}} options
+ * @returns {DshUpdateComparison}
+ */
+export function compareDshUpdate({before, after, requestedVersion, refresh = false}) {
+  assert.equal(typeof refresh, 'boolean');
+  for (const project of [before, after]) {
+    assert.equal(project.selection.kind, 'dsh', 'comparison requires dsh projects');
+    assert.deepEqual(project, readProject({prefix:project.prefix, kind:'dsh'}), 'project differs from validated inputs');
+  }
+  const requested = requestedVersion === '' ? before.selection.version : version(requestedVersion);
+  assert.equal(after.selection.version, requested, 'after selection differs from request');
+  const changed = before.selection.version !== requested;
+  const manifest = project => {
+    const value = structuredClone(project.manifest);
+    if (changed) value.dependencies[roots.dsh] = '<selected>';
+    return value;
+  };
+  assert.deepEqual(manifest(after), manifest(before), 'only dsh manifest selection may change');
+  assert.ok(boundedBytes(path.join(before.prefix, 'pnpm-workspace.yaml')).equals(boundedBytes(path.join(after.prefix, 'pnpm-workspace.yaml'))), 'workspace bytes changed');
+  const header = project => {
+    const value = structuredClone(project.lock);
+    delete value.packages; delete value.snapshots;
+    if (changed || refresh) value.importers['.'].dependencies[roots.dsh] = {specifier:'<selected>', version:'<selected>'};
+    return value;
+  };
+  assert.deepEqual(header(after), header(before), 'lock settings/overrides/importer changed');
+  if (!changed && !refresh) {
+    for (const file of [...pinnedInputs, pinFile]) assert.ok(boundedBytes(path.join(before.prefix, file)).equals(boundedBytes(path.join(after.prefix, file))), `${file}: equal selection requires identical bytes`);
+  }
+  function closure(project) {
+    const snapshots = new Map(project.snapshots.map(snapshot => [snapshot.id.key, snapshot]));
+    const visited = new Set();
+    const pending = project.importer.map(edge => edge.target);
+    while (pending.length) {
+      const key = pending.pop();
+      if (visited.has(key)) continue;
+      const snapshot = snapshots.get(key);
+      assert.ok(snapshot, `dangling closure: ${key}`);
+      visited.add(key);
+      pending.push(...snapshot.edges.map(edge => edge.target));
+    }
+    return {snapshots:visited, archives:new Set([...visited].map(key => archiveKey(snapshots.get(key).id.packageId)))};
+  }
+  const oldClosure = closure(before), newClosure = closure(after);
+  const result = {mode: refresh ? 'refresh' : changed ? 'changed' : 'equal', beforeVersion:before.selection.version, afterVersion:after.selection.version};
+  for (const [field, label] of [['packages','Archives'], ['snapshots','Snapshots']]) {
+    const oldRecords = before.lock[field], newRecords = after.lock[field];
+    const oldKeys = Object.keys(oldRecords), newKeys = Object.keys(newRecords);
+    result[`added${label}`] = sorted(newKeys.filter(key => !Object.hasOwn(oldRecords,key)));
+    result[`removed${label}`] = sorted(oldKeys.filter(key => !Object.hasOwn(newRecords,key)));
+    result[`retained${label}`] = sorted(oldKeys.filter(key => Object.hasOwn(newRecords,key)));
+    for (const key of result[`added${label}`]) assert.ok(newClosure[label.toLowerCase()].has(key), `addition outside changed root closure: ${key}`);
+    for (const key of result[`removed${label}`]) assert.ok(oldClosure[label.toLowerCase()].has(key), `removal outside changed root closure: ${key}`);
+    for (const key of result[`retained${label}`]) {
+      // Refresh may re-select transitive snapshots, never substitute a retained
+      // archive: npm versions are immutable, so a different SRI/tarball/metadata
+      // for the same name@version is a different artifact, not a refresh.
+      if (refresh && field === "snapshots") continue;
+      const oldRecord = structuredClone(oldRecords[key]), newRecord = structuredClone(newRecords[key]);
+      if (field === 'snapshots' && changed && key === before.importer[0].target && key === after.importer[0].target) {
+        delete oldRecord.dependencies; delete oldRecord.optionalDependencies;
+        delete newRecord.dependencies; delete newRecord.optionalDependencies;
+      }
+      assert.deepEqual(newRecord, oldRecord, `retained ${field === 'packages' ? 'archive' : 'snapshot'} changed: ${key}`);
+    }
+  }
+  return result;
+}
+
+// Deliberately conservative: unprovable syntax is a review stop, not a permissive
+// fallback or a reason to choose another version. Cordis families use stable pins.
+function satisfiesFamilyRange(selected, wanted) {
+  const pin = exactDeclaration(wanted);
+  if (pin !== null) return selected === pin;
+  assert.ok(!selected.includes('-') && !selected.includes('+'), `unprovable family range: ${wanted}`);
+  const parts = selected.split('.').map(Number);
+  assert.ok(parts.every(Number.isSafeInteger), `unprovable family range: ${wanted}`);
+  const cmp = other => {
+    for (let i = 0; i < 3; i++) if (parts[i] !== other[i]) return parts[i] < other[i] ? -1 : 1;
+    return 0;
+  };
+  return wanted.split(/\s*\|\|\s*/).map(alternative => {
+    const terms = alternative.trim().split(/\s+/);
+    return terms.map(term => {
+      const match = /^(\^|~|>=|<=|>|<|=)?((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$/.exec(term);
+      assert.ok(match, `unprovable family range: ${wanted}`);
+      const lower = match[2].split('.').map(Number);
+      assert.ok(lower.every(Number.isSafeInteger), `unprovable family range: ${wanted}`);
+      const comparison = cmp(lower);
+      switch (match[1] ?? '=') {
+        case '=': return comparison === 0;
+        case '>=': return comparison >= 0;
+        case '<=': return comparison <= 0;
+        case '>': return comparison > 0;
+        case '<': return comparison < 0;
+        case '~':
+          assert.ok(Number.isSafeInteger(lower[1]+1), `unprovable family range: ${wanted}`);
+          return comparison >= 0 && cmp([lower[0],lower[1]+1,0]) < 0;
+        case '^': {
+          const upper = lower[0] ? [lower[0]+1,0,0] : lower[1] ? [0,lower[1]+1,0] : [0,0,lower[2]+1];
+          assert.ok(upper.every(Number.isSafeInteger), `unprovable family range: ${wanted}`);
+          return comparison >= 0 && cmp(upper) < 0;
+        }
+      }
+    }).every(Boolean);
+  }).some(Boolean);
+}
+
+/** A committed override map, validated like the on-disk proposal format.
+ * @param {unknown} value @returns {Record<string, ExactVersion>} */
+function overrideMap(value) {
+  if (value === undefined) return {};
+  const map = record(value);
+  keys(map, overrideNames, overrideNames);
+  for (const wanted of Object.values(map)) version(wanted);
+  return /** @type {Record<string, ExactVersion>} */ (map);
+}
+
+/**
+ * @param {{prefix:string, committed?:Record<string,string>, approved?:Record<string,string>}} options
+ *   `committed` is the override map of the project being upgraded (the no-op
+ *   re-pin of an unchanged upgrade). `approved` is the map a reviewer explicitly
+ *   supplied with `--cordis-overrides`; it outranks `committed` because it is the
+ *   only thing that can decide a graph the lockfile cannot, and it must name one
+ *   of the surviving candidates.
+ * @returns {DshCordisDerivation}
+ */
+export function deriveDshCordisOverrides({prefix, committed, approved}) {
+  /** @type {TentativeDshProject} */
+  const project = readProjectInputs({prefix, kind:'dsh', checkPins:false, tentative:true});
+  const overrides = {}, requirements = [];
+  const archives = new Map(project.packages.map(pkg => [archiveKey(pkg.id),pkg]));
+  // Every permitted family, with every declaration the tentative graph carries:
+  // peer specifications (exact or range, with their file source) and the
+  // dependency edges that make the family's selected instances reachable.
+  const families = sorted([...overrideNames]).map(selector => {
+    const peer = selector.split('>')[1];
+    const selections = project.packages.filter(pkg => pkg.id.name === peer);
+    const peerRows = project.packages.filter(pkg => Object.hasOwn(pkg.peers,peer)).map(pkg => ({
+      selector,version:pkg.peers[peer],package:pkg.id.name,packageVersion:pkg.id.version,
+      integrity:pkg.integrity,peer,kind:peerSpecClass(pkg.peers[peer]) === 'exact' ? 'exact-peer' : 'range-peer',
+    }));
+    const dependencyRows = [];
+    for (const snapshot of project.snapshots) for (const edge of snapshot.edges) {
+      if (edge.name !== peer) continue;
+      const pkg = archives.get(archiveKey(snapshot.id.packageId));
+      dependencyRows.push({selector,version:snapshotId(edge.target).packageId.version,package:pkg.id.name,packageVersion:pkg.id.version,integrity:pkg.integrity,peer,kind:'dependency'});
+    }
+    // A dependency edge records that this family's instance is reachable; it is
+    // never an exact declaration. A lockfile carries no dependency specifier, so
+    // the number of distinct dependency targets proves nothing about the range
+    // that produced them and must not be read as an exact requirement.
+    return {peer,selector,selections,declarations:[...peerRows, ...dependencyRows]};
+  });
+  const proof = family => JSON.stringify(family.declarations);
+  const reviewed = overrideMap(committed);
+  const decided = overrideMap(approved);
+  for (const family of families) {
+    assert.ok(family.selections.length > 0, `missing family: ${family.peer}; requirements: ${proof(family)}`);
+    assert.ok(family.declarations.some(row => row.kind !== 'dependency'), `missing family peer requirements: ${family.peer}`);
+  }
+  // A declaration constrains the map only while its own package is still in the
+  // graph: an override pins one version per family, so an instance of a family at
+  // any other version is pruned together with its peer declarations. Each family's
+  // domains are therefore solved together instead of one family at a time.
+  const familyOf = new Map(families.map(family => [family.peer,family]));
+  const constraints = new Map(families.map(family => [family.peer,[]]));
+  for (const pkg of project.packages) for (const [peer,wanted] of Object.entries(pkg.peers)) {
+    if (!constraints.has(peer)) continue;
+    const owner = familyOf.get(pkg.id.name);
+    constraints.get(peer).push({owner:owner ? owner.peer : null,version:pkg.id.version,wanted,source:`${pkg.id.name}@${pkg.id.version}`});
+  }
+  const problems = (assignment,family,value) => constraints.get(family.peer)
+    .filter(row => row.owner === null || assignment[row.owner] === row.version)
+    .map(row => {
+      try { return satisfiesFamilyRange(value,row.wanted) ? null : `${row.source} wants ${row.wanted}`; }
+      catch (error) { return error.message; }
+    }).filter(problem => problem !== null);
+  const domains = families.map(family => sorted([...new Set(family.selections.map(pkg => pkg.id.version))]));
+  const solutions = [];
+  const solve = (index,assignment) => {
+    if (index === families.length) {
+      const inconsistent = families.some(family => problems(assignment,family,assignment[family.peer]).length > 0);
+      if (!inconsistent) solutions.push({...assignment});
+      return;
+    }
+    for (const value of domains[index]) solve(index + 1,{...assignment,[families[index].peer]:value});
+  };
+  solve(0,{});
+  if (solutions.length === 0) {
+    // Nothing the tentative graph selected can satisfy every declaration. The
+    // unmet declarations are named for the most constrained family, with the
+    // pruned-instance declarations excluded so the report names what really binds.
+    const reports = families.map(family => {
+      const rejected = domains[families.indexOf(family)].map(value => {
+        const unmet = problems({},family,value);
+        return {value,text:`${value} (${unmet.join('; ') || 'no declared requirement'})`,met:unmet.length === 0};
+      });
+      return {family,rejected};
+    });
+    const report = reports.find(row => row.rejected.every(value => !value.met))
+      ?? reports.sort((a,b) => a.rejected.filter(row => row.met).length - b.rejected.filter(row => row.met).length)[0];
+    throw new Error(`no family selection satisfies the declared requirements: ${report.family.peer}; `
+      + `rejected: ${report.rejected.map(row => row.text).join(', ')}; requirements: ${proof(report.family)}`);
+  }
+  const derived = new Map();
+  for (const family of families) {
+    const {peer,selector} = family;
+    // A family's candidates are the values the tentative graph itself selected in
+    // some assignment that satisfies every live declaration. Nothing outside the
+    // graph may invent a candidate.
+    const candidates = sorted([...new Set(solutions.map(solution => solution[peer]))]);
+    if (candidates.length > 1) {
+      // Two selections can satisfy every declaration (a root range selecting a
+      // newer instance beside an exact peer's older one). A lockfile records no
+      // dependency specifier, so the graph cannot choose between them: only a
+      // reviewed value, while it is one of the survivors, can decide. An
+      // explicitly approved map is that decision (it is passed in, so the review
+      // route never re-enters the stop it comes from); the committed map is the
+      // legitimate no-op re-pin of an unchanged upgrade. Without an approved map
+      // the stop names the route that can decide it.
+      const hasApproved = decided[selector] !== undefined;
+      const keep = hasApproved ? decided[selector] : reviewed[selector];
+      if (keep === undefined || !candidates.includes(keep)) {
+        const why = keep === undefined ? ''
+          : `${hasApproved ? 'reviewed' : 'committed'} value ${keep} is not one of the candidates; `;
+        throw new Error(`ambiguous family selection: ${peer}; candidates: ${candidates.join(', ')}; `
+          + `${why}requirements: ${proof(family)}`
+          + (hasApproved ? '' : '; pass --cordis-overrides after review'));
+      }
+      candidates.length = 0;
+      candidates.push(keep);
+    }
+    derived.set(peer,candidates[0]);
+    overrides[selector] = candidates[0];
+  }
+  // Invariant: the chosen map is one of the assignments the graph supports.
+  const chosen = Object.fromEntries(families.map(family => [family.peer,derived.get(family.peer)]));
+  const conflicts = families.flatMap(family => problems(chosen,family,chosen[family.peer]).map(problem => `${family.peer}: ${problem}`));
+  assert.equal(conflicts.length,0,`family selection conflict: ${conflicts.join('; ')}`);
+  for (const family of families) requirements.push(...family.declarations);
+  const unique = [...new Map(requirements.map(row => [JSON.stringify(row),row])).values()];
+  unique.sort((a,b) => JSON.stringify(a) < JSON.stringify(b) ? -1 : JSON.stringify(a) > JSON.stringify(b) ? 1 : 0);
+  return {overrides,requirements:unique,delta:Object.entries(overrides).map(([selector,after]) => ({selector,before:null,after}))};
+}
+
+/** Strict map syntax shares the bounded duplicate-rejecting parser, not JSON.parse alone. */
+export function readDshCordisOverrideMap(file) {
+  const map = parse(file,true);
+  keys(map,overrideNames,overrideNames);
+  for (const value of Object.values(map)) version(value);
+  return Object.fromEntries(sorted(Object.keys(map)).map(key => [key,map[key]]));
+}
+
 export function graph(project) {
   return { selection: project.selection, packages: project.packages, snapshots: project.snapshots, importer: project.importer };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Compare canonical paths: Node resolves the real file for import.meta.url, so a
+// lexical comparison against a symlinked argv[1] silently skipped dispatch.
+const entrypoint = (() => {
+  if (!process.argv[1]) return false;
+  try { return import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href; }
+  catch { return false; }
+})();
+if (entrypoint) {
   const [verb, kind, prefix, ...extra] = process.argv.slice(2);
-  if (!["check", "graph", "pin"].includes(verb) || !Object.hasOwn(roots, kind) || !prefix || extra.length) {
-    console.error("usage: pnpm-lock.mjs check|graph|pin dsh|pi|bridge PREFIX");
+  if (!["check", "graph", "pin", "peers"].includes(verb) || !Object.hasOwn(roots, kind) || !prefix || extra.length) {
+    console.error("usage: pnpm-lock.mjs check|graph|pin|peers dsh|pi|bridge PREFIX");
     process.exitCode = 2;
   } else {
     try {
       if (verb === "pin") writeInputPins({ prefix, kind });
-      else {
+      else if (verb === "peers") {
+        // Report-only. It reuses derivation's peer-assertion-free reader so a
+        // negative leg can state both numbers instead of guessing from a
+        // diagnostic; nothing is pinned, installed or published, and every
+        // publication path keeps the asserting reader.
+        assert.equal(kind, "dsh", "peer reporting is dsh-only");
+        console.log(JSON.stringify(exactPeerReport(readProjectInputs({ prefix, kind, checkPins: false, report: true }))));
+      } else {
         const project = readProject({ prefix, kind });
         console.log(verb === "check" ? project.selection.version : JSON.stringify(graph(project)));
       }
