@@ -204,7 +204,14 @@ codex_cleanup_failed=
 codex_trap_status=0
 codex_parent=$(dirname "$CODEX_STATE_DIR")
 codex_cleanup() {
-    # ln may have published before the shell could set its ownership flag.
+    # ln may have published before the shell could set its ownership flag, so
+    # ownership is decided by inode identity with the source that still lives in
+    # $scratch. `-ef` is what makes that comparison atomic and cheap; POSIX
+    # leaves it undefined, but this gate runs only under dash (the image's
+    # /bin/sh) and bash, which both implement it, and the alternative --
+    # claiming ownership before the hardlink exists -- deletes a file this run
+    # did not create. The harness runs this file under dash explicitly.
+    # shellcheck disable=SC3013
     if [ -n "$codex_created_file" ] ||
         { [ -n "${fixture_src:-}" ] && [ ! -L "$CODEX_STATE_DIR/auth.json" ] &&
           [ "$CODEX_STATE_DIR/auth.json" -ef "$fixture_src" ]; }; then
