@@ -407,7 +407,10 @@ def _refuse_escaping_links(directory, allowed=()):
             target = item.resolve(strict=False)
             if target == directory or directory in target.parents:
                 continue
-            if parent not in target.parents and not any(root in target.parents for root in allowed):
+            # A pin may name the destination itself (a pnpm project index link
+            # points at the prefix root), so equality counts, not only nesting.
+            if (target != parent and parent not in target.parents
+                    and not any(target == root or root in target.parents for root in allowed)):
                 raise ValueError('symlink inside scratch escapes its authorized destinations: ' + str(item))
 
 

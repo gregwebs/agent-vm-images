@@ -113,6 +113,22 @@ class ProjectTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             project.cleanup_scratch(scratch)
 
+    def test_scratch_link_to_the_prefix_itself_is_allowed(self):
+        # pnpm records the installed project index as a relative link that
+        # resolves to the prefix root, not to a directory inside it: cleanup must
+        # accept that exact destination or a production install cannot finish.
+        capability = project.authorize_mutation(self.prefix)
+        scratch = project.owned_scratch(capability)
+        (scratch / 'store').mkdir()
+        (scratch / 'store' / 'project').symlink_to(self.prefix, target_is_directory=True)
+        project.cleanup_scratch(scratch, (self.prefix,))
+        self.assertFalse(scratch.exists())
+        scratch = project.owned_scratch(capability)
+        (scratch / 'store').mkdir()
+        (scratch / 'store' / 'elsewhere').symlink_to('/', target_is_directory=True)
+        with self.assertRaises(ValueError):
+            project.cleanup_scratch(scratch, (self.prefix,))
+
     def test_fixture_manager_is_not_a_path_lookup(self):
         capability = project.authorize_mutation(self.prefix)
         executable = self.root / 'pnpm-fixture'
