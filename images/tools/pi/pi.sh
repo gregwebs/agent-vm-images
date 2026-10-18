@@ -7,11 +7,12 @@
 # credential warning is loaded for every normal Pi invocation, including a bare
 # `pi` typed into `agent-vm shell`.
 #
-# It makes three decisions and then execs:
+# It makes four decisions and then execs:
 #   1. the Pi env enforcement (PI_SKIP_VERSION_CHECK);
 #   2. subcommand dispatch (forwarded verbatim);
 #   3. whether the optional image-owned bridge extension is loadable and not
 #      opted out;
+#   4. whether the image-owned Codex extension is loadable (ADR-0044);
 # plus the mandatory extension below.
 #
 # agent-vm intervenes in Pi's behaviour only where agent-vm introduced the
@@ -21,7 +22,7 @@
 # policy. Pi's project-trust prompt appears on its own terms, and the answer a
 # user gives is remembered in the now-persistent ~/.pi/agent/trust.json. ADR-0012's
 # wrapper counted its one decision as the mandatory extension; counting the
-# extensions the same way, this wrapper makes four.
+# extensions the same way, this wrapper makes five.
 set -eu
 
 # agent-vm owns the Pi binary: it is a root-owned image layer, `pi update self`
@@ -81,8 +82,16 @@ fi
 # above. It is not a protection.
 BRIDGE_EXTENSION="${AGENT_VM_PI_BRIDGE_EXTENSION:-/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts}"
 
+# An image that drops this file must cost the provider, not pi. The override is
+# test-only, not a protection, like the bridge override above. See ADR-0044:
+# https://github.com/gregwebs/agent-vm/blob/7438927/docs/adr/0044-pi-reaches-host-codex-through-an-image-owned-provider.md
+CODEX_EXTENSION="${AGENT_VM_PI_CODEX_EXTENSION:-/opt/agent-vm/pi-extensions/agent-vm-codex.js}"
+
+# POSIX sh has no arrays; reverse prepending preserves mandatory/bridge/codex order.
+if [ -r "$CODEX_EXTENSION" ]; then
+    set -- --extension "$CODEX_EXTENSION" "$@"
+fi
 if [ -z "${AGENT_VM_PI_NO_BRIDGE:-}" ] && [ -r "${BRIDGE_EXTENSION}" ]; then
-    exec "${PI_ENTRY}" --extension "${MANDATORY_EXTENSION}" \
-                       --extension "${BRIDGE_EXTENSION}" "$@"
+    set -- --extension "$BRIDGE_EXTENSION" "$@"
 fi
 exec "${PI_ENTRY}" --extension "${MANDATORY_EXTENSION}" "$@"

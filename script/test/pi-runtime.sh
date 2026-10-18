@@ -70,24 +70,23 @@ capture() {
 }
 
 assert_warns() {
-    local label="$1" text="$2"
+    local label="$1" text="$2" host_import="$3"
     grep -q '"method":"notify"' <<<"$text" || fail "${label}: no notify frame"
     grep -q 'agent-vm: signing in here' <<<"$text" || fail "${label}: warning text missing"
-    # #96 landed the ~/.pi persistence mapping, so the persistence clause is
-    # back. The host-precedence / host-import clauses stay out: they would be
-    # about Pi's own `auth.json`. #94 (Anthropic through host Pi) was closed as
-    # superseded by #164 -- which imports a *different* credential (Claude
-    # Code's) into a different file -- but #91 (OpenAI/Codex credentials through
-    # host Pi) is still open, so the clause stays out until #91 lands it together
-    # with its behaviour. The negative grep is what fails the day this message
-    # claims behaviour it does not describe.
+    # ADR-0044 D7 ties the host-import claim to observed Codex registration,
+    # never Pi's own auth.json. Distinct ids carry no credential-precedence claim.
     grep -q 'any process in this guest can read' <<<"$text" || fail "${label}: warning scope missing"
     grep -q 'microVM' <<<"$text" || fail "${label}: boundary clause missing"
     grep -q 'persistent guest state' <<<"$text" \
         || fail "${label}: persistence clause missing (#96 restored it)"
-    if grep -Eq 'takes precedence|imported from your host' <<<"$text"; then
-        fail "${label}: warning claims host-import behaviour #91 has not implemented"
-    fi
+    if grep -q 'takes precedence' <<<"$text"; then fail "${label}: precedence claim"; fi
+    case "$host_import" in
+        present)
+            grep -qF 'Credentials imported from your host stay on the host and never appear in guest files.' <<<"$text" || fail "${label}: host-import clause missing" ;;
+        absent)
+            if grep -q 'imported from your host' <<<"$text"; then fail "${label}: unexpected host-import clause"; fi ;;
+        *) fail "assert_warns: bad HOST_IMPORT '$3'" ;;
+    esac
     grep -q '"notifyType":"warning"' <<<"$text" || fail "${label}: notifyType is not warning"
 }
 
@@ -111,11 +110,11 @@ as_guest="$(docker run --rm --user 1000:1000 -e HOME=/tmp "$standard" pi --versi
 
 capture "$standard" pi --mode rpc --no-session --no-approve
 [[ $CAP_STATUS -eq 0 ]] || fail "rpc run exited $CAP_STATUS: $CAP_ERR"
-assert_warns "rpc" "$CAP_OUT"
+assert_warns "rpc" "$CAP_OUT" absent
 
 capture "$standard" pi -ne --mode rpc --no-session --no-approve
 [[ $CAP_STATUS -eq 0 ]] || fail "rpc -ne run exited $CAP_STATUS: $CAP_ERR"
-assert_warns "rpc -ne (--no-extensions cannot silence it)" "$CAP_OUT"
+assert_warns "rpc -ne (--no-extensions cannot silence it)" "$CAP_OUT" absent
 
 capture "$standard" pi -p --no-session
 [[ $CAP_STATUS -eq 0 ]] || fail "print run exited $CAP_STATUS: $CAP_ERR"
@@ -127,6 +126,171 @@ capture "$standard" pi --mode json --no-session
     || fail "json mode must emit exactly one line, got: $CAP_OUT"
 jq -e '.type == "session"' <<<"$CAP_OUT" >/dev/null || fail "json mode's single line is not the session event"
 [[ "$CAP_OUT" != *extension_ui_request* ]] || fail "json mode leaked the warning frame"
+
+# The root fixture setup models provisioning; only Pi runs as uid 1000. The
+# integrity channel is a mount, never stdout (print/json/RPC belong to Pi).
+codex_case() {
+    local fixture="$1" kind=copy
+    shift
+    case "$fixture" in none|fifo|symlink|absent) kind="$fixture" ;; esac
+    CASE_PROBE_DIR="$(mktemp -d "$TMP/codex-probe.XXXXXX")"
+    # A host-generated fixture (the auth-size bound cases) rides in on /probe
+    # instead of the committed, read-only /fixtures mount.
+    local source="/fixtures/$fixture"
+    if [[ -n ${CASE_GENERATED:-} ]]; then
+        cp "$CASE_GENERATED" "$CASE_PROBE_DIR/$fixture"
+        source="/probe/$fixture"
+    fi
+    set +e
+    docker run --rm --user 0:0 \
+        -v "$REPO_ROOT/script/test/fixtures/pi-codex:/fixtures:ro" \
+        -v "$CASE_PROBE_DIR:/probe:rw" "$standard" sh -ec '
+        fixture=$1; kind=$2; source=$3; shift 3
+        auth=/agent-vm-state/codex/auth.json
+        # `absent` models a launch with no /agent-vm-state at all (ENOENT, not an
+        # empty codex directory), which the other kinds cannot express.
+        case "$kind" in absent) : ;; *) mkdir -p /agent-vm-state/codex ;; esac
+        case "$kind" in
+            copy) cp "$source" "$auth"; sha256sum "$auth" >/probe/before ;;
+            fifo) mkfifo "$auth" ;;
+            symlink)
+                ln -s /fixtures/placeholder.json "$auth"
+                readlink "$auth" >/probe/before
+                sha256sum /fixtures/placeholder.json >/probe/target-before ;;
+            none|absent) : ;;
+        esac
+        # chown -R does not follow symlinks; the read-only /fixtures stays untouched.
+        if [ -e /agent-vm-state ]; then chown -R 1000:1000 /agent-vm-state; fi
+        set +e
+        setpriv --reuid=1000 --regid=1000 --clear-groups env HOME=/tmp PI_TELEMETRY=0 pi "$@" </dev/null
+        status=$?
+        set -e
+        case "$kind" in
+            copy)
+                sha256sum "$auth" >/probe/after
+                if cmp -s /probe/before /probe/after; then echo UNCHANGED; else echo CHANGED; fi >/probe/integrity ;;
+            symlink)
+                readlink "$auth" >/probe/after
+                sha256sum /fixtures/placeholder.json >/probe/target-after
+                if cmp -s /probe/before /probe/after && cmp -s /probe/target-before /probe/target-after; then echo UNCHANGED; else echo CHANGED; fi >/probe/integrity ;;
+        esac
+        exit "$status"
+    ' codex-case "$fixture" "$kind" "$source" "$@" >"$TMP/out" 2>"$TMP/err"
+    CAP_STATUS=$?
+    set -e
+    CAP_OUT="$(cat "$TMP/out")"
+    CAP_ERR="$(cat "$TMP/err")"
+    CASE_INTEGRITY=
+    if [[ -f "$CASE_PROBE_DIR/integrity" ]]; then CASE_INTEGRITY="$(cat "$CASE_PROBE_DIR/integrity")"; fi
+}
+
+for fixture in none absent placeholder.json real-token.json partial-access.json partial-refresh.json \
+    near-access-suffix.json near-refresh-suffix.json near-access-space.json near-refresh-space.json \
+    empty-account.json missing-account.json non-string-account.json non-ascii-account.json \
+    control-account.json whitespace-account.json malformed.json oversize.json fifo symlink; do
+    codex_case "$fixture" -e /fixtures/registration-probe.js --mode rpc --no-session --no-approve
+    [[ $CAP_STATUS -eq 0 ]] || fail "codex $fixture: exited $CAP_STATUS: $CAP_ERR"
+    messages="$(jq -r 'select(.method=="notify")|.message' <<<"$CAP_OUT")" || fail "codex $fixture: invalid RPC output"
+    marks="$(grep '^AGENT-VM-CODEX-' <<<"$messages" || true)"
+    if [[ $fixture == placeholder.json ]]; then
+        [[ $marks =~ ^AGENT-VM-CODEX-REGISTERED\ models=[1-9][0-9]*$ ]] || fail "codex $fixture: bad registration: $marks"
+        assert_warns "codex $fixture" "$CAP_OUT" present
+    else
+        [[ $marks == AGENT-VM-CODEX-MISSING ]] || fail "codex $fixture: expected exactly one MISSING: $marks"
+        assert_warns "codex $fixture" "$CAP_OUT" absent
+    fi
+    case "$fixture" in
+        none|fifo|absent) [[ -z $CASE_INTEGRITY ]] || fail "codex $fixture: unexpected integrity file" ;;
+        *) [[ $CASE_INTEGRITY == UNCHANGED ]] || fail "codex $fixture: fixture changed" ;;
+    esac
+    [[ "$CAP_OUT$CAP_ERR" != *real-access-canary* && "$CAP_OUT$CAP_ERR" != *real-refresh-canary* ]] || fail 'guest token canary leaked'
+    if [[ $fixture == malformed.json && $CAP_ERR == *'Failed to load extension'* ]]; then fail 'malformed auth broke extension load'; fi
+done
+
+# --- the auth-size bound is inclusive at exactly 64 KiB ----------------------
+# The extension refuses `stat.size > MAX_AUTH_BYTES` (65536) and reads at most
+# MAX+1 bytes, so a complete credential of exactly 65536 bytes must still
+# register and 65537 must not. This is the fencepost the committed 65687-byte
+# oversize.json cannot see. Generated, not committed: 64 KiB of padding is not
+# reviewable fixture data.
+for total in 65536 65537; do
+    CASE_GENERATED="$TMP/auth-$total.json"
+    python3 - "$CASE_GENERATED" "$total" <<'PY'
+import json, sys
+path, total = sys.argv[1], int(sys.argv[2])
+head = json.dumps({"tokens": {
+    "access_token": "msb-openai-placeholder-a-v2",
+    "refresh_token": "msb-openai-placeholder-r-v2",
+    "account_id": "acct-~~~?",
+}})[:-1] + ', "pad": "'
+tail = '"}'
+pad = total - len(head) - len(tail)
+assert pad > 0, pad
+with open(path, "w") as fh:
+    fh.write(head + "x" * pad + tail)
+PY
+    codex_case "auth-$total.json" -e /fixtures/registration-probe.js --mode rpc --no-session --no-approve
+    [[ $CAP_STATUS -eq 0 ]] || fail "codex auth-$total.json: exited $CAP_STATUS: $CAP_ERR"
+    messages="$(jq -r 'select(.method=="notify")|.message' <<<"$CAP_OUT")" || fail "codex auth-$total.json: invalid RPC output"
+    marks="$(grep '^AGENT-VM-CODEX-' <<<"$messages" || true)"
+    if [[ $total == 65536 ]]; then
+        [[ $marks =~ ^AGENT-VM-CODEX-REGISTERED\ models=[1-9][0-9]*$ ]] \
+            || fail "codex auth-65536.json: exactly 64 KiB must register: $marks"
+        assert_warns "codex auth-65536.json" "$CAP_OUT" present
+    else
+        [[ $marks == AGENT-VM-CODEX-MISSING ]] || fail "codex auth-65537.json: one byte over must not register: $marks"
+        assert_warns "codex auth-65537.json" "$CAP_OUT" absent
+    fi
+    [[ $CASE_INTEGRITY == UNCHANGED ]] || fail "codex auth-$total.json: fixture changed"
+done
+CASE_GENERATED=
+codex_case placeholder.json -p --no-session
+[[ $CAP_STATUS -eq 0 && ! -s "$TMP/out" && $CASE_INTEGRITY == UNCHANGED ]] || fail "codex print contract: $CAP_STATUS $CAP_OUT $CAP_ERR"
+codex_case placeholder.json --mode json --no-session
+[[ $CAP_STATUS -eq 0 && $CASE_INTEGRITY == UNCHANGED ]] || fail 'codex json status/integrity'
+[[ "$(wc -l <"$TMP/out" | tr -d ' ')" == 1 ]] || fail 'codex json must emit exactly one line'
+jq -e '.type == "session"' <<<"$CAP_OUT" >/dev/null || fail 'codex json session missing'
+[[ $CAP_OUT != *extension_ui_request* ]] || fail 'codex json leaked warning'
+
+codex_case placeholder.json -e /fixtures/oracle.mjs --mode rpc --no-session --no-approve
+[[ $CAP_STATUS -eq 0 && $CASE_INTEGRITY == UNCHANGED ]] || fail "codex oracle process/integrity: $CAP_STATUS $CAP_ERR"
+jq -r 'select(.method=="notify")|.message' <<<"$CAP_OUT" >"$TMP/oracle-messages"
+if grep '^AGENT-VM-CODEX-CASE FAIL' "$TMP/oracle-messages"; then fail 'codex oracle failed'; fi
+# Literal expectations detect skipped, duplicated and renamed cases independently
+# of the oracle's self-reported count; Pi catches session_start exceptions.
+cat >"$TMP/oracle-expected" <<'CASES'
+abort-after-refresh-before-resend
+abort-during-refresh
+foreign-host-refused
+guest-apikey-not-forwarded
+headers-and-account
+infer-5xx-untouched-n0
+infer-5xx-untouched-n2
+infer-redirect-refused
+malformed-200
+non-401-untouched
+refresh-403-n0
+refresh-503-n0
+refresh-503-n2
+refresh-body-error-n0
+refresh-redirect-refused
+refresh-then-success
+refresh-throws-n0
+refresh-throws-n2
+replay-identity
+replay-mutant-control
+resend-redirect-refused-n0
+resend-redirect-refused-n2
+second-401-n0
+second-401-n2
+transport-forced-sse
+CASES
+sed -n 's/^AGENT-VM-CODEX-CASE PASS //p' "$TMP/oracle-messages" | sort >"$TMP/oracle-actual"
+sort "$TMP/oracle-expected" >"$TMP/oracle-sorted"
+cmp -s "$TMP/oracle-sorted" "$TMP/oracle-actual" || fail "codex oracle PASS-set mismatch: $(cat "$TMP/oracle-messages")"
+done_marker="$(grep '^AGENT-VM-CODEX-ORACLE DONE' "$TMP/oracle-messages" || true)"
+[[ $done_marker == 'AGENT-VM-CODEX-ORACLE DONE cases=25' ]] || fail "codex oracle DONE mismatch: $done_marker"
+echo 'Pi codex runtime: 20 registration fixtures, 64 KiB bound, print/json contracts, 25 oracle cases passed'
 
 # --- fail-closed when the mandatory extension is gone or broken --------------
 
@@ -184,7 +348,7 @@ esac
 # the wrapper's existence check is what makes the bridge cost the bridge, not pi.
 capture "$standard" sh -c "rm -rf /opt/agent-vm/pi-packages; pi --mode rpc --no-session --no-approve </dev/null"
 [[ $CAP_STATUS -eq 0 ]] || fail "a removed pi-packages tree must not break pi, got $CAP_STATUS: $CAP_ERR"
-assert_warns "bridge-removed" "$CAP_OUT"
+assert_warns "bridge-removed" "$CAP_OUT" absent
 
 # Seed fixtures use standard's real Claude executable. Only the explicit
 # absence negative removes it in its own disposable container.

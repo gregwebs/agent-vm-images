@@ -6,25 +6,15 @@
 // through jiti with no `node_modules` beside it and no writable directory (the
 // file lives under a root-owned /opt).
 //
-// This is an advisory, not a boundary. The microVM is the boundary; a guest
-// that wants to can invoke the Pi entry point directly. The mixed-ownership
-// rationale the text summarises is [#93](https://github.com/gregwebs/agent-vm/issues/93);
-// the Pi-`auth.json` host-import half it reserves room for is
-// [#91](https://github.com/gregwebs/agent-vm/issues/91), still open.
-//
-// The text is scoped to what #95 and #96 deliver: signing in writes a
-// credential into THIS project's persistent guest state (the project-scoped
-// <state>/pi mapping from #96), any process in this guest can read it, and the
-// microVM is the boundary. It deliberately does NOT claim host-credential
-// precedence or host import: those clauses would describe *Pi's own*
-// `~/.pi/agent/auth.json`, and #94 (Anthropic through host Pi) was closed as
-// superseded by #164 -- which imports a **different** credential (Claude Code's)
-// into a **different** file (`~/.claude/.credentials.json`) through the `pi ->
-// claude` provisioning edge. #91 (OpenAI and Codex credentials through host Pi)
-// is still open, so those clauses stay reserved for it. Since #164 a `pi`
-// launch does provision the Anthropic/Claude-Code credential, but this warning
-// is about Pi's own sign-in and says nothing about it; see
-// docs/adr/0023-image-owned-pi-extension-packages.md.
+// #96 maps Pi's guest-owned auth to per-project persisted state, so guest sign-ins
+// are scoped to this project's state in the base advisory.
+// This advisory is not a boundary; the microVM is. The host-import clause
+// describes the Codex credential provisioned by agent-vm#360, never Pi's own
+// auth.json. ADR-0044 D7 requires observed registration, not a duplicate file
+// predicate: this mandatory extension has no file I/O and must never throw.
+// No host credential shares a guest provider id, so no precedence claim applies
+// (ADR-0011). A guest models.json or extension can spoof this registration;
+// the warning remains advisory, as ADR-0044's Consequences acknowledge.
 //
 // #93 added a *separate*, host-side surface: `agent-vm` reports EXISTING
 // guest-managed Pi state on every launch, and `agent-vm doctor` shows the same
@@ -38,6 +28,9 @@ const WARNING = [
   "read it. The microVM -- not this warning -- is the boundary.",
 ].join(" ");
 
+const HOST_IMPORT = "Credentials imported from your host stay on the host and never appear in guest files.";
+const CODEX_PROVIDER_ID = "agent-vm-codex";
+
 export default function (pi) {
   pi.on("session_start", (_event, ctx) => {
     // hasUI is true exactly for the two modes a human reads (tui, rpc) and
@@ -46,6 +39,12 @@ export default function (pi) {
     if (!ctx.hasUI) {
       return;
     }
-    ctx.ui.notify(WARNING, "warning");
+    let message = WARNING;
+    try {
+      if (ctx.modelRegistry.getProvider(CODEX_PROVIDER_ID)) message += " " + HOST_IMPORT;
+    } catch {
+      // An advisory must never throw or vanish because a registry lookup failed.
+    }
+    ctx.ui.notify(message, "warning");
   });
 }

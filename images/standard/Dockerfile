@@ -70,7 +70,7 @@ RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
 
 COPY --chmod=0755 tools/pi/seed-claude-bridge-config.sh /opt/agent-vm/seed.d/20-pi-claude-bridge
 
-COPY tools/pi/extensions/guest-credential-warning.js /opt/agent-vm/pi-extensions/
+COPY tools/pi/extensions/guest-credential-warning.js tools/pi/extensions/agent-vm-codex.js /opt/agent-vm/pi-extensions/
 RUN chmod -R a+rX /opt/agent-vm/pi-extensions
 
 COPY --chmod=0755 tools/pi/pi.sh /usr/local/bin/pi

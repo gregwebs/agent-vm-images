@@ -434,7 +434,7 @@ printf '=== T5 ===\n'
 t5_pi_seed=0
 python3 /contract/check-tool-access.py pi /opt/agent-vm/seed.d/20-pi-claude-bridge || t5_pi_seed=$?
 t5_pi_content=0
-python3 /contract/check-tool-access.py --content /opt/agent-vm/pi-extensions/guest-credential-warning.js /opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts || t5_pi_content=$?
+python3 /contract/check-tool-access.py --content /opt/agent-vm/pi-extensions/guest-credential-warning.js /opt/agent-vm/pi-extensions/agent-vm-codex.js /opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts || t5_pi_content=$?
 t5rc=0
 [ "$t5_pi_seed" -eq 0 ] || t5rc=1
 [ "$t5_pi_content" -eq 0 ] || t5rc=1
@@ -463,11 +463,13 @@ pi_audit_status_regression() {
     printf '#!/bin/sh\necho pi\n' >"$fixture/bin/pi"
     printf '#!/bin/sh\necho seed\n' >"$fixture/opt/agent-vm/seed.d/20-pi-claude-bridge"
     printf 'export default function () {}\n' >"$fixture/opt/agent-vm/pi-extensions/guest-credential-warning.js"
+    printf 'export default function () {}\n' >"$fixture/opt/agent-vm/pi-extensions/agent-vm-codex.js"
     printf 'export const bridge = true\n' >"$fixture/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts"
     printf 'installed\n' >"$fixture/opt/agent-vm/install-status/pi"
     printf 'installed\n' >"$fixture/opt/agent-vm/install-status/pi-claude-bridge"
     chmod 0755 "$fixture/bin/pi" "$fixture/opt/agent-vm/seed.d/20-pi-claude-bridge"
-    chmod 0644 "$fixture/opt/agent-vm/pi-extensions/guest-credential-warning.js" \
+    chmod 0644 "$fixture/opt/agent-vm/pi-extensions/agent-vm-codex.js" \
+        "$fixture/opt/agent-vm/pi-extensions/guest-credential-warning.js" \
         "$fixture/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts"
     generated="$(container_script pi)"
 
@@ -503,6 +505,9 @@ pi_audit_status_regression() {
     chmod 0600 "$fixture/opt/agent-vm/pi-extensions/guest-credential-warning.js"
     expect_t5rc content-denied 1
     chmod 0644 "$fixture/opt/agent-vm/pi-extensions/guest-credential-warning.js"
+    chmod 0600 "$fixture/opt/agent-vm/pi-extensions/agent-vm-codex.js"
+    expect_t5rc codex-content-denied 1
+    chmod 0644 "$fixture/opt/agent-vm/pi-extensions/agent-vm-codex.js"
     echo '  pi audit status: first-check failure is not overwritten by a passing content check'
 }
 

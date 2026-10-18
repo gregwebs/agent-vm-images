@@ -2,7 +2,7 @@
 
 The [standard Dockerfile](../../standard/Dockerfile) installs the reviewed
 manifest/lock (`0.87.1`) and the separate bridge project (`0.8.0`), then copies
-the wrapper, mandatory warning extension and seed hook. The
+the wrapper, mandatory warning and Codex extensions, and seed hook. The
 [installer documentation](../README.md#pi-integrity) explains the five sibling
 hashes, tarball/tree comparison, exact override semantics and bridge flags.
 
@@ -11,7 +11,10 @@ under `/opt/agent-vm/pi-extensions` without replacing the required warning. It
 enforces `PI_SKIP_VERSION_CHECK`, preserves positional subcommands and requires
 the warning to load; removing or breaking it fails closed. The bridge's explicit
 extension is optional only via the wrapper's documented opt-out, not during
-standard installation/certification. There is no default trust/telemetry change.
+standard installation/certification. The third extension, `agent-vm-codex`, exposes
+host Codex placeholders as a distinct provider.
+Its existence check makes a removed file cost the provider, not Pi.
+There is no default trust/telemetry change.
 
 The bridge's `--legacy-peer-deps` lock and `--omit=optional` install avoid a second
 Pi and native Claude. The seed hook merges the image Claude executable path
