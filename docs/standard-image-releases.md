@@ -160,7 +160,8 @@ remains an explicit constraint.
   the archive files/parts and the SBOM; its bundle is
   `platform-ARCH-files.sigstore.json`.
 - `platform.json` is a strict schema containing the full image graph, the nine
-  committed selections (pnpm from the base pin, not dsh manifest), source SHA/version/product/arch, Docker reported
+  committed selections (pnpm comes from the base pin; dsh's `packageManager` is
+  an assertion and dsh owns four input files), source SHA/version/product/arch, Docker reported
   ID/driver/version plus canonical config digest, archive/part/SBOM
   names/sizes/hashes, `build_run_id`, `build_run_attempt` and the exact
   invocation URL. Assembly verifies its exact SHA-256 subject, signer
@@ -286,10 +287,20 @@ gate before stable promotion:
 3. `python3 -B script/release/content.py check-evidence --release release.json --evidence-dir DIR`
    hash-binds both architecture records. It validates evidence; it does **not**
    prove a boot occurred.
-4. A named maintainer independently reviews both direct runs' logs, records the
+4. The guest probe those runs execute is a **rendered, lightweight identity
+   check**, not a runtime gate. For dsh it verifies the four committed input
+   hashes, that no `package-lock.json` exists at `/opt/agent-vm/dsh`, and that
+   `/usr/local/bin/dsh` is the direct same-file link to the installed
+   `node_modules/@deepseek-ai/dsh/lib/bin.js`. Runtime behaviour — exact peers,
+   sandbox resolution, PTY/FFI/subprocess payload, bounded web readiness and the
+   four UID/GID pairs — comes only from the native build/audit gates
+   (`script/test/ci-native.sh`, `standard-image.sh`,
+   `standard-node-consumers.sh --consumer dsh`). A green rendered probe certifies
+   none of that, and a green runtime gate does not certify a release transport.
+5. A named maintainer independently reviews both direct runs' logs, records the
    evidence bundle SHA-256, source/version/index/child/archive identities and the
    decision in a linked issue/Release comment.
-5. **Immediately before promotion**, anonymously re-download metadata, bundles,
+6. **Immediately before promotion**, anonymously re-download metadata, bundles,
    archive parts and SBOMs with `download-release.sh` into new directories on both
    architectures, authenticate signatures, and compare every payload hash and
    the attested `release.json` subject with the reviewed evidence. Run the

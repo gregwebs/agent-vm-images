@@ -1,0 +1,17 @@
+{
+  "packages": [
+    "."
+  ],
+  "autoInstallPeers": true,
+  "strictPeerDependencies": false,
+  "enableGlobalVirtualStore": false,
+  "pmOnFail": "error",
+  "sideEffectsCache": false,
+  "allowBuilds": {},
+  "extendNodePath": false,
+  "nodeLinker": "isolated",
+  "hoist": true,
+  "trustPolicyExclude": [
+    "chokidar@4.0.3"
+  ]
+}

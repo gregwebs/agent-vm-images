@@ -30,7 +30,12 @@ publish_transactional() {
     for i in "${!srcs[@]}"; do
         if [ -e "${dests[$i]}" ] || [ -L "${dests[$i]}" ]; then
             existed+=(yes)
-            if ! cp -p "${dests[$i]}" "$backup_dir/$i"; then
+            # A backup appears under its final name only once it is complete: the
+            # copy lands in a temporary sibling and is renamed within the same
+            # directory, so a signal during `cp` can never leave a truncated file
+            # that a later restore would copy over an untouched source.
+            if ! cp -p "${dests[$i]}" "$backup_dir/.tmp$i" || ! mv -f "$backup_dir/.tmp$i" "$backup_dir/$i"; then
+                rm -f "$backup_dir/.tmp$i"
                 echo "publish_transactional: backup failed: ${dests[$i]} -> $backup_dir/$i" >&2
                 return 1
             fi
@@ -38,6 +43,12 @@ publish_transactional() {
             existed+=(no)
         fi
     done
+    # Record that the backup phase finished: a caller that catches a signal can
+    # then tell "no backup taken yet" from "backups complete, publication started".
+    if ! : >"$backup_dir/.complete"; then
+        echo "publish_transactional: cannot record completed backups in: $backup_dir" >&2
+        return 1
+    fi
     for i in "${!srcs[@]}"; do
         if ! cp "${srcs[$i]}" "${dests[$i]}"; then
             echo "error: failed to publish ${dests[$i]}; restoring attempted files inclusively" >&2

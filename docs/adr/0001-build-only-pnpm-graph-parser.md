@@ -56,3 +56,26 @@ elsewhere. Fixtures prove primitive
 behavior only; later slices must regenerate exact configs and cold-install real
 consumers before claiming runtime compatibility. dsh's later graph freeze is
 weaker than its current location freeze and requires explicit review.
+
+## Amended by #51 / ADR 0003 (2026-10-18)
+
+The decision text above is the accepted #42 record and stays as written. Two
+things in it are now read through this amendment rather than rewritten in place:
+
+- **"Rust checks source/inventory boundaries without Node subprocesses" no longer
+  holds for dsh.** The independent `script/test/image-sources` guards still author
+  their own vectors, but for the dsh graph they run the reviewed CLI as a syntax
+  adapter instead of parsing YAML themselves, because a second parser would be a
+  second grammar. Rust checks the CLI's arguments and typed output; the graph
+  rules remain Node-owned. The original wording describes PR 1, where no consumer
+  used the parser yet.
+- **Peer contexts are opaque.** A snapshot key can carry a 32-hex peer-context
+  suffix that is an identity, not a readable provider list. Resolution goes
+  through the dependency edge target, never by reconstructing the hash (ADR 0003
+  § "Peer-context identity rules"). The exact-peer oracle is therefore per
+  snapshot and per context, as the Consequences section already required.
+
+The "later graph freeze is weaker than its current location freeze" sentence was
+predictive; [ADR 0003](0003-dsh-graph-freeze.md) is that record. Nothing above
+widens the parser boundary: it remains data-only, build-only and mounted, never
+installed or resolved into an image.

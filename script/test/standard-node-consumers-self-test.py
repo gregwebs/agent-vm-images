@@ -17,6 +17,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / 'script/test/standard-node-consumers.sh'
 BODY = '/source/script/test/fixtures/standard-node-consumers.sh'
+DSH_BODY = '/source/script/test/fixtures/standard-node-dsh.py'
 HASH = 'a' * 64
 
 
@@ -80,6 +81,34 @@ def fake_docker(args):
         elif 'du' in args:
             assert '/root' not in args and '/runtime-homes' not in args, 'private HOMEs cannot be inventoried by restricted root'
             output = ('999999' if case == 'budget' else '24') + '\t/fixtures\n4\t/invocation\n'
+        elif DSH_BODY in args:
+            command = args[args.index(DSH_BODY) + 1:]
+            action = command[0]
+            if action == 'initialize':
+                state['binding'] = command[1:]
+            if action == 'cordis-negative':
+                # Plumbing only: the real negative needs a native container.
+                assert command[1] == '/invocation/cordis-negative', command
+                output = json.dumps({'cordisNegative': 'exact-peer rejection',
+                                     'diagnostic': 'peer @deepseek-ai/cordis wanted 4.0.2, got 4.0.5'})
+                failure = case == 'cordis-negative'
+            if action == 'probe':
+                _, token, source, selection, uid, gid = command
+                assert state['binding'] == [token, source, selection]
+                report = {'dshProbe': token, 'source': source, 'selection': selection,
+                          'pair': uid + ':' + gid, 'caps': 'zero', 'offline': True}
+                if case == 'stale': report['dshProbe'] = 'stale'
+                if case == 'wrong-selection': report['selection'] = '9.9.9'
+                if case == 'wrong-source': report['source'] = 'stale'
+                if case == 'duplicate': report['pair'] = '12345:23456'
+                details = {'dshRuntime': token, 'source': source, 'selection': selection, 'pair': uid + ':' + gid,
+                           'runtime': {'fixtureOnly': True}, 'web': {'http': {'status': 200}, 'cleanup': {'execTmpRemoved': True, 'survivors': 0}},
+                           'independent': {'subprocess': {'stdout': 'independent-dsh\n', 'exitCode': 7, 'disposed': True}}}
+                if case == 'stale-details': details['source'] = 'stale'
+                if case == 'dirty-temp': details['web']['cleanup']['execTmpRemoved'] = False
+                output = '' if case == 'missing' else json.dumps(details) + '\n' + json.dumps(report)
+            failure = case == action or (case == 'web' and action == 'probe')
+            if case == 'signal' and action == 'prepare': signal_parent = True
         elif BODY in args:
             command = args[args.index(BODY) + 1:]
             action = command[0]
@@ -145,6 +174,13 @@ def fake_docker(args):
 
 
 def fake_python(args):
+    if args and args[0].endswith('/standard-node-layout.py'):
+        state_path = Path(os.environ['AVM_FAKE_STATE'])
+        state = json.loads(state_path.read_text())
+        state['commands'].append(['layout', *args[1:]])
+        state_path.write_text(json.dumps(state))
+        assert '--platform' in args and '--expect-version' in args
+        return 1 if os.environ.get('AVM_FAKE_CASE') == 'layout' else 0
     if args and args[0].endswith('/host-watchdog.py'):
         assert args[1] == '1800', 'missing overall 1800s watchdog'
         if os.environ.get('AVM_FAKE_CASE') == 'watchdog-timeout':
@@ -169,6 +205,130 @@ class FullEvidence:
         return []
 
 
+def dsh_action_tests(work):
+    spec = importlib.util.spec_from_file_location('dsh_actions', ROOT / 'script/test/fixtures/standard-node-dsh.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    prefix = work / 'owning-actions/prefix'
+    prefix.mkdir(parents=True)
+    command = work / 'owning-actions/bin/dsh'
+    command.parent.mkdir()
+    inputs = ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-inputs.sha256']
+    for name in inputs: (prefix / name).write_text(name)
+    calls = []
+    with patch.object(module, 'PREFIX', prefix), patch.object(module, 'BIN', command), \
+            patch.object(module, 'run', lambda argv, **options: calls.append((argv, options))):
+        for action in [['prepare', '0.1.5-rc.1'], ['install'], ['verify']]:
+            with patch.object(sys, 'argv', ['fixture', *action]): module.main()
+    assert [Path(argv[1]).name for argv, _ in calls] == ['prepare-lock.sh', 'run-install.sh', 'verify-dsh.sh']
+    assert calls[0] == (['sh', str(module.SOURCE / 'prepare-lock.sh'), str(prefix), '0.1.5-rc.1', ''], {'seconds': 625})
+    assert calls[1] == (['sh', '/fixtures/contract/run-install.sh', 'dsh', '/fixtures/install-status/dsh',
+                         'sh', str(module.SOURCE / 'install-dsh.sh')], {'seconds': 625})
+    assert os.readlink(command) == str(prefix / 'node_modules/@deepseek-ai/dsh/lib/bin.js')
+    assert [(prefix / name).read_text() for name in inputs] == inputs
+    print('standard-node-consumers dsh self-test: owning actions/direct link PASS')
+
+
+def dsh_tests(work, environment):
+    dsh_action_tests(work)
+    cases = ['positive', 'driver', 'daemon-platform', 'image-platform', 'capacity',
+             'create', 'copy', 'initialize', 'prepare', 'install', 'verify', 'clean',
+             'disconnect', 'attachments', 'layout', 'web', 'stale', 'wrong-source',
+             'wrong-selection', 'duplicate', 'missing', 'stale-details', 'dirty-temp', 'remove', 'volume-remove', 'signal']
+    for case in cases:
+        state_path = work / ('dsh-' + case + '.json')
+        state_path.write_text(json.dumps({'commands': [], 'containers': [], 'volume': None, 'network': None}))
+        env = dict(environment, AVM_FAKE_CASE=case, AVM_FAKE_STATE=str(state_path))
+        with tempfile.TemporaryFile() as output:
+            result = subprocess.run(['bash', str(ENTRY), 'base:fixture', '--consumer', 'dsh',
+                                     '--platform', 'linux/arm64'], env=env, stdout=output, stderr=output, timeout=45)
+            output.seek(0)
+            text = output.read().decode()
+        assert (result.returncode == 0) == (case == 'positive'), (case, result.returncode, text)
+        state = json.loads(state_path.read_text())
+        if case not in ['remove', 'volume-remove']:
+            assert not state['containers'] and not state['volume'], (case, state)
+        if case == 'positive':
+            commands = state['commands']
+            actions = [args[args.index(DSH_BODY) + 1] for args in commands if DSH_BODY in args]
+            assert actions == ['initialize', 'prepare', 'install', 'verify', 'clean'] + ['probe'] * 4, actions
+            create = next(args for args in commands if args[0] == 'create' and DSH_BODY not in args and args[args.index('--name') + 1].endswith('-probe'))
+            assert '/runtime-homes:rw,mode=1777' in create and '/root:rw,mode=0770,uid=0,gid=23456' in create
+            assert create[create.index('--cap-drop') + 1] == 'ALL'
+            copies = [args for args in commands if args[0] == 'cp']
+            assert [Path(args[1]).name for args in copies[:4]] == ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-inputs.sha256']
+            assert len(copies) == 6 and copies[-1][1].endswith('/usr/local/bin/dsh')
+            layout = next(args for args in commands if args[0] == 'layout')
+            assert layout[layout.index('--expect-version') + 1] == '0.1.5-rc.2'
+            probes = [args for args in commands if DSH_BODY in args and 'probe' in args]
+            assert [(args[args.index('--reuid') + 1], args[args.index('--regid') + 1]) for args in probes] == [('12345','23456'),('0','23456'),('12345','0'),('12345','12345')]
+            for args in probes:
+                assert all(flag in args for flag in ['--bounding-set=-all','--inh-caps=-all','--ambient-caps=-all','--clear-groups','--no-new-privs'])
+            clean = next(index for index, args in enumerate(commands) if DSH_BODY in args and 'clean' in args)
+            disconnect = next(index for index, args in enumerate(commands) if args[:2] == ['network','disconnect'])
+            oracle = commands.index(layout)
+            first_probe = commands.index(probes[0])
+            assert clean < disconnect < oracle < first_probe
+            for args in commands:
+                if DSH_BODY in args:
+                    action = args[args.index(DSH_BODY) + 1]
+                    seconds = '630' if action in ['prepare','install'] else '180'
+                    assert seconds in args and '--kill-after=5' in args
+        print('standard-node-consumers dsh self-test: ' + case + ' PASS')
+    staged_root = (work / 'staged-fixture').resolve()
+    staged = staged_root / 'inputs'
+    staged.mkdir(parents=True)
+    (staged_root / 'pnpm').mkdir()
+    import shutil
+    shutil.copyfile(ROOT / 'images/pnpm/pin.json', staged_root / 'pnpm/pin.json')
+    for name in ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-inputs.sha256']:
+        shutil.copyfile(ROOT / 'images/tools/dsh' / name, staged / name)
+    for name, flags in [('changed', ['--version', '0.1.5-rc.1']),
+                        ('cordis-negative', ['--cordis-negative']),
+                        ('cordis-negative-failure', ['--cordis-negative']),
+                        ('inputs', ['--version', '0.1.5-rc.1', '--inputs', str(staged)])]:
+        state_path = work / ('dsh-' + name + '.json')
+        state_path.write_text(json.dumps({'commands': [], 'containers': [], 'volume': None, 'network': None}))
+        case = 'cordis-negative' if name == 'cordis-negative-failure' else 'positive'
+        env = dict(environment, AVM_FAKE_CASE=case, AVM_FAKE_STATE=str(state_path), AGENT_VM_FIXTURE_ROOT=str(staged_root))
+        with tempfile.TemporaryFile() as output:
+            result = subprocess.run(['bash', str(ENTRY), 'base:fixture', '--consumer', 'dsh', *flags],
+                                    env=env, stdout=output, stderr=output, timeout=90)
+            output.seek(0)
+            text = output.read().decode()
+        assert (result.returncode == 0) == (name != 'cordis-negative-failure'), (name, text)
+        state = json.loads(state_path.read_text())
+        if name.startswith('cordis-negative'):
+            # The negative leg runs before the committed install, so a failure in it
+            # cannot be mistaken for a healthy run, and the overrides-removed copy is
+            # uploaded from this invocation's scratch.
+            actions = [args[args.index(DSH_BODY) + 1] for args in state['commands'] if DSH_BODY in args]
+            assert actions[:2] == ['initialize', 'cordis-negative'], actions
+            uploads = [args for args in state['commands'] if args[0] == 'cp' and args[-1].endswith(':/invocation/cordis-negative')]
+            assert len(uploads) == 1 and 'cordis-negative' in uploads[0][1], uploads
+            if name == 'cordis-negative':
+                assert 'cordisNegative' in text, text[-3000:]
+            else:
+                # A failing negative leg blocks the repair/readiness steps entirely:
+                # a recorded failure cannot be mistaken for acceptance.
+                assert 'dsh PASS' not in text
+                assert not any('install' in args for args in state['commands'] if DSH_BODY in args)
+            assert not state['containers'] and not state['volume']
+            print('standard-node-consumers dsh self-test: ' + name + ' PASS')
+            continue
+        assert state['binding'][2] == '0.1.5-rc.1'
+        layout = next(args for args in state['commands'] if args[0] == 'layout')
+        assert layout[layout.index('--expect-version') + 1] == '0.1.5-rc.1'
+        if name == 'inputs':
+            assert all(Path(args[1]).parent == staged for args in state['commands'] if args[0] == 'cp' and not ':' in args[1])
+        assert not state['containers'] and not state['volume']
+        print('standard-node-consumers dsh self-test: ' + name + ' PASS')
+    for flags in [['--version','latest'], ['--version','12'], ['--version','0.1.5-rc.1','--version','0.1.5-rc.2'], ['--inputs','/tmp']]:
+        result = subprocess.run(['bash', str(ENTRY), 'base:fixture', '--consumer','dsh', *flags],
+                                env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert result.returncode == 2, flags
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix='standard-node-self-test-') as directory:
         work = Path(directory)
@@ -178,12 +338,19 @@ def main():
             file = tools / executable
             file.write_text(f'#!{sys.executable}\nimport runpy,sys\nsys.argv=[{str(Path(__file__).resolve())!r},{mode!r},*sys.argv[1:]]\nrunpy.run_path(sys.argv[0],run_name="__main__")\n')
             file.chmod(0o755)
-        environment = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'])
+        environment = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'],
+                           AGENT_VM_EVIDENCE_ROOT=str(work / 'evidence-subprocess'))
         for variable in ['NODE_OPTIONS', 'NODE_PATH', 'BUN_OPTIONS']:
             environment.pop(variable, None)
         spec = importlib.util.spec_from_file_location('primitive_host', ROOT / 'script/test/standard-node-consumers.py')
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        # Fake-Docker runs must not leave artifact-shaped evidence in the build
+        # log directory: redirect it and prove the real directory stayed untouched.
+        evidence_root = work / 'evidence'
+        evidence_root.mkdir()
+        module.EVIDENCE_ROOT = evidence_root
+        real_evidence = module.ROOT / 'target/ci-logs'
         live_invocation = module.Invocation
 
         def bare_invocation(**attributes):
@@ -278,11 +445,12 @@ def main():
                 assert 'scripted failure: cleanup' in result.stderr and 'owned cleanup failed' in result.stderr
                 assert 'status 19' in result.stderr and 'status 23' in result.stderr, result.stderr
             print('standard-node-consumers self-test: ' + case + ' PASS')
+        dsh_tests(work, environment)
         for args in [[], ['base', '--bad'], ['base', '--consumer', 'primitives', '--extra'],
                      ['base', '--consumer', 'primitives', '--platform', 'linux/riscv64']]:
             result = subprocess.run(['bash', str(ENTRY), *args], env=environment, capture_output=True)
             assert result.returncode == 2
-        for consumer in ['dsh', 'pi', 'copilot']:
+        for consumer in ['pi', 'copilot']:
             result = subprocess.run(['bash', str(ENTRY), 'base', '--consumer', consumer], env=environment, capture_output=True)
             assert result.returncode == 2 and b'consumer not available in this slice' in result.stderr
         sentinel = work / 'preloaded'
@@ -551,6 +719,30 @@ def main():
                 raise AssertionError('timeout swallowed')
             except module.Failure as error:
                 assert error.status == 124 and 'timeout' in str(error)
+        # The redirect is proven positively: a child's evidence appears under the
+        # redirected root, not the build-log default. A real harness may legitimately
+        # add its own evidence while this self-test runs, so only this run's tokens
+        # are checked for leakage into target/ci-logs.
+        own_tokens = set()
+
+        def note_tokens(state):
+            for args in state['commands']:
+                if args[0] != 'create' or '--name' not in args:
+                    continue
+                name = args[args.index('--name') + 1]
+                for suffix in ('-capacity', '-setup', '-probe'):
+                    if name.endswith(suffix):
+                        own_tokens.add(name[:-len(suffix)])
+
+        for path in work.glob('*.json'):
+            note_tokens(json.loads(path.read_text()))
+        redirected = {path.name for path in (work / 'evidence-subprocess').glob('pnpm-primitives-*')}
+        assert own_tokens, 'the self-test recorded no invocation token'
+        assert redirected, 'no child evidence reached the redirected evidence root'
+        own_tokens |= redirected
+        leaked = sorted(path.name for path in real_evidence.glob('pnpm-primitives-*')
+                        if path.name in own_tokens) if real_evidence.is_dir() else []
+        assert not leaked, ('the fake suite wrote evidence into target/ci-logs', leaked)
     print('standard-node-consumers: plumbing self-test PASS (no native acceptance claim)')
 
 

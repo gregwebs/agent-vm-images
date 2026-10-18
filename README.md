@@ -120,6 +120,8 @@ Scripts installed outside HOME survive HOME mounts. Use non-login `bash -c`
 for agent commands: `bash -lc` can reset the image PATH through `/etc/profile`.
 
 - [Node package defaults and override limits](docs/node-package-defaults.md)
+- [dsh graph-freeze decision](docs/adr/0003-dsh-graph-freeze.md)
+- [Standard pnpm migration evidence](docs/standard-pnpm-migration.md)
 - [Contributing and verification](CONTRIBUTING.md)
 - [Standard image releases](docs/standard-image-releases.md)
 - [Installer security, locks and runtime payloads](images/tools/README.md)

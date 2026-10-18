@@ -1,0 +1,23 @@
+{
+  "packages": [
+    "."
+  ],
+  "autoInstallPeers": true,
+  "strictPeerDependencies": false,
+  "enableGlobalVirtualStore": false,
+  "pmOnFail": "error",
+  "sideEffectsCache": false,
+  "allowBuilds": {},
+  "extendNodePath": false,
+  "nodeLinker": "isolated",
+  "hoist": true,
+  "trustPolicyExclude": [
+    "chokidar@4.0.3"
+  ],
+  "overrides": {
+    "@deepseek-ai/dsh>@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-loader": "1.0.3",
+    "@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-timer": "1.1.4",
+    "@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-include": "1.0.7"
+  }
+}

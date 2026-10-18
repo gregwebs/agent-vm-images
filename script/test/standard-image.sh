@@ -134,6 +134,13 @@ PATH="$TMP/bin:$PATH"
 export PATH
 
 cleanup() {
+    # The extraction container is removed on every explicit path already; this
+    # retry reads the on-disk registration and covers an interrupted run (a
+    # shell variable could not cross the command substitution the extraction
+    # runs in). No docker call is made for the fake-only self-test.
+    if [ "$self_test" = false ] && [ -s "$TMP/dsh-extract.container" ]; then
+        docker rm -f "$(cat "$TMP/dsh-extract.container")" >/dev/null 2>&1 || true
+    fi
     [ "$self_test" = false ] || { rm -rf "$TMP"; return; }
     local cids
     cids="$(docker ps -aq --filter "name=^${RUN_ID}-" 2>/dev/null || true)"
@@ -356,6 +363,8 @@ printf 'status_b64=%s\n' "$(b64file /opt/agent-vm/install-status/copilot)"
 EOS
             ;;
         dsh)
+            # `AVM_EXPECTED_DSH` is the CALLER's selection, injected by
+            # run_container from the independently supplied --expect value.
             cat <<'EOS'
 printf '=== RUN ===\n'
 timeout --kill-after=5s 60 dsh --version >/tmp/o 2>/tmp/e
@@ -369,6 +378,11 @@ printf 'stderr1_b64=%s\n' "$(b64file /tmp/e1)"
 printf '=== T5 ===\n'
 python3 /contract/check-tool-access.py dsh pnpm
 printf 't5rc=%s\n' "$?"
+printf '=== INDEPENDENT ===\n'
+timeout --kill-after=5s 60 node /dsh-oracle.mjs /opt/agent-vm/dsh "$AVM_EXPECTED_DSH" >/tmp/i.out 2>/tmp/i.err
+printf 'ircc=%s\n' "$?"
+printf 'ioracle_b64=%s\n' "$(b64file /tmp/i.out)"
+printf 'ioracleerr_b64=%s\n' "$(b64file /tmp/i.err)"
 printf '=== STATUS ===\n'
 printf 'status_b64=%s\n' "$(b64file /opt/agent-vm/install-status/dsh)"
 EOS
@@ -492,13 +506,21 @@ pi_audit_status_regression() {
     echo '  pi audit status: first-check failure is not overwritten by a passing content check'
 }
 
-# run_container IMG RECIPE UID -> stdout+stderr of the audit script
-run_container() { # $1 image, $2 recipe, $3 uid:gid
-    local img="$1" recipe="$2" uid="$3" rc=0
+# run_container IMG RECIPE UID [EXPECTED_DSH] -> stdout+stderr of the audit script
+run_container() { # $1 image, $2 recipe, $3 uid:gid, $4 expected dsh version
+    local img="$1" recipe="$2" uid="$3" expected="${4:-}" rc=0
+    # The independent runtime oracle ships as a read-only file mount so the
+    # in-container audit runs reviewed test-only code, not image content.
+    local oracle=()
+    if [ "$recipe" = dsh ]; then
+        oracle=(--mount "type=bind,src=$REPO_ROOT/script/test/fixtures/dsh/oracle.mjs,dst=/dsh-oracle.mjs,readonly"
+            -e "AVM_EXPECTED_DSH=$expected")
+    fi
     run_with_watchdog "$RUNTIME_WATCHDOG_SECONDS" \
         docker_run --rm --platform "$platform" --user "$uid" \
         --cap-drop ALL --network none --tmpfs /tmp:rw,exec \
         -e HOME=/tmp \
+        ${oracle[@]+"${oracle[@]}"} \
         -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
         --entrypoint sh "$img" -c "$(container_script "$recipe")" 2>&1 || rc=$?
     [ "$rc" -eq 0 ] || fail "$recipe ($uid) runtime capture failed: $rc"
@@ -737,6 +759,46 @@ check_bridge() { # $1 output, $2 expected bridge version
     esac
 }
 
+# check_dsh_oracle CONTAINER_OUTPUT EXPECTED_DSH -- the independent in-container
+# oracle must have resolved the real installed owners by itself and driven a
+# controlled Cordis subprocess. Its expectation (the exact output, exit status,
+# disposal and the resolved sandbox/cordis versions) is asserted here from the
+# caller's selection; the oracle is a separate implementation from the image's
+# build-time check-runtime.mjs, so a defect in one cannot certify the other.
+check_dsh_oracle() { # $1 output, $2 expected dsh version
+    local out="$1" expected="$2" file
+    [ "$(kv "$out" ircc)" = 0 ] || {
+        printf 'independent dsh oracle exited %s' "$(kv "$out" ircc)"
+        return 1
+    }
+    file="$TMP/oracle-check.$$"
+    decode_b64 "$(kv "$out" ioracle_b64)" "$file" || {
+        printf 'independent dsh oracle report is missing'
+        return 1
+    }
+    if ! python3 - "$file" "$expected" <<'PY'
+import json, re, sys
+
+try:
+    report = json.loads(open(sys.argv[1], 'rb').read())
+except (OSError, ValueError):
+    sys.exit(1)
+if not isinstance(report, dict) or report.get('version') != sys.argv[2]:
+    sys.exit(1)
+version = re.compile(r'[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?')
+for field in ('sandbox', 'cordis'):
+    if not isinstance(report.get(field), str) or not version.fullmatch(report[field]):
+        sys.exit(1)
+if report.get('subprocess') != {'stdout': 'independent-dsh\n', 'exitCode': 7, 'disposed': True}:
+    sys.exit(1)
+PY
+    then
+        printf 'independent dsh oracle report is not the controlled subprocess/sandbox record'
+        return 1
+    fi
+    return 0
+}
+
 # expect_label IMG SUFFIX EXPECTED GOT -- a label must equal the
 # INDEPENDENTLY-supplied selection; this is what catches a dropped override arg.
 expect_label() { # $1 image, $2 suffix, $3 expected, $4 got
@@ -871,6 +933,39 @@ oracle_self_test() {
     check_raw_bridge "$(printf 'AGENT-VM-BRIDGE-REGISTERED models=12\n{"message":"AGENT-VM-BRIDGE-MISSING"')" 0
     check_raw_bridge "$(printf 'AGENT-VM-BRIDGE-REGISTERED models=12\nAGENT-VM-BRIDGE-MISSING')" 0
 
+    # --- independent dsh runtime oracle -------------------------------------
+    # The in-container report is the oracle's own JSON: the caller's exact
+    # selection, resolved sandbox/cordis versions and a controlled subprocess
+    # (output, exit status, disposal). Every field is required; a truncated or
+    # partial report is not evidence.
+    dsh_oracle_wire() { # $1 version, $2 sandbox, $3 subprocess JSON
+        printf 'ircc=0\nioracle_b64=%s\n' "$(printf '{"version":"%s","sandbox":"%s","cordis":"4.0.2","subprocess":%s}\n' \
+            "$1" "$2" "$3" | blob)"
+    }
+    local good_sub='{"stdout":"independent-dsh\n","exitCode":7,"disposed":true}'
+    check_dsh_oracle "$(dsh_oracle_wire 0.1.5-rc.2 0.1.4 "$good_sub")" 0.1.5-rc.2 >/dev/null ||
+        fail 'self-test: a healthy independent dsh oracle report was rejected'
+    reason="$(check_dsh_oracle "$(dsh_oracle_wire 0.1.5-rc.2 0.1.4 "$good_sub")" 0.1.5-rc.1)" &&
+        fail 'self-test: a stale independent dsh oracle selection was accepted'
+    [ -n "$reason" ] || fail 'self-test: stale oracle rejection needs a reason'
+    reason="$(check_dsh_oracle "$(printf 'ircc=1\nioracle_b64=%s\n' "$(printf '{\n' | blob)")" 0.1.5-rc.2)" &&
+        fail 'self-test: a nonzero independent dsh oracle was accepted'
+    reason="$(check_dsh_oracle $'ircc=0\nioracle_b64=MISSING' 0.1.5-rc.2)" &&
+        fail 'self-test: a missing independent dsh oracle report was accepted'
+    reason="$(check_dsh_oracle "ioracle_b64=$(printf 'not json\n' | blob)" 0.1.5-rc.2)" &&
+        fail 'self-test: a malformed independent dsh oracle report was accepted'
+    local bad_sub
+    for bad_sub in '{"stdout":"independent-dsh\n","exitCode":6,"disposed":true}' \
+        '{"stdout":"independent-dsh\n","exitCode":7,"disposed":false}' \
+        '{"stdout":"wrong\\n","exitCode":7,"disposed":true}'; do
+        reason="$(check_dsh_oracle "$(dsh_oracle_wire 0.1.5-rc.2 0.1.4 "$bad_sub")" 0.1.5-rc.2)" &&
+            fail "self-test: an uncontrolled oracle subprocess ($bad_sub) was accepted"
+        [ -n "$reason" ] || fail 'self-test: uncontrolled oracle rejection needs a reason'
+    done
+    # A report contradicted by a second JSON document is not one record.
+    reason="$(check_dsh_oracle "ioracle_b64=$(printf '{"version":"0.1.5-rc.2","sandbox":"0.1.4","cordis":"4.0.2","subprocess":{"stdout":"independent-dsh\n","exitCode":7,"disposed":true}}\n{}\n' | blob)" 0.1.5-rc.2)" &&
+        fail 'self-test: a trailing oracle document was accepted'
+
     expect_label img codex rust-v0.159.2 rust-v0.159.2 >/dev/null ||
         fail "self-test: a matching override label was rejected"
     reason="$(expect_label img codex rust-v0.159.2 rust-v0.159.3)" &&
@@ -887,15 +982,17 @@ oracle_self_test() {
     [ "$reason" = 'pi lock drifted' ] || fail "self-test: lock drift rejection lost its reason"
 
     echo "oracle self-test: every rejected state failed with a reason"
+    ( dsh_extraction_self_test )
     ( oracle_wiring_self_test )
 }
 
 # audit_image IMG RECIPE [STRICT_LABELS] -> labels + reports + T5 + status.
 audit_image() { # $1 image, $2 recipe, $3 strict-label-exactness (default 1)
-    local img="$1" recipe="$2" strict="${3:-1}" out v0 v1 k0 k1 reason
+    local img="$1" recipe="$2" strict="${3:-1}" out v0 v1 k0 k1 reason expected
     assert_recipe_labels "$img" "$recipe" "" 0
     : "$strict"
     assert_expected_selection "$img" "$EXPECTED"
+    expected=$(printf '%s\n' "$EXPECTED" | sed -n 's/^dsh=//p')
 
     case "$recipe" in
         codex) k0=codex ;;
@@ -911,7 +1008,7 @@ audit_image() { # $1 image, $2 recipe, $3 strict-label-exactness (default 1)
     [ -n "${k1:-}" ] && v1="$(label_value "$img" "org.agent-vm.version.$k1")"
 
     for uid in 0:0 12345:23456 12345:45678 54321:12345; do
-        out="$(run_container "$img" "$recipe" "$uid")"
+        out="$(run_container "$img" "$recipe" "$uid" "$expected")"
         [ "$(kv "$out" rc0)" = 0 ] ||
             fail "$recipe ($uid) report exited $(kv "$out" rc0); output: $(printf '%s' "$out" | head -c 400)"
         [ "$(kv "$out" t5rc)" = 0 ] ||
@@ -924,6 +1021,11 @@ audit_image() { # $1 image, $2 recipe, $3 strict-label-exactness (default 1)
             # The behavioral probe must run under a numeric uid too: metadata
             # and a stale `installed` record are not proof a working extension.
             reason="$(check_bridge "$out" "$v1")" || fail "pi ($uid) $reason"
+        fi
+        if [ "$recipe" = dsh ]; then
+            # The independent runtime oracle is a separate implementation from
+            # the image's own check-runtime.mjs; a failure here is the audit's.
+            reason="$(check_dsh_oracle "$out" "$expected")" || fail "dsh ($uid) $reason"
         fi
     done
     echo "  $recipe: labels ok; reports/T5/status ok as 0:0, 12345:23456, 12345:45678 and 54321:12345"
@@ -1111,12 +1213,180 @@ for entry in ${expect_overrides[@]+"${expect_overrides[@]}"}; do
     EXPECTED=$(printf '%s\n' "$EXPECTED" | sed "s/^$suffix=.*/$suffix=$value/")
 done
 
+# --- dsh finished-image extraction (plan section 9.4) ------------------------
+# The finished image is the evidence: extract the installed dsh payload into
+# host scratch and audit those bytes. A stopped container is only a mount view
+# of the image -- nothing in it runs -- and `docker cp` preserves the image's
+# symlinks (never `-L`), which is exactly what the independent layout oracle
+# interprets inside a virtual root. Nothing here reads the host /opt.
+
+# The registration is an on-disk name, written BEFORE `docker create`: the
+# extraction runs inside a command substitution, so the EXIT trap could not see
+# a shell variable, and a create/cp failure must still be removable.
+dsh_extract_remove() { # $1 container name
+    local name="$1" rc=0
+    if [ -n "$name" ]; then
+        docker rm -f "$name" >/dev/null 2>&1 || rc=$?
+        [ "$rc" -ne 0 ] || rm -f "$TMP/dsh-extract.container"
+    fi
+    return 0
+}
+
+dsh_extract_image() { # $1 image -> reason on stdout, 1 on failure
+    local img="$1" name="${RUN_ID}-dsh-extract-$$" root="$TMP/image-root" file rc
+    rm -rf "$root" "$TMP/dsh-inputs"
+    printf '%s' "$name" >"$TMP/dsh-extract.container"
+    mkdir -p "$root/opt/agent-vm" "$root/usr/local/bin" "$TMP/dsh-inputs"
+    rc=0
+    run_with_watchdog "$RUNTIME_WATCHDOG_SECONDS" docker create --name "$name" \
+        --platform "$platform" --network none --entrypoint /usr/bin/true "$img" \
+        >"$TMP/dsh-extract.log" 2>&1 || rc=$?
+    if [ "$rc" -eq 124 ]; then
+        dsh_extract_remove "$name"
+        printf 'dsh extraction container create timed out'
+        return 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        dsh_extract_remove "$name"
+        printf 'cannot create the dsh extraction container'
+        return 1
+    fi
+    for file in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
+        rc=0
+        docker cp "$name:/opt/agent-vm/dsh/$file" "$TMP/dsh-inputs/$file" >/dev/null 2>&1 || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            dsh_extract_remove "$name"
+            printf 'cannot extract the dsh %s input' "$file"
+            return 1
+        fi
+    done
+    rc=0
+    docker cp "$name:/opt/agent-vm/dsh" "$root/opt/agent-vm/dsh" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        dsh_extract_remove "$name"
+        printf 'cannot extract the installed dsh prefix'
+        return 1
+    fi
+    rc=0
+    docker cp "$name:/usr/local/bin/dsh" "$root/usr/local/bin/dsh" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        dsh_extract_remove "$name"
+        printf 'cannot extract the dsh command link'
+        return 1
+    fi
+    dsh_extract_remove "$name"
+    return 0
+}
+
+# dsh_extract_checks ROOT INPUTS -- the extracted tree must carry the four
+# reviewed inputs as regular files, no npm lock in the installed prefix (a
+# dangling link counts as present), and the direct command link. Byte identity
+# or graph comparison is the caller's next step.
+dsh_extract_checks() { # $1 virtual image root, $2 extracted inputs
+    local root="$1" inputs="$2" file prefix link
+    for file in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
+        if [ -L "$inputs/$file" ]; then
+            printf 'dsh input %s is a symlink' "$file"
+            return 1
+        fi
+        if [ ! -f "$inputs/$file" ]; then
+            printf 'dsh input %s is missing' "$file"
+            return 1
+        fi
+    done
+    prefix="$root/opt/agent-vm/dsh"
+    if [ -e "$prefix/package-lock.json" ] || [ -L "$prefix/package-lock.json" ]; then
+        printf 'the dsh prefix carries an npm lock'
+        return 1
+    fi
+    if [ ! -L "$root/usr/local/bin/dsh" ]; then
+        printf '/usr/local/bin/dsh is not a symbolic link'
+        return 1
+    fi
+    link="$(readlink "$root/usr/local/bin/dsh")"
+    if [ "$link" != /opt/agent-vm/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js ]; then
+        printf '/usr/local/bin/dsh is not a direct link to the installed dsh bin (target %s)' "$link"
+        return 1
+    fi
+}
+
+# Production graph CLI: an opaque parser, not this harness. It prints the exact
+# selection it read from the extracted project.
+dsh_graph_check() { # $1 extracted prefix
+    node "$REPO_ROOT/images/recipe-contract/pnpm-lock.mjs" check dsh "$1"
+}
+
+# The reviewed update rule (only the dsh root selection and its closure may
+# change; workspace bytes and lock settings stay frozen). The requested version
+# is the CALLER's --expect value, never inferred from the image label.
+dsh_compare_update() { # $1 committed prefix, $2 extracted prefix, $3 requested version
+    node "$REPO_ROOT/images/tools/dsh/check-lock-update.js" "$1" "$2" "$3"
+}
+
+# The caller already validated $platform from --platform (or the host default),
+# so the oracle is never asked to infer an architecture.
+dsh_layout_oracle() { # $1 virtual image root, $2 expected dsh version
+    local root="$1" expected="$2" err
+    err="$(mktemp "$TMP/layout-oracle.XXXXXX")"
+    if python3 "$REPO_ROOT/script/test/standard-node-layout.py" --consumer dsh \
+        --root "$root" --platform "$platform" --expect-version "$expected" \
+        >"$TMP/layout-oracle.json" 2>"$err"; then
+        return 0
+    fi
+    printf 'independent dsh layout oracle failed: %s' "$(head -c 400 "$err")"
+    return 1
+}
+
+# dsh is one reviewed pnpm project installed by the base manager. Its four
+# inputs are always extracted and checked: the committed default must be
+# byte-identical, and an explicit changed selection must pass the production
+# graph check plus the reviewed update rule against the committed project using
+# the caller's own expectation. "Not selected" can never mean "not checked".
+check_dsh_locks() { # $1 image
+    local image="$1" expected_dsh file reason got
+    expected_dsh=$(printf '%s\n' "$EXPECTED" | sed -n 's/^dsh=//p')
+    [ -n "$expected_dsh" ] || { printf 'the dsh selection is missing from --expect'; return 1; }
+    reason="$(dsh_extract_image "$image")" || { printf '%s' "$reason"; return 1; }
+    reason="$(dsh_extract_checks "$TMP/image-root" "$TMP/dsh-inputs")" || { printf '%s' "$reason"; return 1; }
+    if [ "$expected_dsh" = "$DEFAULT_DSH" ]; then
+        for file in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
+            reason=$(assert_files_identical "$REPO_ROOT/images/tools/dsh/$file" \
+                "$TMP/dsh-inputs/$file" "dsh $file drifted") || { printf '%s' "$reason"; return 1; }
+        done
+    else
+        got="$(dsh_graph_check "$TMP/dsh-inputs")" || {
+            printf 'the extracted dsh project does not pass the production graph check'
+            return 1
+        }
+        [ "$got" = "$expected_dsh" ] || {
+            printf 'the extracted dsh project selects %s, not the expected %s' "$got" "$expected_dsh"
+            return 1
+        }
+        dsh_compare_update "$REPO_ROOT/images/tools/dsh" "$TMP/dsh-inputs" "$expected_dsh" || {
+            printf 'the extracted dsh project is not a compatible %s update of the committed project' \
+                "$expected_dsh"
+            return 1
+        }
+    fi
+    reason="$(dsh_layout_oracle "$TMP/image-root" "$expected_dsh")" || { printf '%s' "$reason"; return 1; }
+    echo "  dsh: four inputs/no npm lock/direct link ok as $expected_dsh; independent layout oracle passed ($platform)"
+}
+
 check_locks() {
-    local image=$1 project committed suffix pin file reason
-    for project in dsh pi pi-packages; do
+    local image=$1 project committed suffix pin file reason expected_pnpm
+    expected_pnpm=$(printf '%s\n' "$EXPECTED" | sed -n 's/^pnpm=//p')
+    # pnpm is owned by the base pin, not by the dsh project. A different expected
+    # pnpm contradicts the image contract and must fail; skipping the dsh checks
+    # on that mismatch would certify a selection nobody asked for.
+    [ "$expected_pnpm" = "$DEFAULT_PNPM" ] ||
+        fail "pnpm is owned by the base pin $DEFAULT_PNPM; expected pnpm=$expected_pnpm"
+    if reason="$(check_dsh_locks "$image")"; then
+        [ -z "$reason" ] || echo "$reason"
+    else
+        fail "$reason"
+    fi
+    for project in pi pi-packages; do
         case "$project" in
-            dsh) committed=images/tools/dsh; suffix=dsh; pin=$DEFAULT_DSH
-                [ "$(printf '%s\n' "$EXPECTED" | sed -n 's/^pnpm=//p')" = "$DEFAULT_PNPM" ] || continue ;;
             pi) committed=images/tools/pi; suffix=pi; pin=$DEFAULT_PI ;;
             pi-packages) committed=images/tools/pi/bridge; suffix=pi-claude-bridge; pin=$DEFAULT_BRIDGE ;;
         esac
@@ -1137,6 +1407,241 @@ check_locks() {
 
 }
 
+# --- dsh extraction self-test (wiring controls, not runtime claims) ----------
+# These drive the REAL extraction/check functions over a fake `docker` seam and
+# assert the call graph: per-file default drift, the changed-expectation path
+# with the caller's exact value (never the image label), mismatch rejection, the
+# absent npm lock, the direct link, layout-oracle propagation, pnpm ownership
+# and container removal on success and on failure.
+dsh_extraction_self_test() {
+    local root="$TMP/dsh-check-root" inputs="$TMP/dsh-check-inputs" file reason out
+    local changed=0.1.5-rc.1 changed_expected
+    changed_expected=$(printf '%s\n' "$EXPECTED" | sed "s/^dsh=.*/dsh=$changed/")
+
+    dsh_fixture() {
+        local name
+        rm -rf "$root" "$inputs"
+        mkdir -p "$root/opt/agent-vm/dsh/node_modules/@deepseek-ai/dsh/lib" \
+            "$root/usr/local/bin" "$inputs"
+        for name in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
+            cp "$REPO_ROOT/images/tools/dsh/$name" "$root/opt/agent-vm/dsh/$name"
+            cp "$REPO_ROOT/images/tools/dsh/$name" "$inputs/$name"
+        done
+        printf '#!/usr/bin/env node\n' >"$root/opt/agent-vm/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js"
+        ln -s /opt/agent-vm/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js "$root/usr/local/bin/dsh"
+    }
+
+    dsh_fixture
+    dsh_extract_checks "$root" "$inputs" >/dev/null ||
+        fail 'self-test: a healthy dsh extraction was rejected'
+
+    dsh_fixture
+    rm "$inputs/pnpm-lock.yaml"
+    ln -s /opt/agent-vm/dsh/pnpm-lock.yaml "$inputs/pnpm-lock.yaml"
+    reason="$(dsh_extract_checks "$root" "$inputs")" &&
+        fail 'self-test: a symlinked dsh input was accepted'
+    [ "$reason" = 'dsh input pnpm-lock.yaml is a symlink' ] ||
+        fail "self-test: symlinked dsh input rejection lost its reason: $reason"
+
+    dsh_fixture
+    rm "$inputs/pnpm-workspace.yaml"
+    reason="$(dsh_extract_checks "$root" "$inputs")" &&
+        fail 'self-test: a missing dsh input was accepted'
+    [ "$reason" = 'dsh input pnpm-workspace.yaml is missing' ] ||
+        fail "self-test: missing dsh input rejection lost its reason: $reason"
+
+    dsh_fixture
+    printf '{}\n' >"$root/opt/agent-vm/dsh/package-lock.json"
+    reason="$(dsh_extract_checks "$root" "$inputs")" &&
+        fail 'self-test: an npm lock in the dsh prefix was accepted'
+    [ "$reason" = 'the dsh prefix carries an npm lock' ] ||
+        fail "self-test: npm lock rejection lost its reason: $reason"
+
+    dsh_fixture
+    ln -s /nonexistent/package-lock.json "$root/opt/agent-vm/dsh/package-lock.json"
+    reason="$(dsh_extract_checks "$root" "$inputs")" &&
+        fail 'self-test: a dangling npm lock link was accepted'
+    [ "$reason" = 'the dsh prefix carries an npm lock' ] ||
+        fail "self-test: dangling npm lock rejection lost its reason: $reason"
+
+    dsh_fixture
+    rm "$root/usr/local/bin/dsh"
+    printf '#!/bin/sh\n' >"$root/usr/local/bin/dsh"
+    reason="$(dsh_extract_checks "$root" "$inputs")" &&
+        fail 'self-test: a generated dsh wrapper was accepted'
+    [ "$reason" = '/usr/local/bin/dsh is not a symbolic link' ] ||
+        fail "self-test: wrapper rejection lost its reason: $reason"
+
+    dsh_fixture
+    rm "$root/usr/local/bin/dsh"
+    ln -s /opt/agent-vm/dsh/node_modules/.bin/dsh "$root/usr/local/bin/dsh"
+    reason="$(dsh_extract_checks "$root" "$inputs")" &&
+        fail 'self-test: an indirect dsh link was accepted'
+    case "$reason" in
+        '/usr/local/bin/dsh is not a direct link to the installed dsh bin ('*) : ;;
+        *) fail "self-test: indirect dsh link rejection lost its reason: $reason" ;;
+    esac
+
+    local seam="$TMP/dsh-seam.log" docker_log="$TMP/dsh-docker.log"
+    (
+        # Fake Docker: records every call, serves the committed inputs for `cp`,
+        # and lets a case request one injected failure/drift.
+        docker() {
+            printf '%s\n' "$*" >>"$docker_log"
+            case "$1" in
+                create)
+                    [ -s "$TMP/dsh-extract.container" ] || printf 'UNREGISTERED CREATE\n' >>"$docker_log"
+                    [ "${AVM_FAKE_CREATE_FAIL:-}" != 1 ] || return 1
+                    return 0 ;;
+                cp)
+                    local src="$2" dst="$3" name
+                    case "$src" in
+                        *:/opt/agent-vm/dsh)
+                            mkdir -p "$dst/node_modules/@deepseek-ai/dsh/lib"
+                            printf '#!/usr/bin/env node\n' >"$dst/node_modules/@deepseek-ai/dsh/lib/bin.js"
+                            for name in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
+                                cp "$REPO_ROOT/images/tools/dsh/$name" "$dst/$name"
+                            done
+                            [ "${AVM_FAKE_NPM_LOCK:-}" != 1 ] || : >"$dst/package-lock.json"
+                            return 0 ;;
+                        *:/usr/local/bin/dsh)
+                            if [ "${AVM_FAKE_BIN_WRAPPER:-}" = 1 ]; then
+                                printf '#!/bin/sh\n' >"$dst"
+                            elif [ "${AVM_FAKE_BIN_TARGET:-}" = 1 ]; then
+                                ln -s /opt/agent-vm/dsh/node_modules/.bin/dsh "$dst"
+                            else
+                                ln -s /opt/agent-vm/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js "$dst"
+                            fi
+                            return 0 ;;
+                        *:/opt/agent-vm/dsh/*)
+                            name="${src##*/}"
+                            [ "${AVM_FAKE_CP_FAIL:-}" != "$name" ] || return 1
+                            if [ "${AVM_FAKE_DRIFT:-}" = "$name" ]; then
+                                printf 'drift\n' >"$dst"
+                            else
+                                cp "$REPO_ROOT/images/tools/dsh/$name" "$dst"
+                            fi
+                            return 0 ;;
+                        *) return 1 ;;
+                    esac ;;
+                rm) return 0 ;;
+                *) return 1 ;;
+            esac
+        }
+        run_with_watchdog() { shift; "$@"; }
+        # The dsh expectation must never come from the image: record any label read.
+        label_value() {
+            printf 'LABEL-READ %s\n' "$2" >>"$seam"
+            printf '%s\n' "$DEFAULT_DSH"
+        }
+        dsh_graph_check() {
+            printf 'graph %s\n' "$*" >>"$seam"
+            printf '%s\n' "${GRAPH_VERSION:-$DEFAULT_DSH}"
+        }
+        dsh_compare_update() {
+            printf 'compare %s\n' "$*" >>"$seam"
+            [ "${COMPARE_FAIL:-}" != 1 ]
+        }
+
+        # The real layout-oracle function must forward the audited platform and
+        # the caller's expectation, and a nonzero oracle must fail the audit.
+        : >"$seam"
+        ( python3() { printf 'python3 %s\n' "$*" >>"$seam"; return "${PYTHON_RC:-0}"; }; dsh_layout_oracle "$TMP/image-root" "$changed" ) >/dev/null ||
+            fail 'self-test: a healthy layout-oracle invocation was rejected'
+        grep -q -F -x "python3 $REPO_ROOT/script/test/standard-node-layout.py --consumer dsh --root $TMP/image-root --platform $platform --expect-version $changed" "$seam" ||
+            fail 'self-test: the layout oracle was not invoked with the audited platform and caller expectation'
+        if ( python3() { return 1; }; dsh_layout_oracle "$TMP/image-root" "$changed" ) >/dev/null 2>&1; then
+            fail 'self-test: a nonzero layout oracle was accepted'
+        fi
+        dsh_layout_oracle() { return 0; }
+
+        : >"$seam"
+        : >"$docker_log"
+        check_dsh_locks img >/dev/null || fail 'self-test: a healthy default dsh extraction was rejected'
+        grep -q 'UNREGISTERED CREATE' "$docker_log" &&
+            fail 'self-test: the extraction container was not registered before create'
+        case "$(head -n 1 "$docker_log")" in
+            create\ *) : ;;
+            *) fail "self-test: the extraction container was not created first: $(head -n 1 "$docker_log")" ;;
+        esac
+        case "$(tail -n 1 "$docker_log")" in
+            rm\ *) : ;;
+            *) fail "self-test: the extraction container was not removed: $(tail -n 1 "$docker_log")" ;;
+        esac
+        grep -q '^create .*--platform ' "$docker_log" ||
+            fail 'self-test: the extraction container ignored the audited platform'
+        [ ! -e "$TMP/dsh-extract.container" ] ||
+            fail 'self-test: the extraction registration survived removal'
+        grep -q 'LABEL-READ' "$seam" &&
+            fail 'self-test: the dsh expectation was read from the image label'
+
+        for file in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
+            if ( export AVM_FAKE_DRIFT="$file"; check_dsh_locks img ) >/dev/null 2>&1; then
+                fail "self-test: default dsh $file drift was accepted"
+            fi
+            reason="$(AVM_FAKE_DRIFT="$file" check_dsh_locks img)" &&
+                fail "self-test: default dsh $file drift was accepted"
+            [ "$reason" = "dsh $file drifted" ] ||
+                fail "self-test: default dsh $file drift rejection lost its reason: $reason"
+        done
+
+        for failure in AVM_FAKE_NPM_LOCK AVM_FAKE_BIN_WRAPPER AVM_FAKE_BIN_TARGET; do
+            if ( export "$failure"=1; check_dsh_locks img ) >/dev/null 2>&1; then
+                fail "self-test: $failure was accepted in the extracted dsh tree"
+            fi
+        done
+
+        : >"$seam"
+        if ! ( EXPECTED=$changed_expected; GRAPH_VERSION=$changed; check_dsh_locks img ) >/dev/null; then
+            fail 'self-test: a healthy changed dsh extraction was rejected'
+        fi
+        grep -q -F -x "graph $TMP/dsh-inputs" "$seam" ||
+            fail 'self-test: the changed path did not use the production graph check'
+        grep -q -F -x "compare $REPO_ROOT/images/tools/dsh $TMP/dsh-inputs $changed" "$seam" ||
+            fail 'self-test: the changed path did not compare against the committed project with the caller expectation'
+        grep -q 'LABEL-READ' "$seam" &&
+            fail 'self-test: the changed dsh expectation was read from the image label'
+
+        if ( EXPECTED=$changed_expected; GRAPH_VERSION=$DEFAULT_DSH; check_dsh_locks img ) >/dev/null 2>&1; then
+            fail 'self-test: an image selection that contradicts --expect was accepted'
+        fi
+        reason="$(EXPECTED=$changed_expected; GRAPH_VERSION=$DEFAULT_DSH; check_dsh_locks img)" &&
+            fail 'self-test: an image selection that contradicts --expect was accepted'
+        [ "$reason" = "the extracted dsh project selects $DEFAULT_DSH, not the expected $changed" ] ||
+            fail "self-test: contradictory selection rejection lost its reason: $reason"
+        if ( EXPECTED=$changed_expected; GRAPH_VERSION=$changed; COMPARE_FAIL=1; check_dsh_locks img ) >/dev/null 2>&1; then
+            fail 'self-test: a rejected dsh update comparison was accepted'
+        fi
+
+        : >"$docker_log"
+        if ( export AVM_FAKE_CP_FAIL=pnpm-lock.yaml; check_dsh_locks img ) >/dev/null 2>&1; then
+            fail 'self-test: a failed docker cp was accepted'
+        fi
+        case "$(tail -n 1 "$docker_log")" in
+            rm\ *) : ;;
+            *) fail 'self-test: the extraction container survived a failed docker cp' ;;
+        esac
+        : >"$docker_log"
+        if ( export AVM_FAKE_CREATE_FAIL=1; check_dsh_locks img ) >/dev/null 2>&1; then
+            fail 'self-test: a failed extraction container create was accepted'
+        fi
+        case "$(tail -n 1 "$docker_log")" in
+            rm\ *) : ;;
+            *) fail 'self-test: the extraction container survived a failed create' ;;
+        esac
+
+        # pnpm is owned by the base pin; a different expectation must fail the
+        # dsh lock check, never skip it (the previous revision skipped here).
+        out="$(EXPECTED=$(printf '%s\n' "$EXPECTED" | sed 's/^pnpm=.*/pnpm=11.10.0/'); check_locks img 2>&1)" &&
+            fail 'self-test: an expected pnpm outside the base pin did not fail the dsh lock check'
+        case "$out" in
+            *"pnpm is owned by the base pin"*) : ;;
+            *) fail "self-test: the pnpm mismatch did not fail on the pnpm selection: $out" ;;
+        esac
+    )
+    echo '  dsh extraction: four-input/default-drift/changed-expectation/oracle wiring rejected every bad state'
+}
+
 # Drive the real audit call sites with complete wire captures, not predicates alone.
 oracle_wiring_self_test() {
     assert_recipe_labels() { return 0; }
@@ -1153,7 +1658,17 @@ oracle_wiring_self_test() {
             *version.pi-claude-bridge) printf '%s\n' "$DEFAULT_BRIDGE" ;;
         esac
     }
-    run_container() { printf '%s\n' "$WIRE"; }
+    run_container() {
+        # The dsh audit must hand the CALLER's expectation to the container, not
+        # a label-derived one; a wrong fourth argument fails this fake.
+        [ "$4" = "$(printf '%s\n' "$EXPECTED" | sed -n 's/^dsh=//p')" ] || return 1
+        printf '%s\n' "$4" >"$TMP/wiring-container-expected"
+        printf '%s\n' "$WIRE"
+    }
+    # check_locks extracts the installed dsh payload; its four-input/graph/
+    # direct-link/layout-oracle controls have their own self-test tier, so bind
+    # the whole dsh sub-check healthy here.
+    check_dsh_locks() { return 0; }
     local healthy
     healthy=$(printf 'rc0=0\nt5rc=0\nreport_b64=%s\nstatus_b64=%s\n' "$(printf 'codex-cli %s\n' "${DEFAULT_CODEX#rust-v}" | blob)" "$(sblob installed)")
     WIRE=$healthy
@@ -1182,19 +1697,42 @@ oracle_wiring_self_test() {
     done
     WIRE=$(printf '%s\n' "$pi_wire" | sed 's/^probes=1/probes=2/')
     if ( audit_image img pi ) >/dev/null 2>&1; then fail 'contradictory bridge wire accepted'; fi
+    local dsh_wire good_sub
+    good_sub='{"stdout":"independent-dsh\n","exitCode":7,"disposed":true}'
+    dsh_wire=$(printf 'rc0=0\nt5rc=0\nreport_b64=%s\nreport1_b64=%s\nrc1=0\nstatus_b64=%s\nircc=0\nioracle_b64=%s\n' \
+        "$(printf '%s\n' "$DEFAULT_DSH" | blob)" "$(printf '%s\n' "$DEFAULT_PNPM" | blob)" "$(sblob installed)" \
+        "$(printf '{"version":"%s","sandbox":"0.1.4","cordis":"4.0.2","subprocess":%s}\n' "$DEFAULT_DSH" "$good_sub" | blob)")
+    WIRE=$dsh_wire
+    audit_image img dsh >/dev/null || fail 'healthy dsh wire rejected'
+    [ "$(cat "$TMP/wiring-container-expected")" = "$DEFAULT_DSH" ] ||
+        fail 'the dsh audit did not pass the caller expectation into the container'
+    WIRE=$(printf '%s\n' "$dsh_wire" | sed 's/^ircc=0/ircc=1/')
+    if ( audit_image img dsh ) >/dev/null 2>&1; then fail 'nonzero dsh oracle wire accepted'; fi
+    WIRE=$(printf '%s\n' "$dsh_wire" | sed "s/^ioracle_b64=.*/ioracle_b64=$(printf '{"version":"0.0.0"}\n' | blob)/")
+    if ( audit_image img dsh ) >/dev/null 2>&1; then fail 'stale dsh oracle wire accepted'; fi
     image_file() {
         local committed
         case "$2" in
             */opencode-plugins/*) committed=images/tools/opencode/plugins ;;
             */pi-packages/*) committed=images/tools/pi/bridge ;;
             */pi/*) committed=images/tools/pi ;;
-            */dsh/*) committed=images/tools/dsh ;;
         esac
-        cp "$REPO_ROOT/$committed/${2##*/}" "$3"
+        if [ "$2" = "${DRIFT:-}" ]; then printf drift >"$3"; else cp "$REPO_ROOT/$committed/${2##*/}" "$3"; fi
     }
     check_locks img || fail 'healthy extracted lock wire rejected'
-    image_file() { printf drift >"$3"; }
-    if ( check_locks img ) >/dev/null 2>&1; then fail 'lock wire drift accepted'; fi
+    # Unselected data must stay unchanged and checked, including while dsh is
+    # the changed selection: a Pi, bridge or OpenCode drift still fails.
+    local drift
+    for drift in /opt/agent-vm/pi/package.json /opt/agent-vm/pi-packages/package-lock.json \
+        /opt/agent-vm/opencode-plugins/pnpm-lock.yaml; do
+        if ( DRIFT=$drift; check_locks img ) >/dev/null 2>&1; then
+            fail "unselected data drift accepted ($drift)"
+        fi
+        if ( DRIFT=$drift; EXPECTED=$(printf '%s\n' "$EXPECTED" | sed 's/^dsh=.*/dsh=0.1.5-rc.1/');
+            check_locks img ) >/dev/null 2>&1; then
+            fail "unselected data drift accepted with a changed dsh selection ($drift)"
+        fi
+    done
     local AUDIT_RC=0
     run_with_watchdog() { return "$AUDIT_RC"; }
     audit_opencode_plugins img || fail 'plugin audit success was dropped'

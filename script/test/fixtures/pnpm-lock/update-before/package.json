@@ -1,0 +1,8 @@
+{
+  "name": "independent-dsh-vector",
+  "private": true,
+  "packageManager": "pnpm@11.11.0",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.1.5-rc.2"
+  }
+}

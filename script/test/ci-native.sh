@@ -26,6 +26,31 @@ timed() {
     printf '%s seconds=%s status=%s\n' "$label" "$((SECONDS-start))" "$status" | tee -a target/ci-logs/durations.txt
     return "$status"
 }
+# The audit step's host watchdog in build-local.yml is the outer bound, so the
+# audit must fail on its own measured wall-clock before it can consume it.
+#
+# PROVISIONAL: 4800s keeps 1.5x headroom under the 6900s watchdog, but no native
+# audit has recorded per-leg durations yet, so this bound is arithmetic, not
+# measurement. The local durations that exist describe a diagnostic stale base,
+# not this leg set. The first green native audit must replace it with the sum in
+# target/ci-logs/durations.txt plus the same 1.5x headroom. Never widen it for
+# convenience: an overrun means splitting the dsh legs into a second audit step
+# (with its own watchdog inside the same job, because images do not survive a job
+# change) and re-checking the 360-minute job total: 20 prerequisites + 20 capacity
+# + 180 build + 120 audit + 10 upload = 350. No gate is ever dropped to fit.
+AUDIT_BUDGET_SECONDS=4800
+check_audit_budget() {
+    local first_line=$1 measured
+    measured=$(awk -v first="$first_line" 'NR > first {
+        for (field = 1; field <= NF; field++) {
+            if ($field ~ /^seconds=/) { sub(/^seconds=/, "", $field); total += $field }
+        }
+    } END { print total + 0 }' target/ci-logs/durations.txt)
+    printf 'audit-budget measured_seconds=%s budget_seconds=%s watchdog_seconds=6900\n' \
+        "$measured" "$AUDIT_BUDGET_SECONDS" | tee -a target/ci-logs/durations.txt
+    [ "$measured" -le "$AUDIT_BUDGET_SECONDS" ] ||
+        { echo "audit wall-clock ${measured}s exceeds its ${AUDIT_BUDGET_SECONDS}s budget" >&2; return 1; }
+}
 case "$phase" in
     prepare)
         uname -a; df -Pk; docker version; docker buildx version
@@ -49,7 +74,18 @@ case "$phase" in
         done
         ;;
     audit)
+        touch target/ci-logs/durations.txt
+        audit_durations_start=$(wc -l <target/ci-logs/durations.txt)
         timed node-primitives bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer primitives --platform "$platform"
+        timed dsh-default bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer dsh --platform "$platform"
+        timed dsh-changed bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer dsh --version 0.1.5-rc.1 --platform "$platform"
+        timed dsh-policy bash script/test/standard-node-policy.sh agent-vm-base:local --consumer dsh --platform "$platform"
+        # The ticket's real Cordis-removal negative: the same committed inputs with
+        # the four reviewed overrides removed must be rejected (exact peers) or fail
+        # at startup, and the run then installs the committed inputs and proves
+        # readiness. One extra resolution, inside the measured audit budget.
+        timed dsh-cordis-negative bash script/test/standard-node-consumers.sh agent-vm-base:local \
+            --consumer dsh --cordis-negative --platform "$platform"
         timed pnpm-runtime bash script/test/pnpm-runtime.sh agent-vm-base:local agent-vm-standard:local --platform "$platform"
         timed standard-uid-t5 bash script/test/standard-image.sh agent-vm-base:local agent-vm-standard:local --platform "$platform"
         timed opencode-runtime bash script/test/opencode-runtime.sh agent-vm-base:local agent-vm-standard:local
@@ -59,11 +95,16 @@ case "$phase" in
         printf 'hello from my base extension\nLinux\n12345\n' >target/ci-logs/example-expected
         cmp target/ci-logs/example-expected target/ci-logs/example-uid.log
         prior=$(docker image inspect agent-vm-standard:local --format '{{.Id}}')
+        # The stale tag stays inspectable, so record where it came from: this ID is
+        # the artifact that existed before the failing build, not its result.
+        printf 'stale-tag control: prior agent-vm-standard id %s = prior artifact, not a result of the failing build\n' \
+            "$prior" | tee -a target/ci-logs/durations.txt
         if timed bad-version docker build --builder "$BUILDER" --platform "$platform" -t agent-vm-standard:local --build-arg AGENT_VERSION_DSH=latest -f images/standard/Dockerfile images; then
             echo 'invalid exact selection succeeded' >&2; exit 1
         fi
         [ "$(docker image inspect agent-vm-standard:local --format '{{.Id}}')" = "$prior" ]
         timed final-controls bash script/test/standard-certification.sh
+        check_audit_budget "$audit_durations_start"
         ;;
     network-build)
         timed network-base docker build --builder "$BUILDER" --platform "$platform" -t agent-vm-base:local -f images/Dockerfile images

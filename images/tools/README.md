@@ -39,10 +39,12 @@ cannot execute jq in LABEL. These nine `org.agent-vm.version.*` labels record
 **selection, not health**. There is no build-time latest query.
 
 An explicit different exact locked selection prepares a build-local lock; it
-never edits committed inputs. dsh rewrites only selected dependencies and the
-freeze checker requires recursive equality at every location outside changed
-roots, including shared/hoisted records. An incompatible pair fails with moved
-paths rather than silently refreshing the empty slot. Pi/bridge regenerate a
+never edits committed inputs. dsh accepts only a changed root specifier: retained
+archive and peer-context snapshot records stay frozen, while records inside the
+changed root's own closure may be replaced and nothing outside it may appear (see
+[ADR 0003](../../docs/adr/0003-dsh-graph-freeze.md)). An incompatible pair fails
+with the offending records named rather than silently refreshing the empty slot.
+Pi/bridge regenerate a
 changed project from its exact manifest and revalidate integrity, sibling and
 loader-alias invariants. New override transitives may be registry-dependent;
 a reviewed committed bump is the reproducible default. Pi and bridge are
@@ -58,8 +60,8 @@ checksum/sha512 mismatch, `EINTEGRITY`, native exit 75 and timeout are hard.
 Native subprocesses do not receive the receipt. Low-level isolated helpers
 retain classified development failure behavior for audit fidelity; an owning
 hook can only soften positively classified transport when explicitly enabled,
-remove its own partial artifacts and write `absent-transport CODE`. dsh and
-Copilot never soften partial npm trees.
+remove its own partial artifacts and write `absent-transport CODE`. dsh never
+softens a partial pnpm tree and Copilot never softens a partial npm tree.
 
 **Maintained base and standard builds disable soft failure explicitly.** No
 soft-fail ARG, skip flag or successful partial product exists. Each standard
@@ -70,10 +72,12 @@ Bridge or plugin absence is not success.
 
 The mandatory build-only final gate checks strict `installed\n` records before
 and after re-running all seven agent verifiers (excluding separate pnpm verification calls). It compares the first lexically existing
-PATH candidate for Codex, OpenCode, Claude and Pi to their fixed-path verified
-files, before and after verification. Wrong executable shadows, dangling/cyclic
+PATH candidate for dsh, Codex, OpenCode, Claude and Pi to their fixed-path verified
+files, before and after verification. dsh's target is the installed
+`node_modules/@deepseek-ai/dsh/lib/bin.js` the image links directly, so a
+generated `.bin` wrapper is a different file. Wrong executable shadows, dangling/cyclic
 links and unusable candidates fail rather than falling through. Symlinks to the
-same verified file pass. dsh/pnpm/Copilot already report through bare PATH names. Base pnpm verification
+same verified file pass. pnpm and Copilot already report through bare PATH names. Base pnpm verification
 also checks immutable launcher/alias identity before and after the agent gates.
 Access auditing includes command/interpreter/symlink ancestry and arbitrary-UID
 usability; readable mode bits alone are not version proof. Future customization
@@ -100,21 +104,40 @@ an assertion of fully reproducible OS or supply chain.
 
 ### dsh and pnpm
 
+dsh is an image-owned pnpm project: `package.json`, `pnpm-lock.yaml`,
+`pnpm-workspace.yaml` and `pnpm-inputs.sha256`. Base alone owns pnpm 11.11.0; dsh
+plugin management finds that launcher through ordinary PATH. The dsh root has no
+pnpm dependency or private pnpm executable. Its isolated layout uses private
+hoist for sandbox resolution, four reviewed exact Cordis overrides and only the
+`chokidar@4.0.3` trust exception. Installation is frozen, production-only,
+scripts disabled, with a disposable external store; `node_modules/.pnpm` is
+runtime payload.
+
 The lock is functional, not only reproducibility. A floating dsh install can
 pull a newer `dsh-base` and nest `dsh-sandbox-local` under its node_modules,
-where the app's plugin loader cannot resolve it. The reviewed lock preserves
-app-root sandbox placement and every transitive integrity hash. pnpm remains in the
-same lock as a transitional compatibility constraint until #42. `dsh plugin`
-resolves the inherited base launcher via ordinary PATH; only dsh is linked from
-this private tree. Base pin and retained manifest must agree; standard cannot
-independently override pnpm. The stock distribution is unmodified; see the
-canonical [Node package defaults](../../docs/node-package-defaults.md).
+where the app's plugin loader cannot resolve it. The reviewed lock preserves the
+private-hoist sandbox placement and every transitive integrity hash; the
+graph only proves reachability, so the installed-tree check and the independent
+layout oracle prove the physical layout separately. Base pin and retained
+manifest must agree; standard cannot independently override pnpm. The stock
+distribution is unmodified; see the canonical
+[Node package defaults](../../docs/node-package-defaults.md).
 
-`npm ci --ignore-scripts` avoids upstream lifecycle execution. The reviewed
-lifecycle scripts only fetch prebuilds, restore mode bits or write metadata.
-The dsh gate checks nonempty exact output: `import.meta.main` is undefined on
-Node older than 22.19, where dsh can exit 0 printing nothing. Exit status alone
-would certify a broken CLI. No community OAuth/subscription plugins or new host credential readers are
+A successful version report is not health. Certification also requires effective
+exact peers, sandbox resolution, PTY and libc FFI, shipped protobuf/genai
+runtime, actual `dsh-subprocess-local` execution and bounded credential-free HTTP
+web readiness with complete process-group cleanup. Missing prebuilds fail;
+scripts are never enabled as fallback. Default/equal inputs are byte-frozen;
+a changed dsh selection permits root-closure transitive replacement while
+preserving retained records. See the
+[graph-freeze ADR](../../docs/adr/0003-dsh-graph-freeze.md) and
+[migration evidence](../../docs/standard-pnpm-migration.md).
+
+Installation disables lifecycle scripts, so no reviewed script ever runs; the
+inspection evidence in the ledger shows they would only fetch prebuilds, restore
+mode bits or write metadata. The dsh gate checks nonempty
+exact output: `import.meta.main` is undefined on Node older than 22.19, where dsh
+can exit 0 printing nothing. Exit status alone would certify a broken CLI. No community OAuth/subscription plugins or new host credential readers are
 baked in, with one named exception: **`@openchamber/opencode-claude` only**.
 It delegates to the installed Claude CLI via the Agent SDK without reading,
 copying, storing or replaying Claude credentials. Credential-replay plugins
@@ -167,8 +190,10 @@ is not a working bridge or evidence of an authenticated turn.
 is canonical for maintenance commands, audit interfaces, prerequisites and CI
 evidence. Bump scripts stage owning manifests/locks and the one standard Dockerfile
 transactionally. Rollback status 3 preserves/report recovery material: stop and
-recover before further edits. Locks and pins were transferred unchanged, not
-regenerated. There are no standalone tool Dockerfiles. Run the linked
+recover before further edits. Historical transfer locks and pins were carried
+unchanged; dsh's npm lock was then regenerated into the reviewed four-input pnpm
+project in #51 (see the [ledger](../../docs/standard-pnpm-migration.md)), so the
+old npm bytes remain only in git history. There are no standalone tool Dockerfiles. Run the linked
 [fast contracts](../../script/test/contracts.sh),
 [finished-image audit](../../script/test/standard-image.sh),
 [Pi runtime matrix](../../script/test/pi-runtime.sh) and

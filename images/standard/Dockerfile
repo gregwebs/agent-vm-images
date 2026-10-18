@@ -7,35 +7,37 @@ LABEL org.opencontainers.image.description="dsh, Pi, Codex, OpenCode, Claude and
 
 # dsh
 ARG AGENT_VERSION_DSH=
-# Deprecated compatibility assertion only; selection is inherited from base.
+# Compatibility assertion only; base owns the pnpm selection and launcher.
 ARG AGENT_VERSION_PNPM=
-
 LABEL org.agent-vm.version.dsh="${AGENT_VERSION_DSH:-0.1.5-rc.2}"
 
-COPY tools/dsh/package.json tools/dsh/package-lock.json /opt/agent-vm/dsh/
+COPY tools/dsh/package.json tools/dsh/pnpm-lock.yaml tools/dsh/pnpm-workspace.yaml tools/dsh/pnpm-inputs.sha256 /opt/agent-vm/dsh/
 RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
-    --mount=type=bind,source=tools/dsh/install-dsh.sh,target=/tmp/install-dsh.sh,ro \
-    --mount=type=bind,source=tools/dsh/prepare-lock.sh,target=/tmp/prepare-lock.sh,ro \
-    --mount=type=bind,source=tools/dsh/check-lock-update.js,target=/tmp/check-lock-update.js,ro \
-    AGENT_INSTALL_SOFT_FAIL= \
-    AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
-    AGENT_VM_PREPARE_LOCK=/tmp/prepare-lock.sh \
-    AGENT_VM_VERSION_DSH="${AGENT_VERSION_DSH}" \
-    AGENT_VM_VERSION_PNPM="${AGENT_VERSION_PNPM}" \
-    AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
-    sh /tmp/recipe-contract/run-install.sh dsh /opt/agent-vm/install-status/dsh sh /tmp/install-dsh.sh
-
-RUN ln -s /opt/agent-vm/dsh/node_modules/.bin/dsh /usr/local/bin/dsh
-
-RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
-    --mount=type=bind,source=tools/dsh/verify-dsh.sh,target=/tmp/verify-dsh.sh,ro \
+    --mount=type=bind,source=tools/dsh,target=/tmp/dsh-source,ro \
     --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
+    AGENT_VM_DSH_SOURCE_DIR=/tmp/dsh-source \
+    PNPM_SOURCE_DIR=/tmp/pnpm-source \
     AGENT_VM_VERSION_DSH="${AGENT_VERSION_DSH}" \
     AGENT_VM_VERSION_PNPM="${AGENT_VERSION_PNPM}" \
     AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
-    sh /tmp/verify-dsh.sh
+    sh /tmp/recipe-contract/run-install.sh dsh /opt/agent-vm/install-status/dsh sh /tmp/dsh-source/install-dsh.sh
+
+RUN test ! -e /usr/local/bin/dsh && test ! -L /usr/local/bin/dsh && \
+    ln -s /opt/agent-vm/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bin/dsh
+
+RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+    --mount=type=bind,source=tools/dsh,target=/tmp/dsh-source,ro \
+    --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
+    AGENT_INSTALL_SOFT_FAIL= \
+    AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
+    AGENT_VM_DSH_SOURCE_DIR=/tmp/dsh-source \
+    PNPM_SOURCE_DIR=/tmp/pnpm-source \
+    AGENT_VM_VERSION_DSH="${AGENT_VERSION_DSH}" \
+    AGENT_VM_VERSION_PNPM="${AGENT_VERSION_PNPM}" \
+    AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
+    sh /tmp/dsh-source/verify-dsh.sh
 
 # pi
 ARG AGENT_VERSION_PI=

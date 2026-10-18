@@ -20,7 +20,7 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 330
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -28,25 +28,33 @@ jobs:
       - name: Audit prerequisites
         timeout-minutes: 20
         run: bash script/ci/apt-install.sh jq coreutils python3
+      # Bounded steps, counted in the job total: 20 (prerequisites) + 20
+      # (capacity) + 180 (build) + 120 (audit) + 10 (evidence upload) = 350 <= 360.
+      # Every host watchdog is shorter than its own step bound (1200 -> 1150, 10800
+      # -> 10600, 7200 -> 6900 = the audit bound minus 300), so the watchdog always
+      # fires first and its termination still has margin before the step timeout.
       - name: Native capacity and builder
+        timeout-minutes: 20
         env:
           NATIVE_ARCH: ${{ matrix.arch }}
         run: |
           mkdir -p target/ci-logs
           set -o pipefail
-          python3 script/test/host-watchdog.py 1800 bash script/test/ci-native.sh prepare "$NATIVE_ARCH" 2>&1 | tee target/ci-logs/capacity.log
+          python3 script/test/host-watchdog.py 1150 bash script/test/ci-native.sh prepare "$NATIVE_ARCH" 2>&1 | tee target/ci-logs/capacity.log
       - name: build
+        timeout-minutes: 180
         env:
           NATIVE_ARCH: ${{ matrix.arch }}
         run: |
           set -o pipefail
-          python3 script/test/host-watchdog.py 10800 bash script/test/ci-native.sh build "$NATIVE_ARCH" 2>&1 | tee target/ci-logs/build-phase.log
+          python3 script/test/host-watchdog.py 10600 bash script/test/ci-native.sh build "$NATIVE_ARCH" 2>&1 | tee target/ci-logs/build-phase.log
       - name: audit
+        timeout-minutes: 120
         env:
           NATIVE_ARCH: ${{ matrix.arch }}
         run: |
           set -o pipefail
-          python3 script/test/host-watchdog.py 5400 bash script/test/ci-native.sh audit "$NATIVE_ARCH" 2>&1 | tee target/ci-logs/audit-phase.log
+          python3 script/test/host-watchdog.py 6900 bash script/test/ci-native.sh audit "$NATIVE_ARCH" 2>&1 | tee target/ci-logs/audit-phase.log
       - name: Evidence summary
         if: always()
         env:
@@ -64,6 +72,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload evidence (no image archive)
         if: always()
+        timeout-minutes: 10
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: build-local-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}

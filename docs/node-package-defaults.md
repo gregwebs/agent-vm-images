@@ -148,17 +148,37 @@ SDK peers remain absent; the runtime probe, handoff and real CLI initialization
 prove this version-specific choice rather than general peer compatibility.
 Frozen installation can request metadata even when preparation reused bytes.
 Policy, lock/configuration, integrity and network failures all stay hard through
-`images/recipe-contract/run-pnpm.sh`; no receipt is written. Existing dsh/Pi/bridge/
-Copilot npm paths remain #42 work. The shared runner/parser and isolated-layout
-checks support that future work without claiming the migration complete.
+`images/recipe-contract/run-pnpm.sh`; no receipt is written. The shared
+runner/parser and isolated-layout checks also support the dsh consumer below.
 
+## Maintained dsh consumer
+
+dsh now uses the base launcher for image-owned installs with all five defaults
+explicit in the owning subprocess and locked-resolution flags. Its workspace
+retains only `chokidar@4.0.3` as a reviewed trust exception; no age or script
+exception is granted. Host preparation follows the same policy. Retained graph
+records are frozen, while changed root-closure selections may replace
+transitives; runtime callers' documented escape routes above are unchanged. Pi,
+bridge and Copilot migration remains pending. The freeze rule is
+[ADR 0003](adr/0003-dsh-graph-freeze.md); the reviewed npm→pnpm delta is the
+[migration ledger](standard-pnpm-migration.md).
+
+Product limitation for **using** the installed dsh: a **noexec TMPDIR is not
+supported by the dsh web surface**. `dsh web` with the default `live` reload
+boots `cordis-plugin-hmr`, whose loader copies its prebuilt addon into
+`$TMPDIR/node-addon-native-custom-loader-<uid>/native-cache` and `dlopen`s it
+there, so a TMPDIR mounted `noexec` (for example a `--tmpfs` HOME) makes the web
+surface fail to start. Point `TMPDIR` at an exec-capable directory instead. Do
+not work around it with `node --expose-internals`: that skips the native-binding
+path real users run.
 
 ## Build-only graph primitives
 
 The [bounded parser ADR](adr/0001-build-only-pnpm-graph-parser.md) documents
-build-only validation for future image-owned install migrations. It never
+build-only validation for image-owned install migrations. It never
 installs, resolves selections or weakens the five defaults. OpenCode keeps its
-byte-only checker; dsh/Pi/bridge/Copilot still use current npm paths until their
-owning slices. The [failure ADR](adr/0002-pnpm-terminal-failure-boundary.md)
+byte-only checker; dsh adopted the graph parser in #51, while Pi/bridge/Copilot
+still use their current npm paths until their owning slices. The
+[failure ADR](adr/0002-pnpm-terminal-failure-boundary.md)
 records the evidence and acknowledgement gate for a proposed later bridge
 transport-contract narrowing; every current pnpm failure remains hard.

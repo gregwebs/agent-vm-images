@@ -28,6 +28,16 @@
     },
     {
       "id": {
+        "name": "@deepseek-ai/dsh-sandbox-local",
+        "version": "1.0.0"
+      },
+      "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      "tarball": "https://registry.npmjs.org/@deepseek-ai/dsh-sandbox-local/-/dsh-sandbox-local-1.0.0.tgz",
+      "peers": {},
+      "optionalPeers": []
+    },
+    {
+      "id": {
         "name": "@deepseek-ai/dsh",
         "version": "0.1.5-rc.1"
       },
@@ -78,6 +88,17 @@
     {
       "id": {
         "packageId": {
+          "name": "@deepseek-ai/dsh-sandbox-local",
+          "version": "1.0.0"
+        },
+        "peerContext": [],
+        "key": "@deepseek-ai/dsh-sandbox-local@1.0.0"
+      },
+      "edges": []
+    },
+    {
+      "id": {
+        "packageId": {
           "name": "@deepseek-ai/dsh",
           "version": "0.1.5-rc.1"
         },
@@ -88,6 +109,11 @@
         {
           "name": "@deepseek-ai/cordis-plugin-loader",
           "target": "@deepseek-ai/cordis-plugin-loader@1.0.3(@deepseek-ai/cordis@4.0.2)",
+          "optional": false
+        },
+        {
+          "name": "@deepseek-ai/dsh-sandbox-local",
+          "target": "@deepseek-ai/dsh-sandbox-local@1.0.0",
           "optional": false
         }
       ]

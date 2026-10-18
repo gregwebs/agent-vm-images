@@ -34,10 +34,39 @@ for tool in (*expected, 'copilot'):
 for tool in ('codex', 'opencode', 'claude', 'copilot', 'dsh', 'pi', 'pi-claude-bridge', 'opencode-claude'):
     assert Path('/opt/agent-vm/install-status', tool).read_bytes() == b'installed\n', tool + ' status'
 PY
-for project in dsh pi pi-packages; do
+for project in pi pi-packages; do
     test -r "/opt/agent-vm/$project/package.json"
     test -r "/opt/agent-vm/$project/package-lock.json"
 done
+# dsh is a reviewed pnpm project installed by the base manager: four regular
+# inputs, no npm lock (nor a dangling link to one), and a direct link at the
+# installed lib entrypoint instead of a generated .bin wrapper.
+for input in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
+    test -f "/opt/agent-vm/dsh/$input"
+    test ! -L "/opt/agent-vm/dsh/$input"
+done
+test ! -e /opt/agent-vm/dsh/package-lock.json
+test ! -L /opt/agent-vm/dsh/package-lock.json
+python3 - "$dsh" "$pnpm" <<'PY'
+import json, os, sys
+dsh, pnpm = sys.argv[1:]
+prefix = '/opt/agent-vm/dsh'
+manifest = json.load(open(prefix + '/package.json'))
+assert manifest['name'] == 'agent-vm-dsh-layer', manifest['name']
+assert manifest['private'] is True
+assert manifest['packageManager'] == 'pnpm@' + pnpm, manifest['packageManager']
+assert list(manifest['dependencies']) == ['@deepseek-ai/dsh'], manifest['dependencies']
+assert manifest['dependencies']['@deepseek-ai/dsh'] == dsh
+assert 'devDependencies' not in manifest
+assert not os.path.lexists(prefix + '/node_modules/pnpm')
+assert not os.path.lexists(prefix + '/node_modules/.bin/pnpm')
+link = '/usr/local/bin/dsh'
+target = prefix + '/node_modules/@deepseek-ai/dsh/lib/bin.js'
+assert os.path.islink(link), link
+assert os.readlink(link) == target, os.readlink(link)
+assert os.path.samefile(link, target)
+assert os.access(target, os.X_OK)
+PY
 test -x /usr/local/bin/pi
 test -r /opt/agent-vm/pi-extensions/guest-credential-warning.js
 test -r /opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts

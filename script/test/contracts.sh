@@ -31,6 +31,11 @@ if [ "$guard_only" = false ]; then
     node script/test/pnpm-vendor.mjs
     node script/test/pnpm-lock-inputs.mjs
     bash script/test/standard-node-consumers.sh --self-test
+    python3 script/test/standard-node-layout.py --self-test
+    bash script/test/standard-node-policy.sh --self-test
+    # The dsh filesystem module's authorization/publisher faults are not
+    # exercised by the shell suites, so its unit table is its own gate.
+    python3 script/test/dsh-project.py
     node script/test/pnpm-inputs.mjs
     python3 script/test/opencode-probe.py
     python3 script/test/opencode-audit-tests.py
@@ -61,9 +66,18 @@ for root in ('images', 'script'):
 assert not list(Path('images/tools').glob('*/contract')), 'tool-local helpers must not reappear'
 assert not list(Path('images/tools').glob('*/Dockerfile')), 'no per-tool products'
 PY
-node --check images/tools/dsh/check-lock-update.js
+# The migration ledger is a generated record: regenerate it in memory and fail on
+# any drift. Fast and offline, but it reads the baseline commit object, so CI needs
+# the full history (contracts.yml checks out with fetch-depth: 0).
+node script/test/pnpm-migration-ledger.mjs --check
 for source in images/recipe-contract/pnpm-lock.mjs script/test/pnpm-vendor.mjs script/test/pnpm-lock-inputs.mjs \
+    script/test/pnpm-migration-ledger.mjs \
     images/recipe-contract/check-pnpm-environment.mjs \
+    images/tools/dsh/check-lock-update.js images/tools/dsh/check-runtime.mjs \
+    images/tools/dsh/derive-cordis-overrides.mjs \
+    images/tools/dsh/upgrade-project.mjs script/test/fixtures/dsh/oracle.mjs \
+    script/test/fixtures/dsh/bin.js script/test/fixtures/dsh/read-workspace.mjs \
+    script/test/fixtures/dsh/strip-cordis-overrides.mjs \
     images/tools/opencode/check-claude-runtime.mjs images/tools/opencode/check-claude-payload.mjs images/tools/opencode/plugins/check-lock.mjs \
     images/tools/opencode/plugins/pin-pnpm-inputs.mjs \
     images/tools/opencode/plugins/index.js; do
