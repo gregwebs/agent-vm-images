@@ -14,17 +14,25 @@ for tool in bash git jq node npm python3 timeout shellcheck actionlint cargo; do
     if ! command -v "$tool" >/dev/null; then echo "missing prerequisite: $tool" >&2; missing=true; fi
 done
 [ "$missing" = false ] || exit 1
-version=$(actionlint -version | head -n 1)
-[ "$version" = v1.7.7 ] || { echo "actionlint v1.7.7 required, got $version" >&2; exit 1; }
+# A tool that cannot report a version still gets the "required, got ..." message.
+version=$(actionlint -version | head -n 1) || version=unknown
+[ "$version" = v1.7.7 ] || { echo "actionlint v1.7.7 required, got ${version:-nothing}" >&2; exit 1; }
+version=$(shellcheck --version | sed -n 's/^version: //p') || version=unknown
+[ "$version" = 0.11.0 ] || { echo "shellcheck 0.11.0 required, got ${version:-nothing} (script/dev/install-shellcheck.sh)" >&2; exit 1; }
 timeout --version | grep -q 'GNU coreutils' || { echo 'GNU timeout required (macOS: coreutils gnubin on PATH)' >&2; exit 1; }
+# The images run #!/bin/sh under dash; macOS sh is bash 3.2 and parses bashisms.
+if command -v dash >/dev/null; then posix_sh='dash'
+elif [ "${GITHUB_ACTIONS:-}" = true ]; then echo 'dash required on CI for #!/bin/sh syntax checks' >&2; exit 1
+else posix_sh='sh'; echo 'note: dash not on PATH; #!/bin/sh syntax checked with sh -n' >&2
+fi
 if [ "$guard_only" = false ]; then
     for suite in agent-versions claude-installer codex-installer copilot-installer copilot-verify \
         opencode-installer opencode-pnpm-prepare-lock opencode-pnpm-install opencode-pnpm-upgrade \
         opencode-plugins-verify run-pnpm dsh-prepare-lock dsh-verify pi-install pi-prepare-lock pi-verify \
         pi-wrapper shipped-installer-contracts tool-access vendored-installers upgrade-scripts \
-        install-zellij install-pnpm host-watchdog transactional-publish standard-certification build-entrypoint \
-        release-content release-operations release-http ci-boot-bind ci-boot-runtime ci-boot-evidence \
-        ci-boot-prepare; do
+        install-shellcheck install-zellij install-pnpm host-watchdog transactional-publish \
+        standard-certification build-entrypoint release-content release-operations release-http \
+        ci-boot-bind ci-boot-runtime ci-boot-evidence ci-boot-prepare; do
         echo "=== $suite ==="
         bash "script/test/$suite.sh"
     done
@@ -49,7 +57,7 @@ fi
 while IFS= read -r -d '' script; do
     case "$(head -n 1 "$script")" in
         *bash*) bash -n "$script" ;;
-        *) sh -n "$script" ;;
+        *) "$posix_sh" -n "$script" ;;
     esac
     # SC2016 in the byte-preserved Claude seed JS is inherited informational
     # literal interpolation, not a warning; don't rewrite reviewed payloads.

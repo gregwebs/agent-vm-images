@@ -28,7 +28,9 @@ jobs:
       - name: Contributor prerequisites
         timeout-minutes: 20
         run: |
-          bash script/ci/apt-install.sh jq coreutils python3 shellcheck
+          bash script/ci/apt-install.sh jq coreutils python3
+          bash script/dev/install-shellcheck.sh "$RUNNER_TEMP/shellcheck"
+          echo "$RUNNER_TEMP/shellcheck" >> "$GITHUB_PATH"
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
       - name: Hermetic and static gates

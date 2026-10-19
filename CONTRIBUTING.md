@@ -140,13 +140,19 @@ bash script/test/standard-node-policy.sh agent-vm-base:local --consumer dsh --pl
 ## Contributor prerequisites and fast gates
 
 Build users need Docker only. Contributors running contracts need Bash, git, jq,
-Node/npm, Python 3, GNU coreutils `timeout`, shellcheck, **actionlint v1.7.7**, and
+Node/npm, Python 3, GNU coreutils `timeout`, `xz` on Linux (GNU `tar -cJf` in the
+shellcheck suite's fixture), **ShellCheck 0.11.0**, **actionlint v1.7.7**, and
 Rust/rustfmt/clippy **1.98.1** for the independent test-only Cargo package.
+`#!/bin/sh` scripts are syntax-checked with `dash -n` (macOS ships `/bin/dash`);
+without dash the gate falls back to `sh -n` with a note, and CI requires dash.
 On macOS:
 
 ```bash
 brew install coreutils jq shellcheck actionlint
 export PATH="$(brew --prefix coreutils)/libexec/gnubin:$PATH"
+# If Homebrew shellcheck is not 0.11.0, install the reviewed release (any absolute dir outside the checkout):
+bash script/dev/install-shellcheck.sh "$HOME/.local/opt/shellcheck-0.11.0"
+export PATH="$HOME/.local/opt/shellcheck-0.11.0:$PATH"
 # If Homebrew actionlint differs, install the reviewed version (Go required):
 go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
 export PATH="$HOME/go/bin:$PATH"
@@ -161,11 +167,13 @@ listed hermetic suites, watchdog, transactional/gate/helper controls, the
 dsh project authorization/publisher unit table, the independent layout oracle
 `--self-test`, the policy harness `--self-test`, the finished-image oracle
 `--self-test`, and `example-layers.sh --self-test`; both
-modes run syntax, warning-level shellcheck, Python AST, Node syntax, Rust
+modes run syntax checks by shebang (dash for sh scripts when available),
+pinned warning-level shellcheck, Python AST, Node syntax, Rust
 test/fmt/clippy and pinned workflow lint, plus the example-image contract
 (`example-layers.sh`: Chrome capability/wrapper recipe text, parent/digest ARG
 shapes and checksum tokens, default-severity shellcheck of the listed example scripts).
 Do not discover and execute every `.sh`: installers are not host test entrypoints.
+Contributor tooling lives in `script/dev/` and is never a suite.
 The preserved Claude seed's literal JavaScript interpolation yields informational
 SC2016; warning-level lint does not rewrite reviewed runtime bytes to silence it.
 
