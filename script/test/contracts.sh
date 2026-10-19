@@ -80,7 +80,11 @@ for source in images/recipe-contract/pnpm-lock.mjs script/test/pnpm-vendor.mjs s
     script/test/fixtures/dsh/strip-cordis-overrides.mjs \
     images/tools/opencode/check-claude-runtime.mjs images/tools/opencode/check-claude-payload.mjs images/tools/opencode/plugins/check-lock.mjs \
     images/tools/opencode/plugins/pin-pnpm-inputs.mjs \
-    images/tools/opencode/plugins/index.js; do
+    images/tools/opencode/plugins/index.js \
+    images/tools/pi/extensions/agent-vm-codex.js \
+    images/tools/pi/extensions/guest-credential-warning.js \
+    script/test/fixtures/pi-codex/oracle.mjs script/test/pi-codex-read.mjs \
+    script/test/fixtures/pi-codex/registration-probe.js; do
     node --check "$source"
 done
 (cd script/test/image-sources && cargo test --locked && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings)

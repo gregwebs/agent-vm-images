@@ -6,7 +6,8 @@
 # wrapper's decisions -- the PI_SKIP_VERSION_CHECK enforcement, subcommand
 # dispatch, "inject the mandatory --extension on the non-subcommand path", and
 # "inject the image-owned bridge --extension only when it exists and is not
-# opted out" -- are pinned without a 150 MiB install or a microVM.
+# opted out", and existence-checked Codex activation -- are pinned without a
+# 150 MiB install or a microVM.
 #
 # agent-vm only intervenes where agent-vm introduced the condition, so the
 # wrapper injects NO --approve default and NO PI_TELEMETRY default: those, and
@@ -33,6 +34,7 @@ CASE_BRIDGE_EXTENSION=""
 new_case() {
     CASE="$TEST_ROOT/$1"
     CASE_EXTRA_ENV=""
+    CASE_CODEX_EXTENSION="$CASE/no-such-codex.js"
     # Default fixture: the bridge extension does not exist, so the wrapper must
     # skip it. The bridge cases below plant a readable file via
     # CASE_BRIDGE_EXTENSION and repoint this.
@@ -67,6 +69,7 @@ run_wrapper() {
         "PATH=/usr/bin:/bin"
         "AGENT_VM_PI_ENTRY=$CASE/fake-pi"
         "AGENT_VM_PI_BRIDGE_EXTENSION=$CASE_BRIDGE_EXTENSION"
+        "AGENT_VM_PI_CODEX_EXTENSION=$CASE_CODEX_EXTENSION"
         "FAKE_LOG=$CASE/log"
         "CASE_STDIN=$CASE/stdin"
         "CASE_ENV=$CASE/env"
@@ -301,6 +304,8 @@ new_case stdin-passthrough
 printf 'hello from stdin\n' | env -i \
     "PATH=/usr/bin:/bin" \
     "AGENT_VM_PI_ENTRY=$CASE/fake-pi" \
+    "AGENT_VM_PI_BRIDGE_EXTENSION=$CASE_BRIDGE_EXTENSION" \
+    "AGENT_VM_PI_CODEX_EXTENSION=$CASE_CODEX_EXTENSION" \
     "FAKE_LOG=$CASE/log" \
     "CASE_STDIN=$CASE/stdin" \
     "CASE_ENV=$CASE/env" \
@@ -327,5 +332,51 @@ fi
 if grep -Fq 'approve=' "$WRAPPER" || grep -Fq 'for argument in' "$WRAPPER"; then
     fail "the wrapper must not inject or scan for approve flags (no trust default)"
 fi
+
+for bridge in absent present opted-out; do
+    for codex in absent present; do
+        new_case "codex-$codex-bridge-$bridge"
+        expected=(--extension "$MANDATORY_EXTENSION")
+        if [[ $bridge != absent ]]; then
+            CASE_BRIDGE_EXTENSION="$CASE/bridge.ts"
+            : >"$CASE_BRIDGE_EXTENSION"
+            if [[ $bridge == opted-out ]]; then CASE_EXTRA_ENV=AGENT_VM_PI_NO_BRIDGE=1;
+            else expected+=(--extension "$CASE_BRIDGE_EXTENSION"); fi
+        fi
+        if [[ $codex == present ]]; then
+            CASE_CODEX_EXTENSION="$CASE/codex.js"
+            : >"$CASE_CODEX_EXTENSION"
+            expected+=(--extension "$CASE_CODEX_EXTENSION")
+        fi
+        run_wrapper
+        [[ $RUN_STATUS -eq 0 ]] || fail 'codex matrix invocation failed'
+        assert_argv_is "${expected[@]}"
+    done
+done
+
+for variant in prompt subcommand argv-fidelity unreadable; do
+    new_case "codex-present-$variant"
+    CASE_CODEX_EXTENSION="$CASE/codex.js"
+    : >"$CASE_CODEX_EXTENSION"
+    case "$variant" in
+        prompt|subcommand)
+            CASE_BRIDGE_EXTENSION="$CASE/bridge.ts"
+            : >"$CASE_BRIDGE_EXTENSION"
+            if [[ $variant == prompt ]]; then
+                run_wrapper 'fix the tests'
+                assert_argv_is --extension "$MANDATORY_EXTENSION" --extension "$CASE_BRIDGE_EXTENSION" --extension "$CASE_CODEX_EXTENSION" 'fix the tests'
+            else run_wrapper install foo; assert_argv_is install foo; fi ;;
+        argv-fidelity)
+            run_wrapper -- '-a b' '*' ''
+            assert_argv_is --extension "$MANDATORY_EXTENSION" --extension "$CASE_CODEX_EXTENSION" -- '-a b' '*' '' ;;
+        unreadable)
+            if [[ $(id -u) -ne 0 ]]; then
+                chmod 0000 "$CASE_CODEX_EXTENSION"
+                run_wrapper
+                assert_argv_is --extension "$MANDATORY_EXTENSION"
+            fi ;;
+    esac
+done
+grep -Fq 'AGENT_VM_PI_CODEX_EXTENSION:-/opt/agent-vm/pi-extensions/agent-vm-codex.js}"' "$WRAPPER" || fail 'codex default missing'
 
 echo 'pi-wrapper black-box tests passed'

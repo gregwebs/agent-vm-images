@@ -184,6 +184,28 @@ an explicit extension, not `pi install` or HOME auto-discovery. Registration
 checks require actual positive provider/model counts; metadata existence alone
 is not a working bridge or evidence of an authenticated turn.
 
+### agent-vm-codex provider
+
+The bare, dependency-free `agent-vm-codex.js` is agent-vm-owned, not an npm
+package. The wrapper loads it with an existence-checked `--extension`; removing
+it costs the provider, not Pi. It registers `agent-vm-codex` only for the exact
+agent-vm access and refresh placeholders in `/agent-vm-state/codex/auth.json`.
+The placeholder constants are a cross-repo contract: renaming them requires a
+coordinated image release.
+
+```text
+host Codex login → guest placeholders → agent-vm-codex (SSE) → host proxy
+```
+
+The distinct provider id separates guest credentials; the built-in
+`openai-codex-responses` api id preserves encrypted reasoning and tool identities
+on replay. SSE is mandatory because only that transport exposes Pi's fetch seam.
+Each stream can request one host-side refresh; failure returns a fixed diagnostic
+asking for `codex login` on the host, never the refresh response's text.
+The build gate seeds and removes a fixture and proves registration. Registration
+and mock streams are not evidence of an authenticated session. See
+[ADR-0044](https://github.com/gregwebs/agent-vm/blob/7438927/docs/adr/0044-pi-reaches-host-codex-through-an-image-owned-provider.md).
+
 ## Maintenance and runtime ownership
 
 [CONTRIBUTING](../../CONTRIBUTING.md#selection-ownership-and-maintenance)

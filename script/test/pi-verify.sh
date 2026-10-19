@@ -67,18 +67,33 @@ case "${1:-}" in
         exit "${FAKE_PI_HELP_STATUS:-0}"
         ;;
 esac
+has_codex_fixture() {
+    grep -q 'msb-openai-placeholder-a-v2' "$AGENT_VM_PI_CODEX_STATE_DIR/auth.json" 2>/dev/null &&
+    grep -q 'msb-openai-placeholder-r-v2' "$AGENT_VM_PI_CODEX_STATE_DIR/auth.json" 2>/dev/null
+}
+if [ "${1:-}" = "-e" ] && [ "${2##*/}" = "codex-probe.js" ]; then
+    if [ -n "${FAKE_CODEX_PROBE_OUT:-}" ]; then printf '%s\n' "$FAKE_CODEX_PROBE_OUT";
+    elif has_codex_fixture; then echo 'AGENT-VM-CODEX-REGISTERED models=9';
+    else echo 'AGENT-VM-CODEX-MISSING'; fi
+    exit "${FAKE_PI_CODEX_PROBE_STATUS:-0}"
+fi
 if [ "${1:-}" = "-e" ]; then
     printf '%s\n' "${FAKE_PROBE_OUT:-AGENT-VM-BRIDGE-REGISTERED models=12}"
     exit "${FAKE_PI_PROBE_STATUS:-0}"
 fi
-printf '%s\n' "${FAKE_RPC_OUT:-agent-vm: signing in here}"
+if [ -n "${FAKE_RPC_OUT:-}" ]; then printf '%s\n' "$FAKE_RPC_OUT";
+else
+    printf 'agent-vm: signing in here'
+    if has_codex_fixture; then printf ' Credentials imported from your host stay on the host and never appear in guest files.'; fi
+    printf '\n'
+fi
 exit "${FAKE_PI_RPC_STATUS:-0}"
 SH
     chmod 0755 "$CASE/wrapper"
 }
 
 new_case() {
-    unset FAKE_PI_REPORT FAKE_PI_VERSION_STATUS FAKE_HELP_SUBS \
+    unset FAKE_CODEX_PROBE_OUT FAKE_PI_CODEX_PROBE_STATUS CASE_CODEX_STATE CASE_FIXTURE_ROOT CASE_PATH_PREFIX FAKE_PI_REPORT FAKE_PI_VERSION_STATUS FAKE_HELP_SUBS \
         FAKE_PI_HELP_STATUS FAKE_PROBE_OUT FAKE_PI_PROBE_STATUS \
         FAKE_RPC_OUT FAKE_PI_RPC_STATUS SOFT \
         AGENT_VM_VERSION_PI AGENT_VM_VERSION_PI_CLAUDE_BRIDGE
@@ -96,6 +111,7 @@ new_case() {
         >"$CASE/packages/node_modules/pi-claude-bridge/package.json"
     printf 'export default function(){}\n' \
         >"$CASE/packages/node_modules/pi-claude-bridge/src/index.ts"
+    cp "$CASE/ext/guest-credential-warning.js" "$CASE/ext/agent-vm-codex.js"
     write_wrapper
     # World-readable/executable everywhere T5 looks.
     chmod -R a+rX "$CASE"
@@ -114,7 +130,7 @@ write_status() { # $1 = slot, $2 = content
 run_gate() {
     set +e
     RUN_OUTPUT="$(env -i \
-        "PATH=$TIMEOUT_DIR:$PYTHON_DIR:$JQ_DIR:/usr/bin:/bin" \
+        "PATH=${CASE_PATH_PREFIX-}$TIMEOUT_DIR:$PYTHON_DIR:$JQ_DIR:/usr/bin:/bin" \
         "AGENT_VM_CONTRACT_DIR=$CONTRACT" \
         "AGENT_VM_PI_PREFIX=$CASE/prefix" \
         "AGENT_VM_PI_WRAPPER=$CASE/wrapper" \
@@ -123,7 +139,10 @@ run_gate() {
         "AGENT_VM_PI_GATE_WORK_DIR=$CASE/gate" \
         "AGENT_VM_PI_SEED_HOOK=$CASE/seed-hook" \
         "AGENT_VM_INSTALL_STATUS_DIR=$CASE/status" \
-        "AGENT_VM_FIXTURE_ROOT=$CASE" \
+        "AGENT_VM_FIXTURE_ROOT=${CASE_FIXTURE_ROOT-$CASE}" \
+        "AGENT_VM_PI_CODEX_STATE_DIR=${CASE_CODEX_STATE-$CASE/fixture/codex-state}" \
+        "FAKE_CODEX_PROBE_OUT=${FAKE_CODEX_PROBE_OUT-}" \
+        "FAKE_PI_CODEX_PROBE_STATUS=${FAKE_PI_CODEX_PROBE_STATUS-0}" \
         "AGENT_VM_VERSION_PI=${AGENT_VM_VERSION_PI-}" \
         "AGENT_VM_VERSION_PI_CLAUDE_BRIDGE=${AGENT_VM_VERSION_PI_CLAUDE_BRIDGE-}" \
         "FAKE_PI_REPORT=${FAKE_PI_REPORT-}" \
@@ -138,6 +157,23 @@ run_gate() {
         sh "$GATE" 2>&1)"
     RUN_STATUS=$?
     set -e
+}
+
+# The gate's mktemp paths are invocation-owned and must disappear on every exit.
+record_gate_scratch() {
+    cat >"$CASE/bin/mktemp" <<'SH'
+#!/bin/sh
+path=$(/usr/bin/mktemp "$@") || exit $?
+printf '%s\n' "$path" >>"$AGENT_VM_FIXTURE_ROOT/scratch-paths"
+printf '%s\n' "$path"
+SH
+chmod 0755 "$CASE/bin/mktemp"
+}
+
+assert_gate_scratch_removed() {
+    while IFS= read -r path; do
+        [[ ! -e "$path" ]] || fail "failure cleanup leaked scratch: $path"
+    done <"$CASE/scratch-paths"
 }
 
 # --- a missing install: hard unless a fresh absence record exists ------------
@@ -458,7 +494,7 @@ mkdir -p "$outside"
 printf 'do not delete\n' >"$outside/marker"
 set +e
 RUN_OUTPUT="$(env -i \
-    "PATH=$TIMEOUT_DIR:$PYTHON_DIR:$JQ_DIR:/usr/bin:/bin" \
+    "PATH=${CASE_PATH_PREFIX-}$TIMEOUT_DIR:$PYTHON_DIR:$JQ_DIR:/usr/bin:/bin" \
     "AGENT_VM_CONTRACT_DIR=$CONTRACT" \
     "AGENT_VM_PI_PREFIX=$outside" \
     "AGENT_VM_PI_WRAPPER=$CASE/wrapper" \
@@ -467,7 +503,10 @@ RUN_OUTPUT="$(env -i \
     "AGENT_VM_PI_GATE_WORK_DIR=$CASE/gate" \
     "AGENT_VM_PI_SEED_HOOK=$CASE/seed-hook" \
     "AGENT_VM_INSTALL_STATUS_DIR=$CASE/status" \
-    "AGENT_VM_FIXTURE_ROOT=$CASE" \
+    "AGENT_VM_FIXTURE_ROOT=${CASE_FIXTURE_ROOT-$CASE}" \
+        "AGENT_VM_PI_CODEX_STATE_DIR=${CASE_CODEX_STATE-$CASE/fixture/codex-state}" \
+        "FAKE_CODEX_PROBE_OUT=${FAKE_CODEX_PROBE_OUT-}" \
+        "FAKE_PI_CODEX_PROBE_STATUS=${FAKE_PI_CODEX_PROBE_STATUS-0}" \
     sh "$GATE" 2>&1)"
 RUN_STATUS=$?
 set -e
@@ -558,4 +597,165 @@ grep -Fq 'AGENT_VM_PI_SEED_HOOK:-/opt/agent-vm/seed.d/20-pi-claude-bridge}' "$GA
 grep -Fq 'AGENT_VM_INSTALL_STATUS_DIR:-/opt/agent-vm/install-status}' "$GATE" \
     || fail "production default status dir is missing"
 
+# Codex registration is meaningful only after exclusive fixture publication.
+new_case codex-extension-missing
+rm "$CASE/ext/agent-vm-codex.js"
+run_gate
+[[ $RUN_STATUS -ne 0 ]] || fail "missing codex extension accepted"
+assert_contains "$RUN_OUTPUT" 'agent-vm-codex extension is missing'
+
+for variant in missing empty nonzero contradictory malformed-json; do
+    new_case "codex-probe-$variant"
+    case "$variant" in
+        missing) FAKE_CODEX_PROBE_OUT=AGENT-VM-CODEX-MISSING; expected='did not register its provider' ;;
+        empty) FAKE_CODEX_PROBE_OUT='AGENT-VM-CODEX-REGISTERED models=0'; expected='model catalog is empty' ;;
+        nonzero) FAKE_PI_CODEX_PROBE_STATUS=1; expected='the agent-vm-codex probe exited 1' ;;
+        contradictory) FAKE_CODEX_PROBE_OUT=$'AGENT-VM-CODEX-REGISTERED models=9\nAGENT-VM-CODEX-MISSING'; expected='conflicting registration results' ;;
+        malformed-json) FAKE_CODEX_PROBE_OUT=$'AGENT-VM-CODEX-REGISTERED models=9\n{"message":"AGENT-VM-CODEX-MISSING'; expected='malformed registration line' ;;
+    esac
+    run_gate
+    [[ $RUN_STATUS -ne 0 ]] || fail "codex probe $variant accepted"
+    assert_contains "$RUN_OUTPUT" "$expected"
+    [[ ! -e "$CASE/fixture" ]] || fail "failed codex probe leaked fixture"
+done
+
+new_case rpc-no-host-import
+FAKE_RPC_OUT='agent-vm: signing in here'
+run_gate
+[[ $RUN_STATUS -ne 0 ]] || fail 'missing host import accepted'
+assert_contains "$RUN_OUTPUT" 'omits its host-import clause'
+
+for variant in preexisting preexisting-early-failure; do
+    new_case "codex-fixture-$variant"
+    mkdir -p "$CASE/fixture/codex-state"
+    printf 'keep me' >"$CASE/fixture/codex-state/auth.json"
+    cp "$CASE/fixture/codex-state/auth.json" "$CASE/keep-expected"
+    if [[ $variant == preexisting-early-failure ]]; then FAKE_PI_REPORT=9.9.9; fi
+    run_gate
+    [[ $RUN_STATUS -ne 0 ]] || fail 'existing auth accepted'
+    cmp -s "$CASE/keep-expected" "$CASE/fixture/codex-state/auth.json" || fail 'existing auth changed by trap'
+    if [[ $variant == preexisting ]]; then assert_contains "$RUN_OUTPUT" 'refusing to overwrite'; fi
+done
+
+new_case codex-fixture-unauthorized-seam
+CASE_CODEX_STATE="$TEST_ROOT/outside/codex"
+CASE_FIXTURE_ROOT=
+run_gate
+[[ $RUN_STATUS -ne 0 ]] || fail 'unauthorized codex seam accepted'
+assert_contains "$RUN_OUTPUT" 'AGENT_VM_FIXTURE_ROOT is unset'
+[[ ! -e "$TEST_ROOT/outside" ]] || fail 'unauthorized parent created'
+
+new_case codex-fixture-symlinked-ancestry
+mkdir -p "$CASE/fixture" "$CASE/target"
+ln -s "$CASE/target" "$CASE/fixture/link-parent"
+CASE_CODEX_STATE="$CASE/fixture/link-parent/codex"
+run_gate
+[[ $RUN_STATUS -ne 0 ]] || fail 'symlink ancestry accepted'
+assert_contains "$RUN_OUTPUT" 'symlinked Codex fixture ancestry'
+[[ ! -e "$CASE/target/codex" ]] || fail 'wrote through link'
+
+for variant in parent state; do
+    new_case "codex-fixture-$variant-is-a-file"
+    if [[ $variant == parent ]]; then target="$CASE/fixture";
+    else mkdir "$CASE/fixture"; target="$CASE/fixture/codex-state"; fi
+    printf 'keep me' >"$target"
+    cp "$target" "$CASE/keep-expected"
+    run_gate
+    [[ $RUN_STATUS -ne 0 ]] || fail 'file ancestry accepted'
+    cmp -s "$CASE/keep-expected" "$target" || fail 'existing file changed'
+    [[ ! -e "$CASE/fixture/codex-state/auth.json" ]] || fail 'auth created beneath file'
+done
+
+# A successful ln shim makes signal status independent of subprocess failure.
+signal_cases_failed=0
+for timing in before after; do
+    new_case "codex-fixture-term-$timing-publication"
+    mkdir "$CASE/bin"
+    if [[ $timing == before ]]; then
+        printf '#!/bin/sh\nkill -TERM "$PPID"\nexec /bin/ln "$@"\n' >"$CASE/bin/ln"
+    else
+        printf '#!/bin/sh\n/bin/ln "$@" || exit $?\nkill -TERM "$PPID"\n' >"$CASE/bin/ln"
+    fi
+    chmod 0755 "$CASE/bin/ln"
+    record_gate_scratch
+    CASE_PATH_PREFIX="$CASE/bin:"
+    run_gate
+    fixture_left=no
+    [[ ! -e "$CASE/fixture/codex-state/auth.json" ]] || fixture_left=yes
+    certified=no
+    [[ $RUN_OUTPUT != *'claims host import with agent-vm-codex registered'* &&
+       $RUN_OUTPUT != *'agent-vm-codex registered the agent-vm-codex provider'* ]] || certified=yes
+    echo "TERM_$timing: status=$RUN_STATUS fixture_left=$fixture_left certified=$certified"
+    assert_gate_scratch_removed
+    if [[ $RUN_STATUS -eq 0 || $fixture_left != no || $certified != no || -e "$CASE/fixture" ]]; then
+        signal_cases_failed=1
+    fi
+done
+[[ $signal_cases_failed -eq 0 ]] || fail 'TERM publication cleanup/status regression'
+
+new_case codex-fixture-publication-fails
+mkdir "$CASE/bin"
+printf '#!/bin/sh\nexit 37\n' >"$CASE/bin/ln"
+chmod 0755 "$CASE/bin/ln"
+record_gate_scratch
+CASE_PATH_PREFIX="$CASE/bin:"
+run_gate
+[[ $RUN_STATUS -eq 37 ]] || fail "publication status changed: $RUN_STATUS (expected 37)"
+[[ ! -e "$CASE/fixture" ]] || fail 'publication failure leaked dirs'
+assert_gate_scratch_removed
+
+new_case codex-fixture-cleanup-success
+run_gate
+[[ $RUN_STATUS -eq 0 ]] || fail "codex happy path failed: $RUN_OUTPUT"
+assert_contains "$RUN_OUTPUT" 'agent-vm-codex registered the agent-vm-codex provider'
+assert_contains "$RUN_OUTPUT" 'claims host import with agent-vm-codex registered'
+[[ ! -e "$CASE/fixture" ]] || fail 'happy path leaked dirs'
+
+new_case codex-fixture-cleanup-preexisting-dir
+mkdir -p "$CASE/fixture/codex-state"
+run_gate
+[[ $RUN_STATUS -eq 0 ]] || fail "preexisting dir failed: $RUN_OUTPUT"
+[[ -d "$CASE/fixture/codex-state" && ! -e "$CASE/fixture/codex-state/auth.json" ]] || fail 'preexisting dir not preserved'
+
+new_case codex-fixture-cleanup-preserves-status
+mkdir "$CASE/bin"
+record_gate_scratch
+CASE_PATH_PREFIX="$CASE/bin:"
+FAKE_PI_CODEX_PROBE_STATUS=1
+run_gate
+[[ $RUN_STATUS -eq 1 ]] || fail 'cleanup replaced probe failure status'
+assert_contains "$RUN_OUTPUT" 'the agent-vm-codex probe exited 1'
+assert_gate_scratch_removed
+[[ ! -e "$CASE/fixture" ]] || fail 'failure cleanup leaked fixture'
+
+new_case codex-fixture-cleanup-failure-is-recorded
+mkdir "$CASE/bin"
+cat >"$CASE/bin/rm" <<'SH'
+#!/bin/sh
+case "$*" in *codex-state/auth.json*) exit 37 ;; esac
+exec /bin/rm "$@"
+SH
+chmod 0755 "$CASE/bin/rm"
+CASE_PATH_PREFIX="$CASE/bin:"
+run_gate
+[[ $RUN_STATUS -eq 1 ]] || fail 'cleanup failure not recorded as gate failure'
+assert_contains "$RUN_OUTPUT" 'survived the gate'
+
+for variant in private-target repaired-symlink; do
+    new_case "codex-extension-$variant"
+    mkdir "$CASE/private-codex"
+    printf '// codex\n' >"$CASE/private-codex/codex.js"
+    rm "$CASE/ext/agent-vm-codex.js"
+    ln -s "$CASE/private-codex/codex.js" "$CASE/ext/agent-vm-codex.js"
+    if [[ $variant == private-target ]]; then chmod 0700 "$CASE/private-codex"; fi
+    run_gate
+    if [[ $variant == private-target ]]; then
+        [[ $RUN_STATUS -ne 0 ]] || fail 'private codex target accepted'
+        assert_contains "$RUN_OUTPUT" 'private-codex'
+    else [[ $RUN_STATUS -eq 0 ]] || fail "repaired codex symlink rejected: $RUN_OUTPUT"; fi
+done
+
+grep -Fq 'AGENT_VM_PI_CODEX_STATE_DIR:-/agent-vm-state/codex}' "$GATE" || fail 'codex seam default missing'
+
+node "$REPO_ROOT/script/test/pi-codex-read.mjs"
 echo 'pi-verify black-box tests passed'

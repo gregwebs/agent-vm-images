@@ -29,6 +29,7 @@ PI_PREFIX="${AGENT_VM_PI_PREFIX:-/opt/agent-vm/pi}"
 WRAPPER="${AGENT_VM_PI_WRAPPER:-/usr/local/bin/pi}"
 PACKAGES_PREFIX="${AGENT_VM_PI_PACKAGES_PREFIX:-/opt/agent-vm/pi-packages}"
 EXTENSION_DIR="${AGENT_VM_PI_EXTENSION_DIR:-/opt/agent-vm/pi-extensions}"
+CODEX_STATE_DIR="${AGENT_VM_PI_CODEX_STATE_DIR:-/agent-vm-state/codex}"
 GATE_WORK_DIR="${AGENT_VM_PI_GATE_WORK_DIR:-/tmp/pi-gate}"
 SEED_HOOK="${AGENT_VM_PI_SEED_HOOK:-/opt/agent-vm/seed.d/20-pi-claude-bridge}"
 STATUS_DIR="${AGENT_VM_INSTALL_STATUS_DIR:-/opt/agent-vm/install-status}"
@@ -53,7 +54,8 @@ authorize_destructive() { # $1 path, $2 exact production default
     _dir=$(dirname "$_p")
     _base=$(basename "$_p")
     if [ -d "$_dir" ]; then
-        _full="$(cd "$_dir" && pwd -P)/$_base"
+        _full="$(cd "$_dir" && pwd -P)"
+        _full="${_full%/}/$_base"
     else
         _full=$_p
     fi
@@ -90,6 +92,84 @@ pi_run() { # $1 = seconds, $2 = out, $3 = err, rest = executable + args
     sh "$CONTRACT/run-report.sh" "$seconds" "$OUT" "$ERR" "$@" </dev/null || PI_RUN_STATUS=$?
 }
 
+require_registered_provider() { # label, marker prefix, output file
+    label=$1
+    marker=$2
+    probe_out=$3
+    # The probe result may be a complete plain marker line OR a valid single-line
+    # JSON notification whose `.message` is the marker (real Pi wraps the
+    # `ctx.ui.notify` text). Require EXACTLY ONE unambiguous registration
+    # result and a strictly positive canonical model count: a bare prefix match
+    # used to accept `models=00` (a zero), a non-JSON line like
+    # `models=12"garbage`, or a positive marker contradicted by a later
+    # `${marker}-MISSING`.
+    registered_count=""
+    result_count=0
+    malformed=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -z "$line" ] && continue
+        msg="$line"
+        registration_bearing=0
+        case "$line" in
+            *"${marker}-REGISTERED"* | *"${marker}-MISSING"*)
+                registration_bearing=1 ;;
+        esac
+        case "$line" in
+            '{'*)
+                # A registration marker may arrive inside a single-line JSON
+                # notification, so decode `.message`. The WHOLE line must parse:
+                # `jq ... || true` used to erase a truncated/invalid notification,
+                # silently discarding a `...BRIDGE-MISSING` marker it carried and
+                # letting a lone positive pass. Fail closed instead.
+                if msg="$(printf '%s\n' "$line" | jq -r \
+                    'if type == "object" and (.message | type) == "string" then .message else empty end' \
+                    2>/dev/null)"; then
+                    :
+                else
+                    if [ "$registration_bearing" -eq 1 ]; then malformed=1; fi
+                    continue
+                fi ;;
+        esac
+        # A registration-bearing line -- plain or JSON -- must decode to exactly
+        # the supported marker shape. A line that merely MENTIONS a marker (a
+        # JSON notification whose `.message` is null/absent/non-marker, or a
+        # plain line with surrounding text) is malformed, not silently ignored.
+        # Unrelated RPC output (no marker) is accepted and ignored.
+        if [ "$registration_bearing" -eq 1 ]; then
+            case "$msg" in
+                "${marker}-MISSING")
+                    result_count=$((result_count + 1)) ;;
+                "${marker}-REGISTERED models="*)
+                    result_count=$((result_count + 1))
+                    registered_count="${msg#${marker}-REGISTERED models=}" ;;
+                *)
+                    malformed=1 ;;
+            esac
+        fi
+    done <"$probe_out"
+
+    if [ "$malformed" -eq 1 ]; then
+        echo "  pi: ${label} emitted a malformed registration line" >&2
+        exit 1
+    fi
+    if [ "$result_count" -ne 1 ]; then
+        if [ "$result_count" -eq 0 ]; then
+            echo "  pi: ${label} did not register its provider" >&2
+        else
+            echo "  pi: ${label} emitted $result_count conflicting registration results" >&2
+        fi
+        exit 1
+    fi
+    case "$registered_count" in
+        '')
+            echo "  pi: ${label} did not register its provider" >&2; exit 1 ;;
+        0 | 0*)
+            echo "  pi: ${label} registered but its model catalog is empty" >&2; exit 1 ;;
+        *[!0-9]*)
+            echo "  pi: ${label} reported a non-numeric model count '$registered_count'" >&2; exit 1 ;;
+    esac
+}
+
 # Path state via lstat: a present-but-unusable command (e.g. a 0644 entry point)
 # is a contract violation, not an absence, and its tree must NOT be deleted.
 bin_state=0
@@ -117,8 +197,46 @@ if [ "$bin_state" -eq 2 ]; then
 fi
 
 scratch=$(mktemp -d)
-# shellcheck disable=SC2064
-trap "rm -rf '$scratch'" EXIT INT TERM HUP
+codex_created_parent=
+codex_created_dir=
+codex_created_file=
+codex_cleanup_failed=
+codex_trap_status=0
+codex_parent=$(dirname "$CODEX_STATE_DIR")
+codex_cleanup() {
+    # Ownership is decided by inode identity with the source that still lives in
+    # $scratch, because `ln` may have published before the shell could set its
+    # flag. `-ef` makes that comparison atomic and cheap. POSIX leaves it
+    # undefined; this gate runs under `sh` only -- dash in the image
+    # (images/standard/Dockerfile) and bash 3.2 in the host harness, which both
+    # implement it. The alternative, claiming ownership before the hardlink
+    # exists, would delete a file this run did not create.
+    # shellcheck disable=SC3013
+    if [ -n "$codex_created_file" ] ||
+        { [ -n "${fixture_src:-}" ] && [ ! -L "$CODEX_STATE_DIR/auth.json" ] &&
+          [ "$CODEX_STATE_DIR/auth.json" -ef "$fixture_src" ]; }; then
+        if authorize_destructive "$CODEX_STATE_DIR/auth.json" /agent-vm-state/codex/auth.json; then
+            if rm -f "$CODEX_STATE_DIR/auth.json"; then codex_created_file=; else codex_cleanup_failed=1; fi
+        else codex_cleanup_failed=1; fi
+    fi
+    if [ -n "$codex_created_dir" ]; then
+        if authorize_destructive "$CODEX_STATE_DIR" /agent-vm-state/codex; then
+            if rmdir "$CODEX_STATE_DIR"; then codex_created_dir=; else codex_cleanup_failed=1; fi
+        else codex_cleanup_failed=1; fi
+    fi
+    if [ -n "$codex_created_parent" ]; then
+        if authorize_destructive "$codex_parent" /agent-vm-state; then
+            if rmdir "$codex_parent"; then codex_created_parent=; else codex_cleanup_failed=1; fi
+        else codex_cleanup_failed=1; fi
+    fi
+    return 0
+}
+# Ownership flags precede every creation: early exits must leave existing state alone.
+trap 'codex_trap_status=$?; codex_cleanup || :; rm -rf "$scratch" || :; exit "$codex_trap_status"' EXIT
+# Signal handlers must not inherit a preceding successful command's status.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 export HOME="$GATE_WORK_DIR" XDG_CONFIG_HOME="$GATE_WORK_DIR/.config" PI_TELEMETRY=0
 mkdir -p "$HOME"
@@ -179,6 +297,35 @@ if [ ! -r "$EXTENSION_DIR/guest-credential-warning.js" ]; then
     echo "  pi: the mandatory extension is missing" >&2
     exit 1
 fi
+if [ ! -r "$EXTENSION_DIR/agent-vm-codex.js" ]; then
+    echo "  pi: the agent-vm-codex extension is missing" >&2
+    exit 1
+fi
+if [ -L "$codex_parent" ] || [ -L "$CODEX_STATE_DIR" ]; then
+    echo "  pi: refusing symlinked Codex fixture ancestry" >&2
+    exit 1
+fi
+if [ ! -e "$codex_parent" ]; then
+    authorize_destructive "$codex_parent" /agent-vm-state || exit 1
+    mkdir "$codex_parent"
+    codex_created_parent=1
+fi
+if [ ! -e "$CODEX_STATE_DIR" ]; then
+    authorize_destructive "$CODEX_STATE_DIR" /agent-vm-state/codex || exit 1
+    mkdir "$CODEX_STATE_DIR"
+    codex_created_dir=1
+fi
+if [ -e "$CODEX_STATE_DIR/auth.json" ] || [ -L "$CODEX_STATE_DIR/auth.json" ]; then
+    echo "  pi: refusing to overwrite existing $CODEX_STATE_DIR/auth.json" >&2
+    exit 1
+fi
+authorize_destructive "$CODEX_STATE_DIR/auth.json" /agent-vm-state/codex/auth.json || exit 1
+fixture_src="$scratch/codex-auth.json"
+printf '%s\n' '{"tokens":{"access_token":"msb-openai-placeholder-a-v2","refresh_token":"msb-openai-placeholder-r-v2","account_id":"acct-~~~?"}}' >"$fixture_src"
+# A hardlink publishes complete bytes exclusively; mv would overwrite a racing writer.
+ln "$fixture_src" "$CODEX_STATE_DIR/auth.json"
+codex_created_file=1
+rm -f "$fixture_src"
 pi_run 60 "$scratch/w.out" "$scratch/w.err" "$WRAPPER" --mode rpc --no-session --no-approve
 if [ "$PI_RUN_STATUS" -ne 0 ]; then
     echo "  pi: a real invocation exited $PI_RUN_STATUS; refusing to scan its output" >&2
@@ -189,7 +336,30 @@ if ! grep -q 'agent-vm: signing in here' "$scratch/w.out"; then
     echo "  pi: a real invocation does not load the mandatory extension" >&2
     exit 1
 fi
-echo "  pi: mandatory extension loads and warns"
+if ! grep -qF 'Credentials imported from your host stay on the host and never appear in guest files.' "$scratch/w.out"; then
+    echo "  pi: agent-vm-codex is not registered, or the warning omits its host-import clause" >&2
+    exit 1
+fi
+echo "  pi: mandatory extension loads and warns; claims host import with agent-vm-codex registered"
+
+cat > "$GATE_WORK_DIR/codex-probe.js" <<'PROBE'
+export default function (pi) {
+  pi.on("session_start", (_event, ctx) => {
+    const p = ctx.modelRegistry.getProvider("agent-vm-codex");
+    const n = p && typeof p.getModels === "function" ? p.getModels().length
+            : p && Array.isArray(p.models) ? p.models.length : 0;
+    ctx.ui.notify(p ? `AGENT-VM-CODEX-REGISTERED models=${n}` : "AGENT-VM-CODEX-MISSING", "warning");
+  });
+}
+PROBE
+pi_run 120 "$scratch/c.out" "$scratch/c.err" \
+    "$WRAPPER" -e "$GATE_WORK_DIR/codex-probe.js" --mode rpc --no-session --no-approve
+if [ "$PI_RUN_STATUS" -ne 0 ]; then
+    echo "  pi: the agent-vm-codex probe exited $PI_RUN_STATUS; refusing to scan its output" >&2
+    exit 1
+fi
+require_registered_provider agent-vm-codex AGENT-VM-CODEX "$scratch/c.out"
+echo "  pi: agent-vm-codex registered the agent-vm-codex provider"
 
 # The image-owned pi-claude-bridge extension (ADR-0023). Its absence is legal in
 # exactly one case -- a transport-soft build whose `npm ci` failed and recorded
@@ -268,80 +438,14 @@ PROBE
         sed -n '1,10p' "$scratch/p.err" >&2
         exit 1
     fi
-    probe_out="$scratch/p.out"
-    # The probe result may be a complete plain marker line OR a valid single-line
-    # JSON notification whose `.message` is the marker (real Pi wraps the
-    # `ctx.ui.notify` text). Require EXACTLY ONE unambiguous registration
-    # result and a strictly positive canonical model count: a bare prefix match
-    # used to accept `models=00` (a zero), a non-JSON line like
-    # `models=12"garbage`, or a positive marker contradicted by a later
-    # `AGENT-VM-BRIDGE-MISSING`.
-    registered_count=""
-    result_count=0
-    malformed=0
-    while IFS= read -r line || [ -n "$line" ]; do
-        [ -z "$line" ] && continue
-        msg="$line"
-        registration_bearing=0
-        case "$line" in
-            *'AGENT-VM-BRIDGE-REGISTERED'* | *'AGENT-VM-BRIDGE-MISSING'*)
-                registration_bearing=1 ;;
-        esac
-        case "$line" in
-            '{'*)
-                # A registration marker may arrive inside a single-line JSON
-                # notification, so decode `.message`. The WHOLE line must parse:
-                # `jq ... || true` used to erase a truncated/invalid notification,
-                # silently discarding a `...BRIDGE-MISSING` marker it carried and
-                # letting a lone positive pass. Fail closed instead.
-                if msg="$(printf '%s\n' "$line" | jq -r \
-                    'if type == "object" and (.message | type) == "string" then .message else empty end' \
-                    2>/dev/null)"; then
-                    :
-                else
-                    if [ "$registration_bearing" -eq 1 ]; then malformed=1; fi
-                    continue
-                fi ;;
-        esac
-        # A registration-bearing line -- plain or JSON -- must decode to exactly
-        # the supported marker shape. A line that merely MENTIONS a marker (a
-        # JSON notification whose `.message` is null/absent/non-marker, or a
-        # plain line with surrounding text) is malformed, not silently ignored.
-        # Unrelated RPC output (no marker) is accepted and ignored.
-        if [ "$registration_bearing" -eq 1 ]; then
-            case "$msg" in
-                'AGENT-VM-BRIDGE-MISSING')
-                    result_count=$((result_count + 1)) ;;
-                'AGENT-VM-BRIDGE-REGISTERED models='*)
-                    result_count=$((result_count + 1))
-                    registered_count="${msg#AGENT-VM-BRIDGE-REGISTERED models=}" ;;
-                *)
-                    malformed=1 ;;
-            esac
-        fi
-    done <"$probe_out"
-
-    if [ "$malformed" -eq 1 ]; then
-        echo "  pi: pi-claude-bridge emitted a malformed registration line" >&2
-        exit 1
-    fi
-    if [ "$result_count" -ne 1 ]; then
-        if [ "$result_count" -eq 0 ]; then
-            echo "  pi: pi-claude-bridge did not register its provider" >&2
-        else
-            echo "  pi: pi-claude-bridge emitted $result_count conflicting registration results" >&2
-        fi
-        exit 1
-    fi
-    case "$registered_count" in
-        '')
-            echo "  pi: pi-claude-bridge did not register its provider" >&2; exit 1 ;;
-        0 | 0*)
-            echo "  pi: pi-claude-bridge registered but its model catalog is empty" >&2; exit 1 ;;
-        *[!0-9]*)
-            echo "  pi: pi-claude-bridge reported a non-numeric model count '$registered_count'" >&2; exit 1 ;;
-    esac
+    require_registered_provider pi-claude-bridge AGENT-VM-BRIDGE "$scratch/p.out"
     echo "  pi: pi-claude-bridge registered the claude-bridge provider"
+fi
+
+codex_cleanup
+if [ -n "$codex_cleanup_failed" ] || [ -e "$CODEX_STATE_DIR/auth.json" ] || [ -L "$CODEX_STATE_DIR/auth.json" ]; then
+    echo "  pi: the agent-vm-codex fixture survived the gate" >&2
+    exit 1
 fi
 
 # Leavings from the gate runs above (Pi's own caches) are removed so they cannot
@@ -380,7 +484,7 @@ python3 "$CONTRACT/check-tool-access.py" "$WRAPPER" "$pi_bin"
 # symlinks, audits the lexical AND target ancestors, and requires all-class read
 # (these files are data, not executed directly, so no execute bit is needed).
 python3 "$CONTRACT/check-tool-access.py" --content \
-    "$EXTENSION_DIR/guest-credential-warning.js"
+    "$EXTENSION_DIR/guest-credential-warning.js" "$EXTENSION_DIR/agent-vm-codex.js"
 if [ -n "$bridge_shipped" ]; then
     python3 "$CONTRACT/check-tool-access.py" --content "$BRIDGE_SRC"
 fi
