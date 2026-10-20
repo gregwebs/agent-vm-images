@@ -206,12 +206,12 @@ codex_parent=$(dirname "$CODEX_STATE_DIR")
 codex_cleanup() {
     # Ownership is decided by inode identity with the source that still lives in
     # $scratch, because `ln` may have published before the shell could set its
-    # flag. `-ef` makes that comparison atomic and cheap. POSIX leaves it
-    # undefined; this gate runs under `sh` only -- dash in the image
-    # (images/standard/Dockerfile) and bash 3.2 in the host harness, which both
-    # implement it. The alternative, claiming ownership before the hardlink
-    # exists, would delete a file this run did not create.
-    # shellcheck disable=SC3013
+    # flag. `-ef` is that comparison. POSIX specifies it only since POSIX.1-2024;
+    # this gate runs under `sh` only -- dash in the image
+    # (images/standard/Dockerfile) and the host harness's sh (dash on
+    # Debian/Ubuntu, bash 3.2 on macOS), which all implement it. The alternative,
+    # claiming ownership before the hardlink exists, would delete a file this run
+    # did not create.
     if [ -n "$codex_created_file" ] ||
         { [ -n "${fixture_src:-}" ] && [ ! -L "$CODEX_STATE_DIR/auth.json" ] &&
           [ "$CODEX_STATE_DIR/auth.json" -ef "$fixture_src" ]; }; then
