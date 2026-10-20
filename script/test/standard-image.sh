@@ -12,6 +12,9 @@ FIXTURE_DOCKERFILE="$REPO_ROOT/script/test/fixtures/t5-negative/Dockerfile"
 # The committed status-record validator; the external oracle validates the exact
 # status bytes with it rather than a first-line key/value extraction (review F2).
 STATUS_VALIDATOR="$REPO_ROOT/images/recipe-contract/install-status.py"
+# The single base64 encoder, shared by the host predicates and the injected
+# container capture helper below.
+BASE64_ENCODER="$REPO_ROOT/script/test/standard-image-encode-base64.py"
 
 usage() { echo "usage: $0 BASE_IMAGE STANDARD_IMAGE [--platform linux/ARCH] [--expect SUFFIX=VERSION ...] | --artifact STANDARD_IMAGE [--platform linux/ARCH] [--expect SUFFIX=VERSION ...] | --self-test | --pi-audit-status BASE_IMAGE [--platform linux/ARCH]" >&2; }
 self_test=false
@@ -73,22 +76,23 @@ run_with_watchdog() {
 # characters, so the sentinel can never collide with a real value.
 b64file() { # $1 path -> base64 of its bytes, or MISSING
     if [ -r "$1" ]; then
-        python3 -c 'import base64,sys; sys.stdout.write(base64.b64encode(open(sys.argv[1],"rb").read()).decode())' "$1"
+        python3 "$BASE64_ENCODER" "$1"
     else
         printf 'MISSING'
     fi
 }
 
 # decode_b64 BLOB FILE -> write the decoded bytes to FILE; 1 when the blob is
-# the MISSING sentinel.
+# the MISSING sentinel. The sentinel short-circuits before the redirection so a
+# MISSING capture never truncates FILE; every other attempt creates/truncates it.
 decode_b64() { # $1 blob, $2 out file
     [ "$1" != MISSING ] || return 1
-    printf '%s' "$1" | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' >"$2"
+    printf '%s' "$1" | python3 "$REPO_ROOT/script/test/standard-image-decode-base64.py" >"$2"
 }
 
 # blob -> base64 of stdin (host helpers seed the self-test with exact bytes).
 blob() {
-    python3 -c 'import base64,sys; sys.stdout.write(base64.b64encode(sys.stdin.buffer.read()).decode())'
+    python3 "$BASE64_ENCODER"
 }
 
 # sblob RECORD -> base64 of `RECORD` plus its trailing newline.
@@ -300,7 +304,10 @@ assert_recipe_labels() { # $1 image, $2 recipe, $3 expected file, $4 strict
 container_script() { # $1 recipe
     # Inject the byte-exact capture helper: every report and status record is
     # emitted base64-encoded so a first-line extraction cannot hide a
-    # contradictory trailing line or a multi-line record (review F2).
+    # contradictory trailing line or a multi-line record (review F2). The
+    # injected function carries no host variables, so the encoder path is
+    # assigned literally; its source is a read-only mount, never inlined.
+    printf '%s\n' 'BASE64_ENCODER=/audit/standard-image-encode-base64.py'
     printf '%s\n' "$(declare -f b64file)"
     # shellcheck disable=SC2016 # evaluated inside the container
     printf '%s\n' 'uid=$(id -u); if [ "$uid" != 0 ] && getent passwd "$uid" >/dev/null; then echo "unexpected passwd identity" >&2; exit 1; fi'
@@ -481,6 +488,7 @@ pi_audit_status_regression() {
             -v "$fixture/opt/agent-vm:/opt/agent-vm:ro" \
             -v "$fixture/bin:/fixture-bin:ro" \
             -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
+            -v "$REPO_ROOT/script/test/standard-image-encode-base64.py:/audit/standard-image-encode-base64.py:ro" \
             -e "PATH=/fixture-bin:/usr/bin:/bin" \
             --entrypoint sh "$BASE_IMAGE" -c "$generated" 2>&1)" || rc=$?
         [ "$rc" -ne 124 ] || fail "pi audit regression ($label) timed out after ${RUNTIME_WATCHDOG_SECONDS}s"
@@ -527,6 +535,7 @@ run_container() { # $1 image, $2 recipe, $3 uid:gid, $4 expected dsh version
         -e HOME=/tmp \
         ${oracle[@]+"${oracle[@]}"} \
         -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
+        -v "$REPO_ROOT/script/test/standard-image-encode-base64.py:/audit/standard-image-encode-base64.py:ro" \
         --entrypoint sh "$img" -c "$(container_script "$recipe")" 2>&1 || rc=$?
     [ "$rc" -eq 0 ] || fail "$recipe ($uid) runtime capture failed: $rc"
 }
@@ -546,13 +555,7 @@ kv() { # $1 output, $2 key -> first matching value
 # optionally followed by one trailing newline. A contradictory trailing line, a
 # second line, or extra blank lines are rejected (review F2).
 exact_report() { # $1 file, $2 expected single line (no newline)
-    python3 - "$1" "$2" <<'PY'
-import sys
-
-data = open(sys.argv[1], "rb").read()
-expected = sys.argv[2].encode()
-sys.exit(0 if data in (expected, expected + b"\n") else 1)
-PY
+    python3 "$REPO_ROOT/script/test/standard-image-exact-report.py" "$1" "$2"
 }
 
 # copilot_report FILE VERSION -- copilot's genuine --version output is the
@@ -560,23 +563,7 @@ PY
 # footer on every line after the banner. Mirror that exact record rather than
 # demanding a single line, while still rejecting any other extra line (F2).
 copilot_report() { # $1 file, $2 installed version (no prefix)
-    python3 - "$1" "$2" <<'PY'
-import sys
-
-data = open(sys.argv[1], "rb").read()
-version = sys.argv[2].encode()
-# Reject non-printable bytes: a NUL would be erased by command substitution.
-if any(not (b in (9, 10) or 32 <= b <= 126) for b in data):
-    sys.exit(1)
-lines = data.split(b"\n")
-if lines and lines[-1] == b"":
-    lines.pop()
-banner = b"GitHub Copilot CLI " + version + b"."
-footer = b"Run 'copilot update' to check for updates."
-if not lines or lines[0] != banner:
-    sys.exit(1)
-sys.exit(0 if all(line in (b"", footer) for line in lines[1:]) else 1)
-PY
+    python3 "$REPO_ROOT/script/test/standard-image-copilot-report.py" "$1" "$2"
 }
 
 # check_report RECIPE LABEL0 LABEL1 CONTAINER_OUTPUT -- the COMPLETE stdout
@@ -585,21 +572,7 @@ PY
 # Preserve harmless diagnostic stderr, but never certify a contradictory banner
 # there or normalize away nonprintable bytes. Independent of owning verifiers.
 check_stderr() {
-    python3 - "$1" "$2" <<'PYSTDERR'
-import re, sys
-name, path = sys.argv[1:]
-data = open(path, "rb").read()
-if any(not (b in (9, 10) or 32 <= b <= 126) for b in data):
-    sys.exit(1)
-patterns = {
-    "codex": rb"codex-cli [0-9A-Za-z.+-]+",
-    "opencode": rb"(?:opencode v|v?)[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*",
-    "claude": rb"[0-9][0-9A-Za-z.+-]* \(Claude Code\)",
-    "copilot": rb"GitHub Copilot CLI .*",
-}
-pattern = patterns.get(name, rb"v?[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*")
-sys.exit(1 if any(re.fullmatch(pattern, line) for line in data.splitlines()) else 0)
-PYSTDERR
+    python3 "$REPO_ROOT/script/test/standard-image-check-stderr.py" "$1" "$2"
 }
 
 check_report() { # $1 recipe, $2 label0 value, $3 label1 value, $4 output
@@ -781,23 +754,7 @@ check_dsh_oracle() { # $1 output, $2 expected dsh version
         printf 'independent dsh oracle report is missing'
         return 1
     }
-    if ! python3 - "$file" "$expected" <<'PY'
-import json, re, sys
-
-try:
-    report = json.loads(open(sys.argv[1], 'rb').read())
-except (OSError, ValueError):
-    sys.exit(1)
-if not isinstance(report, dict) or report.get('version') != sys.argv[2]:
-    sys.exit(1)
-version = re.compile(r'[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?')
-for field in ('sandbox', 'cordis'):
-    if not isinstance(report.get(field), str) or not version.fullmatch(report[field]):
-        sys.exit(1)
-if report.get('subprocess') != {'stdout': 'independent-dsh\n', 'exitCode': 7, 'disposed': True}:
-    sys.exit(1)
-PY
-    then
+    if ! python3 "$REPO_ROOT/script/test/standard-image-check-dsh-oracle.py" "$file" "$expected"; then
         printf 'independent dsh oracle report is not the controlled subprocess/sandbox record'
         return 1
     fi

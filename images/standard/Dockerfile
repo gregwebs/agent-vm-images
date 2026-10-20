@@ -231,7 +231,10 @@ RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
     sh /tmp/opencode-source/verify-opencode-plugins.sh
 
 # Certification of the finished filesystem and its unmodified final PATH.
+# The PATH-identity helper is a sibling of the script under /tmp: bind only that
+# file, never the directory, so nothing is COPYed into the runtime image.
 RUN --mount=type=bind,source=standard/verify-standard.sh,target=/tmp/verify-standard.sh,ro \
+    --mount=type=bind,source=standard/verify-standard-path-identity.py,target=/tmp/verify-standard-path-identity.py,ro \
     --mount=type=bind,source=tools,target=/tmp/standard-tools,ro \
     --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
     --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \

@@ -309,13 +309,7 @@ assert_contains "$RUN_OUTPUT" 'layer asked for 11.6.0 but the base pin is 11.7.0
 
 new_case package-manager-mismatch
 stage_prefix
-python3 - "$CASE/prefix/package.json" <<'PY'
-import json, sys, pathlib
-path = pathlib.Path(sys.argv[1])
-manifest = json.loads(path.read_text())
-manifest['packageManager'] = 'pnpm@11.6.0'
-path.write_text(json.dumps(manifest, indent=2) + '\n')
-PY
+python3 "$REPO_ROOT/script/test/dsh-verify-mutate-manager.py" "$CASE/prefix/package.json"
 stage_pnpm
 run_gate
 [[ $RUN_STATUS -ne 0 ]] || fail 'a manifest packageManager disagreeing with the base pin must fail'

@@ -14,6 +14,11 @@ SOURCES = {
     "probe-opencode.py": "images/tools/opencode/probe-opencode.py",
     "check-claude-runtime.mjs": "images/tools/opencode/check-claude-runtime.mjs",
     "opencode-audit.py": "script/test/opencode-audit.py",
+    # The probe is rendered into a `bash -c` string, not run from a checkout, so
+    # its guest Python arrives through this same byte-verified transfer.
+    "released-agent-report.py": "script/test/fixtures/released-agent-report.py",
+    "released-agent-dsh-layout.py": "script/test/fixtures/released-agent-dsh-layout.py",
+    "released-agent-bridge-report.py": "script/test/fixtures/released-agent-bridge-report.py",
 }
 # Consumer-qualified input pins. The guest path is a literal whitelist, so a
 # hash scalar can never steer a check at another file or directory.
@@ -102,14 +107,20 @@ def self_test():
             raise AssertionError("unsafe hash scalar passed")
 
     # The guest assertions themselves cannot run on this host: pin the probe
-    # shape that they depend on (four dsh inputs, no npm lock, direct bin).
+    # shape that they depend on (four dsh inputs, no npm lock). The identity
+    # assertions moved into the transferred dsh-layout helper, so check them at
+    # their maintained source; the byte roundtrip above proves they are what the
+    # guest reads.
     probe = (ROOT / "script/test/fixtures/released-agent-probe.sh").read_text()
+    layout = (ROOT / SOURCES["released-agent-dsh-layout.py"]).read_text()
     assert "for project in dsh pi pi-packages" not in probe
     assert 'test ! -e /opt/agent-vm/dsh/package-lock.json' in probe
     assert 'test ! -L /opt/agent-vm/dsh/package-lock.json' in probe
-    assert "os.readlink(link) == target" in probe
-    assert "os.path.samefile(link, target)" in probe
-    assert "node_modules/@deepseek-ai/dsh/lib/bin.js" in probe
+    assert "os.readlink(link) == target" in layout
+    assert "os.path.samefile(link, target)" in layout
+    assert "node_modules/@deepseek-ai/dsh/lib/bin.js" in layout
+    for name, file in SOURCES.items():
+        assert not re.search(r"[0-9a-f]{64}", (ROOT / file).read_text()), f"pins are rendered, never committed into {name}"
     assert not re.search(r"[0-9a-f]{64}", probe), "pins are rendered, never committed into the template"
     assert "pnpm-lock.mjs" not in payload and "lockfileVersion" not in payload
 

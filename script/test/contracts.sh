@@ -53,6 +53,86 @@ if [ "$guard_only" = false ]; then
     bash script/test/standard-image.sh --self-test
     bash script/test/example-layers.sh --self-test
 fi
+# --- no embedded Python in shell sources -------------------------------------
+# Python belongs in its own file, invoked as `python3 FILE`; see CODING_STANDARDS
+# "Avoid embedding code". That includes containers, BuildKit gates and rendered
+# guests: those need an explicit mount or a renderer source entry, never inline
+# source. The walk is over the filesystem, so a new untracked .sh cannot escape
+# it. It is lexical: aliases, computed commands and extensionless bodies still
+# need the manual inventory review, so do not widen it into directory exemptions.
+embedded_manifest=$(mktemp "${TMPDIR:-/tmp}/embedded-python.XXXXXX") ||
+    { echo 'FAIL: cannot create the shell-source manifest for the embedded-Python gate' >&2; exit 1; }
+trap 'rm -f "$embedded_manifest"' EXIT
+# The pinned Codex vendor snapshot is a verbatim upstream-derived installer:
+# vendor/README.md requires snapshot + reviewed patch byte equality, so its inline
+# Python changes only through the reviewed vendor update procedure. `target` is
+# generated build scratch, not a maintained-source allowance.
+if ! find images script examples -type f -name '*.sh' \
+    ! -path '*/target/*' ! -path 'images/tools/codex/vendor/install.sh' \
+    -print0 >"$embedded_manifest"; then
+    echo 'FAIL: cannot enumerate shell sources for the embedded-Python gate' >&2
+    exit 1
+fi
+# Portable ERE alternatives, assembled as data and never eval'd: an interpreter
+# reaching its source mode (-c or stdin) through its own option run, a
+# `--entrypoint` interpreter argument, and a Python heredoc label or .py
+# destination. Heredocs are spelled `[<][<]` so this definition cannot match
+# itself.
+#
+# The interpreter name is a whole word, so quoting, command substitution and an
+# option value (`--entrypoint=…`) are in scope. The option run is what keeps the
+# gate honest: between the name and the source-mode token only option-shaped
+# tokens, plus the options that take a separate value (-X dev, -W ignore), may
+# appear. Any other token is an operand and ends the run, so a helper's own -c or
+# stdin dash after `name FILE` is not inline source, and neither is a stray -c
+# further along the same line. -c may carry attached program text (-c'pass',
+# -cpass) and stdin may be fed by a redirect (-<program.py). Kept on purpose as
+# residual gaps of a lexical gate, not a parser: a quoted option token, a
+# combined short option (-Bc), a versioned name (python3.11), a bare `python`,
+# a long option whose separate value is not -X/-W (--check-hash-based-pycs
+# always), and a body assembled across lines all still pass.
+embedded_option_run='([[:space:]]+(-[XW][[:space:]]+[^[:space:];|&]+|-[^[:space:];|&]*))*'
+embedded_source_mode='[[:space:]]+(-c|-($|[[:space:]]|\\|<))'
+embedded_pattern='(^|[^[:alnum:]_.-])(/usr/bin/|/usr/local/bin/)?python3'
+embedded_pattern="$embedded_pattern$embedded_option_run$embedded_source_mode"
+# docker runs the interpreter directly with the image reference as its operand,
+# so the source-mode token sits after one argument here; the `--entrypoint`
+# prefix makes that unambiguous, and a helper-script operand cannot hide behind
+# it because the token has to be the image reference.
+embedded_pattern="$embedded_pattern"'|(^|[[:space:]])--entrypoint(=|[[:space:]]+)(/usr/bin/|/usr/local/bin/)?python3([[:space:]]+[^[:space:];|&]+)?'
+embedded_pattern="$embedded_pattern$embedded_source_mode"
+embedded_pattern="$embedded_pattern"'|[<][<]-?[[:space:]]*['"'"'"]?[Pp][Yy][[:alnum:]_]*['"'"'"]?([[:space:]]|$)'
+embedded_pattern="$embedded_pattern"'|[>][^<]*[.]py[^<]*[<][<]|[<][<][^>]*[>][^;]*[.]py'
+embedded_found=false
+while IFS= read -r -d '' script; do
+    embedded_hits=
+    if embedded_hits=$(grep -nE -e "$embedded_pattern" -- "$script"); then
+        :
+    else
+        status=$?
+        [ "$status" -eq 1 ] ||
+            { echo "FAIL: embedded-Python search failed for $script (grep status $status)" >&2; exit 1; }
+        embedded_hits=
+    fi
+    [ -n "$embedded_hits" ] || continue
+    # A full-line shell comment cannot execute a body; drop those lines only.
+    embedded_code=
+    if embedded_code=$(printf '%s\n' "$embedded_hits" | grep -vE -e '^[0-9]+:[[:space:]]*#'); then
+        :
+    else
+        status=$?
+        [ "$status" -eq 1 ] ||
+            { echo "FAIL: embedded-Python comment filter failed for $script (grep status $status)" >&2; exit 1; }
+        embedded_code=
+    fi
+    [ -n "$embedded_code" ] || continue
+    printf '%s\n' "$embedded_code" | sed -e "s|^|$script:|"
+    embedded_found=true
+done <"$embedded_manifest"
+if [ "$embedded_found" = true ]; then
+    echo 'FAIL: embedded Python candidate in shell source; move Python to a sibling .py and invoke python3 FILE (preserve container/guest delivery). Codex vendor changes require the reviewed vendor update procedure.' >&2
+    exit 1
+fi
 # Syntax follows the script's interpreter; upstream snapshots are provenance.
 while IFS= read -r -d '' script; do
     case "$(head -n 1 "$script")" in
@@ -64,16 +144,7 @@ while IFS= read -r -d '' script; do
     shellcheck --severity=warning "$script"
 done < <(find images script examples -type f \( -name '*.sh' -o -name hello-image \) ! -name '*.upstream.sh' ! -path '*/target/*' -print0)
 bash script/test/example-layers.sh
-python3 - <<'PY'
-import ast
-from pathlib import Path
-for root in ('images', 'script'):
-    for p in Path(root).rglob('*.py'):
-        if 'target' not in p.parts:
-            ast.parse(p.read_text(), filename=str(p))
-assert not list(Path('images/tools').glob('*/contract')), 'tool-local helpers must not reappear'
-assert not list(Path('images/tools').glob('*/Dockerfile')), 'no per-tool products'
-PY
+python3 "$ROOT/script/test/contracts-python.py"
 # The migration ledger is a generated record: regenerate it in memory and fail on
 # any drift. Fast and offline, but it reads the baseline commit object, so CI needs
 # the full history (contracts.yml checks out with fetch-depth: 0).

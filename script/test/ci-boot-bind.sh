@@ -5,23 +5,7 @@ ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 # No YAML dependency: extract the literal run block belonging to id: bind.
-python3 - "$ROOT/.github/workflows/verify-release-boot.yml" "$work/bind.sh" <<'PY'
-import sys
-from pathlib import Path
-lines = Path(sys.argv[1]).read_text().splitlines(keepends=True)
-assert lines.count('        id: bind\n') == 1
-start = lines.index('        id: bind\n') + 1
-while lines[start] != '        run: |\n':
-    assert not lines[start].startswith('      - '), 'bind has no literal run block'
-    start += 1
-body = []
-for line in lines[start + 1:]:
-    if line.strip() and not line.startswith('          '):
-        break
-    body.append(line[10:] if line.strip() else line)
-assert body, 'empty bind block'
-Path(sys.argv[2]).write_text(''.join(body))
-PY
+python3 "$ROOT/script/test/ci-boot-bind-extract.py" "$ROOT/.github/workflows/verify-release-boot.yml" "$work/bind.sh"
 # A real clean checkout satisfies the harness guard without stubbing git.
 git init -q "$work/harness"
 git -C "$work/harness" -c user.name=Test -c user.email=test@example.invalid commit -qm fixture --allow-empty

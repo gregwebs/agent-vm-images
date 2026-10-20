@@ -21,22 +21,6 @@ fail() {
     exit 1
 }
 
-# A descendant that ignores SIGTERM and records its own pid.
-cat >"$ROOT/grandchild.py" <<'PY'
-import os, signal, sys, time
-signal.signal(signal.SIGTERM, signal.SIG_IGN)
-with open(sys.argv[1], "w") as handle:
-    handle.write(str(os.getpid()))
-time.sleep(300)
-PY
-
-# A leader that spawns the ignoring grandchild and then sleeps too.
-cat >"$ROOT/leader.py" <<'PY'
-import subprocess, sys, time
-subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])
-time.sleep(300)
-PY
-
 alive() {
     kill -0 "$1" 2>/dev/null
 }
@@ -45,7 +29,8 @@ alive() {
 
 pidfile="$ROOT/grandchild.pid"
 set +e
-python3 "$WATCHDOG" 1 python3 "$ROOT/leader.py" "$ROOT/grandchild.py" "$pidfile"
+python3 "$WATCHDOG" 1 python3 "$REPO_ROOT/script/test/host-watchdog-leader.py" \
+    "$REPO_ROOT/script/test/host-watchdog-grandchild.py" "$pidfile"
 status=$?
 set -e
 [[ $status -eq 124 ]] || fail "expected timeout exit 124, got $status"
@@ -58,15 +43,8 @@ fi
 
 # --- 2. an inherited SIGTERM is forwarded to the child group -----------------
 
-cat >"$ROOT/sleeper.py" <<'PY'
-import os, sys, time
-with open(sys.argv[1], "w") as handle:
-    handle.write(str(os.getpid()))
-time.sleep(300)
-PY
-
 pidfile="$ROOT/sleeper.pid"
-python3 "$WATCHDOG" 300 python3 "$ROOT/sleeper.py" "$pidfile" &
+python3 "$WATCHDOG" 300 python3 "$REPO_ROOT/script/test/host-watchdog-sleeper.py" "$pidfile" &
 watchdog_pid=$!
 for _ in $(seq 1 200); do
     [ -f "$pidfile" ] && break

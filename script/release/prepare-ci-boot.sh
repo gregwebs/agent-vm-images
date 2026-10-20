@@ -2,6 +2,7 @@
 # Disposable hosted amd64 runner only: reclaim the four named unused SDK paths and
 # grant this job's user /dev/kvm for a real msb boot. Never run on an operator host.
 set -euo pipefail
+ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
 [ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_OS:-}" = Linux ] || { echo 'disposable Linux Actions runner only' >&2; exit 1; }
 # Measured: ubuntu-24.04-arm exposes no /dev/kvm, so arm64 boot evidence stays a native-host step.
 [ "$(uname -m)" = x86_64 ] || { echo 'hosted boot verification is amd64-only: ubuntu-24.04-arm has no /dev/kvm' >&2; exit 1; }
@@ -30,6 +31,6 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 [ -r /dev/kvm ] && [ -w /dev/kvm ] || { echo '/dev/kvm is not readable and writable after the udev grant' >&2; exit 1; }
 # Permission bits are not proof; open the device the way the runtime will.
-python3 -c 'import os; os.close(os.open("/dev/kvm", os.O_RDWR))'
+python3 "$ROOT/script/release/prepare-ci-boot-kvm.py"
 probe > "$logs/kvm-after.log"
 cat "$logs/kvm-after.log" "$logs/capacity-after.log"
