@@ -29,15 +29,16 @@ timed() {
 # The audit step's host watchdog in build-local.yml is the outer bound, so the
 # audit must fail on its own measured wall-clock before it can consume it.
 #
-# PROVISIONAL: 4800s keeps 1.5x headroom under the 6900s watchdog, but no native
-# audit has recorded per-leg durations yet, so this bound is arithmetic, not
-# measurement. The local durations that exist describe a diagnostic stale base,
-# not this leg set. The first green native audit must replace it with the sum in
-# target/ci-logs/durations.txt plus the same 1.5x headroom. Never widen it for
-# convenience: an overrun means splitting the dsh legs into a second audit step
-# (with its own watchdog inside the same job, because images do not survive a job
-# change) and re-checking the 360-minute job total: 20 prerequisites + 20 capacity
-# + 180 build + 120 audit + 10 upload = 350. No gate is ever dropped to fit.
+# PROVISIONAL: 4800s sits 6900 / 4800 = 1.44x under the 6900s watchdog, but no
+# native audit has recorded per-leg durations yet, so this bound is arithmetic,
+# not measurement. The local durations that exist describe a diagnostic stale
+# base, not this leg set. The first green native audit must replace it with the
+# sum in target/ci-logs/durations.txt plus that same 1.44x headroom. Never widen
+# it for convenience: an overrun means splitting the dsh legs into a second audit
+# step (with its own watchdog inside the same job, because images do not survive
+# a job change) and re-checking the 360-minute job total: 20 prerequisites + 20
+# capacity + 180 build + 120 audit + 10 upload = 350. No gate is ever dropped to
+# fit.
 AUDIT_BUDGET_SECONDS=4800
 check_audit_budget() {
     local first_line=$1 measured
@@ -88,6 +89,13 @@ case "$phase" in
             --consumer dsh --cordis-negative --platform "$platform"
         timed pnpm-runtime bash script/test/pnpm-runtime.sh agent-vm-base:local agent-vm-standard:local --platform "$platform"
         timed standard-uid-t5 bash script/test/standard-image.sh agent-vm-base:local agent-vm-standard:local --platform "$platform"
+        # Artifact mode is the only path that runs the three rendered guest helper
+        # sources: the renderer's byte roundtrip proves the guest is sent them, not
+        # that they execute, so this leg keeps the rendered probe covered on both
+        # native architectures. One more bounded step (~85 s on a native
+        # linux/arm64 daemon) inside the same provisional audit sum, so the bound
+        # above stands unchanged.
+        timed artifact bash script/test/standard-image.sh --artifact agent-vm-standard:local --platform "$platform"
         timed opencode-runtime bash script/test/opencode-runtime.sh agent-vm-base:local agent-vm-standard:local
         timed pi-runtime bash script/test/pi-runtime.sh agent-vm-base:local agent-vm-standard:local
         timed pi-audit-status bash script/test/standard-image.sh --pi-audit-status agent-vm-base:local --platform "$platform"

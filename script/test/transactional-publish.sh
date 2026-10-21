@@ -59,10 +59,7 @@ for count in 1 3; do
                     [[ ! -e "$CASE/d$i" ]] || fail 'absent destination was not removed'
                 elif [[ "$kind" != rollback || "$i" != "$position" ]]; then
                     cmp "$CASE/d$i" "$CASE/orig$i" || fail "$kind destination $i not restored"
-                    python3 - "$CASE/d$i" "$CASE/orig$i" <<'PYMODE'
-import os, stat, sys
-assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode) == stat.S_IMODE(os.stat(sys.argv[2]).st_mode)
-PYMODE
+                    python3 "$ROOT/script/test/transactional-publish-check-mode.py" "$CASE/d$i" "$CASE/orig$i"
                 fi
             done
             if [[ "$kind" == backup ]]; then

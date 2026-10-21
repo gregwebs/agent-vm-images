@@ -30,35 +30,14 @@ require_installed() {
 check_path_identity() {
     # The dsh target is the installed lib entrypoint the image links directly;
     # a generated .bin wrapper or a same-version copy is a different file.
-    python3 - \
+    # The helper is a sibling: host certification runs this script in place, and
+    # the final RUN binds the .py beside it in /tmp.
+    python3 "$(dirname "$0")/verify-standard-path-identity.py" \
         "${AGENT_VM_DSH_PREFIX:-/opt/agent-vm/dsh}/node_modules/@deepseek-ai/dsh/lib/bin.js" \
         "${AGENT_VM_CODEX_PREFIX:-/opt/agent}/.local/bin/codex" \
         "${AGENT_VM_OPENCODE_PREFIX:-/opt/agent}/.opencode/bin/opencode" \
         "${AGENT_VM_CLAUDE_PREFIX:-/opt/agent}/.local/bin/claude" \
-        "${AGENT_VM_PI_WRAPPER:-/usr/local/bin/pi}" <<'PY'
-import os
-import stat
-import sys
-
-for name, verified in zip(("dsh", "codex", "opencode", "claude", "pi"), sys.argv[1:]):
-    candidate = next(
-        (os.path.join(directory, name)
-         for directory in os.environ.get("PATH", "").split(os.pathsep)
-         if os.path.lexists(os.path.join(directory, name))),
-        None,
-    )
-    try:
-        if candidate is None:
-            raise ValueError("missing command")
-        if not stat.S_ISREG(os.stat(candidate).st_mode) or not os.access(candidate, os.X_OK):
-            raise ValueError("not a usable executable regular file")
-        if not os.path.samefile(candidate, verified):
-            raise ValueError("PATH selects a different file than the exact-version verifier")
-    except (OSError, ValueError) as error:
-        print(f"verify-standard.sh: {name}: PATH candidate {candidate!r}, verified {verified!r}: {error}", file=sys.stderr)
-        sys.exit(1)
-    print(f"  {name}: PATH {candidate} -> verified {os.path.realpath(verified)}")
-PY
+        "${AGENT_VM_PI_WRAPPER:-/usr/local/bin/pi}"
 }
 
 require_installed

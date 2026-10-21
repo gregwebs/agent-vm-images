@@ -522,24 +522,7 @@ for arch in x86_64 aarch64; do
     # these must now be a HARD metadata failure before any value is used.
     for variant in missing-comma trailing-garbage duplicate-tag duplicate-digest; do
         make_codex_case "codex-$arch-meta-$variant" "$arch" "$V" 0 0 0
-        python3 - "$CASE/assets/meta.json" "$variant" <<'PY'
-import json
-import sys
-
-path, variant = sys.argv[1], sys.argv[2]
-text = open(path).read()
-if variant == "missing-comma":
-    text = text.replace(',"assets"', ' "assets"', 1)
-elif variant == "trailing-garbage":
-    text = text + "this is not JSON\n"
-elif variant == "duplicate-tag":
-    text = text.replace('"assets":', '"tag_name":"rust-v9.9.9","assets":', 1)
-elif variant == "duplicate-digest":
-    document = json.loads(text)
-    document["assets"].append({"name": document["assets"][0]["name"], "digest": "sha256:" + "0" * 64})
-    text = json.dumps(document) + "\n"
-open(path, "w").write(text)
-PY
+        python3 "$REPO_ROOT/script/test/vendored-installers-mutate-metadata.py" "$CASE/assets/meta.json" "$variant"
         SOFT=1
         run_codex "rust-v$V" "$CODEX_VENDOR"
         expect_hard "codex $arch metadata $variant"
