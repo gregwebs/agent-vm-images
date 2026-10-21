@@ -44,9 +44,9 @@ RUN apt-get update \
 # instead of shipping a different tool. gopls has no tarball to digest;
 # install-gopls.sh pins its module version and the go command verifies it
 # against the checksum database. Bump a version and its digests together.
-ARG GO_VERSION=1.27.1
-ARG GO_AMD64_SHA256=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
-ARG GO_ARM64_SHA256=3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec
+ARG GO_VERSION=1.27.3
+ARG GO_AMD64_SHA256=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
+ARG GO_ARM64_SHA256=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
 ARG GOLANGCI_LINT_VERSION=2.13.2
 ARG GOLANGCI_LINT_AMD64_SHA256=2277d43b98ec0054280f2ac26b53268bae97682444678a59a657dd565da021d6
 ARG GOLANGCI_LINT_ARM64_SHA256=a2a4e0065aa41be71f7c5ac90f271b61751331e5d04314e62afe4027855f0893

@@ -134,7 +134,7 @@ which `script/test/contracts.sh` runs.
 `go-dev` is the layer that lets an in-VM agent iterate on a Go code base. It
 installs, under the world-readable `/opt`:
 
-- the **pinned Go toolchain** from go.dev (`1.27.1` at the time of writing),
+- the **pinned Go toolchain** from go.dev (`1.27.3` at the time of writing),
   verified against its per-architecture SHA-256 — `go`, `gofmt`, `go vet`,
   `go test`, and the rest of the standard distribution;
 - **`build-essential`**, so cgo and `go test -race` work: with no C compiler
