@@ -27,7 +27,7 @@ Node 22, base-owned pnpm, fetch/diagnostic facilities, explicit optional trust a
 | copilot | AGENT_VERSION_COPILOT | 1.0.90 / SEMVER |
 | dsh | AGENT_VERSION_DSH | manifest 0.1.5-rc.2 / SEMVER |
 | pnpm (inherited base) | AGENT_VERSION_PNPM (compatibility only) | base pin.json 11.11.0 / SEMVER |
-| pi | AGENT_VERSION_PI | manifest 0.87.1 / SEMVER |
+| pi | AGENT_VERSION_PI | manifest 1.3.0 / SEMVER |
 | opencode-claude | AGENT_VERSION_OPENCODE_CLAUDE | plugin manifest 1.4.1 / SEMVER |
 | pi-claude-bridge | AGENT_VERSION_PI_CLAUDE_BRIDGE | bridge manifest 0.8.0 / SEMVER |
 
@@ -147,8 +147,14 @@ any further exception requires a maintainer decision. See the
 
 ### Pi integrity
 
-Pi's published shrinkwrap omits hashes for exactly five direct siblings:
-`chord`, `pi-agent-core`, `pi-ai`, `pi-telemetry`, `pi-tui`. Reviewed lock entries
+Pi 1.0.4+ publishes no `npm-shrinkwrap.json`, so the committed, fully hashed
+lock governs `npm ci` and npm authenticates every tarball it installs. The
+committed lock has no nested shrinkwrap-only entries; the build reports that
+explicitly instead of claiming five verified siblings.
+
+A shrinkwrapped selection (Pi 1.0.3 and older) behaves differently: its
+published shrinkwrap omits hashes for exactly five direct siblings (`chord`,
+`pi-agent-core`, `pi-ai`, `pi-telemetry`, `pi-tui`). Reviewed lock entries
 refill their registry `dist.integrity`. npm ignores our lock for that subtree,
 so installation re-fetches each sibling tarball, compares its sha512 to the
 committed integrity and compares extraction against the full installed tree.
@@ -161,7 +167,8 @@ other path inside those five sibling trees must match reviewed archive bytes:
 extra, changed, missing files/directories/symlinks fail hard. A package beside
 one of those five is outside those compared trees; this is not an exhaustive
 independent authentication of the entire npm install. All other non-root lock
-entries must carry integrity, and sibling pin/layout changes require review.
+entries must carry integrity, the nested sibling set must be empty or exactly
+those five at the pin, and sibling pin/layout changes require review.
 
 ### Pi wrapper and bridge
 

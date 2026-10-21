@@ -241,8 +241,16 @@ assert_contains "$RUN_OUTPUT" "differs from its verified tarball"
 new_case selector-count
 write_lock 4
 run_installer
-[[ $RUN_STATUS -ne 0 ]] || fail "a selector matching fewer than five must fail"
-assert_contains "$RUN_OUTPUT" "expected 5"
+[[ $RUN_STATUS -ne 0 ]] || fail "a selector matching a count other than 0 or 5 must fail"
+assert_contains "$RUN_OUTPUT" "expected 0 or 5"
+
+# Pi 1.0.4+ ships no npm-shrinkwrap.json: its lock governs `npm ci` and carries
+# a hash for every entry, so zero sibling entries is a passing install.
+new_case no-shrinkwrap
+write_lock 0
+run_installer
+[[ $RUN_STATUS -eq 0 ]] || fail "a lock with no shrinkwrap siblings must succeed: $RUN_OUTPUT"
+assert_contains "$RUN_OUTPUT" "npm ci authenticated every tarball"
 
 # --- a null/empty integrity in the lock is refused before any fetch ----------
 

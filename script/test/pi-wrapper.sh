@@ -322,7 +322,7 @@ grep -Fq "MANDATORY_EXTENSION=$MANDATORY_EXTENSION" "$WRAPPER" \
     || fail "production mandatory-extension path is missing"
 grep -Fq 'AGENT_VM_PI_BRIDGE_EXTENSION:-/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts}"' "$WRAPPER" \
     || fail "production bridge-extension path is missing"
-grep -Fq 'PI_SUBCOMMANDS="auth config install list remove uninstall update"' "$WRAPPER" \
+grep -Fq 'PI_SUBCOMMANDS="auth config install list mcp remove uninstall update"' "$WRAPPER" \
     || fail "the subcommand allowlist literal changed (the image build checks drift against pi --help)"
 # The wrapper must not reintroduce a trust or telemetry default. Match the code
 # (not the prose above it, which deliberately names the flags it forwards).

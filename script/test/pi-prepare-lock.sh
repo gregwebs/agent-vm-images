@@ -219,6 +219,26 @@ for name in "${SIBLINGS[@]}"; do
 done
 assert_contains "$RUN_OUTPUT" "refilled @earendil-works/pi-ai@0.86.2"
 
+# Pi 1.0.4+ publishes no npm-shrinkwrap.json: the regenerated lock has no
+# nested siblings and every entry already carries integrity, so this path must
+# accept the lock without a single registry view.
+pi_case no-shrinkwrap
+jq '.dependencies["@earendil-works/pi-coding-agent"] = "0.86.2"' "$CASE/pi/package.json" \
+    >"$CASE/result/package.json"
+jq --arg v 0.86.2 --arg n node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/ '
+    .packages[""].dependencies["@earendil-works/pi-coding-agent"] = $v
+    | .packages["node_modules/@earendil-works/pi-coding-agent"].version = $v
+    | .packages |= with_entries(select(.key | startswith($n) | not))' \
+    "$CASE/pi/package-lock.json" >"$CASE/result/package-lock.json"
+STUB_RESULT="$CASE/result"
+run_prepare "$PI_PREPARE" "$CASE/pi" 0.86.2
+assert_success
+npm_called
+view_not_called
+assert_contains "$RUN_OUTPUT" "wrote the prepared pi lock"
+[[ "$(jq -r '.dependencies["@earendil-works/pi-coding-agent"]' "$CASE/pi/package.json")" == "0.86.2" ]] \
+    || fail "the pi pin was not updated"
+
 # --- pi: refusals -----------------------------------------------------------
 
 pi_case nonsibling
