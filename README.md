@@ -102,6 +102,8 @@ corporate CA into a public image. Secret contents are not cache keys; the hash
 invalidates the trust RUN when they change. Builder/pull TLS trust is separate
 from RUN-layer trust: this secret cannot fix daemon registry TLS errors. There
 is no CA auto-detection, host-network mode or softened download failure.
+Persisted shim certificates survive distro CA updates; see the
+[root-store advisory response](docs/ca-trust-response.md).
 
 ## Examples
 
@@ -123,6 +125,7 @@ for agent commands: `bash -lc` can reset the image PATH through `/etc/profile`.
 - [dsh graph-freeze decision](docs/adr/0003-dsh-graph-freeze.md)
 - [Standard pnpm migration evidence](docs/standard-pnpm-migration.md)
 - [Contributing and verification](CONTRIBUTING.md)
+- [Root-store advisory response](docs/ca-trust-response.md)
 - [Standard image releases](docs/standard-image-releases.md)
 - [Installer security, locks and runtime payloads](images/tools/README.md)
 - [Layout, migration manifest and staged ownership](docs/image-source-ownership.md)
