@@ -44,7 +44,7 @@ MANDATORY_EXTENSION=/opt/agent-vm/pi-extensions/guest-credential-warning.js
 # the option. So a subcommand invocation is forwarded verbatim. The image build
 # asserts this list equals `pi --help`'s Commands block, so a pin bump that adds
 # a subcommand fails the build instead of silently mis-dispatching.
-PI_SUBCOMMANDS="auth config install list remove uninstall update"
+PI_SUBCOMMANDS="auth config install list mcp remove uninstall update"
 
 if [ "$#" -gt 0 ]; then
     for subcommand in ${PI_SUBCOMMANDS}; do

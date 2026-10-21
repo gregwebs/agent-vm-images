@@ -1,7 +1,10 @@
 #!/bin/sh
 # Installs the pinned Pi into /opt/agent-vm/pi from the committed (or prepared)
-# lockfile, then verifies the five tarballs npm does NOT integrity-check (see
-# images/tools/pi/package-lock.json and images/tools/README.md).
+# lockfile, then, for a shrinkwrapped selection, verifies the five tarballs npm
+# does NOT integrity-check (see images/tools/pi/package-lock.json and
+# images/tools/README.md). Pi 1.0.4+ publishes no npm-shrinkwrap.json: its lock
+# fully governs `npm ci`, every entry carries a hash, and the verification loop
+# below legitimately finds nothing.
 #
 # Runs inside the recipe-contract envelope (run-install.sh), so
 # AGENT_VM_TRANSPORT_RECEIPT names a fresh private receipt. `npm ci` and the
@@ -80,19 +83,26 @@ if [ "$rc" -ne 0 ]; then
     exit 1
 fi
 
-# The five @earendil-works siblings whose `integrity` Pi's published
-# npm-shrinkwrap.json omits. npm ignores the committed lock's `integrity` for
-# pi's ENTIRE nested subtree -- it installs that subtree from the shrinkwrap,
-# not from our lock -- so these five are the ones npm fetches without checking
-# any hash of its own; this script is the only thing between that fetch and the
-# shipped bytes. Read name/resolved/integrity out of the committed lock so there
-# is exactly one home for the pin.
+# The five @earendil-works siblings whose `integrity` a shrinkwrapped Pi's
+# published npm-shrinkwrap.json omits (Pi <=1.0.3). npm ignores the committed
+# lock's `integrity` for pi's ENTIRE nested subtree in that layout -- it
+# installs that subtree from the shrinkwrap, not from our lock -- so these five
+# are the ones npm fetches without checking any hash of its own; this script is
+# the only thing between that fetch and the shipped bytes. Read
+# name/resolved/integrity out of the committed lock so there is exactly one
+# home for the pin.
+#
+# Pi 1.0.4+ ships no shrinkwrap, so the selector matches nothing and this loop
+# is a no-op: `npm ci` then authenticates every tarball from the committed lock,
+# and the final check accepts zero verified siblings. Only the empty and the
+# reviewed five-entry layouts are legal; anything else is a moved dependency
+# layout that needs review.
 #
 # The selector is anchored to pi-coding-agent's OWN node_modules so it matches
 # only the shrinkwrap-only siblings. A looser substring match would also catch
 # pi-ai's own nested deps (agent-base, https-proxy-agent), which DO carry
 # integrity -- see `image_sources`'
-# `the_build_verified_sibling_set_is_exactly_the_five_nested_earendil_packages`.
+# `the_build_verified_sibling_set_is_empty_or_exactly_the_five_nested_earendil_packages`.
 verified=0
 jq -r '.packages | to_entries[]
        | select(.key | test("^node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/[^/]+$"))
@@ -181,13 +191,17 @@ while IFS="$(printf '\t')" read -r key name resolved integrity; do
     verified=$((verified + 1))
 done < "${siblings}"
 
-# A selector that matches nothing must not read as success: if a future pin
-# changes the nested layout, this is what says so.
-if [ "${verified}" -ne 5 ]; then
-    echo "==> pi: verified ${verified} unhashed siblings, expected 5 -- the lock's nested layout moved" >&2
+# A selector that matches a count other than zero or the reviewed five must not
+# read as success: if a future pin changes the nested layout, this says so.
+if [ "${verified}" -ne 0 ] && [ "${verified}" -ne 5 ]; then
+    echo "==> pi: verified ${verified} unhashed siblings, expected 0 or 5 -- the lock's nested layout moved" >&2
     exit 1
 fi
-echo "==> pi: ${verified}/5 shrinkwrap-only tarballs verified against the committed integrity"
+if [ "${verified}" -eq 0 ]; then
+    echo "==> pi: no shrinkwrap-only siblings; npm ci authenticated every tarball from the committed lock"
+else
+    echo "==> pi: ${verified}/5 shrinkwrap-only tarballs verified against the committed integrity"
+fi
 
 rm -rf "${work}" "${HOME:-/root}/.npm"
 chmod -R a+rX "${PREFIX}"

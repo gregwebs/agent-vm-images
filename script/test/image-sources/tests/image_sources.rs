@@ -51,10 +51,12 @@ struct PinSpec<'a> {
     package_key: &'a str,
 }
 
-/// Every non-root entry in a committed lock carries `integrity`. A freshly
-/// generated pi lock does NOT: npm inherits Pi's published `npm-shrinkwrap.json`
-/// which omits the hashes for its five `@earendil-works` siblings, so those are
-/// refilled by hand. This is what catches a regenerated lock that dropped them.
+/// Every non-root entry in a committed lock carries `integrity`. For a
+/// shrinkwrapped Pi (<=1.0.3) a freshly generated lock does NOT: npm inherits
+/// Pi's published `npm-shrinkwrap.json`, which omits the hashes for its five
+/// `@earendil-works` siblings, so those are refilled by hand. Pi 1.0.4+ ships no
+/// shrinkwrap, so every entry arrives hashed. This catches a regenerated lock
+/// that dropped them.
 fn check_lock_integrity(lock: &Value) -> Result<(), String> {
     let packages = lock["packages"]
         .as_object()
@@ -105,10 +107,15 @@ fn check_pin_agrees(lock: &Value, spec: PinSpec) -> Result<(), String> {
     Ok(())
 }
 
-/// `install-pi.sh` verifies exactly the five `@earendil-works` siblings nested
-/// directly under pi-coding-agent's own `node_modules`, at the pi pin. The
-/// selector is deliberately direct-children-only: pi-ai carries deeper nested
-/// deps that DO carry npm-checked integrity, so a looser match over-matches.
+/// `install-pi.sh` verifies the `@earendil-works` siblings nested directly under
+/// pi-coding-agent's own `node_modules`, at the pi pin. That layout belongs to a
+/// shrinkwrapped Pi (<=1.0.3); Pi 1.0.4+ publishes no `npm-shrinkwrap.json`, so
+/// the committed lock is authoritative, every entry carries a hash, and the
+/// nested set is legitimately empty. Only those two layouts are legal: a
+/// different nonempty set means Pi's dependency layout moved and needs review.
+/// The selector is deliberately direct-children-only: pi-ai carries deeper
+/// nested deps that DO carry npm-checked integrity, so a looser match
+/// over-matches.
 fn check_pi_siblings(lock: &Value) -> Result<(), String> {
     const SIBLINGS: [&str; 5] = ["chord", "pi-agent-core", "pi-ai", "pi-telemetry", "pi-tui"];
     const PREFIX: &str =
@@ -131,6 +138,9 @@ fn check_pi_siblings(lock: &Value) -> Result<(), String> {
         ));
     }
     matched.sort();
+    if matched.is_empty() {
+        return Ok(());
+    }
     let mut expected: Vec<(String, String)> = SIBLINGS
         .iter()
         .map(|name| (name.to_string(), pinned.clone()))
@@ -140,7 +150,7 @@ fn check_pi_siblings(lock: &Value) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "the nested sibling set drifted: matched {matched:?}, expected {expected:?}"
+            "the nested sibling set drifted: matched {matched:?}, expected [] or {expected:?}"
         ))
     }
 }
@@ -170,16 +180,17 @@ fn every_locked_package_carries_integrity() {
     );
     check_lock_integrity(&lock).unwrap_or_else(|problem| {
         panic!(
-            "{problem}\nA freshly generated lock omits integrity for pi's five @earendil-works \
-             siblings. Refill them from the registry (see images/tools/README.md)."
+            "{problem}\nA freshly generated lock for a shrinkwrapped Pi omits integrity for its five \
+             @earendil-works siblings. Refill them from the registry (see images/tools/README.md)."
         )
     });
 }
 
 #[test]
-fn the_build_verified_sibling_set_is_exactly_the_five_nested_earendil_packages() {
+fn the_build_verified_sibling_set_is_empty_or_exactly_the_five_nested_earendil_packages() {
     let lock = read_json("images/tools/pi/package-lock.json");
-    check_pi_siblings(&lock).expect("the build-verified sibling set is exactly the five packages");
+    check_pi_siblings(&lock)
+        .expect("the build-verified sibling set is empty or exactly the five packages");
 }
 
 // ---------------------------------------------------------------------------
@@ -1457,18 +1468,46 @@ fn image_source_guards_reject_mutations() {
         "a lock entry without integrity must fail the gate"
     );
 
-    // A pi sibling at the wrong version must fail the sibling-set gate.
-    let mut sibling_lock = read_json("images/tools/pi/package-lock.json");
-    if let Some(packages) = sibling_lock["packages"].as_object_mut() {
-        let key =
-            "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui";
-        if let Some(entry) = packages.get_mut(key).and_then(Value::as_object_mut) {
-            entry.insert("version".to_string(), Value::String("0.0.0".to_string()));
+    // A pi lock whose nested sibling layout is neither empty nor the reviewed
+    // shrinkwrap set must fail the sibling-set gate, and so must a reviewed
+    // sibling at the wrong version. Build the fixtures rather than mutating the
+    // committed lock: Pi 1.0.4+ legitimately has no nested siblings at all.
+    const SIBLING_PREFIX: &str =
+        "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/";
+    let nested_lock = |versions: &[(&str, &str)]| {
+        let mut packages = serde_json::Map::new();
+        for (name, version) in versions {
+            packages.insert(
+                format!("{SIBLING_PREFIX}{name}"),
+                serde_json::json!({ "version": version }),
+            );
         }
-    }
+        serde_json::json!({ "packages": Value::Object(packages) })
+    };
+    let pin = pi_pin();
+    let full: Vec<(&str, &str)> = ["chord", "pi-agent-core", "pi-ai", "pi-telemetry", "pi-tui"]
+        .iter()
+        .map(|name| (*name, pin.as_str()))
+        .collect();
+    // The empty layout (Pi 1.0.4+) and the complete reviewed shrinkwrap layout
+    // both pass; a wrong version or a different nonempty set does not.
     assert!(
-        check_pi_siblings(&sibling_lock).is_err(),
-        "a sibling at the wrong version must fail the gate"
+        check_pi_siblings(&nested_lock(&[])).is_ok(),
+        "an empty nested sibling set is the Pi 1.0.4+ layout and must pass"
+    );
+    assert!(
+        check_pi_siblings(&nested_lock(&full)).is_ok(),
+        "the complete reviewed shrinkwrap layout must pass"
+    );
+    let mut wrong_version = full.clone();
+    wrong_version[4].1 = "0.0.0";
+    assert!(
+        check_pi_siblings(&nested_lock(&wrong_version)).is_err(),
+        "a nested sibling at the wrong version must fail the gate"
+    );
+    assert!(
+        check_pi_siblings(&nested_lock(&full[..4])).is_err(),
+        "a different nonempty nested sibling set must fail the gate"
     );
 
     // An aliased package inserted into the bridge lock must fail the gate.

@@ -1,10 +1,10 @@
 # Pi runtime payloads
 
 The [standard Dockerfile](../../standard/Dockerfile) installs the reviewed
-manifest/lock (`0.87.1`) and the separate bridge project (`0.8.0`), then copies
+manifest/lock (`1.3.0`) and the separate bridge project (`0.8.0`), then copies
 the wrapper, mandatory warning and Codex extensions, and seed hook. The
-[installer documentation](../README.md#pi-integrity) explains the five sibling
-hashes, tarball/tree comparison, exact override semantics and bridge flags.
+[installer documentation](../README.md#pi-integrity) explains the hashed-lock
+contract, the shrinkwrap-era sibling checks and bridge flags.
 
 `pi.sh` stays separate from the installation so image authors can add extensions
 under `/opt/agent-vm/pi-extensions` without replacing the required warning. It
@@ -25,7 +25,8 @@ session evidence.
 Upgrade with `bash images/tools/pi/upgrade-pi.sh VERSION` and
 `bash images/tools/pi/bridge/upgrade-bridge.sh VERSION`;
 see [CONTRIBUTING](../../../CONTRIBUTING.md#selection-ownership-and-maintenance).
-Review all integrity entries, exact five direct sibling versions and the bridge
-loader-alias exclusions. Do not regenerate locks during migration. Historical
+Review all integrity entries, the nested sibling layout (empty for Pi 1.0.4+,
+otherwise exactly the reviewed five at the pin) and the bridge loader-alias
+exclusions. Do not regenerate locks during migration. Historical
 extension compatibility rationale is in the pinned upstream
 [bridge ADR](https://github.com/gregwebs/agent-vm/blob/3ec78eebb7bdf743c93942a6ed2e5510de15c52d/docs/adr/0023-image-owned-pi-extension-packages.md).

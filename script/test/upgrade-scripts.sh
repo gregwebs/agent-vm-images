@@ -323,7 +323,7 @@ assert_files_unchanged pi
 new_case pi-bump
 registry_add_version @earendil-works/pi-coding-agent "$PI_BUMP"
 STUB_SEED_LOCK="$CASE/expected/pi/package-lock.json"
-STUB_INSTALL_JQ="$(printf '.packages[""].dependencies["@earendil-works/pi-coding-agent"] = "%s" | .packages["node_modules/@earendil-works/pi-coding-agent"].version = "%s" | reduce (["chord","pi-agent-core","pi-ai","pi-telemetry","pi-tui"][]) as $n (.; .packages["node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/" + $n].version = "%s")' "$PI_BUMP" "$PI_BUMP" "$PI_BUMP")"
+STUB_INSTALL_JQ="$(printf '.packages[""].dependencies["@earendil-works/pi-coding-agent"] = "%s" | .packages["node_modules/@earendil-works/pi-coding-agent"].version = "%s" | reduce (["chord","pi-agent-core","pi-ai","pi-telemetry","pi-tui"][]) as $n (.; .packages["node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/" + $n].version = "%s" | .packages["node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/" + $n].integrity = "sha512-FIXTURE")' "$PI_BUMP" "$PI_BUMP" "$PI_BUMP")"
 run_upgrade "$CASE/images/tools/pi/upgrade-pi.sh" "$PI_BUMP"
 assert_status_ok
 assert_contains "$RUN_OUTPUT" "pinning @earendil-works/pi-coding-agent: $PI_PIN -> $PI_BUMP"
@@ -339,7 +339,7 @@ assert_label "$CASE/images/standard/Dockerfile" "org.agent-vm.version.pi-claude-
 new_case pi-publish-failure
 registry_add_version @earendil-works/pi-coding-agent "$PI_BUMP"
 STUB_SEED_LOCK="$CASE/expected/pi/package-lock.json"
-PI_BUMP_JQ="$(printf '.packages[""].dependencies["@earendil-works/pi-coding-agent"] = "%s" | .packages["node_modules/@earendil-works/pi-coding-agent"].version = "%s" | reduce (["chord","pi-agent-core","pi-ai","pi-telemetry","pi-tui"][]) as $n (.; .packages["node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/" + $n].version = "%s")' "$PI_BUMP" "$PI_BUMP" "$PI_BUMP")"
+PI_BUMP_JQ="$(printf '.packages[""].dependencies["@earendil-works/pi-coding-agent"] = "%s" | .packages["node_modules/@earendil-works/pi-coding-agent"].version = "%s" | reduce (["chord","pi-agent-core","pi-ai","pi-telemetry","pi-tui"][]) as $n (.; .packages["node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/" + $n].version = "%s" | .packages["node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/" + $n].integrity = "sha512-FIXTURE")' "$PI_BUMP" "$PI_BUMP" "$PI_BUMP")"
 STUB_INSTALL_JQ="$PI_BUMP_JQ"
 STUB_CP_FAIL_DEST="$CASE/images/standard/Dockerfile"
 run_upgrade "$CASE/images/tools/pi/upgrade-pi.sh" "$PI_BUMP"

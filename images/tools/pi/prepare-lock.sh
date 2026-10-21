@@ -10,10 +10,12 @@
 # the committed manifest and lock byte-identical and making NO registry request.
 #
 # When the slot changes the Pi project is REGENERATED from its exact manifest
-# (not incrementally: Pi's published npm-shrinkwrap.json moves the nested
-# @earendil-works tree wholesale), then the five sibling hashes npm omits are
-# refilled from the registry with exact-only queries, and the pin/integrity/
-# sibling invariants are validated before the committed files are replaced.
+# (not incrementally: a shrinkwrapped Pi moves the nested @earendil-works tree
+# wholesale). Pi 1.0.4+ publishes no npm-shrinkwrap.json, so those selections
+# produce an ordinary all-hashed lock. A shrinkwrapped selection (Pi <=1.0.3)
+# still omits the five sibling hashes; those are refilled from the registry with
+# exact-only queries, and the pin/integrity/sibling invariants are validated
+# before the committed files are replaced.
 #
 # `--refresh-lock` is accepted for interface parity with the dsh recipe and the
 # calling bump tool; Pi regeneration is already a fresh resolve, so it changes
@@ -112,18 +114,21 @@ committed=$(jq -r --arg p "$PACKAGE" '.dependencies[$p]' "$manifest")
 effective=${PI_VERSION:-$committed}
 
 # The same invariants install-pi.sh, upgrade-pi.sh and the `image_sources` cargo
-# guards enforce: the pin is the only home, every entry carries integrity, the
-# nested selector matches exactly the five known siblings, and they are all at
-# the pin.
+# guards enforce: the pin is the only home, every entry carries integrity, and
+# the shrinkwrap-era nested selector is EITHER empty (Pi 1.0.4+ ships no
+# shrinkwrap, so npm ci authenticates every tarball from this lock) OR exactly
+# the five reviewed siblings at the pin. A different nonempty set means Pi's
+# dependency layout moved and needs review.
 validate_lock() {
     jq -e --arg p "$PACKAGE" --arg v "$effective" --arg n "$NESTED" --arg s "$SIBLINGS" '
         .packages as $pk
+        | ([$pk | keys[] | select(startswith($n + "/")) | ltrimstr($n + "/") | select(contains("/") | not)]
+           | sort) as $nested
         | ($pk[""].dependencies[$p] == $v)
         and ($pk["node_modules/" + $p].version == $v)
         and ([$pk | to_entries[] | select(.key != "" and (.value.integrity | not))] | length == 0)
-        and ([$pk | keys[] | select(startswith($n + "/")) | ltrimstr($n + "/") | select(contains("/") | not)]
-             | sort == ($s | split(" ") | sort))
-        and ([$s | split(" ")[] | $pk[$n + "/" + .].version] | all(. == $v))
+        and (($nested | length) == 0 or $nested == ($s | split(" ") | sort))
+        and ([$nested[] as $name | $pk[$n + "/" + $name].version] | all(. == $v))
     ' "$1" >/dev/null
 }
 
@@ -146,8 +151,9 @@ echo "prepare-lock.sh: pi ${committed} -> ${effective}"
 (cd "$work" && npm install --ignore-scripts --package-lock-only --no-audit --no-fund --loglevel=error)
 
 # Refill every entry npm left without `integrity`. The only legitimate ones are
-# the five shrinkwrap-only siblings nested directly under pi-coding-agent;
-# anything else is a layout change install-pi.sh does not verify, so refuse it.
+# the five shrinkwrap-only siblings nested directly under pi-coding-agent (Pi
+# <=1.0.3); anything else is a layout change install-pi.sh does not verify, so
+# refuse it. A Pi that publishes no shrinkwrap (1.0.4+) leaves none.
 missing=$(jq -r '.packages | to_entries[] | select(.key != "" and (.value.integrity | not)) | .key' \
     "$work/package-lock.json")
 for key in $missing; do
