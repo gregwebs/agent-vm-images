@@ -1,0 +1,1196 @@
+[
+ {
+  "source": "",
+  "format": "json",
+  "outcome": "reject",
+  "match": "invalid\\ JSON:\\ unexpected\\ end\\ of\\ input\\ at\\ byte\\ 1"
+ },
+ {
+  "source": "\"<>&\"",
+  "format": "json",
+  "outcome": "accept",
+  "json": "\"<>&\""
+ },
+ {
+  "source": "[]",
+  "format": "json",
+  "outcome": "accept",
+  "json": "[]"
+ },
+ {
+  "source": "null",
+  "format": "json",
+  "outcome": "accept",
+  "json": "null"
+ },
+ {
+  "source": "{\n  \"a\": 1,\n  \"b\": [2, 3]\n}\n",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":1,\"b\":[2,3]}"
+ },
+ {
+  "source": "{\"\\ud800\":1,\"\\ud801\":2}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"\\ud800\":1,\"\\ud801\":2}"
+ },
+ {
+  "source": "{\"a\":\"\u0001\"}",
+  "format": "json",
+  "outcome": "reject",
+  "match": "invalid\\ JSON:\\ control\\ character\\ in\\ string\\ at\\ byte\\ 7"
+ },
+ {
+  "source": "{\"a\":\"\\/\"}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":\"/\"}"
+ },
+ {
+  "source": "{\"a\":\"\\u001f\"}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":\"\\u001f\"}"
+ },
+ {
+  "source": "{\"a\":\"\\ud800\"}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":\"\\ud800\"}"
+ },
+ {
+  "source": "{\"a\":\"\\ud800\\ud800\"}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":\"\\ud800\\ud800\"}"
+ },
+ {
+  "source": "{\"a\":\"\\ud801\"}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":\"\\ud801\"}"
+ },
+ {
+  "source": "{\"a\":\"\\ud83d\\ude00\"}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":\"😀\"}"
+ },
+ {
+  "source": "{\"a\":\"\\udc00\"}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":\"\\udc00\"}"
+ },
+ {
+  "source": "{\"a\":\"\\udc00\\udc00\"}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":\"\\udc00\\udc00\"}"
+ },
+ {
+  "source": "{\"a\":\"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\"}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":\"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\"}"
+ },
+ {
+  "source": "{\"a\":\" \"}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":\" \"}"
+ },
+ {
+  "source": "{\"a\":\"�\"}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":\"�\"}"
+ },
+ {
+  "source": "{\"a\":-0}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":0}"
+ },
+ {
+  "source": "{\"a\":01}",
+  "format": "json",
+  "outcome": "reject",
+  "match": "invalid\\ JSON:\\ expected\\ ','\\ or\\ '\\}'\\ at\\ byte\\ 7"
+ },
+ {
+  "source": "{\"a\":1,\"a\":2}",
+  "format": "json",
+  "outcome": "reject",
+  "match": "Map\\ keys\\ must\\ be\\ unique:\\ \"a\"\\ at\\ line\\ 1,\\ column\\ 8"
+ },
+ {
+  "source": "{\"a\":1,\"b\":[\"x\",{\"c\":true}]}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":1,\"b\":[\"x\",{\"c\":true}]}"
+ },
+ {
+  "source": "{\"a\":1,}",
+  "format": "json",
+  "outcome": "reject",
+  "match": "invalid\\ JSON:\\ expected\\ object\\ key\\ at\\ byte\\ 8"
+ },
+ {
+  "source": "{\"a\":1.5e3}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":1500}"
+ },
+ {
+  "source": "{\"a\":12345678901234567890}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":12345678901234567000}"
+ },
+ {
+  "source": "{\"a\":1e400}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":null}"
+ },
+ {
+  "source": "{\"a\":1}garbage",
+  "format": "json",
+  "outcome": "reject",
+  "match": "invalid\\ JSON:\\ unexpected\\ trailing\\ characters\\ at\\ byte\\ 8"
+ },
+ {
+  "source": "{\"a\":1}x",
+  "format": "json",
+  "outcome": "reject",
+  "match": "invalid\\ JSON:\\ unexpected\\ trailing\\ characters\\ at\\ byte\\ 8"
+ },
+ {
+  "source": "{\"a\":[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]}"
+ },
+ {
+  "source": "{\"a\":true,\"b\":false,\"c\":null}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"a\":true,\"b\":false,\"c\":null}"
+ },
+ {
+  "source": "{\"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\":1}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\":1}"
+ },
+ {
+  "source": "{\"packages\":[\".\"],\"x\":{}}",
+  "format": "json",
+  "outcome": "accept",
+  "json": "{\"packages\":[\".\"],\"x\":{}}"
+ },
+ {
+  "source": "",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "null"
+ },
+ {
+  "source": "\n\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "null"
+ },
+ {
+  "source": "!",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "! x\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "!!str x\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "!<tag> x\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "\"<<\": a\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "merge\\ key\\ forbidden"
+ },
+ {
+  "source": "\"str\"",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "\"str\""
+ },
+ {
+  "source": "# only\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "null"
+ },
+ {
+  "source": "%TAG !e! t:\n---\nx: a\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "YAML\\ directives\\ are\\ forbidden\\ at\\ line\\ 1",
+  "deviation": "D2",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "%TAG !e! tag:example.org,2000:\n---\nx: a\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "YAML\\ directives\\ are\\ forbidden\\ at\\ line\\ 1",
+  "deviation": "D2",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "%YAML 1.1\n---\nx: yes\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "YAML\\ directives\\ are\\ forbidden\\ at\\ line\\ 1",
+  "deviation": "D2",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "%YAML 1.2\n---\nx: yes\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "YAML\\ directives\\ are\\ forbidden\\ at\\ line\\ 1",
+  "deviation": "D2",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "- ! x\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "- &a [x]\n- *a\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "- a\n- b\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "[\"a\",\"b\"]"
+ },
+ {
+  "source": "- a\r\n- b\r\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "[\"a\",\"b\"]"
+ },
+ {
+  "source": "- a - b\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "unsupported\\ line\\ break\\ character\\ U\\+2028",
+  "deviation": "D5",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "---\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "null"
+ },
+ {
+  "source": "---\nx: 1\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":1}"
+ },
+ {
+  "source": "--- \n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "null"
+ },
+ {
+  "source": "--- ! x\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "---x: 1\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"---x\":1}"
+ },
+ {
+  "source": "0: a\n-0: b\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "Map\\ keys\\ must\\ be\\ unique\\ at\\ line\\ 2,\\ column\\ 1"
+ },
+ {
+  "source": "0x1: a\n1: b\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "Map\\ keys\\ must\\ be\\ unique\\ at\\ line\\ 2,\\ column\\ 1"
+ },
+ {
+  "source": "1: a\n\"1\": b\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "mapping\\ keys\\ must\\ be\\ strings"
+ },
+ {
+  "source": "1: x\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "mapping\\ keys\\ must\\ be\\ strings"
+ },
+ {
+  "source": "<<: a\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "merge\\ key\\ forbidden"
+ },
+ {
+  "source": "? ! x\n: y\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "? [a]\n: x\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "mapping\\ keys\\ must\\ be\\ strings"
+ },
+ {
+  "source": "? x\n: 1\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":1}"
+ },
+ {
+  "source": "[1,2]\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "[1,2]"
+ },
+ {
+  "source": "[a!b, \"!x\"]\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "[\"a!b\",\"!x\"]"
+ },
+ {
+  "source": "[a, !t b]\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "a#b: 1\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"a#b\":1}"
+ },
+ {
+  "source": "a: &x 1\nb: *x\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "a: 1\nb:\n  c: 2\nd: [1, 2]\ne:\n  - x\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"a\":1,\"b\":{\"c\":2},\"d\":[1,2],\"e\":[\"x\"]}"
+ },
+ {
+  "source": "null: x\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "mapping\\ keys\\ must\\ be\\ strings"
+ },
+ {
+  "source": "true: x\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "mapping\\ keys\\ must\\ be\\ strings"
+ },
+ {
+  "source": "x:\n  - a\n   - b\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":[\"a - b\"]}"
+ },
+ {
+  "source": "x:\n  <<: a\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "merge\\ key\\ forbidden"
+ },
+ {
+  "source": "x:\n  y: 1\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":{\"y\":1}}"
+ },
+ {
+  "source": "x: \t1\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":1}"
+ },
+ {
+  "source": "x: ! 1\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "x: !!binary aGk=\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "x: !<tag:yaml.org,2002:str> a\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "x: \"!x\"\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"!x\"}"
+ },
+ {
+  "source": "x: \"\\/\"\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ found\\ unknown\\ escape\\ character",
+  "deviation": "D7",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: \"\\U0000d800\"\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ found\\ invalid\\ Unicode\\ character\\ escape\\ code",
+  "deviation": "D7",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: \"\\ud800\"\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ found\\ invalid\\ Unicode\\ character\\ escape\\ code",
+  "deviation": "D7",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: \"\\ud801\"\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ found\\ invalid\\ Unicode\\ character\\ escape\\ code",
+  "deviation": "D7",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: \"\\ud83d\\ude00\"\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ found\\ invalid\\ Unicode\\ character\\ escape\\ code",
+  "deviation": "D7",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: \"a\u0001b\"\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ control\\ characters\\ are\\ not\\ allowed",
+  "deviation": "D6",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: \"a\n\n b\"\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"a\\nb\"}"
+ },
+ {
+  "source": "x: \"a\n  \n   b\"\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"a\\nb\"}"
+ },
+ {
+  "source": "x: \"a\n b\"\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"a b\"}"
+ },
+ {
+  "source": "x: \"a\nb\"\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "expected\\ indented\\ scalar\\ continuation\\ at\\ line\\ 2,\\ column\\ 1"
+ },
+ {
+  "source": "x: \"a\r\n b\"\r\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"a b\"}"
+ },
+ {
+  "source": "x: \"a\"\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"a\"}"
+ },
+ {
+  "source": "x: \"a\\\n b\"\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"ab\"}"
+ },
+ {
+  "source": "x: \"a\\\"b\"\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"a\\\"b\"}"
+ },
+ {
+  "source": "x: \"ab\"\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "unsupported\\ line\\ break\\ character\\ U\\+0085",
+  "deviation": "D5",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: \"a￾b\"\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ control\\ characters\\ are\\ not\\ allowed",
+  "deviation": "D6",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: \"\"\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ control\\ characters\\ are\\ not\\ allowed",
+  "deviation": "D6",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: \"\"\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ control\\ characters\\ are\\ not\\ allowed",
+  "deviation": "D6",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: &a 1\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "x: '!x'\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"!x\"}"
+ },
+ {
+  "source": "x: 'a\n b'\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"a b\"}"
+ },
+ {
+  "source": "x: 'a\nb'\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "expected\\ indented\\ scalar\\ continuation\\ at\\ line\\ 2,\\ column\\ 1"
+ },
+ {
+  "source": "x: 'a'\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"a\"}"
+ },
+ {
+  "source": "x: 'a''b'\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"a'b\"}"
+ },
+ {
+  "source": "x: 'a b'\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "unsupported\\ line\\ break\\ character\\ U\\+2028",
+  "deviation": "D5",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: *a\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ unknown\\ anchor\\ 'a'\\ referenced"
+ },
+ {
+  "source": "x: +.5\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":0.5}"
+ },
+ {
+  "source": "x: +1\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":1}"
+ },
+ {
+  "source": "x: -.Inf\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":null}"
+ },
+ {
+  "source": "x: -.inf\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":null}"
+ },
+ {
+  "source": "x: -0x1\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"-0x1\"}"
+ },
+ {
+  "source": "x: .5\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":0.5}"
+ },
+ {
+  "source": "x: .NaN\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":null}"
+ },
+ {
+  "source": "x: .inf\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":null}"
+ },
+ {
+  "source": "x: .nan\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":null}"
+ },
+ {
+  "source": "x: 00\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":0}"
+ },
+ {
+  "source": "x: 017\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":17}"
+ },
+ {
+  "source": "x: 0b101\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"0b101\"}"
+ },
+ {
+  "source": "x: 0o17\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":15}"
+ },
+ {
+  "source": "x: 0o8\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"0o8\"}"
+ },
+ {
+  "source": "x: 0xG\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"0xG\"}"
+ },
+ {
+  "source": "x: 1\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":1}"
+ },
+ {
+  "source": "x: 1\n  \n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":1}"
+ },
+ {
+  "source": "x: 1\n  y: 2\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ line\\ 2:\\ mapping\\ values\\ are\\ not\\ allowed\\ in\\ this\\ context"
+ },
+ {
+  "source": "x: 1\n# comment\n  ! y\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "x: 1\n---\ny: 2\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "Source\\ contains\\ multiple\\ documents"
+ },
+ {
+  "source": "x: 1\n...\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":1}"
+ },
+ {
+  "source": "x: 1\nx: 2\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "Map\\ keys\\ must\\ be\\ unique\\ at\\ line\\ 2,\\ column\\ 1"
+ },
+ {
+  "source": "x: 1\r\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":1}"
+ },
+ {
+  "source": "x: 1.\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":1}"
+ },
+ {
+  "source": "x: 12345678901234567890\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":12345678901234567000}"
+ },
+ {
+  "source": "x: 1:20\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"1:20\"}"
+ },
+ {
+  "source": "x: 1_000\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"1_000\"}"
+ },
+ {
+  "source": "x: 1e3\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":1000}"
+ },
+ {
+  "source": "x: 2001-12-14\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"2001-12-14\"}"
+ },
+ {
+  "source": "x: =\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"=\"}"
+ },
+ {
+  "source": "x: >\n  !\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"!\\n\"}"
+ },
+ {
+  "source": "x: >\n  a\n  b\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"a b\\n\"}"
+ },
+ {
+  "source": "x: >+2\n  !\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"!\\n\"}"
+ },
+ {
+  "source": "x: NULL\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":null}"
+ },
+ {
+  "source": "x: Null\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":null}"
+ },
+ {
+  "source": "x: Yes\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"Yes\"}"
+ },
+ {
+  "source": "x: [a,\n b]\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":[\"a\",\"b\"]}"
+ },
+ {
+  "source": "x: [a,\nb]\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "expected\\ indented\\ scalar\\ continuation\\ at\\ line\\ 2,\\ column\\ 1"
+ },
+ {
+  "source": "x: [a, &b c]\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "x: [a: 1]\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":[{\"a\":1}]}"
+ },
+ {
+  "source": "x: a\u0001b\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ control\\ characters\\ are\\ not\\ allowed",
+  "deviation": "D6",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: a\n  !b\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"a !b\"}"
+ },
+ {
+  "source": "x: a ! b\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"a ! b\"}"
+ },
+ {
+  "source": "x: a # !\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"a\"}"
+ },
+ {
+  "source": "x: a!b\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"a!b\"}"
+ },
+ {
+  "source": "x: ab\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "unsupported\\ line\\ break\\ character\\ U\\+0085",
+  "deviation": "D5",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: a   b: 1\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "unsupported\\ line\\ break\\ character\\ U\\+2028"
+ },
+ {
+  "source": "x: a b\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "unsupported\\ line\\ break\\ character\\ U\\+2028",
+  "deviation": "D5",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: a b\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "unsupported\\ line\\ break\\ character\\ U\\+2029",
+  "deviation": "D5",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: nULL\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"nULL\"}"
+ },
+ {
+  "source": "x: yes\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"yes\"}"
+ },
+ {
+  "source": "x: {\"a\":1}\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":{\"a\":1}}"
+ },
+ {
+  "source": "x: {? a}\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":{\"a\":null}}"
+ },
+ {
+  "source": "x: |\n\n  a\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"\\na\\n\"}"
+ },
+ {
+  "source": "x: |\n  !\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"!\\n\"}"
+ },
+ {
+  "source": "x: |\n  a\n   b\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"a\\n b\\n\"}"
+ },
+ {
+  "source": "x: |\n  a\n! y\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "x: |\n  a b\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "unsupported\\ line\\ break\\ character\\ U\\+2028",
+  "deviation": "D5",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "x: |2-\n  !\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"!\"}"
+ },
+ {
+  "source": "{\n  \"a\": 1,\n  \"b\": {\n    \"c\": [\n      1\n    ]\n  }\n}\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"a\":1,\"b\":{\"c\":[1]}}"
+ },
+ {
+  "source": "{\"a\"  :  1}",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"a\":1}"
+ },
+ {
+  "source": "{\"a\":! x}\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "anchors,\\ aliases\\ and\\ explicit\\ tags\\ forbidden"
+ },
+ {
+  "source": "{\"a\":\"\\/\"}",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ found\\ unknown\\ escape\\ character",
+  "deviation": "D7",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "{\"a\":\"\\u2028\"}",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"a\":\" \"}"
+ },
+ {
+  "source": "{\"a\":\"\\ud83d\\ude00\"}",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ found\\ invalid\\ Unicode\\ character\\ escape\\ code",
+  "deviation": "D7",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "{\"a\":\"vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\"}",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"a\":\"vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\"}"
+ },
+ {
+  "source": "{\"a\":\"\"}",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ control\\ characters\\ are\\ not\\ allowed",
+  "deviation": "D6",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "{\"a\":1,\"a\":2}",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "Map\\ keys\\ must\\ be\\ unique\\ at\\ line\\ 1,\\ column\\ 8"
+ },
+ {
+  "source": "{\"a\":1,\"b\":[\"x\",{\"c\":true}]}",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"a\":1,\"b\":[\"x\",{\"c\":true}]}"
+ },
+ {
+  "source": "{\"a\":1,}",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"a\":1}"
+ },
+ {
+  "source": "{\"a\":1}\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"a\":1}"
+ },
+ {
+  "source": "{\"a\":1}\n\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"a\":1}"
+ },
+ {
+  "source": "{\"a\":1} ",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"a\":1}"
+ },
+ {
+  "source": "{\"a\":1}x",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ did\\ not\\ find\\ expected\\ <document\\ start>"
+ },
+ {
+  "source": "{\"a\":[]}",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"a\":[]}"
+ },
+ {
+  "source": "{\"a\":true,\"b\":false,\"c\":null,\"d\":1.5,\"e\":-0,\"f\":1e400}",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"a\":true,\"b\":false,\"c\":null,\"d\":1.5,\"e\":0,\"f\":null}"
+ },
+ {
+  "source": "{\"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\": 1}\n",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ did\\ not\\ find\\ expected\\ ','\\ or\\ '\\}'",
+  "deviation": "D7",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "{\"kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk\":1}",
+  "format": "yaml",
+  "outcome": "reject",
+  "match": "yaml:\\ did\\ not\\ find\\ expected\\ ','\\ or\\ '\\}'",
+  "deviation": "D7",
+  "approval": "approved-by-owner-decision-4",
+  "js": "accept"
+ },
+ {
+  "source": "{\"packages\":[\".\"],\"x\":{}}",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"packages\":[\".\"],\"x\":{}}"
+ },
+ {
+  "source": "{\"x\":\"1\",\"y\":\"\\\"q\"}",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":\"1\",\"y\":\"\\\"q\"}"
+ },
+ {
+  "source": "﻿x: 1\n",
+  "format": "yaml",
+  "outcome": "accept",
+  "json": "{\"x\":1}"
+ }
+]

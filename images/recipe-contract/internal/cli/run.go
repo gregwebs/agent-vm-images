@@ -23,24 +23,34 @@ func DiagnosticStream(stream *os.File) io.Writer {
 // Streams names the independently encoded process streams.
 type Streams struct{ Out, Err io.Writer }
 
-// ProcessEnvironment assembles the lazy physical cwd and inherited PATH used
-// by both the command and its process-level tests.
-func ProcessEnvironment() toolaccess.Environment {
-	return toolaccess.Environment{
-		WorkingDirectory: func() (toolaccess.PhysicalDirectory, error) {
-			// os.Getwd may trust lexical PWD; the legacy getcwd never did.
-			directory, err := syscall.Getwd()
-			return toolaccess.PhysicalDirectoryOf(directory), err
+// Environment is the process view the subcommands need: the filesystem policy
+// inputs and the raw environment entries the package-manager guard inspects.
+type Environment struct {
+	toolaccess.Environment
+	Variables []string
+}
+
+// ProcessEnvironment assembles the lazy physical cwd, inherited PATH and the
+// environment entries used by both the command and its process-level tests.
+func ProcessEnvironment() Environment {
+	return Environment{
+		Environment: toolaccess.Environment{
+			WorkingDirectory: func() (toolaccess.PhysicalDirectory, error) {
+				// os.Getwd may trust lexical PWD; the legacy getcwd never did.
+				directory, err := syscall.Getwd()
+				return toolaccess.PhysicalDirectoryOf(directory), err
+			},
+			Path: toolaccess.PathValue(os.Getenv("PATH")),
 		},
-		Path: toolaccess.PathValue(os.Getenv("PATH")),
+		Variables: os.Environ(),
 	}
 }
 
 // Run executes one recipe-contract invocation and returns the process status.
 // It is the only place that turns argv, streams and exit statuses into the
 // legacy contract; the command layers below it return plain errors.
-func Run(args []string, env toolaccess.Environment, streams Streams) int {
-	process := &process{out: newStdout(streams.Out), err: newStderr(streams.Err)}
+func Run(args []string, env Environment, streams Streams) int {
+	process := &process{out: newStdout(streams.Out), err: newStderr(streams.Err), streams: streams, env: env}
 	status := process.dispatch(args, env)
 	if err := process.out.flush(); err != nil {
 		process.reportDeferredFlushFailure("sys.stdout", err)
@@ -53,11 +63,13 @@ func Run(args []string, env toolaccess.Environment, streams Streams) int {
 }
 
 type process struct {
-	out *pythonStream
-	err *pythonStream
+	out     *pythonStream
+	err     *pythonStream
+	streams Streams
+	env     Environment
 }
 
-func (p *process) dispatch(args []string, env toolaccess.Environment) int {
+func (p *process) dispatch(args []string, env Environment) int {
 	if len(args) == 0 {
 		return p.stderrStatus(2, dispatcherUsage)
 	}
@@ -65,7 +77,19 @@ func (p *process) dispatch(args []string, env toolaccess.Environment) int {
 	case "install-status":
 		return p.runInstallStatus(args[1:])
 	case "tool-access":
-		return p.runToolAccess(args[1:], env)
+		return p.runToolAccess(args[1:], env.Environment)
+	case "pnpm-lock":
+		return p.runPnpmLock(args[1:])
+	case "pnpm-environment":
+		return p.runPnpmEnvironment(args[1:])
+	case "pnpm-yaml":
+		return p.runPnpmYAML(args[1:])
+	case "dsh-lock-update":
+		return p.runDshLockUpdate(args[1:])
+	case "dsh-cordis-overrides":
+		return p.runDshCordisOverrides(args[1:])
+	case "dsh-upgrade-stage":
+		return p.runDshUpgradeStage(args[1:])
 	default:
 		return p.stderrStatus(2, dispatcherUsage)
 	}

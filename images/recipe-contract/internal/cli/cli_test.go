@@ -38,14 +38,14 @@ type result struct {
 	status int
 }
 
-func testEnv(workingDirectory toolaccess.PhysicalDirectory, path string) toolaccess.Environment {
-	return toolaccess.Environment{
+func testEnv(workingDirectory toolaccess.PhysicalDirectory, path string) Environment {
+	return Environment{Environment: toolaccess.Environment{
 		WorkingDirectory: func() (toolaccess.PhysicalDirectory, error) { return workingDirectory, nil },
 		Path:             toolaccess.PathValue(path),
-	}
+	}}
 }
 
-func runInProcess(t *testing.T, env toolaccess.Environment, args ...string) result {
+func runInProcess(t *testing.T, env Environment, args ...string) result {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
 	status := Run(args, env, Streams{Out: &stdout, Err: &stderr})
@@ -426,12 +426,12 @@ func TestRecordsAndCwdIndependence(t *testing.T) {
 	installed := write("record-installed", "installed\n")
 	transport := write("record-transport", "absent-transport ECONNRESET\n")
 	broken := write("record-broken", "absent-transport 99\n")
-	failingCwd := toolaccess.Environment{
+	failingCwd := Environment{Environment: toolaccess.Environment{
 		WorkingDirectory: func() (toolaccess.PhysicalDirectory, error) {
 			return toolaccess.PhysicalDirectory{}, errors.New("getcwd failed")
 		},
 		Path: toolaccess.PathValue("/usr/bin:/bin"),
-	}
+	}}
 	if got := runInProcess(t, failingCwd, "install-status", "record", installed); got.status != 0 || string(got.stdout) != "installed\n" {
 		t.Fatalf("record with a failing cwd = %+v", got)
 	}

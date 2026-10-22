@@ -222,7 +222,7 @@ calls = go_calls()
 assert len(calls) == 1, calls
 call = calls[0]
 target = call['args'][call['args'].index('-o') + 1]
-assert call['args'] == ['build', '-trimpath', '-buildvcs=false', '-o', target, './cmd/recipe-contract'], call['args']
+assert call['args'] == ['build', '-mod=vendor', '-trimpath', '-buildvcs=false', '-o', target, './cmd/recipe-contract'], call['args']
 assert '.stage.' in target and target.endswith('/recipe-contract'), target
 # The build runs inside the staged canonical copy, not the checked-out module.
 assert os.path.realpath(call['cwd']) == os.path.realpath(os.path.dirname(target)), call['cwd']

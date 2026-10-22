@@ -44,8 +44,10 @@ mkdir -m 0755 "$stage"
 # maintained copy.
 (cd "$module" && cp -R -p . "$stage/")
 
+# -mod=vendor makes a missing vendor tree a build failure instead of a proxy
+# download: the image build never fetches modules (ADR 0001 § Amended by #75).
 (cd "$stage" && GOWORK=off GOFLAGS='' CGO_ENABLED=0 \
-    go build -trimpath -buildvcs=false -o "$stage/recipe-contract" ./cmd/recipe-contract)
+    go build -mod=vendor -trimpath -buildvcs=false -o "$stage/recipe-contract" ./cmd/recipe-contract)
 
 chmod 0755 "$stage/recipe-contract"
 find "$stage" -type d -exec chmod 0755 {} +

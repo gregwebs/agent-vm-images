@@ -41,7 +41,14 @@ if selected_goroot=$(cd "$contract_module" && GOTOOLCHAIN=auto go env GOROOT); t
 fi
 formatter="$selected_goroot/bin/gofmt"
 [ -x "$formatter" ] || { echo "missing formatter: $formatter" >&2; exit 1; }
-if format_output=$(cd "$contract_module" && "$formatter" -l .); then :; else
+# Upstream vendor bytes are never reformatted: the vendor tree is a verbatim
+# module copy whose only authenticator is the drift gate, so a formatter rewrite
+# would look like a local (reviewed) change. The file list is passed explicitly
+# because `-l .` walks vendor/.
+format_files=()
+while IFS= read -r -d '' format_file; do format_files+=("$format_file"); done \
+    < <(cd "$contract_module" && find . -path ./vendor -prune -o -name '*.go' -print0)
+if format_output=$(cd "$contract_module" && "$formatter" -l ${format_files+"${format_files[@]}"}); then :; else
     status=$?; echo "formatter failed: $formatter (status $status)" >&2; exit "$status"
 fi
 [ -z "$format_output" ] || { printf '%s\n' "$format_output" >&2; exit 1; }
