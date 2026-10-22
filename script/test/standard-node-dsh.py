@@ -97,7 +97,7 @@ class Invocation(base.Invocation):
     def mounts(self):
         return ['--mount', f'type=bind,src={ROOT},dst=/source,readonly',
                 '--mount', f'type=volume,src={self.volume},dst=/fixtures',
-                '--mount', f'type=bind,src={ROOT / "images/recipe-contract"},dst=/fixtures/contract,readonly']
+                '--mount', f'type=bind,src={self.contract / "out"},dst=/fixtures/contract,readonly']
 
     def action(self, main, action, *args):
         seconds = 630 if action in ('prepare', 'install') else 240 if action == 'cordis-negative' else 180
@@ -154,6 +154,7 @@ class Invocation(base.Invocation):
         if image['Os'] != 'linux' or 'linux/' + base.arch(image['Architecture']) != self.platform:
             raise base.Failure('base-image platform mismatch/emulation')
         print(f'dsh: predeclared install budget {INSTALL_BUDGET_KIB} KiB + reserve {RESERVE_KIB} KiB; measured prior install 307 MB/9 s', flush=True)
+        self.select_contract()
         self.volume = self.token + '-fixtures'
         self.docker('volume', 'create', self.volume)
         self.capacity(INSTALL_BUDGET_KIB + RESERVE_KIB)

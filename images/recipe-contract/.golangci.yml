@@ -1,0 +1,23 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - exhaustive
+    - govet
+    - staticcheck
+    - unused
+  settings:
+    exhaustive:
+      # A switch over one of this module's closed enums (Mode, PathState,
+      # RecordKind, waypointKind) must name every member; a map lookup over the
+      # same enum must too.
+      check:
+        - switch
+        - map
+      default-signifies-exhaustive: false
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - exhaustive

@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Tree permission/link oracles, including controlled filesystem-root traversal."""
+"""Tree permission/link oracles for `recipe-contract tool-access --tree`.
+
+The filesystem-root establishment control lives in the Go module
+(toolaccess.TestTreeRootEstablishment) rather than as a mocked import here.
+"""
 import errno
-import importlib.util
 import os
 from pathlib import Path
 import socket
@@ -10,13 +13,14 @@ import struct
 import subprocess
 import sys
 import tempfile
-from unittest.mock import patch
 
 sys.dont_write_bytecode = True
-CHECKER = Path(__file__).resolve().parents[2] / 'images/recipe-contract/check-tool-access.py'
-spec = importlib.util.spec_from_file_location('tool_access', CHECKER)
-checker = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(checker)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+from contract_context import native_contract_directory
+
+CHECKER = native_contract_directory(REPO_ROOT) / 'recipe-contract'
 
 
 def main():
@@ -33,7 +37,7 @@ def main():
         (tree / 'pkg').symlink_to('.pnpm/pkg/node_modules/pkg')
 
         def run(target=tree, status=0, diagnostic='', flags=('--tree',), cwd=None, env=None):
-            result = subprocess.run([sys.executable, str(CHECKER), *flags, str(target)],
+            result = subprocess.run([str(CHECKER), 'tool-access', *flags, str(target)],
                                     cwd=cwd, env=env, capture_output=True, text=True, timeout=10)
             assert result.returncode == status, (result.returncode, result.stdout, result.stderr)
             if diagnostic:
@@ -191,20 +195,10 @@ def main():
         run(data, status=1, diagnostic='tree root is not a directory')
         run(tree, status=2, diagnostic='usage:', flags=('--tree', '--content'))
         run(tree, status=2, diagnostic='unknown option', flags=('--bad',))
-        result = subprocess.run([sys.executable, str(CHECKER), '--tree'], capture_output=True)
+        result = subprocess.run([str(CHECKER), 'tool-access', '--tree'], capture_output=True)
         assert result.returncode == 2
         assert run(flags=('--quiet', '--tree')).stdout == ''
         assert run(flags=('--help',)).returncode == 0
-
-        # Exercise '/' root establishment without enumerating the host filesystem.
-        class EmptyRoot:
-            def __enter__(self):
-                return iter(())
-            def __exit__(self, *args):
-                return False
-        with patch.object(checker.os, 'scandir', return_value=EmptyRoot()) as scan:
-            assert checker.audit_tree('/') == '/'
-            scan.assert_called_once_with('/')
     print('tool-access-tree: root forms, permissions, edges and repaired positives PASS')
 
 

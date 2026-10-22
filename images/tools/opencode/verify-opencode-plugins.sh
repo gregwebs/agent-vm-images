@@ -37,8 +37,8 @@ fi
 python3 "$SOURCE/probe-opencode.py" check --evidence "$work/evidence.json" --plugin-entry "$PREFIX/index.js"
 # Supply physical and logical regular files; the access auditor checks ancestors.
 node "$SOURCE/check-claude-payload.mjs" files "$PREFIX" >"$work/files"
-xargs -0 python3 "$CONTRACT/check-tool-access.py" --quiet --content <"$work/files"
-python3 "$CONTRACT/check-tool-access.py" --content "$CONFIG"
-python3 "$CONTRACT/check-tool-access.py" "$CLAUDE" "$OPENCODE"
+xargs -0 "$CONTRACT/recipe-contract" tool-access --quiet --content <"$work/files"
+"$CONTRACT/recipe-contract" tool-access --content "$CONFIG"
+"$CONTRACT/recipe-contract" tool-access "$CLAUDE" "$OPENCODE"
 mkdir -p "$status_dir"
 printf 'installed\n' >"$status_dir/opencode-claude"

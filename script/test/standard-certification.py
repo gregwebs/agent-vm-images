@@ -4,13 +4,15 @@ import os,subprocess,sys,tempfile,importlib.util
 # Importing the fixture module must not leave a __pycache__ in the source tree.
 sys.dont_write_bytecode=True
 r=Path(__file__).resolve().parents[2]
-# The real verifier runs check-tool-access.py over host paths, which requires every
+# The real verifier runs `recipe-contract tool-access` over host paths, which requires every
 # audited ancestor to be traversable by all. The release build points TMPDIR under
 # /home/runner (mode 750), so the fixture must live under a world-traversable root
 # rather than the ambient TMPDIR. It also runs children under umask 077: the 0700
 # mkdtemp root was not the only victim, because every nested mkdir inherited 0700
 # too, so pin the umask to the image's 022 before creating any fixture directory.
 os.umask(0o022)
+sys.path.insert(0, str(r / 'script/test'))
+from contract_context import native_contract_directory  # noqa: E402  (path first)
 tmp=Path(tempfile.mkdtemp(prefix='gate.', dir='/tmp')); tmp.chmod(0o755)
 atexit.register(shutil.rmtree, tmp)
 records=tmp/'records'; records.mkdir(); tools=tmp/'tools'; commands=tmp/'bin'; commands.mkdir()
@@ -35,7 +37,7 @@ writeexe(dsh_target,'#!/usr/bin/env node\n')
 prefix=tmp/'prefix'
 for name,folder in [('codex','.local'),('claude','.local'),('opencode','.opencode')]:
  p=prefix/folder/'bin'/name; p.parent.mkdir(parents=True,exist_ok=True); p.symlink_to(commands/name)
-env=dict(os.environ,AGENT_VM_CONTRACT_DIR=str(r/'images/recipe-contract'),AGENT_VM_TOOL_SOURCE_DIR=str(tools),AGENT_VM_INSTALL_STATUS_DIR=str(records),AGENT_INSTALL_SOFT_FAIL='1',AGENT_VM_CODEX_PREFIX=str(prefix),AGENT_VM_OPENCODE_PREFIX=str(prefix),AGENT_VM_CLAUDE_PREFIX=str(prefix),AGENT_VM_DSH_PREFIX=str(dsh_prefix),AGENT_VM_PI_WRAPPER=str(commands/'pi'),CALLS=str(tmp/'calls'),PATH=str(commands)+':'+os.environ['PATH'],AGENT_VM_VERSION_CODEX='rust-v0.159.3')
+env=dict(os.environ,AGENT_VM_CONTRACT_DIR=str(native_contract_directory(r)),AGENT_VM_TOOL_SOURCE_DIR=str(tools),AGENT_VM_INSTALL_STATUS_DIR=str(records),AGENT_INSTALL_SOFT_FAIL='1',AGENT_VM_CODEX_PREFIX=str(prefix),AGENT_VM_OPENCODE_PREFIX=str(prefix),AGENT_VM_CLAUDE_PREFIX=str(prefix),AGENT_VM_DSH_PREFIX=str(dsh_prefix),AGENT_VM_PI_WRAPPER=str(commands/'pi'),CALLS=str(tmp/'calls'),PATH=str(commands)+':'+os.environ['PATH'],AGENT_VM_VERSION_CODEX='rust-v0.159.3')
 spec=importlib.util.spec_from_file_location('pnpm_fixture',r/'script/test/fixtures/pnpm/verifier-fixture.py')
 fixture_module=importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture_module)
 fixture=tmp/'pnpm-fixture'; fixture.mkdir()

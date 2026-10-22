@@ -173,9 +173,9 @@ require_registered_provider() { # label, marker prefix, output file
 # Path state via lstat: a present-but-unusable command (e.g. a 0644 entry point)
 # is a contract violation, not an absence, and its tree must NOT be deleted.
 bin_state=0
-python3 "$CONTRACT/install-status.py" path-state "$pi_bin" || bin_state=$?
+"$CONTRACT/recipe-contract" install-status path-state "$pi_bin" || bin_state=$?
 if [ "$bin_state" -eq 0 ]; then
-    if python3 "$CONTRACT/install-status.py" code "$STATUS_DIR/pi" >/dev/null 2>&1; then
+    if "$CONTRACT/recipe-contract" install-status code "$STATUS_DIR/pi" >/dev/null 2>&1; then
         echo "  pi: ABSENT ($(cat "$STATUS_DIR/pi")); raw developer build only"
         authorize_destructive "$WRAPPER" "/usr/local/bin/pi" || exit 1
         authorize_destructive "$SEED_HOOK" "/opt/agent-vm/seed.d/20-pi-claude-bridge" || exit 1
@@ -373,9 +373,9 @@ bridge_shipped=
 # Present-but-unreadable or present-but-broken is hard; only a genuinely
 # absent tree with a valid absence record may degrade to "no bridge".
 bridge_state=0
-python3 "$CONTRACT/install-status.py" path-state "$BRIDGE_PKG" || bridge_state=$?
+"$CONTRACT/recipe-contract" install-status path-state "$BRIDGE_PKG" || bridge_state=$?
 if [ "$bridge_state" -eq 0 ]; then
-    if python3 "$CONTRACT/install-status.py" code "$STATUS_DIR/pi-claude-bridge" >/dev/null 2>&1; then
+    if "$CONTRACT/recipe-contract" install-status code "$STATUS_DIR/pi-claude-bridge" >/dev/null 2>&1; then
         echo "  pi: pi-claude-bridge ABSENT ($(cat "$STATUS_DIR/pi-claude-bridge")); the wrapper will skip it"
         # The extension tree is gone, so its seed hook must go too: left behind
         # it would write a claude-bridge.json for an extension this image does
@@ -476,17 +476,17 @@ for executable in "$WRAPPER" "$pi_bin"; do
         echo "  pi: $executable is not a+rx (C7)" >&2; exit 1
     fi
 done
-python3 "$CONTRACT/check-tool-access.py" "$WRAPPER" "$pi_bin"
+"$CONTRACT/recipe-contract" tool-access "$WRAPPER" "$pi_bin"
 # The wrapper loads required extension content on every invocation; that content
 # must itself be readable and reachable by any uid. The `find` tree walks above
 # do not follow symlinks (they inspect the link's own 0777 mode), so a required
 # file symlinked into a 0700 directory would pass them. `--content` resolves
 # symlinks, audits the lexical AND target ancestors, and requires all-class read
 # (these files are data, not executed directly, so no execute bit is needed).
-python3 "$CONTRACT/check-tool-access.py" --content \
+"$CONTRACT/recipe-contract" tool-access --content \
     "$EXTENSION_DIR/guest-credential-warning.js" "$EXTENSION_DIR/agent-vm-codex.js"
 if [ -n "$bridge_shipped" ]; then
-    python3 "$CONTRACT/check-tool-access.py" --content "$BRIDGE_SRC"
+    "$CONTRACT/recipe-contract" tool-access --content "$BRIDGE_SRC"
 fi
 
 mkdir -p "$STATUS_DIR"

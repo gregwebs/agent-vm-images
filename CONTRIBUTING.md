@@ -311,6 +311,35 @@ builds, the real launcher policy controls and all runtime/egress audits remain
 merge prerequisites. Do not substitute hermetic fake-manager controls for them.
 
 
+## Go build helpers
+
+Read [ADR 0004](docs/adr/0004-go-build-helpers.md) for version ownership,
+build-only delivery, supported environments, parity exceptions and evidence.
+Install the module-owned lint pin through Go's checksum database:
+
+```sh
+bash script/dev/install-golangci-lint.sh
+(cd images/recipe-contract && GOTOOLCHAIN=auto go test ./... && GOTOOLCHAIN=auto go vet ./... && golangci-lint run)
+bash script/test/contracts.sh
+bash script/test/contracts.sh --guard-only
+```
+
+Build and audit commands (mount `<context>/out`, never a Darwin binary in Linux):
+
+```sh
+bash script/build/recipe-contract.sh --native
+bash script/build/recipe-contract.sh --platform linux/arm64
+bash images/build.sh base --host-helpers
+bash images/build.sh standard --host-helpers
+bash script/test/tool-access.sh
+```
+
+The committed process goldens run in the module tests. For a compatibility
+change, run them on Linux as an unprivileged uid and record exact commands,
+statuses and any discrepancy under the ADR's evidence policy. The spike's
+temporary differential experiment is historical evidence, not a contributor
+prerequisite or a maintained test command.
+
 ## Bounded pnpm primitives
 
 #42 PR 1 adds build-only graph/access interfaces; PR 2 migrates dsh on top of
@@ -337,7 +366,7 @@ not linted/rewritten; Rust inventory guards run without Node, while the dsh grap
 guards run this CLI as a syntax adapter. `contracts.sh`
 explicitly runs vendor/parser and harness self-tests, without Docker/network.
 
-`check-tool-access.py [--content | --tree] TARGET...` accepts explicit tree
+`recipe-contract tool-access [--content | --tree] TARGET...` accepts explicit tree
 directories (bare names beneath cwd, not PATH). It audits every physical entry
 and symlink hop, rejects external targets/ACLs/special files and preserves lexical
 ancestry. Tree readability does not prove bins executable: run normal command/

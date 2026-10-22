@@ -1,3 +1,20 @@
+# Build-only helper compiler. Docker stages do not cross Dockerfiles, so both
+# products declare this stage; the substantive recipe is recipe-contract/build.sh
+# and the version/digest pair is guarded by script/test/image-sources. The binary
+# reaches consumers only through a read-only composed-directory mount, so no
+# compiler or helper persists in a final layer.
+FROM --platform=$BUILDPLATFORM golang:1.27.3-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4 AS recipe-contract-bin
+ARG TARGETARCH
+WORKDIR /src/recipe-contract
+COPY recipe-contract/ ./
+# The pinned image compiler must equal go.mod's toolchain before any cross-target
+# variable is set, so auto-download inside the build cannot mask a stale image.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    GOTOOLCHAIN=local GOWORK=off GOFLAGS= GOENV=off \
+    go test -tags recipe_contract_image_compiler -run '^TestImageCompiler$' ./internal/buildcheck
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    GOOS=linux GOARCH=$TARGETARCH CGO_ENABLED=0 bash ./build.sh /out
+
 # Coding-agent-free source building block; install agents with standard/Dockerfile
 # or extend this base with an ordinary user-owned Dockerfile.
 FROM debian:13-slim
@@ -64,7 +81,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # pnpm's reviewed pin owns the inherited selection; npm/npx remain Node's commands.
 RUN --mount=type=bind,source=install-pnpm.sh,target=/tmp/install-pnpm.sh,ro \
     --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
-    --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+    --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     AGENT_INSTALL_SOFT_FAIL= bash /tmp/install-pnpm.sh \
  && sh /tmp/pnpm-source/verify-pnpm.sh
 

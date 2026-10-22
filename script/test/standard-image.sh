@@ -9,9 +9,9 @@ umask 022
 
 REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
 FIXTURE_DOCKERFILE="$REPO_ROOT/script/test/fixtures/t5-negative/Dockerfile"
-# The committed status-record validator; the external oracle validates the exact
-# status bytes with it rather than a first-line key/value extraction (review F2).
-STATUS_VALIDATOR="$REPO_ROOT/images/recipe-contract/install-status.py"
+# The committed status-record validator (native build of the same helper the
+# image runs); the external oracle validates the exact status bytes with it rather
+# than a first-line key/value extraction (review F2).
 # The single base64 encoder, shared by the host predicates and the injected
 # container capture helper below.
 BASE64_ENCODER="$REPO_ROOT/script/test/standard-image-encode-base64.py"
@@ -51,7 +51,16 @@ if [ -z "$platform" ]; then
         *) usage; exit 2 ;;
     esac
 fi
-case "$platform" in linux/amd64 | linux/arm64) ;; *) usage; exit 2 ;; esac
+case "$platform" in linux/amd64 | linux/arm64 | linux/arm64/v8) ;; *) usage; exit 2 ;; esac
+
+# Resolve outside command substitutions used by audit predicates: assignments in
+# those subshells cannot memoise a build in the parent process.
+CONTRACT_CONTEXT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)"
+STATUS_VALIDATOR="$CONTRACT_CONTEXT/out/recipe-contract"
+CONTRACT_LINUX=""
+if [ "$self_test" = false ]; then
+    CONTRACT_LINUX="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --platform "$platform")"
+fi
 
 fail() {
     echo "FAIL: $*" >&2
@@ -321,7 +330,7 @@ printf 'rc0=%s\n' "$?"
 printf 'report_b64=%s\n' "$(b64file /tmp/o)"
 printf 'stderr_b64=%s\n' "$(b64file /tmp/e)"
 printf '=== T5 ===\n'
-python3 /contract/check-tool-access.py codex
+/contract/recipe-contract tool-access codex
 printf 't5rc=%s\n' "$?"
 printf '=== STATUS ===\n'
 printf 'status_b64=%s\n' "$(b64file /opt/agent-vm/install-status/codex)"
@@ -335,7 +344,7 @@ printf 'rc0=%s\n' "$?"
 printf 'report_b64=%s\n' "$(b64file /tmp/o)"
 printf 'stderr_b64=%s\n' "$(b64file /tmp/e)"
 printf '=== T5 ===\n'
-python3 /contract/check-tool-access.py opencode
+/contract/recipe-contract tool-access opencode
 printf 't5rc=%s\n' "$?"
 printf '=== STATUS ===\n'
 printf 'status_b64=%s\n' "$(b64file /opt/agent-vm/install-status/opencode)"
@@ -349,7 +358,7 @@ printf 'rc0=%s\n' "$?"
 printf 'report_b64=%s\n' "$(b64file /tmp/o)"
 printf 'stderr_b64=%s\n' "$(b64file /tmp/e)"
 printf '=== T5 ===\n'
-python3 /contract/check-tool-access.py claude
+/contract/recipe-contract tool-access claude
 printf 't5rc=%s\n' "$?"
 printf '=== STATUS ===\n'
 printf 'status_b64=%s\n' "$(b64file /opt/agent-vm/install-status/claude)"
@@ -363,7 +372,7 @@ printf 'rc0=%s\n' "$?"
 printf 'report_b64=%s\n' "$(b64file /tmp/o)"
 printf 'stderr_b64=%s\n' "$(b64file /tmp/e)"
 printf '=== T5 ===\n'
-python3 /contract/check-tool-access.py copilot
+/contract/recipe-contract tool-access copilot
 printf 't5rc=%s\n' "$?"
 printf '=== STATUS ===\n'
 printf 'status_b64=%s\n' "$(b64file /opt/agent-vm/install-status/copilot)"
@@ -383,7 +392,7 @@ printf 'rc1=%s\n' "$?"
 printf 'report1_b64=%s\n' "$(b64file /tmp/o1)"
 printf 'stderr1_b64=%s\n' "$(b64file /tmp/e1)"
 printf '=== T5 ===\n'
-python3 /contract/check-tool-access.py dsh pnpm
+/contract/recipe-contract tool-access dsh pnpm
 printf 't5rc=%s\n' "$?"
 printf '=== INDEPENDENT ===\n'
 timeout --kill-after=5s 60 node /dsh-oracle.mjs /opt/agent-vm/dsh "$AVM_EXPECTED_DSH" >/tmp/i.out 2>/tmp/i.err
@@ -439,9 +448,9 @@ printf '=== T5 ===\n'
 # and combine them: the content check must not overwrite a failed Pi/seed-hook
 # access check (review MAJOR: a failed all-uid access audit reported t5rc=0).
 t5_pi_seed=0
-python3 /contract/check-tool-access.py pi /opt/agent-vm/seed.d/20-pi-claude-bridge || t5_pi_seed=$?
+/contract/recipe-contract tool-access pi /opt/agent-vm/seed.d/20-pi-claude-bridge || t5_pi_seed=$?
 t5_pi_content=0
-python3 /contract/check-tool-access.py --content /opt/agent-vm/pi-extensions/guest-credential-warning.js /opt/agent-vm/pi-extensions/agent-vm-codex.js /opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts || t5_pi_content=$?
+/contract/recipe-contract tool-access --content /opt/agent-vm/pi-extensions/guest-credential-warning.js /opt/agent-vm/pi-extensions/agent-vm-codex.js /opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts || t5_pi_content=$?
 t5rc=0
 [ "$t5_pi_seed" -eq 0 ] || t5rc=1
 [ "$t5_pi_content" -eq 0 ] || t5rc=1
@@ -479,7 +488,6 @@ pi_audit_status_regression() {
         "$fixture/opt/agent-vm/pi-extensions/guest-credential-warning.js" \
         "$fixture/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts"
     generated="$(container_script pi)"
-
     expect_t5rc() { # $1 label, $2 expected t5rc
         local label="$1" want="$2" rc=0 out got
         out="$(run_with_watchdog "$RUNTIME_WATCHDOG_SECONDS" \
@@ -487,7 +495,7 @@ pi_audit_status_regression() {
             --cap-drop ALL --network none --tmpfs /tmp:rw,exec -e HOME=/tmp \
             -v "$fixture/opt/agent-vm:/opt/agent-vm:ro" \
             -v "$fixture/bin:/fixture-bin:ro" \
-            -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
+            -v "$CONTRACT_LINUX/out:/contract:ro" \
             -v "$REPO_ROOT/script/test/standard-image-encode-base64.py:/audit/standard-image-encode-base64.py:ro" \
             -e "PATH=/fixture-bin:/usr/bin:/bin" \
             --entrypoint sh "$BASE_IMAGE" -c "$generated" 2>&1)" || rc=$?
@@ -534,7 +542,7 @@ run_container() { # $1 image, $2 recipe, $3 uid:gid, $4 expected dsh version
         --cap-drop ALL --network none --tmpfs /tmp:rw,exec \
         -e HOME=/tmp \
         ${oracle[@]+"${oracle[@]}"} \
-        -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
+        -v "$CONTRACT_LINUX/out:/contract:ro" \
         -v "$REPO_ROOT/script/test/standard-image-encode-base64.py:/audit/standard-image-encode-base64.py:ro" \
         --entrypoint sh "$img" -c "$(container_script "$recipe")" 2>&1 || rc=$?
     [ "$rc" -eq 0 ] || fail "$recipe ($uid) runtime capture failed: $rc"
@@ -622,7 +630,7 @@ check_report() { # $1 recipe, $2 label0 value, $3 label1 value, $4 output
 }
 
 # check_status RECIPE CONTAINER_OUTPUT -- decode the exact status bytes and
-# validate them with the committed install-status.py record predicate, so a
+# validate them with the committed `install-status record` predicate, so a
 # multi-line or unterminated record is rejected rather than truncated to its
 # first line (review F2). Pi's separate bridge record is validated too.
 check_status() { # $1 recipe, $2 output
@@ -630,7 +638,7 @@ check_status() { # $1 recipe, $2 output
     file="$TMP/status-check.$$"
     decode_b64 "$(kv "$out" status_b64)" "$file" ||
         { printf '%s status record is missing' "$recipe"; return 1; }
-    got="$(python3 "$STATUS_VALIDATOR" record "$file" 2>/dev/null)" || {
+    got="$("$STATUS_VALIDATOR" install-status record "$file" 2>/dev/null)" || {
         printf '%s status record is not a valid record: %s' \
             "$recipe" "$(tr -d '\0' <"$file" | head -c 200)"
         return 1
@@ -640,7 +648,7 @@ check_status() { # $1 recipe, $2 output
         file="$TMP/status-check-bridge.$$"
         decode_b64 "$(kv "$out" bridgestatus_b64)" "$file" ||
             { printf 'pi bridge status record is missing'; return 1; }
-        got="$(python3 "$STATUS_VALIDATOR" record "$file" 2>/dev/null)" || {
+        got="$("$STATUS_VALIDATOR" install-status record "$file" 2>/dev/null)" || {
             printf 'pi bridge status record is not a valid record: %s' \
                 "$(tr -d '\0' <"$file" | head -c 200)"
             return 1
@@ -1001,7 +1009,7 @@ audit_opencode_plugins() {
         run_with_watchdog 180 docker_run --rm --platform "$platform" --network none --cap-drop ALL \
             --user "$pair" --tmpfs /home/probe:rw,exec,mode=1777 -e HOME=/home/probe \
             -v "$REPO_ROOT/images/tools/opencode:/opencode-source:ro" \
-            -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
+            -v "$CONTRACT_LINUX/out:/contract:ro" \
             -v "$REPO_ROOT/script/test:/audit:ro" \
             --entrypoint bash "$image" /audit/opencode-guest-audit.sh /opencode-source /audit/opencode-audit.py "$selection" || return $?
     done
@@ -1038,8 +1046,8 @@ t5_negatives() {
         if [ -n "$workdir" ]; then
             args=(--workdir "$workdir" "${args[@]}")
         fi
-        args+=(-v "$REPO_ROOT/images/recipe-contract:/contract:ro"
-            --entrypoint /usr/bin/python3 "$img" /contract/check-tool-access.py "$target")
+        args+=(-v "$CONTRACT_LINUX/out:/contract:ro"
+            --entrypoint /contract/recipe-contract "$img" tool-access "$target")
         set +e
         out="$(run_with_watchdog "$RUNTIME_WATCHDOG_SECONDS" docker_run "${args[@]}" 2>&1)"
         status=$?
@@ -1101,7 +1109,6 @@ t5_negatives() {
     expect_fail 12345:23456 private/../bin/tool "" "not traversable by all" \
         /t5/neg/lexical0700
     echo "  T5 negatives: all twelve rejected with the offending path"
-
     # The repaired tree passes under two unrelated numeric gids.
     local ok_uid
     for ok_uid in 12345:54321 54321:12345; do
@@ -1109,9 +1116,9 @@ t5_negatives() {
         run_with_watchdog "$RUNTIME_WATCHDOG_SECONDS" \
             docker_run --rm --platform "$platform" --user "$ok_uid" \
             --cap-drop ALL --network none \
-            -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
-            --entrypoint /usr/bin/python3 "$img" \
-            /contract/check-tool-access.py /t5/pass/one/two/cmd /t5/pass/multi/two \
+            -v "$CONTRACT_LINUX/out:/contract:ro" \
+            --entrypoint /contract/recipe-contract "$img" tool-access \
+            /t5/pass/one/two/cmd /t5/pass/multi/two \
             >"$TMP/t5-pass-$ok_uid.out" 2>&1 || rc=$?
         [ "$rc" -ne 124 ] ||
             fail "T5 repaired fixture timed out under uid $ok_uid after ${RUNTIME_WATCHDOG_SECONDS}s"
@@ -1122,9 +1129,9 @@ t5_negatives() {
         run_with_watchdog "$RUNTIME_WATCHDOG_SECONDS" \
             docker_run --rm --platform "$platform" --user "$ok_uid" \
             --cap-drop ALL --network none -e "PATH=/t5/pass/env/interp:/usr/bin:/bin" \
-            -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
-            --entrypoint /usr/bin/python3 "$img" \
-            /contract/check-tool-access.py /t5/pass/env/bin/tool \
+            -v "$CONTRACT_LINUX/out:/contract:ro" \
+            --entrypoint /contract/recipe-contract "$img" tool-access \
+            /t5/pass/env/bin/tool \
             >"$TMP/t5-pass-env-$ok_uid.out" 2>&1 || rc=$?
         [ "$rc" -ne 124 ] ||
             fail "T5 repaired env fixture timed out under uid $ok_uid after ${RUNTIME_WATCHDOG_SECONDS}s"
@@ -1135,9 +1142,9 @@ t5_negatives() {
         run_with_watchdog "$RUNTIME_WATCHDOG_SECONDS" \
             docker_run --rm --platform "$platform" --user "$ok_uid" \
             --cap-drop ALL --network none -e "PATH=/t5/pass/envpath/good:/usr/bin:/bin" \
-            -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
-            --entrypoint /usr/bin/python3 "$img" \
-            /contract/check-tool-access.py /t5/pass/envpath/bin/tool \
+            -v "$CONTRACT_LINUX/out:/contract:ro" \
+            --entrypoint /contract/recipe-contract "$img" tool-access \
+            /t5/pass/envpath/bin/tool \
             >"$TMP/t5-pass-envpath-$ok_uid.out" 2>&1 || rc=$?
         [ "$rc" -ne 124 ] ||
             fail "T5 repaired envpath fixture timed out under uid $ok_uid after ${RUNTIME_WATCHDOG_SECONDS}s"
@@ -1148,9 +1155,9 @@ t5_negatives() {
         run_with_watchdog "$RUNTIME_WATCHDOG_SECONDS" \
             docker_run --rm --platform "$platform" --user "$ok_uid" \
             --cap-drop ALL --network none -e "PATH=/t5/pass/envnested/bad:/usr/bin:/bin" \
-            -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
-            --entrypoint /usr/bin/python3 "$img" \
-            /contract/check-tool-access.py /t5/pass/envnested/bin/tool \
+            -v "$CONTRACT_LINUX/out:/contract:ro" \
+            --entrypoint /contract/recipe-contract "$img" tool-access \
+            /t5/pass/envnested/bin/tool \
             >"$TMP/t5-pass-envnested-$ok_uid.out" 2>&1 || rc=$?
         [ "$rc" -ne 124 ] ||
             fail "T5 repaired nested-env fixture timed out under uid $ok_uid after ${RUNTIME_WATCHDOG_SECONDS}s"

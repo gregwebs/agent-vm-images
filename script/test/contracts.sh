@@ -20,18 +20,50 @@ version=$(actionlint -version | head -n 1) || version=unknown
 version=$(shellcheck --version | sed -n 's/^version: //p') || version=unknown
 [ "$version" = 0.11.0 ] || { echo "shellcheck 0.11.0 required, got ${version:-nothing} (script/dev/install-shellcheck.sh)" >&2; exit 1; }
 timeout --version | grep -q 'GNU coreutils' || { echo 'GNU timeout required (macOS: coreutils gnubin on PATH)' >&2; exit 1; }
+# Go owns the recipe-contract build helper. GOTOOLCHAIN=auto lets go.mod select the
+# patch release; a stale local linter must fail rather than silently accept.
+command -v go >/dev/null || { echo 'missing prerequisite: go (install Go; go.mod selects the toolchain via GOTOOLCHAIN=auto)' >&2; exit 1; }
+# The module owns the linter pin, so this gate and the review notes cannot drift
+# from one another; installing the same version is CONTRIBUTING's job.
+lint_want=$(<"$ROOT/images/recipe-contract/golangci-lint.version")
+lint_version=$(golangci-lint --version 2>/dev/null | sed -n 's/.*has version \([^ ]*\) .*/\1/p') || lint_version=unknown
+[ "${lint_version:-}" = "$lint_want" ] || {
+    echo "golangci-lint $lint_want required, got ${lint_version:-nothing} (bash script/dev/install-golangci-lint.sh)" >&2
+    exit 1
+}
+contract_module="$ROOT/images/recipe-contract"
+# The formatter must come from the toolchain the module selects, not from PATH:
+# an older gofmt there would silently reformat to a different style. Every step is
+# status-checked separately so a missing or failing formatter cannot pass on empty
+# output.
+if selected_goroot=$(cd "$contract_module" && GOTOOLCHAIN=auto go env GOROOT); then :; else
+    status=$?; echo 'cannot select Go formatter toolchain' >&2; exit "$status"
+fi
+formatter="$selected_goroot/bin/gofmt"
+[ -x "$formatter" ] || { echo "missing formatter: $formatter" >&2; exit 1; }
+if format_output=$(cd "$contract_module" && "$formatter" -l .); then :; else
+    status=$?; echo "formatter failed: $formatter (status $status)" >&2; exit "$status"
+fi
+[ -z "$format_output" ] || { printf '%s\n' "$format_output" >&2; exit 1; }
+(cd "$contract_module" && GOTOOLCHAIN=auto go test ./internal/buildcheck)
+(cd "$contract_module" && GOTOOLCHAIN=auto go vet ./...)
+(cd "$contract_module" && golangci-lint run)
 # The images run #!/bin/sh under dash; macOS sh is bash 3.2 and parses bashisms.
 if command -v dash >/dev/null; then posix_sh='dash'
 elif [ "${GITHUB_ACTIONS:-}" = true ]; then echo 'dash required on CI for #!/bin/sh syntax checks' >&2; exit 1
 else posix_sh='sh'; echo 'note: dash not on PATH; #!/bin/sh syntax checked with sh -n' >&2
 fi
 if [ "$guard_only" = false ]; then
+    (cd "$contract_module" && GOTOOLCHAIN=auto go test ./...)
+    contract_context=$(bash "$ROOT/script/build/recipe-contract.sh" --native) ||
+        { echo 'cannot build the native recipe-contract helper' >&2; exit 1; }
+    export RECIPE_CONTRACT_CONTEXT="$contract_context"
     for suite in agent-versions claude-installer codex-installer copilot-installer copilot-verify \
         opencode-installer opencode-pnpm-prepare-lock opencode-pnpm-install opencode-pnpm-upgrade \
         opencode-plugins-verify run-pnpm dsh-prepare-lock dsh-verify pi-install pi-prepare-lock pi-verify \
         pi-wrapper shipped-installer-contracts tool-access vendored-installers upgrade-scripts \
         install-shellcheck install-zellij install-pnpm host-watchdog transactional-publish \
-        standard-certification build-entrypoint release-content release-operations release-http \
+        standard-certification build-entrypoint contracts-formatter release-content release-operations release-http \
         ci-boot-bind ci-boot-runtime ci-boot-evidence ci-boot-prepare; do
         echo "=== $suite ==="
         bash "script/test/$suite.sh"

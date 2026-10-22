@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -173,6 +174,18 @@ def fake_docker(args):
     return 0
 
 
+def fake_go(args):
+    """`go version BINARY` is the harness's compiler evidence, not a build."""
+    if args[:1] == ['version'] and len(args) == 2:
+        state_path = Path(os.environ['AVM_FAKE_STATE'])
+        state = json.loads(state_path.read_text())
+        state['commands'].append(['go', *args])
+        state_path.write_text(json.dumps(state))
+        print(args[-1] + ': go1.27.3')
+        return 0
+    raise AssertionError('the harness must not build; RECIPE_CONTRACT_CONTEXT is set: ' + repr(args))
+
+
 def fake_python(args):
     if args and args[0].endswith('/standard-node-layout.py'):
         state_path = Path(os.environ['AVM_FAKE_STATE'])
@@ -254,6 +267,9 @@ def dsh_tests(work, environment):
             assert actions == ['initialize', 'prepare', 'install', 'verify', 'clean'] + ['probe'] * 4, actions
             create = next(args for args in commands if args[0] == 'create' and DSH_BODY not in args and args[args.index('--name') + 1].endswith('-probe'))
             assert '/runtime-homes:rw,mode=1777' in create and '/root:rw,mode=0770,uid=0,gid=23456' in create
+            contract_mount = f'type=bind,src={ROOT / "target/recipe-contract/linux-arm64"}/out,dst=/fixtures/contract,readonly'
+            assert contract_mount in create, create
+            assert not any(str(ROOT / 'images/recipe-contract') in arg for arg in create), create
             assert create[create.index('--cap-drop') + 1] == 'ALL'
             copies = [args for args in commands if args[0] == 'cp']
             assert [Path(args[1]).name for args in copies[:4]] == ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-inputs.sha256']
@@ -329,17 +345,88 @@ def dsh_tests(work, environment):
         assert result.returncode == 2, flags
 
 
+def contract_context_tests(module, work):
+    """The adapter owns reuse; the harness checks publication and diagnostics."""
+    built = work / 'unit-built' / 'linux-amd64'
+    (built / 'out').mkdir(parents=True)
+    (built / 'out/recipe-contract').write_bytes(b'fixture helper')
+    calls = []
+
+    def built_run(argv, **options):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, str(built) + '\n', '')
+
+    # Even a same-basename context must go through the adapter, not local reuse.
+    reusable = work / 'elsewhere' / 'linux-amd64'
+    (reusable / 'out').mkdir(parents=True)
+    (reusable / 'out/recipe-contract').write_bytes(b'wrong helper')
+    with patch.dict(os.environ, {'RECIPE_CONTRACT_CONTEXT': str(reusable)}), \
+            patch.object(module.subprocess, 'run', built_run):
+        assert module.contract_context('linux/amd64') == built
+    assert calls == [['bash', str(module.ROOT / 'script/build/recipe-contract.sh'), '--platform', 'linux/amd64']], calls
+
+    # A failed build is the harness's failure, with the adapter's diagnostic.
+    failed = subprocess.CompletedProcess([], 1, '', 'go.mod selects go1.27.3\n')
+    with patch.dict(os.environ, {'RECIPE_CONTRACT_CONTEXT': ''}), \
+            patch.object(module.subprocess, 'run', lambda argv, **options: failed):
+        try:
+            module.contract_context('linux/arm64')
+        except module.Failure as error:
+            assert 'go1.27.3' in str(error), error
+        else:
+            raise AssertionError('a failed helper build was accepted')
+
+    # A "successful" build that published no binary is the same failure, earlier.
+    empty = work / 'unit-empty' / 'linux-arm64'
+    empty.mkdir(parents=True)
+    with patch.dict(os.environ, {'RECIPE_CONTRACT_CONTEXT': ''}), \
+            patch.object(module.subprocess, 'run', lambda argv, **options: subprocess.CompletedProcess(argv, 0, str(empty) + '\n', '')):
+        try:
+            module.contract_context('linux/arm64')
+        except module.Failure as error:
+            assert 'published no binary' in str(error), error
+        else:
+            raise AssertionError('a helper build without a binary was accepted')
+    print('standard-node-consumers self-test: contract context selection PASS')
+
+
 def main():
+    global ROOT, ENTRY
     with tempfile.TemporaryDirectory(prefix='standard-node-self-test-') as directory:
         work = Path(directory)
         tools = work / 'bin'
         tools.mkdir()
-        for executable, mode in [('docker', '--fake-docker'), ('python3', '--fake-python')]:
+        for executable, mode in [('docker', '--fake-docker'), ('python3', '--fake-python'), ('go', '--fake-go')]:
             file = tools / executable
             file.write_text(f'#!{sys.executable}\nimport runpy,sys\nsys.argv=[{str(Path(__file__).resolve())!r},{mode!r},*sys.argv[1:]]\nrunpy.run_path(sys.argv[0],run_name="__main__")\n')
             file.chmod(0o755)
+        # Run the real adapter in a scratch checkout so its exact-path reuse
+        # rule is tested without writing into the developer's target directory.
+        source_root = ROOT
+        ROOT = (work / 'repo').resolve()
+        (ROOT / 'script/test').mkdir(parents=True)
+        (ROOT / 'script/build').mkdir()
+        for path in (source_root / 'script/test').iterdir():
+            destination = ROOT / 'script/test' / path.name
+            if path.name in ['standard-node-consumers.py', 'standard-node-consumers.sh']:
+                shutil.copyfile(path, destination)
+            else:
+                destination.symlink_to(path)
+        shutil.copyfile(source_root / 'script/build/recipe-contract.sh',
+                        ROOT / 'script/build/recipe-contract.sh')
+        shutil.copytree(source_root / 'images', ROOT / 'images', symlinks=True)
+        (ROOT / '.git').symlink_to(source_root / '.git')
+        ENTRY = ROOT / 'script/test/standard-node-consumers.sh'
+        # The harness mounts a composed helper directory and execs `recipe-contract`
+        # from it. A fixture stands in for the host build so the fake suite never
+        # compiles and never mounts the source-only module.
+        contract = ROOT / 'target/recipe-contract/linux-arm64'
+        (contract / 'out').mkdir(parents=True)
+        (contract / 'out/recipe-contract').write_bytes(b'fixture helper')
+        (contract / 'out/run-install.sh').write_text('fixture run-install\n')
         environment = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'],
-                           AGENT_VM_EVIDENCE_ROOT=str(work / 'evidence-subprocess'))
+                           AGENT_VM_EVIDENCE_ROOT=str(work / 'evidence-subprocess'),
+                           RECIPE_CONTRACT_CONTEXT=str(contract))
         for variable in ['NODE_OPTIONS', 'NODE_PATH', 'BUN_OPTIONS']:
             environment.pop(variable, None)
         spec = importlib.util.spec_from_file_location('primitive_host', ROOT / 'script/test/standard-node-consumers.py')
@@ -429,6 +516,10 @@ def main():
                 assert 'MKNOD' not in main_create and 'CHOWN' not in main_create
                 assert main_create[main_create.index('--cap-drop') + 1] == 'ALL'
                 assert sum('readonly' in arg for arg in main_create) == 2
+                # The audit execs `<mount>/recipe-contract`, so the mount must be a
+                # composed directory. The source-only module holds no binary.
+                assert f'type=bind,src={contract}/out,dst=/contract,readonly' in main_create, main_create
+                assert not any(str(ROOT / 'images/recipe-contract') in arg for arg in main_create), main_create
                 probes = [args for args in state['commands'] if 'probe' in args and '--bounding-set=-all' in args]
                 assert len(probes) == 28
                 assert all('--no-new-privs' in args and '--clear-groups' in args for args in probes)
@@ -445,6 +536,7 @@ def main():
                 assert 'scripted failure: cleanup' in result.stderr and 'owned cleanup failed' in result.stderr
                 assert 'status 19' in result.stderr and 'status 23' in result.stderr, result.stderr
             print('standard-node-consumers self-test: ' + case + ' PASS')
+        contract_context_tests(module, work)
         dsh_tests(work, environment)
         for args in [[], ['base', '--bad'], ['base', '--consumer', 'primitives', '--extra'],
                      ['base', '--consumer', 'primitives', '--platform', 'linux/riscv64']]:
@@ -751,4 +843,6 @@ if __name__ == '__main__':
         sys.exit(fake_docker(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == '--fake-python':
         sys.exit(fake_python(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == '--fake-go':
+        sys.exit(fake_go(sys.argv[2:]))
     main()

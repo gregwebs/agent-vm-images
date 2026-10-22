@@ -35,6 +35,8 @@ test "$(go version | cut -d' ' -f3)" = "go${GO_VERSION}"
 # long enough to hit it reliably).
 gofmt_help="$(gofmt -h 2>&1 || true)"
 grep -q 'usage: gofmt' <<<"$gofmt_help"
+# GOLANGCI_LINT_VERSION is the guarded Dockerfile mirror of the repository pin,
+# so verification follows the same bump rather than carrying another default.
 golangci_lint_version="$(golangci-lint version)"
 grep -q "golangci-lint has version ${GOLANGCI_LINT_VERSION} " <<<"$golangci_lint_version"
 gopls_version="$(gopls version)"

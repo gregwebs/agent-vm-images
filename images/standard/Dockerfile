@@ -1,6 +1,23 @@
 # One maintained all-agent recipe. Build context: images/.
 # Version declarations remain local to each block for Docker cache locality.
 ARG BASE_IMAGE=agent-vm-base:local
+# Build-only helper compiler. Docker stages do not cross Dockerfiles, so both
+# products declare this stage; the substantive recipe is recipe-contract/build.sh
+# and the version/digest pair is guarded by script/test/image-sources. The binary
+# reaches consumers only through a read-only composed-directory mount, so no
+# compiler or helper persists in a final layer.
+FROM --platform=$BUILDPLATFORM golang:1.27.3-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4 AS recipe-contract-bin
+ARG TARGETARCH
+WORKDIR /src/recipe-contract
+COPY recipe-contract/ ./
+# The pinned image compiler must equal go.mod's toolchain before any cross-target
+# variable is set, so auto-download inside the build cannot mask a stale image.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    GOTOOLCHAIN=local GOWORK=off GOFLAGS= GOENV=off \
+    go test -tags recipe_contract_image_compiler -run '^TestImageCompiler$' ./internal/buildcheck
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    GOOS=linux GOARCH=$TARGETARCH CGO_ENABLED=0 bash ./build.sh /out
+
 FROM ${BASE_IMAGE}
 LABEL org.opencontainers.image.title="agent-vm standard coding-agent image"
 LABEL org.opencontainers.image.description="dsh, Pi, Codex, OpenCode, Claude and Copilot with reviewed exact selections."
@@ -12,7 +29,7 @@ ARG AGENT_VERSION_PNPM=
 LABEL org.agent-vm.version.dsh="${AGENT_VERSION_DSH:-0.1.5-rc.2}"
 
 COPY tools/dsh/package.json tools/dsh/pnpm-lock.yaml tools/dsh/pnpm-workspace.yaml tools/dsh/pnpm-inputs.sha256 /opt/agent-vm/dsh/
-RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/dsh,target=/tmp/dsh-source,ro \
     --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
     AGENT_INSTALL_SOFT_FAIL= \
@@ -27,7 +44,7 @@ RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
 RUN test ! -e /usr/local/bin/dsh && test ! -L /usr/local/bin/dsh && \
     ln -s /opt/agent-vm/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js /usr/local/bin/dsh
 
-RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/dsh,target=/tmp/dsh-source,ro \
     --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
     AGENT_INSTALL_SOFT_FAIL= \
@@ -47,7 +64,7 @@ LABEL org.agent-vm.version.pi="${AGENT_VERSION_PI:-1.3.0}" \
       org.agent-vm.version.pi-claude-bridge="${AGENT_VERSION_PI_CLAUDE_BRIDGE:-0.8.0}"
 
 COPY tools/pi/package.json tools/pi/package-lock.json /opt/agent-vm/pi/
-RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/pi/install-pi.sh,target=/tmp/install-pi.sh,ro \
     --mount=type=bind,source=tools/pi/prepare-lock.sh,target=/tmp/prepare-pi-lock.sh,ro \
     AGENT_INSTALL_SOFT_FAIL= \
@@ -58,7 +75,7 @@ RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
     sh /tmp/recipe-contract/run-install.sh pi /opt/agent-vm/install-status/pi sh /tmp/install-pi.sh
 
 COPY tools/pi/bridge/package.json tools/pi/bridge/package-lock.json /opt/agent-vm/pi-packages/
-RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/pi/install-pi-packages.sh,target=/tmp/install-pi-packages.sh,ro \
     --mount=type=bind,source=tools/pi/bridge/prepare-lock.sh,target=/tmp/prepare-bridge-lock.sh,ro \
     AGENT_INSTALL_SOFT_FAIL= \
@@ -75,7 +92,7 @@ RUN chmod -R a+rX /opt/agent-vm/pi-extensions
 
 COPY --chmod=0755 tools/pi/pi.sh /usr/local/bin/pi
 
-RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/pi/verify-pi.sh,target=/tmp/verify-pi.sh,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
@@ -91,7 +108,7 @@ LABEL org.agent-vm.version.codex="${AGENT_VERSION_CODEX}"
 
 ENV PATH=/opt/agent/.local/bin:${PATH}
 
-RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/codex/install-codex.sh,target=/tmp/install-codex.sh,ro \
     --mount=type=bind,source=tools/codex/vendor,target=/opt/agent-vm/recipe-vendor,ro \
     AGENT_INSTALL_SOFT_FAIL= \
@@ -101,7 +118,7 @@ RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
     AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
     sh /tmp/recipe-contract/run-install.sh codex /opt/agent-vm/install-status/codex sh /tmp/install-codex.sh
 
-RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/codex/verify-codex.sh,target=/tmp/verify-codex.sh,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
@@ -116,7 +133,7 @@ LABEL org.agent-vm.version.opencode="${AGENT_VERSION_OPENCODE}"
 
 ENV PATH=/opt/agent/.opencode/bin:${PATH}
 
-RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/opencode/install-opencode.sh,target=/tmp/install-opencode.sh,ro \
     --mount=type=bind,source=tools/opencode/vendor,target=/opt/agent-vm/recipe-vendor,ro \
     AGENT_INSTALL_SOFT_FAIL= \
@@ -126,7 +143,7 @@ RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
     AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
     sh /tmp/recipe-contract/run-install.sh opencode /opt/agent-vm/install-status/opencode sh /tmp/install-opencode.sh
 
-RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/opencode/verify-opencode.sh,target=/tmp/verify-opencode.sh,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
@@ -141,7 +158,7 @@ LABEL org.agent-vm.version.claude="${AGENT_VERSION_CLAUDE}"
 
 ENV PATH=/opt/agent/.local/bin:/opt/agent/.claude/local/bin:${PATH}
 
-RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/claude/install-claude.sh,target=/tmp/install-claude.sh,ro \
     --mount=type=bind,source=tools/claude/vendor,target=/opt/agent-vm/recipe-vendor,ro \
     AGENT_INSTALL_SOFT_FAIL= \
@@ -151,7 +168,7 @@ RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
     AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
     sh /tmp/recipe-contract/run-install.sh claude /opt/agent-vm/install-status/claude sh /tmp/install-claude.sh
 
-RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/claude/verify-claude.sh,target=/tmp/verify-claude.sh,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
@@ -195,7 +212,7 @@ RUN --mount=type=bind,source=tools/copilot/install-copilot.sh,target=/tmp/instal
     AGENT_VM_VERSION_COPILOT="${AGENT_VERSION_COPILOT}" \
     sh /tmp/install-copilot.sh
 
-RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/copilot/verify-copilot.sh,target=/tmp/verify-copilot.sh,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_VERSION_COPILOT="${AGENT_VERSION_COPILOT}" \
@@ -214,7 +231,7 @@ COPY tools/opencode/plugins/index.js /opt/agent-vm/opencode-plugins/index.js
 COPY tools/opencode/opencode.json /opt/agent-vm/opencode/opencode.json
 ENV OPENCODE_CONFIG=/opt/agent-vm/opencode/opencode.json
 
-RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/opencode,target=/tmp/opencode-source,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
@@ -222,7 +239,7 @@ RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
     AGENT_VM_VERSION_OPENCODE_CLAUDE="${AGENT_VERSION_OPENCODE_CLAUDE}" \
     sh /tmp/recipe-contract/run-install.sh opencode-claude /opt/agent-vm/install-status/opencode-claude sh /tmp/opencode-source/install-opencode-plugins.sh
 
-RUN --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/opencode,target=/tmp/opencode-source,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
@@ -237,7 +254,7 @@ RUN --mount=type=bind,source=standard/verify-standard.sh,target=/tmp/verify-stan
     --mount=type=bind,source=standard/verify-standard-path-identity.py,target=/tmp/verify-standard-path-identity.py,ro \
     --mount=type=bind,source=tools,target=/tmp/standard-tools,ro \
     --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
-    --mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro \
+    --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
     AGENT_VM_TOOL_SOURCE_DIR=/tmp/standard-tools \

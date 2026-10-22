@@ -36,9 +36,9 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential \
  && rm -rf /var/lib/apt/lists/*
 
-# Pins. There is no second copy of these in the repo (this is the only
-# example here that pins a Go toolchain), so the pin and its verification sitting
-# together is the whole lockstep rule: install-go.sh and
+# Pins. The lint version mirrors images/recipe-contract/golangci-lint.version
+# (guarded by image-sources); the standalone example context cannot read that
+# repository file during a build. The pin and its verification stay together: install-go.sh and
 # install-golangci-lint.sh each check their prebuilt tarball against the digest
 # declared here, so a bumped version left beside a stale digest fails the build
 # instead of shipping a different tool. gopls has no tarball to digest;
@@ -47,9 +47,9 @@ RUN apt-get update \
 ARG GO_VERSION=1.27.3
 ARG GO_AMD64_SHA256=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
 ARG GO_ARM64_SHA256=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
-ARG GOLANGCI_LINT_VERSION=2.13.2
-ARG GOLANGCI_LINT_AMD64_SHA256=2277d43b98ec0054280f2ac26b53268bae97682444678a59a657dd565da021d6
-ARG GOLANGCI_LINT_ARM64_SHA256=a2a4e0065aa41be71f7c5ac90f271b61751331e5d04314e62afe4027855f0893
+ARG GOLANGCI_LINT_VERSION=2.14.0
+ARG GOLANGCI_LINT_AMD64_SHA256=ab90aeb7b066f92a33415b638a50fe5344bbb75a0d32ad30cc248d88f81032ab
+ARG GOLANGCI_LINT_ARM64_SHA256=ee7ec5f3453d15ddf106fae5a4d6c71737712348a979d1fe9cd52ec7ea299bae
 ARG GOPLS_VERSION=v0.23.0
 
 # Where the toolchain and the two extra tools live. Both are under /opt so the

@@ -5,11 +5,17 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / 'images/tools/opencode'
 os.umask(0o022)
+
+sys.path.insert(0, str(ROOT / 'script/test'))
+from contract_context import native_contract_directory  # noqa: E402  (path first)
+
+CONTRACT = native_contract_directory(ROOT)
 with tempfile.TemporaryDirectory(prefix='opencode-verifier-', dir='/tmp') as private:
     work = Path(private)
     work.chmod(0o755)
@@ -48,7 +54,7 @@ with tempfile.TemporaryDirectory(prefix='opencode-verifier-', dir='/tmp') as pri
     config.write_text(json.dumps({'plugins': [str(prefix)]}))
     status = work / 'status'
     status.mkdir()
-    env = dict(os.environ, AGENT_VM_CONTRACT_DIR=str(ROOT / 'images/recipe-contract'),
+    env = dict(os.environ, AGENT_VM_CONTRACT_DIR=str(CONTRACT),
                AGENT_VM_OPENCODE_SOURCE_DIR=str(SOURCE), AGENT_VM_OPENCODE_PLUGINS_PREFIX=str(prefix),
                AGENT_VM_OPENCODE_CONFIG_PATH=str(config), OPENCODE_CONFIG=str(config),
                AGENT_VM_CLAUDE_PREFIX=str(native), AGENT_VM_OPENCODE_PREFIX=str(native),

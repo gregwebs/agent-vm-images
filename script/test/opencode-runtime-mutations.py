@@ -70,11 +70,11 @@ with tempfile.TemporaryDirectory(prefix='opencode-runtime-') as private:
     logical = prefix / 'node_modules/@anthropic-ai/claude-agent-sdk/package.json'
     assert physical
     for file in (physical[0], logical):
-        control = subprocess.run(['python3', '/contract/check-tool-access.py', '--quiet', '--content', str(file)], capture_output=True)
+        control = subprocess.run(['/contract/recipe-contract', 'tool-access', '--quiet', '--content', str(file)], capture_output=True)
         assert control.returncode == 0, control.stderr
     denied.chmod(0o700)
     for file in (physical[0], logical):
-        result = subprocess.run(['python3', '/contract/check-tool-access.py', '--quiet', '--content', str(file)], capture_output=True)
+        result = subprocess.run(['/contract/recipe-contract', 'tool-access', '--quiet', '--content', str(file)], capture_output=True)
         assert result.returncode != 0 and b'.pnpm' in result.stderr, result.stderr
     denied.chmod(0o755)
     reset()

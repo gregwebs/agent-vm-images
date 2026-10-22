@@ -9,7 +9,7 @@
 # mandatory extension, a real (rpc) invocation that exits nonzero, the
 # bridge's manifest/installed/probe gates, and the bridge-only degradation -- is
 # exercised hermetically. jq, `timeout`, python3, the real run-report.sh/`jq`
-# selectors and check-tool-access.py back the gate; both status records are
+# selectors and `recipe-contract` back the gate; both status records are
 # written under the case temp root.
 #
 # The wrapper's `--help` subcommand list is compared against its own
@@ -19,10 +19,13 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
 GATE="$REPO_ROOT/images/tools/pi/verify-pi.sh"
-CONTRACT="$REPO_ROOT/images/recipe-contract"
+# The converted verifiers execute `recipe-contract` from the contract directory,
+# so build the native composed directory once before any restricted env -i or
+# fixture PATH replaces the tooling.
+CONTRACT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)/out"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/pi-verify-test.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
-# T5 (check-tool-access.py) audits every ancestor, so the fixture tree must be
+# T5 (`recipe-contract tool-access`) audits every ancestor, so the fixture tree must be
 # traversable by all.
 chmod 0755 "$TEST_ROOT"
 

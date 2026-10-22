@@ -20,7 +20,7 @@ sh "$CONTRACT/run-report.sh" 60 "$scratch/out" "$scratch/err" pnpm --version
     echo 'pnpm: exact report mismatch' >&2
     exit 1
 }
-python3 "$CONTRACT/check-tool-access.py" pnpm pnx pnpx "$node" \
+"$CONTRACT/recipe-contract" tool-access pnpm pnx pnpx "$node" \
     "$prefix/bin/pnpm.mjs" "$prefix/bin/pnpx.mjs"
 mkdir "$scratch/home"
 for pair in minimum-release-age:1440 minimum-release-age-strict:true \

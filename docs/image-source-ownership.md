@@ -57,8 +57,7 @@ READMEs may be adapted to their new owner):
 - `images/recipe-contract/download.sh`
 - `images/recipe-contract/run-npm.sh`
 - `images/recipe-contract/run-report.sh`
-- `images/recipe-contract/install-status.py`
-- `images/recipe-contract/check-tool-access.py`
+- `images/recipe-contract/` — Go record/access predicates; see [ADR 0004](adr/0004-go-build-helpers.md)
 - `images/tools/dsh/install-dsh.sh`
 - `images/tools/dsh/verify-dsh.sh`
 - `images/tools/dsh/prepare-lock.sh`
