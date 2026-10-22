@@ -131,6 +131,14 @@ def main():
             # between two of the five copies.
             time.sleep(float(os.environ.get('DSH_TEST_SLEEP_SECONDS', '2')))
         return subprocess.call(['/bin/cp', *args])
+    if name == 'go':
+        # The consumer harness records the mounted helper's compiler; the fixture
+        # context is not a real Go binary, so `go version BINARY` is fixture data.
+        log('go', args)
+        if args[:1] != ['version'] or len(args) != 2:
+            raise ValueError('the fixture harness must not build: ' + repr(args))
+        print(args[-1] + ': go1.27.3')
+        return 0
     if name == 'git':
         if 'status' in args: return 0
         if 'rev-parse' in args:

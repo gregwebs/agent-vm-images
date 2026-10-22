@@ -14,7 +14,7 @@ import sys
 
 FIXTURE = Path('/fixtures')
 PAIRS = [(12345, 23456), (0, 23456), (12345, 0), (12345, 12345)]
-CHECKER = '/contract/check-tool-access.py'
+CHECKER = '/contract/recipe-contract'
 CAPS = ['CapEff', 'CapPrm', 'CapAmb', 'CapInh', 'CapBnd']
 ACL_ENTRIES = [(1, 6, 0xffffffff), (2, 4, 12345), (4, 4, 0xffffffff),
                (16, 4, 0xffffffff), (32, 4, 0xffffffff)]
@@ -128,13 +128,13 @@ def probe(token, stage, uid, gid, expected_hash):
     assert command(['node', '--version']).strip().startswith('v22.')
     assert command(['/usr/local/bin/pnpm', '--version']).strip() == '11.11.0'
     command(['python3', '/source/images/pnpm/verify.py'])
-    command(['python3', CHECKER, 'pnpm', 'pnx', 'pnpx', '/usr/bin/node',
+    command([CHECKER, 'tool-access', 'pnpm', 'pnx', 'pnpx', '/usr/bin/node',
              '/opt/agent-vm/pnpm/bin/pnpm.mjs', '/opt/agent-vm/pnpm/bin/pnpx.mjs'])
     assert launcher_hash() == expected_hash
     assert command(['node', '/contract/pnpm-lock.mjs', 'check', 'dsh', '/fixtures/project']) == '0.1.5-rc.2\n'
-    command(['python3', CHECKER, '--tree', '/fixtures/positive'])
+    command([CHECKER, 'tool-access', '--tree', '/fixtures/positive'])
     for tree in ['private', 'acl', 'device']:
-        result = subprocess.run(['python3', CHECKER, '--tree', str(FIXTURE / tree)],
+        result = subprocess.run([CHECKER, 'tool-access', '--tree', str(FIXTURE / tree)],
                                 capture_output=True, text=True, timeout=30)
         diagnostic = {'private': 'not readable by all', 'acl': 'POSIX access ACL', 'device': 'special file in tree'}[tree]
         negative = stage == tree + '-negative'

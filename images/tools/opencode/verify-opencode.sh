@@ -23,9 +23,9 @@ status="$status_dir/opencode"
 # by an absence record. A dangling symlink, a present-but-unusable file or a
 # permission error on an ancestor is a contract violation, not an absence.
 bin_state=0
-python3 "$CONTRACT/install-status.py" path-state "$opencode_bin" || bin_state=$?
+"$CONTRACT/recipe-contract" install-status path-state "$opencode_bin" || bin_state=$?
 if [ "$bin_state" -eq 0 ]; then
-    if python3 "$CONTRACT/install-status.py" code "$status" >/dev/null 2>&1; then
+    if "$CONTRACT/recipe-contract" install-status code "$status" >/dev/null 2>&1; then
         echo "  opencode: ABSENT ($(cat "$status")); raw developer build only"
         exit 0
     fi
@@ -68,7 +68,7 @@ if ! cmp -s "$scratch/expected" "$out"; then
 fi
 echo "  opencode: $slot (pinned)"
 
-python3 "$CONTRACT/check-tool-access.py" opencode
+"$CONTRACT/recipe-contract" tool-access opencode
 
 mkdir -p "$status_dir"
 printf 'installed\n' >"$status"

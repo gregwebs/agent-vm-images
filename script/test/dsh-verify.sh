@@ -18,7 +18,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
 GATE="$REPO_ROOT/images/tools/dsh/verify-dsh.sh"
 SOURCE_DIR="$REPO_ROOT/images/tools/dsh"
-CONTRACT="$REPO_ROOT/images/recipe-contract"
+# The gate executes its contract helpers, so the native composed directory is
+# built once and copied into each case's own scratch checkout: that keeps the
+# explicit and unset contract-directory shapes authorized by the fixture root and
+# gives both a real binary instead of a source-only tree.
+CONTRACT_CONTEXT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)"
+CONTRACT=""
 FIXTURES="$REPO_ROOT/script/test/fixtures/dsh"
 PNPM_FIXTURES="$REPO_ROOT/script/test/fixtures/pnpm"
 TEST_ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/dsh-verify-test.XXXXXX")" && pwd -P)"
@@ -128,6 +133,15 @@ stage_pnpm() {
 stage() {
     stage_prefix "${1:-healthy}"
     stage_pnpm
+    # A copied checkout owns its own contract directory: the gate's module derives
+    # it from its own location, so the copy must sit under this case's root.
+    mkdir -m 0755 "$CASE/checkout"
+    mkdir -m 0755 "$CASE/checkout/tools"
+    cp -R "$SOURCE_DIR" "$CASE/checkout/tools/dsh"
+    cp -R "$CONTRACT_CONTEXT/out" "$CASE/checkout/recipe-contract"
+    chmod -R a+rX "$CASE/checkout"
+    CASE_SOURCE_DIR="$CASE/checkout/tools/dsh"
+    CONTRACT="$CASE/checkout/recipe-contract"
 }
 
 run_gate() {
@@ -143,7 +157,7 @@ run_gate() {
         "TMPDIR=$TEST_ROOT/tmp" \
         "AGENT_VM_FIXTURE_ROOT=$CASE" \
         "AGENT_VM_DSH_PREFIX=$CASE/prefix" \
-        "AGENT_VM_DSH_SOURCE_DIR=$SOURCE_DIR" \
+        "AGENT_VM_DSH_SOURCE_DIR=${CASE_SOURCE_DIR:-$SOURCE_DIR}" \
         "AGENT_VM_DSH_COMMAND=$CASE/bin/dsh" \
         ${contract_env[@]+"${contract_env[@]}"} \
         "AGENT_VM_INSTALL_STATUS_DIR=$CASE/status" \
@@ -398,6 +412,18 @@ run_gate
 assert_contains "$RUN_OUTPUT" 'tool-access: ok'
 [[ "$(status_record)" == "installed" ]] || fail 'the unset-env run must record installed'
 
+# A host checkout authorizes a *source-only* contract directory, which holds no
+# binary. Exec would then fail with 127 and no reason; the gate must name the
+# missing helper instead and keep its own status.
+new_case contract-source-only
+stage
+rm -f "$CASE/checkout/recipe-contract/recipe-contract"
+RUN_GATE_CONTRACT="unset"
+run_gate
+[[ $RUN_STATUS -eq 1 ]] || fail "a source-only contract directory must fail with status 1: $RUN_STATUS $RUN_OUTPUT"
+assert_contains "$RUN_OUTPUT" 'no executable recipe-contract'
+assert_contains "$RUN_OUTPUT" "$CASE/checkout/recipe-contract"
+
 # `/tmp/recipe-contract` is a build mount, not a directory this gate may execute
 # from. A decoy there must never run: the helpers come from contract-dir, so an
 # unset environment still resolves the authorized copy. Skipped only if a real
@@ -410,7 +436,7 @@ else
     stage
     mkdir -m 0755 "$CONTRACT_DECOY"
     CONTRACT_DECOY_CREATED=1
-    for helper in run-report.sh check-tool-access.py; do
+    for helper in run-report.sh recipe-contract; do
         printf '#!/bin/sh\nprintf executed >%s/contract-decoy-executed\n' "$CASE" >"$CONTRACT_DECOY/$helper"
         chmod 0755 "$CONTRACT_DECOY/$helper"
     done
@@ -611,7 +637,7 @@ grep -Fq 'AGENT_VM_INSTALL_STATUS_DIR:-/opt/agent-vm/install-status}' "$GATE" \
     || fail 'production default status dir is missing'
 grep -Fq 'AGENT_VM_DSH_COMMAND:-/usr/local/bin/dsh}' "$GATE" \
     || fail 'production default command is missing'
-# The gate executes run-report.sh and check-tool-access.py, so it must take their
+# The gate executes run-report.sh and recipe-contract, so it must take their
 # directory from the authorized verb, never from a fixed build-mount path.
 # shellcheck disable=SC2016  # single quotes keep the literal grep pattern
 grep -Fq 'contract-dir "$PREFIX"' "$GATE" \

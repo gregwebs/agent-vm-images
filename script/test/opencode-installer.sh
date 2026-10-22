@@ -8,7 +8,10 @@ REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
 VENDOR_SRC="$REPO_ROOT/images/tools/opencode/vendor"
 INSTALL="$REPO_ROOT/images/tools/opencode/install-opencode.sh"
 VERIFY="$REPO_ROOT/images/tools/opencode/verify-opencode.sh"
-CONTRACT="$REPO_ROOT/images/recipe-contract"
+# The converted verifiers execute `recipe-contract` from the contract directory,
+# so build the native composed directory once before any restricted env -i or
+# fixture PATH replaces the tooling.
+CONTRACT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)/out"
 
 TEST_ROOT="$(mktemp -d /tmp/opencode-installer.XXXXXX)"
 chmod 0755 "$TEST_ROOT"

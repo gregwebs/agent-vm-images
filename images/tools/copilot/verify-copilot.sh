@@ -85,7 +85,7 @@ echo "  copilot: $got (pinned)"
 # arbitrary uid. This follows the PATH symlink into the npm global prefix and
 # audits the target and all ancestors; the chmod in the Dockerfile is what
 # repairs a narrowed prefix.
-python3 "$CONTRACT/check-tool-access.py" copilot
+"$CONTRACT/recipe-contract" tool-access copilot
 
 # Only now is the slot healthy: report, exact equality and T5 have all passed.
 # Copilot is never soft-failable, but an external audit still reads this record

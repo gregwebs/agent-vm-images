@@ -73,12 +73,19 @@ class Case:
         native = self.tools / 'tools.py'
         native.write_text('#!' + sys.executable + '\n' + script.split('\n', 1)[1])
         native.chmod(0o755)
-        for tool in ['npm', 'pnpm-fixture', 'cp', 'docker', 'python3', 'git']:
+        for tool in ['npm', 'pnpm-fixture', 'cp', 'docker', 'python3', 'git', 'go']:
             (self.tools / tool).symlink_to('tools.py')
         # The authorized manager seam intentionally refuses symlink executables.
         (self.tools / 'pnpm-fixture').unlink()
         shutil.copyfile(native, self.tools / 'pnpm-fixture')
         (self.tools / 'pnpm-fixture').chmod(0o755)
+        # The focused consumer harness mounts a composed helper directory and execs
+        # `recipe-contract` from it. A fixture stands in for the host build, so these
+        # cases neither compile Go nor mount the source-only module.
+        self.contract = self.root / 'contexts' / 'linux-arm64'
+        (self.contract / 'out').mkdir(parents=True)
+        (self.contract / 'out/recipe-contract').write_bytes(b'fixture helper')
+        (self.contract / 'out/run-install.sh').write_text('fixture run-install\n')
         self.targets = [self.prefix / name for name in INPUTS] + [self.root / 'images/standard/Dockerfile']
         self.before = [target.read_bytes() for target in self.targets]
         self.log = self.root / 'events.jsonl'
@@ -87,6 +94,7 @@ class Case:
                     and key not in ['NODE_OPTIONS', 'NODE_PATH', 'BUN_OPTIONS', 'NODE_EXTRA_CA_CERTS', 'AGENT_VM_DSH_PNPM_PACKAGE', 'AGENT_VM_FIXTURE_BASE_PNPM']}
         self.env.update(PATH=str(self.tools) + os.pathsep + os.environ['PATH'], TMPDIR=str(self.root),
                         AGENT_VM_FIXTURE_ROOT=str(self.root), AGENT_VM_FIXTURE_PNPM=str(self.tools / 'pnpm-fixture'),
+                        RECIPE_CONTRACT_CONTEXT=str(self.contract),
                         DSH_TEST_REPO=str(ROOT), DSH_TEST_GRAPH=str(self.graph), DSH_TEST_LOG=str(self.log),
                         DSH_TEST_TARGETS=json.dumps(list(map(str, self.targets))), AVM_FAKE_STATE=str(self.state))
 

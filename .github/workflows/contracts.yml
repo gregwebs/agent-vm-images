@@ -21,6 +21,18 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: '22'
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        timeout-minutes: 10
+        with:
+          # go.mod is the single source of truth for the language version; the
+          # selected patch release comes from its toolchain line (see the next step).
+          go-version-file: images/recipe-contract/go.mod
+          # The helper module has no dependencies, so there is no go.sum to key a
+          # module cache on.
+          cache: false
+      - name: Assert the go.mod toolchain
+        timeout-minutes: 10
+        run: bash script/ci/assert-go-toolchain.sh
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1 (2026-08-05)
         with:
           toolchain: '1.98.1'
@@ -32,6 +44,9 @@ jobs:
           bash script/dev/install-shellcheck.sh "$RUNNER_TEMP/shellcheck"
           echo "$RUNNER_TEMP/shellcheck" >> "$GITHUB_PATH"
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
-          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+          # The exact linter, built by the toolchain go.mod selects; contracts.sh
+          # fails on any other version.
+          bash script/dev/install-golangci-lint.sh
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Hermetic and static gates
         run: bash script/test/contracts.sh

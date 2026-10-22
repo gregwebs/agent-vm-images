@@ -6,13 +6,16 @@
 # expected version is passed in, so every branch -- wrong version, an extra
 # output line, a prefix match, a banner-shaped warning, a nonzero exit and a
 # missing command -- is exercised hermetically. The real run-report.sh and
-# check-tool-access.py are used, since status handling and the T5 audit are part
+# `recipe-contract tool-access` are used, since status handling and the T5 audit are part
 # of what is under test.
 set -euo pipefail
 
 REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
 GATE="$REPO_ROOT/images/tools/copilot/verify-copilot.sh"
-CONTRACT="$REPO_ROOT/images/recipe-contract"
+# The converted verifiers execute `recipe-contract` from the contract directory,
+# so build the native composed directory once before any restricted env -i or
+# fixture PATH replaces the tooling.
+CONTRACT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)/out"
 
 TEST_ROOT="$(mktemp -d /tmp/copilot-verify.XXXXXX)"
 chmod 0755 "$TEST_ROOT"

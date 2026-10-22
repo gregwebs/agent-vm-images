@@ -10,7 +10,7 @@ Installs the GitHub Copilot CLI from npm at an exact, committed version.
   A dist-tag, range or URL is rejected. An npm failure is hard.
 - `verify-copilot.sh` runs a bounded `copilot --version`, requires exit 0 before
   parsing, and accepts only the recorded banner plus the one known footer. It
-  then audits T5 (any-uid access) with the shared `check-tool-access.py`
+  then audits T5 (any-uid access) with the shared `recipe-contract tool-access`
   resolver.
 
 ## Exact-version contract

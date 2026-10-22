@@ -1208,31 +1208,49 @@ fn continuations_join_and_the_exact_slot_grammar_rejects_bad_defaults() {
 // Recipe-source walkers: no base install helper, no upstream latest
 // ---------------------------------------------------------------------------
 
+/// Filesystem inventory shared by the source guards. Callers retain their own
+/// directory exclusions and error policy; no symlink directory is followed.
+fn source_files(mut stack: Vec<PathBuf>, skipped: &[&str]) -> Vec<Result<PathBuf, String>> {
+    let mut files = Vec::new();
+    while let Some(directory) = stack.pop() {
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) => {
+                files.push(Err(format!("cannot read {}: {error}", directory.display())));
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = entry.expect("directory entry");
+            let path = entry.path();
+            if entry.file_type().expect("file type").is_dir() {
+                if !skipped.contains(&entry.file_name().to_string_lossy().as_ref()) {
+                    stack.push(path);
+                }
+            } else {
+                files.push(Ok(path));
+            }
+        }
+    }
+    files
+}
+
 /// Collect every committed file under `images/tools` as `(relative path, bytes)`.
 fn image_source_files() -> Vec<(PathBuf, Vec<u8>)> {
     let root = repo_path("images");
-    let mut stack = vec![
+    let roots = vec![
         root.join("tools"),
         root.join("standard"),
         root.join("recipe-contract"),
         root.join("pnpm"),
     ];
     let mut out = Vec::new();
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)
-            .unwrap_or_else(|error| panic!("read {}: {error}", dir.display()))
-        {
-            let entry = entry.expect("dir entry");
-            let path = entry.path();
-            if entry.file_type().expect("file type").is_dir() {
-                stack.push(path);
-            } else {
-                let relative = path.strip_prefix(&root).expect("under root").to_path_buf();
-                let contents = std::fs::read(&path)
-                    .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-                out.push((relative, contents));
-            }
-        }
+    for path in source_files(roots, &[]) {
+        let path = path.unwrap_or_else(|error| panic!("{error}"));
+        let relative = path.strip_prefix(&root).expect("under root").to_path_buf();
+        let contents =
+            std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        out.push((relative, contents));
     }
     for name in ["Dockerfile", "install-pnpm.sh"] {
         out.push((
@@ -1594,6 +1612,707 @@ fn dsh_or_npm_invocations(tool: &str) -> [(&'static str, String); 2] {
     }
 }
 
+/// The one mount both product Dockerfiles use for the composed helper directory.
+const RECIPE_CONTRACT_MOUNT: &str =
+    "--mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro";
+
+/// The builder stage's pinned image and its two RUNs. Docker stages do not cross
+/// Dockerfiles, so base and standard each declare it; the declarations must stay
+/// byte-identical and the image version must be the one go.mod selects.
+fn check_recipe_contract_builder(text: &str) -> Result<(), String> {
+    let (stage, _) = recipe_contract_stages(text)?;
+    let image = stage
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(2))
+        .ok_or("the builder stage has no image")?;
+    if !image.contains("@sha256:") {
+        return Err("the Go builder image must be digest-pinned".into());
+    }
+    let (tag, digest) = image.split_once("@sha256:").ok_or("bad builder image")?;
+    if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("the Go builder digest must be 64 hex characters".into());
+    }
+    let declared = tag
+        .split(':')
+        .nth(1)
+        .ok_or("the Go builder image must declare a version tag")?;
+    let go_mod = read_text("images/recipe-contract/go.mod");
+    let toolchain = go_mod
+        .lines()
+        .find_map(|line| line.strip_prefix("toolchain go"))
+        .ok_or("go.mod must declare a toolchain directive")?
+        .trim();
+    // The tag carries the toolchain version plus a reviewed distro suffix.
+    if !declared.starts_with(&format!("{toolchain}-")) {
+        return Err(format!(
+            "builder image is {declared}, go.mod toolchain is {toolchain}"
+        ));
+    }
+    // go/version owns language/toolchain ordering in buildcheck. Both contracts
+    // modes run that test; this guard owns only the image declaration.
+    for required in [
+        "AS recipe-contract-bin",
+        "ARG TARGETARCH",
+        "COPY recipe-contract/ ./",
+        "GOTOOLCHAIN=local GOWORK=off GOFLAGS= GOENV=off",
+        "go test -tags recipe_contract_image_compiler -run '^TestImageCompiler$' ./internal/buildcheck",
+        "GOOS=linux GOARCH=$TARGETARCH CGO_ENABLED=0 bash ./build.sh /out",
+    ] {
+        if !stage.contains(required) {
+            return Err(format!("builder stage misses {required}"));
+        }
+    }
+    Ok(())
+}
+
+fn builder_stage(text: &str) -> &str {
+    let (block, _) = recipe_contract_stages(text).expect("builder/product stages");
+    // Trailing blank/comment lines belong to whatever follows the stage.
+    let mut cut = block.len();
+    for line in block.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            cut -= line.len() + 1;
+        } else {
+            break;
+        }
+    }
+    block[..cut].trim_end()
+}
+
+fn recipe_contract_stages(text: &str) -> Result<(&str, &str), String> {
+    let start = text
+        .find("FROM --platform=$BUILDPLATFORM golang:")
+        .ok_or("missing the recipe-contract builder stage")?;
+    let rest = &text[start..];
+    let end = rest
+        .find("\nFROM ")
+        .ok_or("the builder stage must precede a FROM")?;
+    Ok((&rest[..end], &rest[end + 1..]))
+}
+
+fn product_stage(text: &str) -> &str {
+    recipe_contract_stages(text)
+        .expect("builder/product stages")
+        .1
+}
+
+#[test]
+fn the_two_builder_declarations_agree_with_go_mod() {
+    let base = read_text("images/Dockerfile");
+    let standard = standard_dockerfile();
+    check_recipe_contract_builder(&base).unwrap();
+    check_recipe_contract_builder(&standard).unwrap();
+    assert_eq!(
+        builder_stage(&base),
+        builder_stage(&standard),
+        "the builder stage declarations must stay byte-identical"
+    );
+    let go_mod = read_text("images/recipe-contract/go.mod");
+    let toolchain = go_mod
+        .lines()
+        .find_map(|line| line.strip_prefix("toolchain go"))
+        .expect("toolchain")
+        .trim();
+    let image_tag = format!("golang:{toolchain}-");
+    for mutation in [
+        base.replacen(&image_tag, "golang:0.0.0-", 1),
+        base.replacen("@sha256:", "@sha256:00", 1),
+        base.replacen("GOARCH=$TARGETARCH", "GOARCH=amd64", 1),
+        base.replacen("GOTOOLCHAIN=local", "GOTOOLCHAIN=auto", 1),
+        base.replacen("COPY recipe-contract/", "COPY missing/", 1),
+        base.replacen(
+            "go test -tags recipe_contract_image_compiler -run '^TestImageCompiler$' ./internal/buildcheck",
+            "true",
+            1,
+        ),
+    ] {
+        assert!(
+            check_recipe_contract_builder(&mutation).is_err(),
+            "accepted builder mutation"
+        );
+    }
+    let mismatched = base.replace(&image_tag, "golang:999.0.0-");
+    assert_ne!(mismatched, base);
+    assert!(check_recipe_contract_builder(&mismatched).is_err());
+}
+
+/// The converted helpers must not come back as Python, and no caller may invoke
+/// the retired entrypoints or a Python file out of a contract directory.
+///
+/// The scan is lexical over one filesystem root, so a new untracked file cannot
+/// escape it and a test can point it at a scratch mutation of the live tree. Two
+/// rules are enforced:
+///
+/// * The converted module is Go and shell only: no `.py`/`.pyc` file and no file
+///   whose first line is a Python shebang. Bytes are read as bytes, so one
+///   invalid UTF-8 byte cannot hide a shebang.
+/// * No command position runs Python on a contract path or on a retired helper
+///   name, and no command position names a retired helper. Quoted data is allowed
+///   (a golden or help string may spell the old name); Dockerfile `RUN` lines and
+///   workflow `run:` bodies are scanned because they execute strings the same way.
+///
+/// Known lexical gaps, deliberately left to other gates: a `python3 - <<EOF`
+/// heredoc bodies an interpreter that is caught by contracts.sh's embedded-Python
+/// gate instead; a helper with no shebang and no `.py` name is only caught when a
+/// caller mentions it; and a path assembled from two shell variables
+/// (`"$DIR/$(echo tool_access)"`) is not resolved here.
+const RETIRED_HELPERS: [&str; 2] = ["install-status.py", "check-tool-access.py"];
+
+/// One shell-ish word plus whether any of it came from a quoted string.
+struct Word {
+    text: String,
+    quoted: bool,
+}
+
+/// strip_comment drops a trailing shell/YAML comment. `$#`, `${x#y}` and a `#`
+/// inside a quoted string are data, not a comment.
+fn strip_comment(line: &str) -> &str {
+    if line.trim_start().starts_with('#') {
+        return "";
+    }
+    let bytes = line.as_bytes();
+    let mut quote: Option<u8> = None;
+    for (index, byte) in bytes.iter().enumerate() {
+        match *byte {
+            b'\'' | b'"' if quote == Some(*byte) => quote = None,
+            b'\'' | b'"' if quote.is_none() => quote = Some(*byte),
+            b'#' if quote.is_none() => {
+                let previous = index.checked_sub(1).map(|before| bytes[before]);
+                if previous.is_none_or(|byte| byte.is_ascii_whitespace()) {
+                    return &line[..index];
+                }
+            }
+            _ => {}
+        }
+    }
+    line
+}
+
+fn is_program_text(name: &str) -> bool {
+    name.starts_with("Dockerfile")
+        || [".sh", ".py", ".mjs", ".js", ".yml", ".yaml"]
+            .iter()
+            .any(|extension| name.ends_with(extension))
+}
+
+/// split_commands breaks a line at unquoted shell separators, so each piece is
+/// one simple command whose first word is the command position.
+fn split_commands(line: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for character in line.chars() {
+        if escaped {
+            current.push(character);
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' if quote != Some('\'') => {
+                current.push(character);
+                escaped = true;
+            }
+            '\'' | '"' if quote == Some(character) => {
+                current.push(character);
+                quote = None;
+            }
+            '\'' | '"' if quote.is_none() => {
+                current.push(character);
+                quote = Some(character);
+            }
+            ';' | '|' | '&' | '(' | ')' if quote.is_none() => {
+                commands.push(std::mem::take(&mut current));
+            }
+            _ => current.push(character),
+        }
+    }
+    commands.push(current);
+    commands
+}
+
+fn shell_words(command: &str) -> Vec<Word> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    let mut characters = command.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\'' | '"' => {
+                quoted = true;
+                started = true;
+                for inner in characters.by_ref() {
+                    if inner == character {
+                        break;
+                    }
+                    current.push(inner);
+                }
+            }
+            '\\' => {
+                if let Some(next) = characters.next() {
+                    current.push(next);
+                    started = true;
+                }
+            }
+            ' ' | '\t' => {
+                if started {
+                    words.push(Word {
+                        text: std::mem::take(&mut current),
+                        quoted,
+                    });
+                    quoted = false;
+                    started = false;
+                }
+            }
+            _ => {
+                started = true;
+                current.push(character);
+            }
+        }
+    }
+    if started {
+        words.push(Word {
+            text: current,
+            quoted,
+        });
+    }
+    words
+}
+
+fn is_python(word: &str) -> bool {
+    let name = word.rsplit('/').next().unwrap_or(word);
+    name == "env" || name == "python" || name.starts_with("python3") || name.starts_with("python2")
+}
+
+/// contract_reference reports a word that names the contract directory or a
+/// retired helper, whichever way the caller spelled it.
+fn contract_reference(word: &str) -> Option<&'static str> {
+    for retired in RETIRED_HELPERS {
+        if word.contains(retired) {
+            return Some(retired);
+        }
+    }
+    for marker in ["$CONTRACT", "${CONTRACT}", "/contract/", "recipe-contract/"] {
+        if word.contains(marker) {
+            return Some("a contract directory");
+        }
+    }
+    None
+}
+
+fn command_offence(words: &[Word]) -> Option<String> {
+    let mut index = 0;
+    while index < words.len() {
+        let word = &words[index].text;
+        let assignment = !word.starts_with('-')
+            && word.contains('=')
+            && word.split('=').next().is_some_and(|name| {
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            });
+        // Dockerfile instruction prefixes, wrappers and shell keywords all stand
+        // before the command word.
+        let keyword = matches!(
+            word.as_str(),
+            "RUN"
+                | "CMD"
+                | "ENTRYPOINT"
+                | "sudo"
+                | "exec"
+                | "command"
+                | "env"
+                | "time"
+                | "nohup"
+                | "if"
+                | "then"
+                | "else"
+                | "elif"
+                | "do"
+                | "while"
+                | "until"
+                | "!"
+                | "="
+                | "["
+                | "-"
+                | "run:"
+        ) || word.starts_with("--kill-after=")
+            || word.starts_with("--");
+        if word == "xargs" {
+            index += 1;
+            while words
+                .get(index)
+                .is_some_and(|word| word.text.starts_with('-'))
+            {
+                index += 1;
+            }
+            continue;
+        }
+        if assignment || keyword || word.chars().all(|ch| ch.is_ascii_digit()) {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    let command = words.get(index)?;
+    let mut arguments = index + 1;
+    if command.text == "timeout" {
+        // timeout [OPTIONS] DURATION COMMAND ...
+        arguments += 1;
+        while words
+            .get(arguments)
+            .is_some_and(|word| word.text.starts_with('-'))
+        {
+            arguments += 1;
+        }
+        arguments += 1;
+    }
+    let arguments = arguments.min(words.len());
+    let python = is_python(&command.text);
+    for word in &words[arguments..] {
+        if python {
+            if let Some(reason) = contract_reference(&word.text) {
+                return Some(format!("{} runs {reason}", command.text));
+            }
+            continue;
+        }
+        // A non-Python command may legitimately read the contract directory
+        // (`sh "$CONTRACT/run-report.sh"`, `COPY recipe-contract/ ./`); only an
+        // unquoted retired helper name is the regression.
+        if word.quoted {
+            continue;
+        }
+        for retired in RETIRED_HELPERS {
+            if word.text.contains(retired) {
+                return Some(format!("{} invokes {retired}", command.text));
+            }
+        }
+    }
+    None
+}
+
+/// python_helper_offences lists every lexical offence under `root`. An empty
+/// list is the only passing result.
+fn python_helper_offences(root: &Path) -> Vec<String> {
+    // The repository's own program text: image sources, harness scripts and the
+    // workflows that run both. Untracked scratch trees (.pi, target, docs) are
+    // outside the claim.
+    const SCANNED_ROOTS: [&str; 3] = ["images", "script", ".github"];
+    let mut offences = Vec::new();
+    let roots = SCANNED_ROOTS
+        .iter()
+        .map(|relative| root.join(relative))
+        .filter(|directory| directory.is_dir())
+        .collect();
+    for path in source_files(roots, &["target", "__pycache__", ".git"]) {
+        let path = match path {
+            Ok(path) => path,
+            Err(error) => {
+                offences.push(error);
+                continue;
+            }
+        };
+        let name = path
+            .file_name()
+            .expect("file name")
+            .to_string_lossy()
+            .to_string();
+        let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                offences.push(format!("cannot read {}: {error}", path.display()));
+                continue;
+            }
+        };
+        if relative.starts_with("images/recipe-contract") {
+            let extension = path.extension().and_then(|value| value.to_str());
+            if matches!(extension, Some("py") | Some("pyc")) {
+                offences.push(format!("python helper file returned: {}", path.display()));
+            }
+            let first_line = bytes.split(|byte| *byte == b'\n').next().unwrap_or(&[]);
+            if first_line.starts_with(b"#!")
+                && first_line.windows(6).any(|window| window == b"python")
+            {
+                offences.push(format!(
+                    "python shebang helper returned: {}",
+                    path.display()
+                ));
+            }
+        }
+        if !is_program_text(&name) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        for line in text.lines() {
+            let line = strip_comment(line);
+            for command in split_commands(line) {
+                if let Some(offence) = command_offence(&shell_words(&command)) {
+                    offences.push(format!("{}: {line}: {offence}", path.display()));
+                }
+            }
+        }
+    }
+    offences
+}
+
+#[test]
+fn the_converted_helpers_stay_go_only() {
+    let offences = python_helper_offences(&repo_path(""));
+    assert!(
+        offences.is_empty(),
+        "the converted helpers must stay Go and shell only: {offences:#?}"
+    );
+}
+
+/// A scratch tree holding only the files the lexical scan reads. Each control
+/// starts from a copy of the live tree, so the baseline proves the rules do not
+/// fire on today's sources and each mutation proves they fire on the regression
+/// it names.
+struct HelperTree {
+    directory: PathBuf,
+}
+
+impl HelperTree {
+    const FILES: [&'static str; 5] = [
+        "images/Dockerfile",
+        "images/standard/Dockerfile",
+        "images/tools/claude/verify-claude.sh",
+        ".github/workflows/contracts.yml",
+        "script/test/tool-access.sh",
+    ];
+
+    fn copy(label: &str) -> Self {
+        let directory = std::env::temp_dir().join(format!(
+            "image-sources-helpers-{}-{label}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        for file in Self::FILES {
+            let destination = directory.join(file);
+            std::fs::create_dir_all(destination.parent().expect("file parent"))
+                .expect("fixture directory");
+            std::fs::copy(repo_path(file), &destination).expect("copy live file");
+        }
+        let module = directory.join("images/recipe-contract");
+        std::fs::create_dir_all(&module).expect("fixture module");
+        for file in ["go.mod", "build.sh", "internal/cli/legacy_text.go"] {
+            let destination = module.join(file);
+            std::fs::create_dir_all(destination.parent().expect("module parent"))
+                .expect("module directory");
+            std::fs::copy(
+                repo_path(&format!("images/recipe-contract/{file}")),
+                destination,
+            )
+            .expect("copy module file");
+        }
+        Self { directory }
+    }
+
+    fn path(&self, relative: &str) -> PathBuf {
+        self.directory.join(relative)
+    }
+
+    fn write(&self, relative: &str, bytes: &[u8]) {
+        let path = self.path(relative);
+        std::fs::create_dir_all(path.parent().expect("file parent")).expect("write parent");
+        std::fs::write(path, bytes).expect("write fixture file");
+    }
+
+    fn append(&self, relative: &str, text: &str) {
+        let before = std::fs::read_to_string(self.path(relative)).expect("read fixture file");
+        self.write(relative, format!("{before}{text}").as_bytes());
+    }
+
+    fn offences(&self) -> Vec<String> {
+        python_helper_offences(&self.directory)
+    }
+}
+
+impl Drop for HelperTree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+#[test]
+fn the_python_return_guard_rejects_every_evasion() {
+    let baseline = HelperTree::copy("baseline");
+    assert!(
+        baseline.offences().is_empty(),
+        "the scratch copy of the live tree must pass: {:#?}",
+        baseline.offences()
+    );
+
+    // The restored oracle source: a `.py` file inside the converted module.
+    let restored = HelperTree::copy("restored-python");
+    restored.write(
+        "images/recipe-contract/check-tool-access.py",
+        b"#!/usr/bin/env python3\nprint('restored')\n",
+    );
+    assert!(
+        restored
+            .offences()
+            .iter()
+            .any(|offence| offence.contains("python helper file")),
+        "{:#?}",
+        restored.offences()
+    );
+
+    // A renamed helper: no extension, a Python shebang.
+    let renamed = HelperTree::copy("renamed-helper");
+    renamed.write(
+        "images/recipe-contract/tool-access",
+        b"#!/usr/bin/env python3\nprint('renamed')\n",
+    );
+    assert!(
+        renamed
+            .offences()
+            .iter()
+            .any(|offence| offence.contains("python shebang")),
+        "{:#?}",
+        renamed.offences()
+    );
+
+    // The same helper with one non-UTF8 byte: the scan reads bytes, so the
+    // shebang on line one still proves what the file is.
+    let mut invalid = b"#!/usr/bin/env python3\n# ".to_vec();
+    invalid.push(0xFF);
+    invalid.extend_from_slice(b"\nprint('renamed')\n");
+    let invalid_tree = HelperTree::copy("non-utf8-helper");
+    invalid_tree.write("images/recipe-contract/tool-access", &invalid);
+    assert!(
+        invalid_tree
+            .offences()
+            .iter()
+            .any(|offence| offence.contains("python shebang")),
+        "{:#?}",
+        invalid_tree.offences()
+    );
+
+    // A compiled module is executable Python even though nothing names it.
+    let compiled = HelperTree::copy("compiled-module");
+    compiled.write(
+        "images/recipe-contract/py/__init__.pyc",
+        b"\x00\x00\x00\x0d",
+    );
+    assert!(
+        compiled
+            .offences()
+            .iter()
+            .any(|offence| offence.contains("python helper file")),
+        "{:#?}",
+        compiled.offences()
+    );
+
+    // A shebang-less helper is only visible through its caller.
+    let shebangless = HelperTree::copy("shebang-less");
+    shebangless.write("images/recipe-contract/tool_access", b"print('helper')\n");
+    shebangless.append(
+        "images/tools/claude/verify-claude.sh",
+        "python3 \"$CONTRACT/tool_access\" claude\n",
+    );
+    assert!(
+        shebangless
+            .offences()
+            .iter()
+            .any(|offence| offence.contains("tool_access")),
+        "{:#?}",
+        shebangless.offences()
+    );
+
+    // A Dockerfile RUN line executes a Python file from the contract mount.
+    let dockerfile = HelperTree::copy("dockerfile-run");
+    dockerfile.append(
+        "images/standard/Dockerfile",
+        "RUN python3 /tmp/recipe-contract/check-tool-access.py claude\n",
+    );
+    assert!(
+        dockerfile
+            .offences()
+            .iter()
+            .any(|offence| offence.contains("check-tool-access.py")),
+        "{:#?}",
+        dockerfile.offences()
+    );
+
+    // A workflow `run:` body is shell too.
+    let workflow = HelperTree::copy("workflow-run");
+    workflow.append(
+        ".github/workflows/contracts.yml",
+        "      - run: python3 images/recipe-contract/check-tool-access.py\n",
+    );
+    assert!(
+        workflow
+            .offences()
+            .iter()
+            .any(|offence| offence.contains("check-tool-access.py")),
+        "{:#?}",
+        workflow.offences()
+    );
+
+    // Workflow command prefixes and xargs must not hide a renamed helper.
+    for (label, caller, bytes) in [
+        (
+            "workflow-one-line",
+            ".github/workflows/contracts.yml",
+            b"      - run: python3 images/recipe-contract/tool_access\n".as_slice(),
+        ),
+        (
+            "workflow-run-key",
+            ".github/workflows/contracts.yml",
+            b"        run: python3 \"$CONTRACT/tool_access\"\n".as_slice(),
+        ),
+        (
+            "xargs-python",
+            "images/tools/claude/verify-claude.sh",
+            b"xargs -0 python3 \"$CONTRACT/tool_access\"\n".as_slice(),
+        ),
+        (
+            "non-utf8-caller",
+            "images/tools/claude/verify-claude.sh",
+            b"# \xff\npython3 \"$CONTRACT/tool_access\"\n".as_slice(),
+        ),
+    ] {
+        let tree = HelperTree::copy(label);
+        tree.write("images/recipe-contract/tool_access", b"print('helper')\n");
+        let mut content = std::fs::read(tree.path(caller)).expect("read caller");
+        content.extend_from_slice(bytes);
+        tree.write(caller, &content);
+        assert!(
+            tree.offences()
+                .iter()
+                .any(|offence| offence.contains("tool_access")),
+            "{label}: {:#?}",
+            tree.offences()
+        );
+    }
+
+    let literal = HelperTree::copy("compatibility-literal");
+    literal.append(
+        "script/test/tool-access.sh",
+        "grep -q 'check-tool-access.py: unknown option' \"$log\"\n",
+    );
+    assert!(
+        literal.offences().is_empty(),
+        "a quoted compatibility literal must not be an offence: {:#?}",
+        literal.offences()
+    );
+
+    // A Python heredoc names no contract path; contracts.sh's embedded-Python
+    // gate owns that shape (documented gap above).
+    let heredoc = HelperTree::copy("python-heredoc");
+    heredoc.append(
+        "images/tools/claude/verify-claude.sh",
+        "python3 - <<'PY'\nprint('inline')\nPY\n",
+    );
+    assert!(heredoc.offences().is_empty(), "{:#?}", heredoc.offences());
+}
+
 /// The dsh block binds its own helper/validator/pnpm sources because the layer
 /// is a reviewed pnpm project, not a single copied installer.
 fn check_dsh_source_block(active: &str) -> Result<(), String> {
@@ -1610,7 +2329,7 @@ fn check_dsh_source_block(active: &str) -> Result<(), String> {
             .find(|line| line.contains(script))
             .ok_or_else(|| format!("missing {phase}-dsh invocation"))?;
         for token in [
-            "--mount=type=bind,source=recipe-contract,target=/tmp/recipe-contract,ro",
+            RECIPE_CONTRACT_MOUNT,
             "--mount=type=bind,source=tools/dsh,target=/tmp/dsh-source,ro",
             "--mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro",
             "AGENT_INSTALL_SOFT_FAIL=",
@@ -1655,14 +2374,16 @@ fn check_standard_blocks(text: &str) -> Result<(), String> {
         .collect::<Vec<_>>()
         .join("\n")
         .replace("\\\n", " ");
+    // Two stages: the build-only helper compiler and the one product stage.
     if active
         .lines()
         .filter(|l| l.trim_start().starts_with("FROM "))
         .count()
-        != 1
+        != 2
     {
-        return Err("standard must have one FROM".into());
+        return Err("standard must have the builder stage and one product stage".into());
     }
+    check_recipe_contract_builder(text)?;
     for tool in RECIPES {
         for (phase, script) in dsh_or_npm_invocations(tool) {
             if !active.contains(&script) {
@@ -1680,7 +2401,7 @@ fn check_standard_blocks(text: &str) -> Result<(), String> {
     {
         return Err("degraded interface".into());
     }
-    if active.contains("source=contract") || !active.contains("source=recipe-contract") {
+    if active.contains("source=contract") || !active.contains("source=/out") {
         return Err("noncanonical helpers".into());
     }
     for instruction in active
@@ -1689,9 +2410,11 @@ fn check_standard_blocks(text: &str) -> Result<(), String> {
     {
         if (instruction.contains("sh /tmp/recipe-contract/run-install.sh")
             || instruction.contains("sh /tmp/verify-"))
-            && !instruction.contains("source=recipe-contract,target=/tmp/recipe-contract,ro")
+            && !instruction.contains(RECIPE_CONTRACT_MOUNT)
         {
-            return Err("installer/audit RUN must bind canonical helpers read-only".into());
+            return Err(
+                "installer/audit RUN must mount the composed helper directory read-only".into(),
+            );
         }
     }
     Ok(())
@@ -1712,10 +2435,43 @@ fn standard_blocks_and_mutations() {
         }
     }
     assert!(check_standard_blocks(&text.replace("sh /tmp/verify-standard.sh", "true")).is_err());
-    assert!(
-        check_standard_blocks(&text.replacen("source=recipe-contract", "source=missing", 1))
-            .is_err()
-    );
+    for mutation in [
+        "true",
+        "--mount=from=recipe-contract-bin,source=/missing,target=/tmp/recipe-contract,ro",
+        "--mount=from=missing-stage,source=/out,target=/tmp/recipe-contract,ro",
+        "--mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,rw",
+    ] {
+        let mutated = text.replacen(RECIPE_CONTRACT_MOUNT, mutation, 1);
+        assert_ne!(mutated, text, "the mutation must change the mount");
+        assert!(
+            check_standard_blocks(&mutated).is_err(),
+            "accepted mount mutation {mutation}"
+        );
+    }
+    // Each dsh phase owns its own mount, so one RUN cannot borrow another's. Every
+    // phase is mutated on its own mount: removed, wrong source, wrong stage and
+    // writable. The claim recorded for the review was per-RUN, not first-RUN.
+    for (phase, script) in dsh_or_npm_invocations("dsh") {
+        let script_at = text.find(&script).expect("dsh script");
+        let mount_at = text[..script_at]
+            .rfind(RECIPE_CONTRACT_MOUNT)
+            .expect("dsh mount precedes its script");
+        for mutation in [
+            "true",
+            "--mount=from=recipe-contract-bin,source=/missing,target=/tmp/recipe-contract,ro",
+            "--mount=from=missing-stage,source=/out,target=/tmp/recipe-contract,ro",
+            "--mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,rw",
+        ] {
+            let mut mutated = String::with_capacity(text.len());
+            mutated.push_str(&text[..mount_at]);
+            mutated.push_str(mutation);
+            mutated.push_str(&text[mount_at + RECIPE_CONTRACT_MOUNT.len()..]);
+            assert!(
+                check_standard_blocks(&mutated).is_err(),
+                "dsh {phase} mount accepted {mutation}"
+            );
+        }
+    }
     // Every dsh RUN must bind its reviewed sources; the runtime verifier cannot
     // borrow another RUN's mount (or the final gate's) and stay certified.
     for mount in [
@@ -2114,7 +2870,16 @@ fn check_pnpm_primitive_inventory() {
         assert!(repo_path(file).is_file(), "missing primitive {file}");
     }
     for recipe in ["images/Dockerfile", "images/standard/Dockerfile"] {
-        for line in read_text(recipe).lines() {
+        let text = read_text(recipe);
+        // The single deliberate builder-stage COPY compiles the helper; it never
+        // appears in the product stage.
+        let product = product_stage(&text);
+        assert_eq!(
+            product.matches("COPY recipe-contract/").count(),
+            0,
+            "the product stage must not COPY the helper directory"
+        );
+        for line in product.lines() {
             if line.trim_start().starts_with("COPY ") || line.trim_start().starts_with("ADD ") {
                 assert!(
                     !line.contains("recipe-contract"),
@@ -2136,4 +2901,33 @@ fn opencode_rejects_parser_adoption_mutations() {
     ] {
         assert!(check_opencode_parser_boundary(&format!("{checker}\n{import}")).is_err());
     }
+}
+
+#[test]
+fn helper_scan_comments_preserve_shell_expansions() {
+    for line in [
+        "echo $#",
+        "echo ${x#prefix}",
+        "echo ${x##prefix}",
+        "echo 'a#b'",
+    ] {
+        assert_eq!(strip_comment(line), line);
+    }
+    assert_eq!(strip_comment("echo $# # comment"), "echo $# ");
+}
+
+#[test]
+fn go_dev_mirrors_the_module_lint_pin() {
+    let pin = read_text("images/recipe-contract/golangci-lint.version");
+    let declaration = format!("ARG GOLANGCI_LINT_VERSION={}", pin.trim());
+    let dockerfile = read_text("examples/layers/go-dev/Dockerfile");
+    assert_eq!(
+        dockerfile
+            .lines()
+            .filter(|line| line.starts_with("ARG GOLANGCI_LINT_VERSION="))
+            .collect::<Vec<_>>(),
+        vec![declaration.as_str()]
+    );
+    let verification = read_text("examples/layers/go-dev/verify-toolchain.sh");
+    assert!(verification.contains("golangci-lint has version ${GOLANGCI_LINT_VERSION} "));
 }

@@ -19,7 +19,7 @@ tools="${AGENT_VM_TOOL_SOURCE_DIR:-/tmp/standard-tools}"
 
 require_installed() {
     for name in dsh pi pi-claude-bridge codex opencode claude copilot opencode-claude; do
-        if record=$(python3 "$AGENT_VM_CONTRACT_DIR/install-status.py" record "$AGENT_VM_INSTALL_STATUS_DIR/$name"); then
+        if record=$("$AGENT_VM_CONTRACT_DIR/recipe-contract" install-status record "$AGENT_VM_INSTALL_STATUS_DIR/$name"); then
             if [ "$record" = installed ]; then continue; fi
         fi
         echo "verify-standard.sh: $name requires exact installed record" >&2

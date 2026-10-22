@@ -56,6 +56,10 @@ bash images/build.sh standard
 bash images/build.sh standard -- --build-arg AGENT_VERSION_CLAUDE=2.1.286 --progress=plain
 ```
 
+The default needs Docker only. For optional host Go compilation, use
+`--host-helpers`; see [contributor commands](CONTRIBUTING.md#go-build-helpers)
+and [ADR 0004](docs/adr/0004-go-build-helpers.md).
+
 The helper builds only the selected recipe, never auto-builds a missing base,
 resolves latest, prunes, pushes or reads launcher configuration. Ordinary Docker
 commands are the full customization interface; edit either Dockerfile or pass
@@ -123,6 +127,7 @@ for agent commands: `bash -lc` can reset the image PATH through `/etc/profile`.
 
 - [Node package defaults and override limits](docs/node-package-defaults.md)
 - [dsh graph-freeze decision](docs/adr/0003-dsh-graph-freeze.md)
+- [Go build helpers and their delivery seam](docs/adr/0004-go-build-helpers.md)
 - [Standard pnpm migration evidence](docs/standard-pnpm-migration.md)
 - [Contributing and verification](CONTRIBUTING.md)
 - [Root-store advisory response](docs/ca-trust-response.md)

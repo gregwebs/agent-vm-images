@@ -122,6 +122,20 @@ def arguments(args):
     return image, platform
 
 
+def contract_context(platform):
+    """Resolve through the shared adapter; it owns platform selection and reuse."""
+    adapter = ROOT / 'script/build/recipe-contract.sh'
+    result = subprocess.run(['bash', str(adapter), '--platform', platform],
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise Failure(f'cannot build the {platform} recipe-contract helper: '
+                      + (result.stderr.strip() or result.stdout.strip() or 'no diagnostic'))
+    context = Path(result.stdout.strip())
+    if not (context / 'out/recipe-contract').is_file():
+        raise Failure(f'the {platform} recipe-contract build published no binary under {context}')
+    return context
+
+
 class Invocation:
     def __init__(self, image, requested):
         self.image = image
@@ -133,6 +147,7 @@ class Invocation:
         self.scratch.mkdir()
         (self.scratch / 'token').write_text(self.token + '\n')
         self.containers = []
+        self.contract = None
         self.volume = None
         self.network = None
         self.index = 0
@@ -289,8 +304,26 @@ class Invocation:
 
     def mounts(self):
         return ['--mount', f'type=bind,src={ROOT},dst=/source,readonly',
-                '--mount', f'type=bind,src={ROOT / "images/recipe-contract"},dst=/contract,readonly',
+                '--mount', f'type=bind,src={self.contract / "out"},dst=/contract,readonly',
                 '--mount', f'type=volume,src={self.volume},dst=/fixtures']
+
+    def select_contract(self):
+        """Build (or reuse) the helper for the validated platform and record it.
+
+        A suite that rebuilds the shared output itself would race every other
+        suite, so reuse the exported context when it matches; otherwise build once
+        per invocation.
+        """
+        self.contract = contract_context(self.platform)
+        binary = self.contract / 'out/recipe-contract'
+        version = subprocess.run(['go', 'version', str(binary)], capture_output=True, text=True)
+        if version.returncode:
+            raise Failure('cannot read the helper compiler: ' + version.stderr.strip())
+        record = {'context': str(self.contract),
+                  'sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
+                  'compiler': version.stdout.strip()}
+        (self.logs / 'helper.json').write_text(json.dumps(record, indent=2) + '\n')
+        print('contract: ' + record['compiler'] + ' ' + record['sha256'], flush=True)
 
     def capacity(self, minimum):
         name = self.create(self.token + '-capacity', '--platform', self.platform,
@@ -356,6 +389,7 @@ class Invocation:
             raise Failure('base-image platform mismatch/emulation')
         print(f'platform: daemon={platform} image={image["Id"]}; client OS is not a native-daemon test', flush=True)
         self.platform = platform
+        self.select_contract()
         self.volume = self.token + '-fixtures'
         self.docker('volume', 'create', self.volume)
         self.capacity(PRIMITIVE_MIN_FREE_KIB + PRIMITIVE_SETUP_BUDGET_KIB)

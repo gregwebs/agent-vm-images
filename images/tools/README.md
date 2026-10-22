@@ -52,6 +52,10 @@ separate projects, so changing one does not rewrite the other.
 
 ## Failure and certification
 
+Recipe-contract sources live in `images/recipe-contract/`, with no maintained
+copies or sync process. [ADR 0004](../../docs/adr/0004-go-build-helpers.md)
+owns their build-only delivery and record/access compatibility contract.
+
 `run-install.sh NAME RESULT_FILE INTERPRETER SCRIPT [ARG ...]` resets the record
 to `pending` before invocation. An inherited `installed` cannot mask failure.
 Exit 75 plus a matching fresh private transport receipt is reserved for known

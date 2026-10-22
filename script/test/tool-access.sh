@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 # Black-box contract tests for the T5 command audit
-# (images/recipe-contract/check-tool-access.py): the all-class permission
+# (`recipe-contract tool-access`): the all-class permission
 # predicate, symlink resolution, and the failure cases that must NOT pass.
 #
 # No Docker: fixtures are real files under a fresh directory whose own ancestors
 # are world-traversable (the macOS per-user $TMPDIR is 0700 and would fail every
-# case for the wrong reason). The checker is Python3, so this runs on Linux and
+# case for the wrong reason). The checker is compiled natively, so this runs on Linux and
 # macOS alike. The uid-12345/12345:45678 ownership variants from the plan need
 # real numeric identities and are exercised in the Docker tier
 # (script/test/standard-image.sh).
 set -euo pipefail
 
 REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
-CHECKER="$REPO_ROOT/images/recipe-contract/check-tool-access.py"
-
-PYTHON="$(command -v python3 || true)"
-[[ -n "$PYTHON" ]] || { echo "FAIL: python3 is required" >&2; exit 1; }
+# One host build per suite: the audit predicates are the same binary the image
+# runs, and rebuilding per case would dominate the suite.
+CONTRACT_CONTEXT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)"
+CHECKER="$CONTRACT_CONTEXT/out/recipe-contract"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -33,7 +33,7 @@ trap 'chmod -R u+rwX "$ROOT" 2>/dev/null || true; rm -rf "$ROOT"' EXIT
 # run <target...>; sets RUN_STATUS/RUN_OUTPUT (combined streams).
 run() {
     set +e
-    RUN_OUTPUT="$(python3 "$CHECKER" "$@" 2>&1)"
+    RUN_OUTPUT="$("$CHECKER" tool-access "$@" 2>&1)"
     RUN_STATUS=$?
     set -e
 }
@@ -69,7 +69,7 @@ chmod 0644 "$first/tool" # present but not executable
 printf '#!/bin/sh\n' >"$second/tool"
 chmod 0755 "$second/tool"
 set +e
-RUN_OUTPUT="$(PATH="$first:$second" "$PYTHON" "$CHECKER" tool 2>&1)"
+RUN_OUTPUT="$(PATH="$first:$second" "$CHECKER" tool-access tool 2>&1)"
 RUN_STATUS=$?
 set -e
 [[ $RUN_STATUS -ne 0 ]] || fail "a present-but-unusable first PATH candidate must fail"
@@ -203,7 +203,7 @@ chmod 0700 "$case_dir/bin/private-interp"
 printf '#!/usr/bin/env private-interp\necho hi\n' >"$case_dir/bin/tool"
 chmod 0755 "$case_dir/bin/tool"
 set +e
-RUN_OUTPUT="$(PATH="$case_dir/bin:/usr/bin:/bin" "$PYTHON" "$CHECKER" "$case_dir/bin/tool" 2>&1)"
+RUN_OUTPUT="$(PATH="$case_dir/bin:/usr/bin:/bin" "$CHECKER" tool-access "$case_dir/bin/tool" 2>&1)"
 RUN_STATUS=$?
 set -e
 [[ $RUN_STATUS -ne 0 ]] || fail "a 0700 PATH interpreter behind `#!/usr/bin/env` must fail: $RUN_OUTPUT"
@@ -222,7 +222,7 @@ printf '#!/bin/sh\n' >"$case_dir/bin/tool"
 chmod 0755 "$case_dir/bin/tool"
 chmod 0700 "$case_dir/private"
 set +e
-RUN_OUTPUT="$(cd "$case_dir" && "$PYTHON" "$CHECKER" private/../bin/tool 2>&1)"
+RUN_OUTPUT="$(cd "$case_dir" && "$CHECKER" tool-access private/../bin/tool 2>&1)"
 RUN_STATUS=$?
 set -e
 [[ $RUN_STATUS -ne 0 ]] || fail "a relative 'private/../bin/tool' must audit 'private': $RUN_OUTPUT"
@@ -247,7 +247,7 @@ chmod 0755 "$case_dir/tool"
 # The invoking PATH points at the good interpreter, exactly the case that used
 # to mask the bad one.
 set +e
-RUN_OUTPUT="$(PATH="$case_dir/good:/usr/bin:/bin" "$PYTHON" "$CHECKER" "$case_dir/tool" 2>&1)"
+RUN_OUTPUT="$(PATH="$case_dir/good:/usr/bin:/bin" "$CHECKER" tool-access "$case_dir/tool" 2>&1)"
 RUN_STATUS=$?
 set -e
 [[ $RUN_STATUS -ne 0 ]] || fail "a PATH-changing env -S shebang must audit its effective PATH: $RUN_OUTPUT"
@@ -264,7 +264,7 @@ chmod 0755 "$case_dir/bin/chosen"
 printf '#!/usr/bin/env -i chosen\n' >"$case_dir/bin/tool"
 chmod 0755 "$case_dir/bin/tool"
 set +e
-RUN_OUTPUT="$(PATH="$case_dir/bin:/usr/bin:/bin" "$PYTHON" "$CHECKER" "$case_dir/bin/tool" 2>&1)"
+RUN_OUTPUT="$(PATH="$case_dir/bin:/usr/bin:/bin" "$CHECKER" tool-access "$case_dir/bin/tool" 2>&1)"
 RUN_STATUS=$?
 set -e
 [[ $RUN_STATUS -ne 0 ]] || fail "env -i changes lookup and must be rejected closed: $RUN_OUTPUT"
@@ -276,7 +276,7 @@ chmod 0755 "$case_dir/bin/chosen"
 printf '#!/usr/bin/env -u PATH chosen\n' >"$case_dir/bin/tool"
 chmod 0755 "$case_dir/bin/tool"
 set +e
-RUN_OUTPUT="$(PATH="$case_dir/bin:/usr/bin:/bin" "$PYTHON" "$CHECKER" "$case_dir/bin/tool" 2>&1)"
+RUN_OUTPUT="$(PATH="$case_dir/bin:/usr/bin:/bin" "$CHECKER" tool-access "$case_dir/bin/tool" 2>&1)"
 RUN_STATUS=$?
 set -e
 [[ $RUN_STATUS -ne 0 ]] || fail "env -u PATH changes lookup and must be rejected closed: $RUN_OUTPUT"
@@ -298,7 +298,7 @@ chmod 0755 "$case_dir/good/inner"
 printf '#!%s\n' "/usr/bin/env -S PATH=$case_dir/bad chosen" >"$case_dir/tool"
 chmod 0755 "$case_dir/tool"
 set +e
-RUN_OUTPUT="$(PATH="$case_dir/good:/usr/bin:/bin" "$PYTHON" "$CHECKER" "$case_dir/tool" 2>&1)"
+RUN_OUTPUT="$(PATH="$case_dir/good:/usr/bin:/bin" "$CHECKER" tool-access "$case_dir/tool" 2>&1)"
 RUN_STATUS=$?
 set -e
 [[ $RUN_STATUS -ne 0 ]] || fail "a nested env interpreter must inherit the effective PATH: $RUN_OUTPUT"
@@ -348,7 +348,7 @@ mkdir -p "$case_dir/bin"
 printf '#!/usr/bin/env sh -e\necho hi\n' >"$case_dir/bin/tool"
 chmod 0755 "$case_dir/bin/tool"
 set +e
-RUN_OUTPUT="$(PATH="/usr/bin:/bin" "$PYTHON" "$CHECKER" "$case_dir/bin/tool" 2>&1)"
+RUN_OUTPUT="$(PATH="/usr/bin:/bin" "$CHECKER" tool-access "$case_dir/bin/tool" 2>&1)"
 RUN_STATUS=$?
 set -e
 [[ $RUN_STATUS -ne 0 ]] || fail 'a "#!/usr/bin/env sh -e" shebang must not certify sh'
@@ -361,7 +361,7 @@ chmod 0755 "$case_dir/bin/chosen"
 printf '#!%s\n' "/usr/bin/env -S PATH=$case_dir/bin chosen" >"$case_dir/bin/tool"
 chmod 0755 "$case_dir/bin/tool"
 set +e
-RUN_OUTPUT="$(PATH="/usr/bin:/bin" "$PYTHON" "$CHECKER" "$case_dir/bin/tool" 2>&1)"
+RUN_OUTPUT="$(PATH="/usr/bin:/bin" "$CHECKER" tool-access "$case_dir/bin/tool" 2>&1)"
 RUN_STATUS=$?
 set -e
 [[ $RUN_STATUS -eq 0 ]] || fail "a valid env -S split shebang must pass: $RUN_OUTPUT"
@@ -408,5 +408,5 @@ chmod 0600 "$case_dir/tree/index.ts"
 expect_fail "not readable by all" --content "$case_dir/tree/index.ts"
 
 PYTHONDONTWRITEBYTECODE=1 python3 "$REPO_ROOT/script/test/pnpm-access.py"
-PYTHONDONTWRITEBYTECODE=1 python3 "$REPO_ROOT/script/test/tool-access-tree.py"
+RECIPE_CONTRACT_CONTEXT="$CONTRACT_CONTEXT" PYTHONDONTWRITEBYTECODE=1 python3 "$REPO_ROOT/script/test/tool-access-tree.py"
 echo "tool-access black-box tests passed"

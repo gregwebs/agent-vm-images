@@ -223,8 +223,8 @@ def probe(token, source, version, uid, gid):
                    XDG_DATA_HOME=str(scratch / 'data'), XDG_STATE_HOME=str(scratch / 'state'), TMPDIR=str(scratch / 'tmp'))
         assert run([str(BIN), '--version'], env=env).strip() == version
         assert base_identity() == invocation['base']
-        run(['python3', '/fixtures/contract/check-tool-access.py', '--tree', str(PREFIX)], env=env)
-        run(['python3', '/fixtures/contract/check-tool-access.py', str(BIN), 'pnpm'], env=env)
+        run(['/fixtures/contract/recipe-contract', 'tool-access', '--tree', str(PREFIX)], env=env)
+        run(['/fixtures/contract/recipe-contract', 'tool-access', str(BIN), 'pnpm'], env=env)
         runtime = json.loads(run(['node', str(SOURCE / 'check-runtime.mjs'), str(PREFIX), '--runtime'], seconds=60, env=env))
         web = json.loads(run(['python3', str(SOURCE / 'probe-dsh.py'), '--prefix', str(PREFIX), '--command', str(BIN),
              '--scratch-root', str(scratch)], seconds=75, env=env))

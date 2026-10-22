@@ -129,6 +129,20 @@ jobs:
           set -euo pipefail
           test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
           test -z "$(git -C source status --porcelain)"
+      # The signed source owns its helper module, so its own go.mod selects the
+      # toolchain -- never the harness checkout, and never a fallback pin. A
+      # release whose signed source predates the Go helper has no module, skips
+      # this step and verifies through its own Python helper.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        timeout-minutes: 10
+        if: ${{ hashFiles('source/images/recipe-contract/go.mod') != '' }}
+        with:
+          go-version-file: source/images/recipe-contract/go.mod
+          cache: false
+      - name: Assert the signed source's go.mod toolchain
+        if: ${{ hashFiles('source/images/recipe-contract/go.mod') != '' }}
+        timeout-minutes: 10
+        run: bash source/script/ci/assert-go-toolchain.sh source/images/recipe-contract
       - name: Native amd64 boot verification with the signed source's own gate
         id: verify
         timeout-minutes: 90

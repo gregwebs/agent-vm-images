@@ -1,5 +1,5 @@
 # Built-image fixtures for the T5 "usable by any uid" command audit
-# (images/recipe-contract/check-tool-access.py), used by
+# (`recipe-contract tool-access`), used by
 # script/test/standard-image.sh. Each case is a real filesystem state in a
 # real image, audited as a numeric uid so the owner/group negatives are genuine
 # (a root-run `os.access` would mask them).

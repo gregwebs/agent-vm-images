@@ -13,5 +13,5 @@ timeout --kill-after=5 80 python3 "$source_dir/probe-opencode.py" capture --bina
 python3 "$audit" --evidence "$work/evidence" --runtime "$work/runtime" --status /opt/agent-vm/install-status/opencode-claude --version "$version" --directory "$PWD"
 # Audit both lexical package links and physical virtual-store contents.
 python3 /audit/opencode-access-files.py /opt/agent-vm/opencode-plugins >"$work/files"
-xargs -0 python3 /contract/check-tool-access.py --quiet --content <"$work/files"
-python3 /contract/check-tool-access.py --quiet --content /opt/agent-vm/opencode/opencode.json
+xargs -0 /contract/recipe-contract tool-access --quiet --content <"$work/files"
+/contract/recipe-contract tool-access --quiet --content /opt/agent-vm/opencode/opencode.json

@@ -6,7 +6,7 @@
 # install directory as build args.
 #
 # Environment:
-#   GOLANGCI_LINT_VERSION        required; the release tag without "v" (e.g. 2.13.2)
+#   GOLANGCI_LINT_VERSION        required; the release tag without "v"
 #   GOLANGCI_LINT_AMD64_SHA256   required on amd64
 #   GOLANGCI_LINT_ARM64_SHA256   required on arm64
 #   GO_TOOLS_BIN                 default /opt/go-tools/bin
@@ -15,7 +15,7 @@
 # arbitrary non-root uid.
 set -euo pipefail
 
-: "${GOLANGCI_LINT_VERSION:?GOLANGCI_LINT_VERSION must be set to the pinned release (e.g. 2.13.2)}"
+: "${GOLANGCI_LINT_VERSION:?GOLANGCI_LINT_VERSION must be set to the pinned release}"
 GO_TOOLS_BIN="${GO_TOOLS_BIN:-/opt/go-tools/bin}"
 
 arch="$(dpkg --print-architecture)"

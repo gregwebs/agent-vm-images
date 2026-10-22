@@ -55,12 +55,17 @@ PNPM_SOURCE=${PNPM_SOURCE_DIR:-$SOURCE/../../pnpm}
 [ -f "$PNPM_SOURCE/verify.py" ] || die "dsh: reviewed pnpm sources are missing at $PNPM_SOURCE"
 
 python3 "$PROJECT" guard "$PREFIX" || die 'dsh: the environment guard rejected this invocation'
-# The contract helpers this gate executes (run-report.sh, check-tool-access.py)
+# The contract helpers this gate executes (run-report.sh, recipe-contract)
 # are executable policy, so the directory comes from the same authorized verb the
 # guard used instead of a fixed build-mount path: an unset AGENT_VM_CONTRACT_DIR
 # resolves to this checkout's (or fixture's) own copy, and a caller-selected one
 # is authorized before the first helper runs. There is no fallback path.
 CONTRACT=$(python3 "$PROJECT" contract-dir "$PREFIX") || die 'dsh: contract directory rejected'
+# An authorized directory is not necessarily a *composed* one: a host checkout
+# authorizes its own source-only `images/recipe-contract`, which holds no binary,
+# so exec would fail with 127 instead of a reason. Name the missing helper.
+[ -x "$CONTRACT/recipe-contract" ] ||
+    die "dsh: no executable recipe-contract in $CONTRACT (set AGENT_VM_CONTRACT_DIR to a composed helper directory; a source checkout carries no binary)"
 facts=$(python3 "$PROJECT" authorize "$PREFIX" --command "$COMMAND" --status-dir "$status_dir") ||
     die 'dsh: prefix, command or status destination is not authorized'
 base_pin=$(printf '%s\n' "$facts" | jq -er '.basePin') || die 'dsh: authorization returned no base pin'
@@ -189,15 +194,15 @@ python3 "$PNPM_SOURCE/verify.py" || die 'pnpm: base identity changed during the 
 # Tree access covers the whole payload; a tree audit alone does not certify
 # executables or the interpreter chain, so the commands are audited explicitly,
 # and every native module the probes actually loaded must be readable by all.
-python3 "$CONTRACT/check-tool-access.py" --tree "$PREFIX" ||
+"$CONTRACT/recipe-contract" tool-access --tree "$PREFIX" ||
     die 'dsh: installed tree is not readable/traversable by an arbitrary uid'
-python3 "$CONTRACT/check-tool-access.py" dsh pnpm ||
+"$CONTRACT/recipe-contract" tool-access dsh pnpm ||
     die 'dsh: a command or its interpreter is not usable by an arbitrary uid'
 native=$(jq -r '.native[]?' "$work/runtime.json") || die 'dsh: runtime report is unreadable'
 if [ -n "$native" ]; then
     if ! printf '%s\n' "$native" | while IFS= read -r file; do
         [ -n "$file" ] || continue
-        python3 "$CONTRACT/check-tool-access.py" --content "$file" || exit 1
+        "$CONTRACT/recipe-contract" tool-access --content "$file" || exit 1
     done; then
         die 'dsh: a loaded native module is not readable by an arbitrary uid'
     fi
