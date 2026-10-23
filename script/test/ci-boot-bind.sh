@@ -12,10 +12,12 @@ mkdir -p "$work/workspace"
 python3 "$ROOT/script/test/ci-boot-go-setup.py" "$ROOT/.github/workflows/verify-release-boot.yml" "$work/workspace"
 # A real clean checkout satisfies the harness guard without stubbing git; no detached
 # auto-maintenance may outlive the commit and race the EXIT trap's rm -rf (#85).
-# gc.auto=0 covers older git, where commit ran gc --auto itself.
+# gc.auto=0 covers older git, where commit ran gc --auto itself; a global core.fsmonitor=true
+# would detach fsmonitor--daemon into the checkout and race that rm -rf as well (#89).
 git init -q "$work/harness"
 git -C "$work/harness" config maintenance.auto false
 git -C "$work/harness" config gc.auto 0
+git -C "$work/harness" config core.fsmonitor false
 git -C "$work/harness" -c user.name=Test -c user.email=test@example.invalid commit -qm fixture --allow-empty
 GITHUB_SHA="$(git -C "$work/harness" rev-parse HEAD)"
 export GITHUB_SHA
