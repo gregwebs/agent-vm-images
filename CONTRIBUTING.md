@@ -142,10 +142,11 @@ bash script/test/standard-node-policy.sh agent-vm-base:local --consumer dsh --pl
 
 ## Contributor prerequisites and fast gates
 
-Build users need Docker only. Contributors running contracts need Bash, git, jq,
+Build users need Docker only. Contributors running contracts need Bash, git >= 2.30, jq,
 Node/npm, Python 3, GNU coreutils `timeout`, `xz` on Linux (GNU `tar -cJf` in the
 shellcheck suite's fixture), **ShellCheck 0.11.0**, **actionlint v1.7.7**, and
 Rust/rustfmt/clippy **1.98.1** for the independent test-only Cargo package.
+The fixture tests trace `commit`'s maintenance child, which git 2.30 introduced.
 `#!/bin/sh` scripts are syntax-checked with `dash -n` (macOS ships `/bin/dash`);
 without dash the gate falls back to `sh -n` with a note, and CI requires dash.
 On macOS:

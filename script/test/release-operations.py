@@ -22,8 +22,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'script/release'))
 
 
-def module(name: str):
-    spec = importlib.util.spec_from_file_location(name, ROOT / 'script/release' / (name + '.py'))
+def module(name: str, directory: str = 'script/release'):
+    spec = importlib.util.spec_from_file_location(name, ROOT / directory / (name + '.py'))
     loaded = importlib.util.module_from_spec(spec)
     sys.modules[name] = loaded
     spec.loader.exec_module(loaded)
@@ -37,6 +37,8 @@ attestations = module('attestations')
 operations = module('operations')
 build = module('build')
 verify = module('verify')
+# ci-boot-bind.sh asserts the same trace2 children, so the predicate lives in one module (#88).
+trace2_children = module('trace2_children', 'script/test')
 
 
 def reply(status: int, body: object, headers: dict | None = None):
@@ -420,14 +422,6 @@ def commit_fixture(repo: Path) -> str:
     return subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
 
 
-def git_children(trace: Path, subcommand: str, *more: str) -> list[list[str]]:
-    # git starts its own helpers with a fixed argv, ['git', <subcommand>, ...]; matching that exactly
-    # is not a git-CLI parser (#85), so a new detached helper needs its name added by a caller (#89).
-    events = [json.loads(line) for line in trace.read_text(encoding='utf-8').splitlines()]
-    names = (subcommand, *more)
-    return [e['argv'] for e in events if e['event'] == 'child_start' and e['argv'][1:2] in [[s] for s in names]]
-
-
 def fsmonitor_daemon_builtin() -> bool:
     # Linux builds may lack the backend; there core.fsmonitor=true spawns nothing, so the hazard cannot occur.
     options = subprocess.check_output(['git', 'version', '--build-options']).decode()
@@ -478,12 +472,12 @@ class FixtureRepositoryTests(unittest.TestCase):
             trace = Path(directory) / 'trace.json'
             with mock.patch.dict(os.environ, {'GIT_TRACE2_EVENT': str(trace)}):
                 commit_fixture(repo)
-                spawned = git_children(trace, 'maintenance', 'gc')
+                spawned = trace2_children.children(trace, 'maintenance', 'gc')
                 self.assertEqual(spawned, [])  # Requires git >=2.30.
                 # autoDetach=false (git >=2.47) keeps the control synchronous to avoid racing cleanup.
                 subprocess.run(['git', '-C', str(repo), '-c', 'maintenance.auto=true', '-c', 'maintenance.autoDetach=false',
                                 *FIXTURE_AUTHOR, 'commit', '--allow-empty', '-qm', 'control'], check=True, capture_output=True)
-            self.assertTrue(git_children(trace, 'maintenance', 'gc'))
+            self.assertTrue(trace2_children.children(trace, 'maintenance', 'gc'))
 
     def test_global_fsmonitor_starts_no_daemon_in_fixture(self):
         if not fsmonitor_daemon_builtin():
@@ -506,7 +500,7 @@ class FixtureRepositoryTests(unittest.TestCase):
                     commit_fixture(repo)
                     # The release code's clean-source check is a later index read in the same fixture.
                     subprocess.run(['git', '-C', str(repo), 'status', '--porcelain'], check=True, capture_output=True)
-                    self.assertEqual(git_children(trace, 'fsmonitor--daemon'), [])
+                    self.assertEqual(trace2_children.children(trace, 'fsmonitor--daemon'), [])
                     # Unpinned, so only the hermetic global can start this daemon.
                     subprocess.run(['git', 'init', '-q', str(control)], check=True, capture_output=True)
                     subprocess.run(['git', '-C', str(control), 'status', '--porcelain'], check=True, capture_output=True)
@@ -515,7 +509,7 @@ class FixtureRepositoryTests(unittest.TestCase):
                         failure.add_note(f'fsmonitor cleanup: {problem}')
                     raise
                 self.assertEqual(stop_fsmonitor_daemons(repo, control), [])
-            self.assertTrue(git_children(trace, 'fsmonitor--daemon'))
+            self.assertTrue(trace2_children.children(trace, 'fsmonitor--daemon'))
 
 
 class FakeTools:
