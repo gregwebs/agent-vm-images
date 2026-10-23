@@ -405,6 +405,41 @@ def inventory_json(graph, arch: str, run: str = '264', attempt: str = '1') -> di
             'docker_reported_id': 'sha256:' + 'd' * 64, 'docker_driver': '[]', 'docker_version': '29.5.2'}
 
 
+FIXTURE_AUTHOR = ('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid')
+
+
+def commit_fixture(repo: Path) -> str:
+    # A commit otherwise detaches `git maintenance run --auto`, which can still be writing .git
+    # when TemporaryDirectory removes it (#85). Repository config binds every git process in the
+    # fixture, including the release code's; tolerant cleanup would also hide real leaks.
+    # gc.auto=0 covers older git, where commit ran gc --auto itself.
+    for argv in (['init', '-q'], ['config', 'maintenance.auto', 'false'], ['config', 'gc.auto', '0'],
+                 ['add', '.'], [*FIXTURE_AUTHOR, 'commit', '-qm', 'fixture']):
+        subprocess.run(['git', '-C', str(repo), *argv], check=True, capture_output=True)
+    return subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
+
+
+def maintenance_spawns(trace: Path) -> list[list[str]]:
+    events = [json.loads(line) for line in trace.read_text(encoding='utf-8').splitlines()]
+    return [e['argv'] for e in events if e['event'] == 'child_start' and e['argv'][1:2] in (['maintenance'], ['gc'])]
+
+
+class FixtureRepositoryTests(unittest.TestCase):
+    def test_fixture_commit_leaves_no_background_maintenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / 'repo'; repo.mkdir()
+            (repo / 'file').write_text('fixture\n')
+            trace = Path(directory) / 'trace.json'
+            with mock.patch.dict(os.environ, {'GIT_TRACE2_EVENT': str(trace)}):
+                commit_fixture(repo)
+                spawned = maintenance_spawns(trace)
+                self.assertEqual(spawned, [])  # Requires git >=2.30.
+                # autoDetach=false (git >=2.47) keeps the control synchronous to avoid racing cleanup.
+                subprocess.run(['git', '-C', str(repo), '-c', 'maintenance.auto=true', '-c', 'maintenance.autoDetach=false',
+                                *FIXTURE_AUTHOR, 'commit', '--allow-empty', '-qm', 'control'], check=True, capture_output=True)
+            self.assertTrue(maintenance_spawns(trace))
+
+
 class FakeTools:
     def __init__(self, root: Path):
         self.root = root
@@ -532,10 +567,7 @@ class ReviewRegressionTests(unittest.TestCase):
             shutil.copytree(ROOT / 'script/release', root / 'script/release', ignore=shutil.ignore_patterns('__pycache__'))
             (root / 'images/standard').mkdir(parents=True)
             (root / 'images/standard/version').write_text('0.1.0\n')
-            for command in (['git', 'init', '-q'], ['git', 'add', '.'],
-                ['git', '-c', 'user.name=Fixture', '-c', 'user.email=f@invalid', 'commit', '-qm', 'fixture']):
-                subprocess.run(command, cwd=root, check=True, capture_output=True)
-            sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root).decode().strip()
+            sha = commit_fixture(root)
             binary = Path(directory).parent / (root.name + '-bin'); binary.mkdir()
             docker = binary / 'docker'
             docker.write_text('#!/bin/sh\necho clean-source-gate-passed >&2\nexit 17\n')
@@ -767,10 +799,7 @@ class ReviewRegressionTests(unittest.TestCase):
             # committed_version() compares against the checked-in file, so pin the
             # fixture's own version instead of tracking the repository's bump.
             (repo / 'images/standard/version').write_text('0.1.0\n')
-            for argv in (['git', 'init', '-q'], ['git', 'add', '.'],
-                ['git', '-c', 'user.name=Fixture', '-c', 'user.email=f@invalid', 'commit', '-qm', 'fixture']):
-                subprocess.run(argv, cwd=repo, check=True, capture_output=True)
-            sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo).decode().strip()
+            sha = commit_fixture(repo)
             selected = operations.selections()
             image = {'Id': 'sha256:' + 'd'*64, 'Config': {'Labels': {
                 **{'org.agent-vm.version.' + name: value for name, value in selected.items()},
@@ -1060,10 +1089,7 @@ class ReleaseInterfaceTests(unittest.TestCase):
             self.assertIn(original, source)
             source = source.replace(original, replacement)
         caps.write_text(source)
-        for argv in (['init', '-q'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
-                        'commit', '-qm', 'Frozen verifier source']):
-            subprocess.run(['git', '-C', str(self.checkout), *argv], check=True, capture_output=True)
-        self.sha = subprocess.check_output(['git', '-C', str(self.checkout), 'rev-parse', 'HEAD']).decode().strip()
+        self.sha = commit_fixture(self.checkout)
         self.arch = {'arm64': 'arm64', 'aarch64': 'arm64', 'x86_64': 'amd64'}[platform.machine()]
         self.assets = self.root / 'assets'; self.assets.mkdir()
         self.binary = self.root / 'bin'; self.binary.mkdir()
