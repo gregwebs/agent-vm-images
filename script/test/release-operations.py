@@ -412,16 +412,62 @@ def commit_fixture(repo: Path) -> str:
     # A commit otherwise detaches `git maintenance run --auto`, which can still be writing .git
     # when TemporaryDirectory removes it (#85). Repository config binds every git process in the
     # fixture, including the release code's; tolerant cleanup would also hide real leaks.
-    # gc.auto=0 covers older git, where commit ran gc --auto itself.
+    # gc.auto=0 covers older git, where commit ran gc --auto itself. A global core.fsmonitor=true
+    # (Scalar sets it) makes the first index read detach `git fsmonitor--daemon` into .git (#89).
     for argv in (['init', '-q'], ['config', 'maintenance.auto', 'false'], ['config', 'gc.auto', '0'],
-                 ['add', '.'], [*FIXTURE_AUTHOR, 'commit', '-qm', 'fixture']):
+                 ['config', 'core.fsmonitor', 'false'], ['add', '.'], [*FIXTURE_AUTHOR, 'commit', '-qm', 'fixture']):
         subprocess.run(['git', '-C', str(repo), *argv], check=True, capture_output=True)
     return subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
 
 
-def maintenance_spawns(trace: Path) -> list[list[str]]:
+def git_children(trace: Path, subcommand: str, *more: str) -> list[list[str]]:
+    # git starts its own helpers with a fixed argv, ['git', <subcommand>, ...]; matching that exactly
+    # is not a git-CLI parser (#85), so a new detached helper needs its name added by a caller (#89).
     events = [json.loads(line) for line in trace.read_text(encoding='utf-8').splitlines()]
-    return [e['argv'] for e in events if e['event'] == 'child_start' and e['argv'][1:2] in (['maintenance'], ['gc'])]
+    names = (subcommand, *more)
+    return [e['argv'] for e in events if e['event'] == 'child_start' and e['argv'][1:2] in [[s] for s in names]]
+
+
+def fsmonitor_daemon_builtin() -> bool:
+    # Linux builds may lack the backend; there core.fsmonitor=true spawns nothing, so the hazard cannot occur.
+    options = subprocess.check_output(['git', 'version', '--build-options']).decode()
+    return 'feature: fsmonitor--daemon' in options.splitlines()
+
+
+# Bounds every `fsmonitor--daemon` call, `status` included; git's own wait inside `stop` for the daemon
+# to quit is unbounded, so this is the only bound there is.
+FSMONITOR_COMMAND_SECONDS = 10
+
+
+def fsmonitor_daemon(repo: Path, subcommand: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(['git', '-C', str(repo), 'fsmonitor--daemon', subcommand],
+                          capture_output=True, text=True, timeout=FSMONITOR_COMMAND_SECONDS)
+
+
+def stop_fsmonitor_daemons(*repos: Path) -> list[str]:
+    # Problems are returned, not raised, so a test that is already failing can attach them to that failure
+    # instead of having a cleanup error replace it.
+    problems = []
+    for repo in repos:
+        # Never created, so nothing watches it; `git -C` would otherwise find an enclosing repository.
+        if not (repo / '.git').is_dir():
+            continue
+        try:
+            state = fsmonitor_daemon(repo, 'status')
+            # `stop` exits 128 when no daemon runs, so only a watched repository is stopped.
+            if state.returncode == 0:
+                stopped = fsmonitor_daemon(repo, 'stop')
+                if stopped.returncode:
+                    problems.append(f'{repo}: stop exited {stopped.returncode}: {stopped.stderr.strip()}')
+                    continue
+                state = fsmonitor_daemon(repo, 'status')
+        except subprocess.TimeoutExpired as expired:
+            problems.append(f'{repo}: {" ".join(expired.cmd)} exceeded {expired.timeout}s')
+            continue
+        if state.returncode != 1:
+            detail = f'{state.returncode} {state.stdout.strip()}{state.stderr.strip()}'
+            problems.append(f'{repo}: not confirmed unwatched: {detail}')
+    return problems
 
 
 class FixtureRepositoryTests(unittest.TestCase):
@@ -432,12 +478,44 @@ class FixtureRepositoryTests(unittest.TestCase):
             trace = Path(directory) / 'trace.json'
             with mock.patch.dict(os.environ, {'GIT_TRACE2_EVENT': str(trace)}):
                 commit_fixture(repo)
-                spawned = maintenance_spawns(trace)
+                spawned = git_children(trace, 'maintenance', 'gc')
                 self.assertEqual(spawned, [])  # Requires git >=2.30.
                 # autoDetach=false (git >=2.47) keeps the control synchronous to avoid racing cleanup.
                 subprocess.run(['git', '-C', str(repo), '-c', 'maintenance.auto=true', '-c', 'maintenance.autoDetach=false',
                                 *FIXTURE_AUTHOR, 'commit', '--allow-empty', '-qm', 'control'], check=True, capture_output=True)
-            self.assertTrue(maintenance_spawns(trace))
+            self.assertTrue(git_children(trace, 'maintenance', 'gc'))
+
+    def test_global_fsmonitor_starts_no_daemon_in_fixture(self):
+        if not fsmonitor_daemon_builtin():
+            # CI's git has the backend; failing there keeps this gate from going vacuous on a new runner image.
+            if os.environ.get('GITHUB_ACTIONS') == 'true':
+                self.fail('CI git lacks the builtin fsmonitor--daemon, so this test would be vacuous')
+            self.skipTest('git has no builtin fsmonitor--daemon, so core.fsmonitor=true cannot spawn one')
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / 'repo'; repo.mkdir()
+            (repo / 'file').write_text('fixture\n')
+            control = Path(directory) / 'control'
+            trace = Path(directory) / 'trace.json'
+            config = Path(directory) / 'global.gitconfig'
+            config.write_text('[core]\n\tfsmonitor = true\n')
+            environment = {'GIT_TRACE2_EVENT': str(trace), 'GIT_CONFIG_GLOBAL': str(config), 'GIT_CONFIG_NOSYSTEM': '1'}
+            with mock.patch.dict(os.environ, environment):
+                # Daemons are stopped here, on both paths, while the directory still exists (#85): addCleanup
+                # would run only after this `with` had already deleted it.
+                try:
+                    commit_fixture(repo)
+                    # The release code's clean-source check is a later index read in the same fixture.
+                    subprocess.run(['git', '-C', str(repo), 'status', '--porcelain'], check=True, capture_output=True)
+                    self.assertEqual(git_children(trace, 'fsmonitor--daemon'), [])
+                    # Unpinned, so only the hermetic global can start this daemon.
+                    subprocess.run(['git', 'init', '-q', str(control)], check=True, capture_output=True)
+                    subprocess.run(['git', '-C', str(control), 'status', '--porcelain'], check=True, capture_output=True)
+                except BaseException as failure:
+                    for problem in stop_fsmonitor_daemons(repo, control):
+                        failure.add_note(f'fsmonitor cleanup: {problem}')
+                    raise
+                self.assertEqual(stop_fsmonitor_daemons(repo, control), [])
+            self.assertTrue(git_children(trace, 'fsmonitor--daemon'))
 
 
 class FakeTools:
