@@ -22,8 +22,11 @@ for repo in harness control; do
     git -C "$work/$repo" config gc.auto 0
     git -C "$work/$repo" config core.fsmonitor false
 done
-# Assert the settings by value as well as by effect: gc.auto is inert on git >=2.30, where
-# commit no longer runs gc --auto itself, so nothing else would show that line's removal.
+# Assert the settings by value as well as by effect: while maintenance.auto is false git never
+# consults gc.auto, and before 2.55 a commit with maintenance.auto unset spawns `maintenance
+# run --auto` whatever gc.auto says, so deleting either line can leave the trace nothing to catch.
+# From 2.55 gc.auto=0 suppresses that spawn on its own, which is why the mutant suite removes both
+# pins to reach the trace check (#92).
 # --local reads only the file written just above; a developer whose global config already sets
 # maintenance.auto=false or gc.auto=0 would satisfy --get with both script lines deleted.
 [ "$(git -C "$work/harness" config --local --get maintenance.auto)" = false ] \

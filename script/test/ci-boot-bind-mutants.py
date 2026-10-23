@@ -30,6 +30,10 @@ MAINTENANCE_ASSERTION = (
     '[ "$(git -C "$work/harness" config --local --get maintenance.auto)" = false ] \\\n'
     "    || fail \"harness repository is missing 'maintenance.auto false'\"\n"
 )
+GC_ASSERTION = (
+    '[ "$(git -C "$work/harness" config --local --get gc.auto)" = 0 ] \\\n'
+    "    || fail \"harness repository is missing 'gc.auto 0'\"\n"
+)
 CONTROL_COMMIT = (
     'GIT_TRACE2_EVENT="$work/control-trace.json" git -C "$work/control" \\\n'
     '    -c maintenance.auto=true -c maintenance.autoDetach=false \\\n'
@@ -70,13 +74,18 @@ MUTATIONS = (
         expected="missing 'gc.auto 0'",
         edits=(Edit(SCRIPT, GC_PIN),),
     ),
-    # Deleting the maintenance pin alone fails its value assertion, so the trace check is reached
-    # only once that assertion goes too; gc.auto 0 alone does not stop `maintenance run --auto` on
-    # git >= 2.30, which is why the child itself has to fail this run.
+    # With no configuration left, nothing suppresses the child and the trace is the only guard.
+    # Removing just the maintenance pair is not enough: from git 2.55 gc.auto=0 suppresses the
+    # spawn by itself, so the child would never appear and the case would prove nothing (#92).
     Mutation(
-        name='delete-pin-and-assertion',
+        name='delete-pins-and-assertions',
         expected="harness commit spawned 'git maintenance run --auto",
-        edits=(Edit(SCRIPT, MAINTENANCE_PIN), Edit(SCRIPT, MAINTENANCE_ASSERTION)),
+        edits=(
+            Edit(SCRIPT, MAINTENANCE_PIN),
+            Edit(SCRIPT, GC_PIN),
+            Edit(SCRIPT, MAINTENANCE_ASSERTION),
+            Edit(SCRIPT, GC_ASSERTION),
+        ),
     ),
     # The predicate is the check; a predicate that never matches has to be caught by the control.
     Mutation(
