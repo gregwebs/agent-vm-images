@@ -22,8 +22,11 @@ for repo in harness control; do
     git -C "$work/$repo" config gc.auto 0
     git -C "$work/$repo" config core.fsmonitor false
 done
-# Assert the settings by value as well as by effect: gc.auto is inert on git >=2.30, where
-# commit no longer runs gc --auto itself, so nothing else would show that line's removal.
+# Assert the settings by value as well as by effect: while maintenance.auto is false git never
+# consults gc.auto, and before 2.55 a commit with maintenance.auto unset spawns `maintenance
+# run --auto` whatever gc.auto says, so deleting either line can leave the trace nothing to catch.
+# From 2.55 gc.auto=0 suppresses that spawn on its own, which is why the mutant suite removes both
+# pins to reach the trace check (#92).
 # --local reads only the file written just above; a developer whose global config already sets
 # maintenance.auto=false or gc.auto=0 would satisfy --get with both script lines deleted.
 [ "$(git -C "$work/harness" config --local --get maintenance.auto)" = false ] \
@@ -45,6 +48,11 @@ if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 30 ]; }; then
 fi
 trace="$work/harness-trace.json"
 GIT_TRACE2_EVENT="$trace" git -C "$work/harness" -c user.name=Test -c user.email=test@example.invalid commit -qm fixture --allow-empty
+# The spawn check is only evidence when this run actually wrote a stream: a missing file reaches
+# the predicate as its traceback, and an empty one lets the check pass without examining anything.
+# The control gets the same guard, so a removed or retargeted trace fails by name instead of being
+# blamed on the commit spawning nothing.
+[ -s "$trace" ] || fail "harness commit wrote no trace2 stream; the spawn check would be vacuous"
 spawned=$(python3 "$ROOT/script/test/trace2_children.py" "$trace" maintenance gc)
 case "$spawned" in
     '') ;;
@@ -65,6 +73,7 @@ export GITHUB_REPOSITORY=gregwebs/agent-vm-images
 GIT_TRACE2_EVENT="$work/control-trace.json" git -C "$work/control" \
     -c maintenance.auto=true -c maintenance.autoDetach=false \
     -c user.name=Test -c user.email=test@example.invalid commit -qm control --allow-empty
+[ -s "$work/control-trace.json" ] || fail "control commit wrote no trace2 stream"
 [ -n "$(python3 "$ROOT/script/test/trace2_children.py" "$work/control-trace.json" maintenance gc)" ] \
     || fail "control commit spawned no maintenance child; the trace assertion cannot fail"
 check() {
