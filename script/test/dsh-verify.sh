@@ -193,10 +193,17 @@ probe_argv() {
 
 probe_env() {
     local web_case="$1"
+    # The probe drives the owning dsh runtime, whose guard authorizes the composed
+    # helper before running it; the copy lives inside this case's authorized root.
+    if [ ! -d "$CASE/recipe-contract" ]; then
+        cp -R "$CONTRACT_CONTEXT/out" "$CASE/recipe-contract"
+        chmod -R a+rX "$CASE/recipe-contract"
+    fi
     PROBE_ENV=(
         "PATH=$TEST_ROOT/prerequisites:/usr/bin:/bin"
         "HOME=$CASE/home"
         "AGENT_VM_FIXTURE_ROOT=$CASE"
+        "AGENT_VM_CONTRACT_DIR=$CASE/recipe-contract"
         "AGENT_VM_FIXTURE_EXEC_TMPDIR=$CASE/exec-temp"
         "DSH_WEB_FIXTURE_CASE=$web_case"
         "DSH_WEB_FIXTURE_TMP_RECORD=$CASE/exec-temp-path"

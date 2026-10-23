@@ -11,8 +11,8 @@ import (
 // parseVector is one row of the corpus captured from npm yaml@2.9.0 through the
 // retired parse(). Accepted rows pin the emitted JSON bytes; rejected rows pin a
 // message pattern. Deviation rows are inputs the retired parser accepted and this
-// parser rejects; each names its approval so a new, unapproved difference cannot
-// be added without failing here.
+// parser rejects; each names the owner decision that approved the rejection.
+// JS outcomes are captured independently, never inferred from this parser.
 type parseVector struct {
 	Source    string `json:"source"`
 	Format    string `json:"format"`
@@ -73,15 +73,22 @@ func TestParseVectors(t *testing.T) {
 				}
 				switch row.Deviation {
 				case "":
-					if row.Approval != "" || row.JS != "" {
+					if row.Approval != "" || row.JS != "reject" {
 						t.Fatalf("deviation metadata without a deviation")
 					}
 				case "D2", "D5", "D6", "D7":
 					if row.Approval != "approved-by-owner-decision-4" || row.JS != "accept" {
 						t.Fatalf("deviation %s must record its approval", row.Deviation)
 					}
-					if err.Error() == "" {
-						t.Fatalf("deviation %s must name the offending construct", row.Deviation)
+					if row.Match == ".+" || row.Match == "" {
+						t.Fatalf("approved deviation %s needs a construct-specific pattern", row.Deviation)
+					}
+				case "F5", "F6", "F4-CR", "YAML-CR", "R2-2":
+					if row.Approval != "approved-by-owner-decision-6" || row.JS != "accept" || row.JSON == "" {
+						t.Fatal("owner decision 6 deviation must retain the oracle outcome and its approval")
+					}
+					if row.Match == ".+" || row.Match == "" {
+						t.Fatalf("approved deviation %s needs a diagnostic pattern", row.Deviation)
 					}
 				default:
 					t.Fatalf("unapproved deviation %q", row.Deviation)
@@ -129,4 +136,57 @@ func truncate(source string) string {
 		return text[:24]
 	}
 	return text
+}
+
+// Owner decision 6 approved these classes as fail-closed exceptions. The port may
+// reject them; it may never accept them, so every row keeps outcome "reject" and
+// the oracle's accepted value. Only the owner-approved enumerations carry an approval.
+func TestDecision6RestrictionClassifications(t *testing.T) {
+	rows := loadParseVectors(t)
+	foundTabComment, foundNoncharacter := false, false
+	for _, row := range rows {
+		if row.Format != "yaml" {
+			continue
+		}
+		if row.Source == "\t#c\nx: 1\n" {
+			foundTabComment = true
+			if row.Deviation != "F6" || row.Approval != "approved-by-owner-decision-6" || row.JSON != `{"x":1}` {
+				t.Fatal("tab-indented comment must retain its approval, rejection and JS value")
+			}
+		}
+		if strings.ContainsRune(row.Source, '\uffff') {
+			foundNoncharacter = true
+			if row.Deviation != "F6" || row.Approval != "approved-by-owner-decision-6" || row.JS != "accept" || row.JSON == "" {
+				t.Fatal("U+FFFF is approved by owner decision 6, not by D6")
+			}
+		}
+	}
+	if !foundTabComment || !foundNoncharacter {
+		t.Fatal("decision-6 restriction controls missing")
+	}
+}
+
+// TestDecision6SyntaxFamilies pins the four syntax families approved by owner
+// decision 6: the port rejects each one, and the JS accepted it with this value.
+func TestDecision6SyntaxFamilies(t *testing.T) {
+	controls := map[string]string{
+		"? foo\n : bar\n":          `{"foo":"bar"}`,
+		"{a\nx: 1}\n":              `{"a x":1}`,
+		" \tx\n":                   `"x"`,
+		"- \tx\n":                  `["x"]`,
+		"- a:\n  #c\n   |-\n  v\n": `[{"a":"v"}]`,
+	}
+	for _, row := range loadParseVectors(t) {
+		want, ok := controls[row.Source]
+		if !ok || row.Format != "yaml" {
+			continue
+		}
+		if row.Approval != "approved-by-owner-decision-6" || row.JS != "accept" || row.JSON != want || row.Deviation != "R2-2" || row.Outcome != "reject" {
+			t.Fatalf("syntax family lost its approval or JS value: %q", row.Source)
+		}
+		delete(controls, row.Source)
+	}
+	if len(controls) != 0 {
+		t.Fatalf("missing decision-6 syntax controls: %v", controls)
+	}
 }

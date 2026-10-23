@@ -53,7 +53,7 @@ python3 "$PROJECT" guard "$PREFIX" || exit 1
 # names the directory this install may spawn from (build mount, fixture copy or
 # the checkout's own tracked copy). Nothing in it runs before this line.
 CONTRACT=$(python3 "$PROJECT" contract-dir "$PREFIX") || exit 1
-[ -f "$CONTRACT/pnpm-lock.mjs" ] || fail "graph module is missing in $CONTRACT"
+[ -x "$CONTRACT/recipe-contract" ] || fail "no executable recipe-contract in $CONTRACT"
 [ -f "$CONTRACT/run-pnpm.sh" ] || fail "hard runner is missing in $CONTRACT"
 
 PNPM_SOURCE=${PNPM_SOURCE_DIR:-$SOURCE/../../pnpm}
@@ -77,7 +77,7 @@ esac
 committed_dsh=$(jq -er '.dependencies["@deepseek-ai/dsh"]' "$PREFIX/package.json") || fail 'committed manifest selects no dsh version'
 [ -z "$DSH_VERSION" ] || [ "$DSH_VERSION" = "$committed_dsh" ] ||
     fail "prepared selection $committed_dsh does not match the requested $DSH_VERSION"
-node "$CONTRACT/pnpm-lock.mjs" check dsh "$PREFIX" || fail 'reviewed inputs failed pinned-input validation'
+"$CONTRACT/recipe-contract" pnpm-lock check dsh "$PREFIX" || fail 'reviewed inputs failed pinned-input validation'
 
 work=''
 installed=0

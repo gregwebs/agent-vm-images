@@ -25,20 +25,7 @@ func editTopLevel(source []byte, key JSString, replacement *Value) ([]byte, erro
 	if err != nil {
 		return nil, err
 	}
-	if err := scanYAMLSource(prepared); err != nil {
-		return nil, err
-	}
-	document, err := decodeSingleDocument(prepared)
-	if err != nil {
-		return nil, err
-	}
-	if err := checkDuplicateKeys(document, 0); err != nil {
-		return nil, err
-	}
-	if err := checkNodePolicies(document, 0); err != nil {
-		return nil, err
-	}
-	original, err := nodeValue(document)
+	document, original, err := parsePoliced(prepared)
 	if err != nil {
 		return nil, err
 	}
@@ -57,10 +44,7 @@ func editTopLevel(source []byte, key JSString, replacement *Value) ([]byte, erro
 			break
 		}
 	}
-	if !found && replacement == nil {
-		return encodeDocument(document)
-	}
-	if !found {
+	if !found && replacement != nil {
 		document.Content = append(document.Content,
 			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: mustUTF8(key)},
 			nodeOfValue(*replacement))

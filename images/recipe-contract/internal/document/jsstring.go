@@ -55,15 +55,6 @@ func FromUnits(units []uint16) JSString {
 	return JSString{units: string(dst)}
 }
 
-// Units returns a copy of the code units; the backing storage stays immutable.
-func (s JSString) Units() []uint16 {
-	units := make([]uint16, len(s.units)/2)
-	for index := range units {
-		units[index] = uint16(s.units[2*index])<<8 | uint16(s.units[2*index+1])
-	}
-	return units
-}
-
 // At returns the code unit at index; Len is the unit count.
 func (s JSString) At(index int) uint16 {
 	return uint16(s.units[2*index])<<8 | uint16(s.units[2*index+1])
@@ -134,19 +125,6 @@ func (s JSString) Less(other JSString) bool {
 		}
 	}
 	return s.Len() < other.Len()
-}
-
-// JSLess is the comparator the retired `sorted()` helper used.
-func JSLess(a, b JSString) bool { return a.Less(b) }
-
-// AppendUTF8String is the convenience path for text this package produced
-// itself: it validates UTF-8 before recording the units.
-func AppendUTF8String(dst []byte, s string) []byte {
-	value, err := StringFromUTF8(s)
-	if err != nil {
-		panic(err)
-	}
-	return appendJSString(dst, value)
 }
 
 // Display renders the string for a diagnostic: UTF-8 when it is representable,

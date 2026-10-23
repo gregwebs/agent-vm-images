@@ -124,15 +124,23 @@ def arguments(args):
 
 def contract_context(platform):
     """Resolve through the shared adapter; it owns platform selection and reuse."""
+    return adapter_context(['--platform', platform], f'the {platform}')
+
+
+def contract_context_native():
+    """The host's own composed directory, for host-side helper calls."""
+    return adapter_context(['--native'], 'the native')
+
+
+def adapter_context(arguments, label):
     adapter = ROOT / 'script/build/recipe-contract.sh'
-    result = subprocess.run(['bash', str(adapter), '--platform', platform],
-                            capture_output=True, text=True)
+    result = subprocess.run(['bash', str(adapter), *arguments], capture_output=True, text=True)
     if result.returncode:
-        raise Failure(f'cannot build the {platform} recipe-contract helper: '
+        raise Failure(f'cannot build {label} recipe-contract helper: '
                       + (result.stderr.strip() or result.stdout.strip() or 'no diagnostic'))
     context = Path(result.stdout.strip())
     if not (context / 'out/recipe-contract').is_file():
-        raise Failure(f'the {platform} recipe-contract build published no binary under {context}')
+        raise Failure(f'{label} recipe-contract build published no binary under {context}')
     return context
 
 

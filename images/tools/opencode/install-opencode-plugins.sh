@@ -23,12 +23,12 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
-# Reject preload injection before starting the Node policy checker itself.
+# Reject preload injection before any Node process (pnpm, check-lock.mjs) starts.
 [ -z "${NODE_OPTIONS:-}${NODE_PATH:-}${BUN_OPTIONS:-}" ] || { echo 'manager runtime overrides are unsupported' >&2; exit 1; }
 # The build hook never honors the test seams either: only prepare-lock.sh's
 # developer path may re-pin, and no image build can reach it.
 unset AGENT_VM_OPENCODE_LOCK_CHECK AGENT_VM_OPENCODE_LOCK_PIN
-node "$CONTRACT/check-pnpm-environment.mjs" "$PREFIX"
+"$CONTRACT/recipe-contract" pnpm-environment "$PREFIX"
 mkdir -p "$work/home" "$work/config" "$work/cache" "$work/data" "$work/state"
 export HOME="$work/home" XDG_CONFIG_HOME="$work/config" XDG_CACHE_HOME="$work/cache" XDG_DATA_HOME="$work/data" XDG_STATE_HOME="$work/state"
 export AGENT_INSTALL_SOFT_FAIL=

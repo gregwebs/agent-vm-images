@@ -2,6 +2,7 @@ package document
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"os"
 	"strings"
@@ -68,7 +69,7 @@ func TestCoreSchemaResolution(t *testing.T) {
 
 func TestKeyOrderAndKeys(t *testing.T) {
 	value := mustParse(t, []byte("b: 1\n'10': 2\na: 3\n'2': 4\n'01': 5\n"), YAML)
-	keys, err := value.StringKeys()
+	keys, err := value.stringKeys()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,3 +322,20 @@ func repeat(text string, count int) string { return strings.Repeat(text, count) 
 func bytesEqual(a, b []byte) bool { return bytes.Equal(a, b) }
 
 func osReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
+
+func TestLargeMappingAllocations(t *testing.T) {
+	var source strings.Builder
+	for index := 0; index < 1500; index++ {
+		fmt.Fprintf(&source, "k%d: value\n", index)
+	}
+	payload := []byte(source.String())
+	var parseErr error
+	allocations := testing.AllocsPerRun(1, func() { _, parseErr = Parse(payload, YAML) })
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	// Resolving every preceding key again used millions of allocations here.
+	if allocations > 100000 {
+		t.Fatalf("%.0f allocations for 1500 distinct keys", allocations)
+	}
+}

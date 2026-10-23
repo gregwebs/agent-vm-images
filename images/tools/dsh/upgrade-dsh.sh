@@ -46,9 +46,15 @@ base=$(jq -er .version "$REPO_ROOT/images/pnpm/pin.json")
 [ "$(jq -r .packageManager "$DIR/package.json")" = "pnpm@$base" ] || fail 'packageManager disagrees with base'
 # The contract directory executes policy, so project.py authorizes it before the
 # first graph check. A caller-selected directory is authorized by the same rules
-# as a build mount or a fixture copy.
+# as a build mount or a fixture copy; an unset one means a host checkout, whose
+# composed helper comes from the native adapter it also authorizes below.
+if [ -z "${AGENT_VM_CONTRACT_DIR-}" ]; then
+    context=$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native) ||
+        fail 'cannot build the native recipe-contract helper'
+    export AGENT_VM_CONTRACT_DIR="$context/out"
+fi
 CONTRACT=$(python3 "$DIR/project.py" contract-dir "$DIR") || fail 'contract directory rejected'
-node "$CONTRACT/pnpm-lock.mjs" check dsh "$DIR"
+"$CONTRACT/recipe-contract" pnpm-lock check dsh "$DIR"
 current=$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$DIR/package.json")
 work=$(mktemp -d "${TMPDIR:-/tmp}/dsh-upgrade.XXXXXX")
 work=$(cd "$work" && pwd -P)
@@ -152,7 +158,7 @@ mkdir "$work/manager-prefix"
 for input in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
     cp "$DIR/$input" "$work/manager-prefix/$input"
 done
-node "$DIR/upgrade-project.mjs" tentative "$DIR" "$work/tentative" "$version"
+"$CONTRACT/recipe-contract" dsh-upgrade-stage tentative "$DIR" "$work/tentative" "$version"
 if [ -z "${AGENT_VM_FIXTURE_PNPM-}" ]; then
     python3 "$DIR/host-manager.py" "$work/manager-prefix" >"$work/manager.json"
     export AGENT_VM_DSH_PNPM_PACKAGE AGENT_VM_DSH_PNPM_ARCHIVE AGENT_VM_DSH_NODE
@@ -174,19 +180,19 @@ POLICY=(--config.minimum-release-age=1440 --config.minimum-release-age-strict=tr
     --package-import-method=copy --store-dir "$work/store")
 (cd "$work/tentative" && sh "$CONTRACT/run-pnpm.sh" "$work/tentative.ndjson" -- \
     "${MANAGER[@]}" install --lockfile-only --no-frozen-lockfile "${POLICY[@]}")
-DERIVE=("$DIR/derive-cordis-overrides.mjs" "$work/tentative" --before "$DIR")
+DERIVE=("$CONTRACT/recipe-contract" dsh-cordis-overrides "$work/tentative" --before "$DIR")
 if [ -n "$proposal" ]; then
     # Existing/tracked files are never proposal destinations, even if unchanged.
     if git -C "$REPO_ROOT" ls-files --error-unmatch "$proposal" >/dev/null 2>&1; then fail 'proposal collides with tracked source'; fi
-    node "${DERIVE[@]}" --propose "$proposal"
+    "${DERIVE[@]}" --propose "$proposal"
     exit 0
 fi
 if [ -n "$approved" ]; then DERIVE+=(--cordis-overrides "$approved"); fi
-node "${DERIVE[@]}" >"$work/proof.json"
+"${DERIVE[@]}" >"$work/proof.json"
 cat "$work/proof.json"
 FINAL=(final "$DIR" "$work/final" "$work/proof.json")
 if [ -n "$approved" ]; then FINAL+=("$approved"); fi
-node "$DIR/upgrade-project.mjs" "${FINAL[@]}"
+"$CONTRACT/recipe-contract" dsh-upgrade-stage "${FINAL[@]}"
 # Unchanged maps use the same ordinary refresh path as preparation, including
 # comparison. Reviewed changed maps have their own explicit developer boundary.
 if [ "$(jq '.delta | length' "$work/proof.json")" = 0 ]; then
@@ -206,7 +212,7 @@ else
 fi
 CHECK=(check-final "$DIR" "$work/final" "$work/proof.json")
 if [ -n "$approved" ]; then CHECK+=("$approved"); fi
-node "$DIR/upgrade-project.mjs" "${CHECK[@]}"
+"$CONTRACT/recipe-contract" dsh-upgrade-stage "${CHECK[@]}"
 [ ! -e "$work/tentative/node_modules" ] && [ ! -e "$work/final/node_modules" ] || fail 'lock generation installed a tree'
 
 # The real focused harness consumes the staged four files, never the tentative

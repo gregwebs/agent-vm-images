@@ -12,7 +12,8 @@ import (
 
 func errorOf(text string) error { return errors.New(text) }
 
-// runDshLockUpdate is the argv port of check-lock-update.js with `--json` added.
+// runDshLockUpdate is the argv port of the retired dsh lock-update adapter,
+// with `--json` added.
 func (p *process) runDshLockUpdate(args []string) int {
 	if len(args) < 3 {
 		return p.nodeUsage(2, dshLockUpdateUsage)
@@ -34,20 +35,15 @@ func (p *process) runDshLockUpdate(args []string) int {
 		}
 	}
 	return p.nodeCommand(dshLockUpdatePrefix, func() (string, error) {
-		requested, err := pnpmlock.ParseRequestedSelection(args[2])
-		if err != nil {
-			return "", err
-		}
 		mode := pnpmlock.NoRefresh
 		if refresh {
 			mode = pnpmlock.RefreshLock
 		}
-		comparison, after, err := pnpmlock.CompareDshUpdate(pnpmlock.UpdateRequest{
-			Before:    pnpmlock.Prefix(args[0]),
-			After:     pnpmlock.Prefix(args[1]),
-			Requested: requested,
-			Refresh:   mode,
-		})
+		comparison, after, err := pnpmlock.CompareDshUpdateArgument(pnpmlock.UpdateRequest{
+			Before:  pnpmlock.Prefix(args[0]),
+			After:   pnpmlock.Prefix(args[1]),
+			Refresh: mode,
+		}, args[2])
 		if err != nil {
 			return "", err
 		}
@@ -63,7 +59,8 @@ func (p *process) runDshLockUpdate(args []string) int {
 	})
 }
 
-// runDshCordisOverrides is the argv port of derive-cordis-overrides.mjs.
+// runDshCordisOverrides is the argv port of the retired Cordis derivation
+// adapter.
 func (p *process) runDshCordisOverrides(args []string) int {
 	prefix := ""
 	if len(args) > 0 {
@@ -126,8 +123,8 @@ func hasFlag(flags map[string]string, flag string) bool {
 	return ok
 }
 
-// runDshUpgradeStage is the argv port of upgrade-project.mjs. It has no usage
-// path: every failure is status 1 with the `dsh upgrade: ` prefix.
+// runDshUpgradeStage is the argv port of the retired developer staging helper.
+// It has no usage path: every failure is status 1 with the `dsh upgrade: ` prefix.
 func (p *process) runDshUpgradeStage(args []string) int {
 	positional := func(index int) string {
 		if index < len(args) {
@@ -139,14 +136,8 @@ func (p *process) runDshUpgradeStage(args []string) int {
 	return p.nodeCommand(dshUpgradePrefix, func() (string, error) {
 		// The retired adapter read the committed project before dispatching, so a
 		// broken prefix wins over an unknown action.
-		if before == "" {
+		if len(args) < 2 {
 			return "", errorOf("missing argument: before")
-		}
-		if stage == "" {
-			return "", errorOf("missing argument: stage")
-		}
-		if argument == "" {
-			return "", errorOf("missing argument: argument")
 		}
 		if _, err := pnpmlock.ReadDshProject(pnpmlock.Prefix(before)); err != nil {
 			return "", err

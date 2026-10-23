@@ -38,7 +38,9 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path('/source/script/test/fixtures/pnpm')))
 
 SOURCE = Path('/source')
-CONTRACT = SOURCE / 'images/recipe-contract'
+# The composed helper directory the harness mounts read-only; its executable is
+# the only package-manager policy boundary this fixture may call.
+CONTRACT = Path('/contract')
 FIXTURES = SOURCE / 'script/test/fixtures/pnpm'
 LAUNCHER = Path('/usr/local/bin/pnpm')
 COMMITTED_WORKSPACE = SOURCE / 'images/tools/dsh/pnpm-workspace.yaml'
@@ -271,7 +273,7 @@ def install(project_path):
     store = os.environ['POLICY_STORE']
     env = environment(**POLICY_ENV)
     # The owning pre-Node guard runs before the manager can start.
-    guard = run(['node', str(CONTRACT / 'check-pnpm-environment.mjs'), str(project)], env=env)
+    guard = run([str(CONTRACT / 'recipe-contract'), 'pnpm-environment', str(project)], env=env)
     if guard.returncode:
         raise Refused('owning environment guard rejected the fixture environment')
     # Record the soft value the envelope actually reached us with: the host

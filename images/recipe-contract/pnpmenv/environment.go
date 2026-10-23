@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gregwebs/agent-vm-images/images/recipe-contract/internal/nodefs"
+	"github.com/gregwebs/agent-vm-images/images/recipe-contract/pnpmlock"
 )
 
 // defaults are the launcher's own settings. A caller may pass the same value
@@ -30,12 +31,16 @@ var unreviewedFiles = []string{".npmrc", ".pnpmfile.cjs", ".pnpmfile.js", ".pnpm
 var runtimeOverrides = []string{"NODE_OPTIONS", "NODE_PATH", "BUN_OPTIONS"}
 
 // Check validates the whole environment, then every prefix argument.
-func Check(environ []string, prefixes []string) error {
+func Check(environ []string, prefixes []pnpmlock.Prefix) error {
+	type variable struct{ name, value string }
+	variables := make([]variable, 0, len(environ))
 	for _, entry := range environ {
-		key, value, ok := strings.Cut(entry, "=")
-		if !ok {
-			continue
+		if name, value, ok := strings.Cut(entry, "="); ok {
+			variables = append(variables, variable{name: name, value: value})
 		}
+	}
+	for _, entry := range variables {
+		key, value := entry.name, entry.value
 		lowered := asciiLower(key)
 		managed := strings.HasPrefix(lowered, "npm_config_") ||
 			strings.HasPrefix(lowered, "pnpm_config_") ||
@@ -50,21 +55,20 @@ func Check(environ []string, prefixes []string) error {
 		}
 	}
 	for _, key := range runtimeOverrides {
-		for _, entry := range environ {
-			name, value, ok := strings.Cut(entry, "=")
-			if ok && name == key && value != "" {
+		for _, entry := range variables {
+			if entry.name == key && entry.value != "" {
 				return fmt.Errorf("unsupported manager runtime override: %s", key)
 			}
 		}
 	}
-	for _, entry := range environ {
-		if name, value, ok := strings.Cut(entry, "="); ok && name == "NODE_TLS_REJECT_UNAUTHORIZED" && value == "0" {
+	for _, entry := range variables {
+		if entry.name == "NODE_TLS_REJECT_UNAUTHORIZED" && entry.value == "0" {
 			return fmt.Errorf("TLS verification cannot be disabled")
 		}
 	}
 	for _, prefix := range prefixes {
 		for _, file := range unreviewedFiles {
-			present, err := nodefs.Present(filepath.Join(prefix, file))
+			present, err := nodefs.Present(filepath.Join(string(prefix), file))
 			if err != nil {
 				return err
 			}

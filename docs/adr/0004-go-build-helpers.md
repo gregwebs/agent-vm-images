@@ -305,3 +305,23 @@ image is broken between the PRs.
   ./...` ~1 s, `golangci-lint run` ~2 s, `contracts.sh --guard-only` 24 s.
   Linux ACL, device and numeric-uid acceptance still belong to the native CI rows
   and the native smoke suites.
+
+## Amended by #75 (2026-10-22)
+
+The decision above stays as written. Two of its statements are now read through
+this amendment:
+
+- **What the mount carries.** The composed directory still holds the whole module
+  tree plus the binary, but the Node helpers (`pnpm-lock.mjs`,
+  `check-pnpm-environment.mjs`) and the npm `vendor/yaml/` tree are gone. In their
+  place are the Go packages `pnpmlock/`, `pnpmenv/`, `dshupgrade/`,
+  `internal/document/` and the committed Go vendor closure
+  (`vendor/go.yaml.in/yaml/v3`, `vendor/modules.txt`). The tree is still inert
+  read-only source in a build-time-only mount, and `build.sh` still refuses to
+  publish a composed directory containing Python.
+- **Consequences.** The pnpm helpers are subcommands now; the "follow-up ticket"
+  sentence no longer applies to them. Command ownership and the build/vendor
+  rules are defined in [ADR 0001's amendment](0001-build-only-pnpm-graph-parser.md). Native host upgrades name the composed directory their own
+  `script/build/recipe-contract.sh --native` build published
+  (`target/recipe-contract/OS-ARCH/out`), which `project.py` authorizes as the
+  checkout's host shape.

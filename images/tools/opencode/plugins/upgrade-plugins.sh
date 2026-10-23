@@ -41,10 +41,12 @@ current=$(jq -r --arg p "$PACKAGE" '.dependencies[$p]' "$DIR/package.json")
 work=$(mktemp -d)
 keep_recovery=false
 trap 'if [ "$keep_recovery" = false ]; then rm -rf "$work"; fi' EXIT
-CONTRACT="$REPO_ROOT/images/recipe-contract"
-# Reject preload injection before starting the Node policy checker itself.
+context=$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native) ||
+    { echo 'cannot build the native recipe-contract helper' >&2; exit 1; }
+CONTRACT="$context/out"
+# Reject preload injection before any Node process (pnpm, check-lock.mjs) starts.
 [ -z "${NODE_OPTIONS:-}${NODE_PATH:-}${BUN_OPTIONS:-}" ] || { echo 'manager runtime overrides are unsupported' >&2; exit 1; }
-node "$CONTRACT/check-pnpm-environment.mjs" "$DIR"
+"$CONTRACT/recipe-contract" pnpm-environment "$DIR"
 mkdir -p "$work/home" "$work/config" "$work/cache" "$work/data" "$work/state"
 export HOME="$work/home" XDG_CONFIG_HOME="$work/config" XDG_CACHE_HOME="$work/cache" XDG_DATA_HOME="$work/data" XDG_STATE_HOME="$work/state"
 [ "$(timeout --kill-after=5 20 pnpm --version --pm-on-fail=error --config.update-notifier=false)" = 11.11.0 ] || { echo 'pnpm 11.11.0 required' >&2; exit 1; }
@@ -70,7 +72,7 @@ cp "$DIR/pnpm-inputs.sha256" "$work/plugins/pnpm-inputs.sha256"
 cp "$REPO_ROOT/images/standard/Dockerfile" "$work/Dockerfile"
 
 echo "==> updating pnpm-lock.yaml"
-AGENT_VM_CONTRACT_DIR="$REPO_ROOT/images/recipe-contract" AGENT_VM_FIXTURE_ROOT="$work" sh "$DIR/prepare-lock.sh" "$work/plugins" "$version" --refresh-lock
+AGENT_VM_CONTRACT_DIR="$CONTRACT" AGENT_VM_FIXTURE_ROOT="$work" sh "$DIR/prepare-lock.sh" "$work/plugins" "$version" --refresh-lock
 
 staged=$(jq -r --arg p "$PACKAGE" '.dependencies[$p]' "$work/plugins/package.json")
 [ "$staged" = "$version" ] || {

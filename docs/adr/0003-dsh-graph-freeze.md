@@ -176,3 +176,16 @@ gates pass. No generic "the graph changed" flag can alter the workspace.
 - [Standard pnpm migration ledger](../standard-pnpm-migration.md): the reviewed
   npm→pnpm delta, including the exact records this decision froze.
 - [Contributor maintenance](../../CONTRIBUTING.md#dsh-maintenance-and-graph-freeze).
+
+## Amended by #75 (2026-10-22)
+
+The rules and vectors above are unchanged; only the language moved. The comparator
+is now `pnpmlock.CompareDshUpdate` in `images/recipe-contract/pnpmlock/compare.go`,
+reached through `recipe-contract dsh-lock-update` (with `--json` for the machine
+readable comparison) or through the staging subcommands. The TypeScript/JavaScript
+adapter `images/tools/dsh/check-lock-update.js` and the Node module that carried
+this rule are deleted; `script/test/pnpm-lock-inputs.mjs` still stores every vector
+and expected diagnostic and now drives the comparator out of process. The refresh
+comparison's raw-record equality keeps UTF-16 code units losslessly, so an unpaired
+surrogate in a free-text manifest field is still a difference (see ADR 0001
+§ Amended by #75, D8).

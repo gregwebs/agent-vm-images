@@ -2,9 +2,7 @@ package document
 
 import "math"
 
-// StrictEqual is JavaScript `===`. The retired `assert.equal` uses `==`, but
-// every operand is a scalar whose type the caller already fixed, so `===` is the
-// same predicate here and the container cases cannot arise.
+// StrictEqual is JavaScript `===`, including NaN and signed-zero semantics.
 func StrictEqual(a, b Value) bool {
 	if a.kind != b.kind {
 		return false

@@ -1,6 +1,7 @@
 package pnpmlock
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -105,7 +106,7 @@ func writeAll(handle pinHandle, source []byte) error {
 }
 
 func cleanupFailure(ops pinOps, temporary string, cause error) error {
-	if err := ops.Remove(temporary); err != nil {
+	if err := ops.Remove(temporary); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nodefs.Wrap("unlink", temporary, err)
 	}
 	return cause

@@ -1,6 +1,7 @@
 package document
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"unicode/utf16"
@@ -17,10 +18,40 @@ type jsonReader struct {
 	offset int
 	line   int
 	column int
+	plain  bool
 }
 
 func parseJSON(source []byte) (Value, error) {
-	reader := &jsonReader{source: source, line: 1, column: 1}
+	quoted, escaped := false, false
+	for index, c := range source {
+		if quoted {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				quoted = false
+			}
+		} else if c == '"' {
+			quoted = true
+		} else if c == '\r' && (index+1 == len(source) || source[index+1] != '\n') {
+			return Value{}, errors.New("lone CR outside JSON strings is unsupported")
+		}
+	}
+	return readJSON(source, false)
+}
+
+// ParsePlainJSON reads developer proof files with JSON.parse semantics, without
+// the YAML policies, TextDecoder BOM removal or project depth bound.
+func ParsePlainJSON(source []byte) (Value, error) {
+	if !utf8.Valid(source) {
+		return Value{}, errors.New("invalid UTF-8 in proof JSON")
+	}
+	return readJSON(source, true)
+}
+
+func readJSON(source []byte, plain bool) (Value, error) {
+	reader := &jsonReader{source: source, line: 1, column: 1, plain: plain}
 	reader.skipSeparation()
 	value, err := reader.parseValue(0)
 	if err != nil {
@@ -68,7 +99,7 @@ func (r *jsonReader) skipSeparation() {
 }
 
 func (r *jsonReader) parseValue(depth int) (Value, error) {
-	if depth > maxDepth {
+	if !r.plain && depth > maxDepth {
 		return Value{}, fmt.Errorf("input exceeds depth100")
 	}
 	c, ok := r.peek()
@@ -110,6 +141,10 @@ func (r *jsonReader) parseLiteral(literal string, value Value) (Value, error) {
 func (r *jsonReader) parseObject(depth int) (Value, error) {
 	r.advance()
 	entries := make([]NewMappingEntry, 0, 8)
+	var seen map[JSString]struct{}
+	if !r.plain {
+		seen = make(map[JSString]struct{})
+	}
 	r.skipSeparation()
 	if c, ok := r.peek(); ok && c == '}' {
 		r.advance()
@@ -126,11 +161,16 @@ func (r *jsonReader) parseObject(depth int) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		for _, entry := range entries {
-			if entry.Key.Equal(key) {
-				return Value{}, fmt.Errorf("Map keys must be unique: %s at line %d, column %d", //nolint:staticcheck // the retired parser text
-					string(appendJSString(nil, key)), keyLine, keyColumn)
+		if !r.plain && key.Equal(mergeKey) {
+			return Value{}, errors.New("merge key forbidden")
+		}
+		if !r.plain {
+			if _, exists := seen[key]; exists {
+				// The retired parser emitted one duplicate-key text for JSON and
+				// YAML alike, with no key text.
+				return Value{}, fmt.Errorf("Map keys must be unique at line %d, column %d", keyLine, keyColumn) //nolint:staticcheck // the retired parser text
 			}
+			seen[key] = struct{}{}
 		}
 		r.skipSeparation()
 		if c, ok := r.peek(); !ok || c != ':' {

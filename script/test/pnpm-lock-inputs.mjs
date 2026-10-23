@@ -6,10 +6,17 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { readProject, validateProject, checkExactPeers, compareDshUpdate, deriveDshCordisOverrides } from "../../images/recipe-contract/pnpm-lock.mjs";
-
+// Independent fixture/CLI oracle. The graph reader is the shipped helper, spawned
+// as a CLI, so no in-process module is shared with the parser under test.
 const fixtures = fileURLToPath(new URL("fixtures/pnpm-lock/", import.meta.url));
-const cli = fileURLToPath(new URL("../../images/recipe-contract/pnpm-lock.mjs", import.meta.url));
+const bin = (() => {
+  const adapter = fileURLToPath(new URL("../../script/build/recipe-contract.sh", import.meta.url));
+  const result = spawnSync("bash", [adapter, "--native"], { encoding: "utf8", timeout: 600000 });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  return path.join(result.stdout.trim(), "out", "recipe-contract");
+})();
+const pinnedInputs = ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"];
 const files = ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"];
 const pinFile = "pnpm-inputs.sha256";
 const root = "@deepseek-ai/dsh";
@@ -35,8 +42,39 @@ function edit(prefix, file, change) {
 function inventory(prefix) {
   return fs.readdirSync(prefix).sort().map(file => [file, fs.readFileSync(path.join(prefix, file)).toString("base64")]);
 }
+// The graph reader is a CLI now, so every oracle assertion is out-of-process.
+function graphOf(prefix) { return JSON.parse(run(["graph", "dsh", prefix], 0)); }
+function peersOf(prefix) { return JSON.parse(run(["peers", "dsh", prefix], 0)); }
+function deriveOrThrow(prefix, options = {}) {
+  const args = ["dsh-cordis-overrides", prefix];
+  if (options.before) args.push("--before", options.before);
+  if (options.approved) args.push("--cordis-overrides", options.approved);
+  if (options.propose) args.push("--propose", options.propose);
+  const result = spawnSync(bin, args, { encoding: "utf8", timeout: 20000 });
+  if (result.status !== 0) {
+    const error = new Error(result.stderr.trim());
+    error.status = result.status;
+    throw error;
+  }
+  return JSON.parse(result.stdout);
+}
+function approvedFile(map) {
+  const file = path.join(work, `approved-${counter++}.json`);
+  fs.writeFileSync(file, JSON.stringify(map));
+  return file;
+}
+// A committed project whose override map is the caller's: the no-op re-pin of an
+// unchanged upgrade is decided by the map the graph was committed with.
+function committedPrefix(map) {
+  const prefix = copy("update-before");
+  edit(prefix, "pnpm-workspace.yaml", w => { w.overrides = map; });
+  edit(prefix, "pnpm-lock.yaml", l => { l.overrides = map; });
+  pins(prefix);
+  return prefix;
+}
+
 function run(args, status) {
-  const result = spawnSync(process.execPath, [cli, ...args], { encoding: "utf8", timeout: 20000, maxBuffer: 32 * 1024 * 1024 });
+  const result = spawnSync(bin, ["pnpm-lock", ...args], { encoding: "utf8", timeout: 20000, maxBuffer: 32 * 1024 * 1024 });
   assert.ifError(result.error);
   assert.equal(result.status, status, `${args}: ${result.stderr}`);
   if (status) {
@@ -53,7 +91,7 @@ function invalid(change, diagnostic, fixture = "tiny-dsh") {
     if (repin) pins(prefix);
     for (const verb of ["check", "graph", "pin"]) {
       const before = inventory(prefix);
-      const result = spawnSync(process.execPath, [cli, verb, fixture === "real-bridge" ? "bridge" : "dsh", prefix], { encoding: "utf8", timeout: 20000 });
+      const result = spawnSync(bin, ["pnpm-lock", verb, fixture === "real-bridge" ? "bridge" : "dsh", prefix], { encoding: "utf8", timeout: 20000 });
       assert.ifError(result.error);
       assert.equal(result.status, 1, `${verb}: negative survived: ${result.stderr}`);
       assert.equal(result.stdout, "");
@@ -77,25 +115,25 @@ try {
     const actualPins = fs.readFileSync(path.join(prefix, pinFile), "utf8");
     pins(prefix);
     assert.equal(actualPins, fs.readFileSync(path.join(prefix, pinFile), "utf8"));
-    const project = readProject({ prefix, kind: "dsh" });
-    validateProject(project, project.selection);
-    checkExactPeers(project);
+    // The pinned project re-reads clean through the public CLI: `check` for the
+    // structure and exact peers, `peers` for the numbers.
+    run(["check", "dsh", prefix], 0);
+    assert.deepEqual(JSON.parse(run(["peers", "dsh", prefix], 0)).unsatisfied, []);
   }
   const real = copy("real-bridge");
   {
-    // A symlinked entrypoint must still dispatch. Node canonicalises the module URL,
-    // so comparing canonical paths is what keeps a real failing check from exiting 0
-    // with no output.
+    // A symlinked entrypoint must still dispatch: an argv[0] reached through a
+    // symlink may not silently skip the command and exit 0 with no output.
     const prefix = copy("tiny-dsh");
-    const linked = path.join(work, "pnpm-lock-symlink.mjs");
-    fs.symlinkSync(cli, linked);
+    const linked = path.join(work, "recipe-contract-link");
+    fs.symlinkSync(bin, linked);
     const expected = json(path.join(fixtures, "tiny-dsh-expected.json"));
-    const ok = spawnSync(process.execPath, [linked, "check", "dsh", prefix], { encoding: "utf8" });
+    const ok = spawnSync(linked, ["pnpm-lock", "check", "dsh", prefix], { encoding: "utf8" });
     assert.ifError(ok.error);
     assert.equal(ok.status, 0, ok.stderr);
     assert.equal(ok.stdout, expected.selection.version + "\n");
     fs.appendFileSync(path.join(prefix, "pnpm-workspace.yaml"), "\n");
-    const bad = spawnSync(process.execPath, [linked, "check", "dsh", prefix], { encoding: "utf8" });
+    const bad = spawnSync(linked, ["pnpm-lock", "check", "dsh", prefix], { encoding: "utf8" });
     assert.ifError(bad.error);
     assert.equal(bad.status, 1, "symlinked invocation silently ignored a failing check");
     assert.equal(bad.stdout, "");
@@ -248,7 +286,7 @@ try {
         l.snapshots[`${root}@0.1.5-rc.2`].dependencies[loader] = `1.0.3(${cordis}@4.0.4)`;
       });
       pins(prefix);
-      const result = spawnSync(process.execPath, [cli, "check", "dsh", prefix], { encoding: "utf8" });
+      const result = spawnSync(bin, ["pnpm-lock", "check", "dsh", prefix], { encoding: "utf8" });
       assert.equal(result.status, 1);
       assert.match(result.stderr, /peer @deepseek-ai\/cordis wanted 4.0.2, got .*4.0.4/);
     } else run(["check", "dsh", prefix], 0);
@@ -265,11 +303,6 @@ try {
     delete l.snapshots[loaderKey].dependencies[cordis];
   });
   pins(unmet);
-  const peersOf = prefix => {
-    const result = spawnSync(process.execPath, [cli, 'peers', 'dsh', prefix], { encoding: 'utf8' });
-    assert.equal(result.status, 0, result.stderr);
-    return JSON.parse(result.stdout);
-  };
   const unmetReport = peersOf(unmet);
   assert.equal(unmetReport.unsatisfied.length, 1, unmetReport);
   assert.match(unmetReport.unsatisfied[0], /peer @deepseek-ai\/cordis wanted 4\.0\.2, got missing/);
@@ -281,7 +314,8 @@ try {
   const intact = copy();
   const intactReport = peersOf(intact);
   assert.deepEqual(intactReport.unsatisfied, []);
-  assert.deepEqual({ ...intactReport, unsatisfied: 0 }, checkExactPeers(readProject({prefix:intact,kind:'dsh'})));
+  run(["check", "dsh", intact], 0);
+  assert.deepEqual(intactReport, {exact:1,totalOptionalMissing:0,cordisExact:1,unsatisfied:[]});
   // Peer specifications are classified, never silently skipped: `=X`/`vX` and
   // surrounding whitespace are exact pins, the explicit range grammar is a range,
   // and any other syntax stops the check instead of escaping the exact-peer oracle.
@@ -295,7 +329,7 @@ try {
       l.snapshots['@deepseek-ai/dsh-sandbox-local@1.0.0'].dependencies = { [cordis]: '4.0.2' };
     });
     pins(prefix);
-    const result = spawnSync(process.execPath, [cli, "check", "dsh", prefix], { encoding: "utf8" });
+    const result = spawnSync(bin, ["pnpm-lock", "check", "dsh", prefix], { encoding: "utf8" });
     assert.equal(result.status, status, `${JSON.stringify(spec)}: ${result.stderr}`);
     return result;
   }
@@ -316,7 +350,7 @@ try {
     delete l.snapshots[loaderKey]; delete l.snapshots[`${cordis}@4.0.2`]; delete l.packages[`${cordis}@4.0.2`];
   });
   pins(optional); run(["check", "dsh", optional], 0);
-  assert.deepEqual(checkExactPeers(readProject({prefix:optional,kind:'dsh'})), {exact:1,totalOptionalMissing:1,cordisExact:1,unsatisfied:0});
+  assert.deepEqual(satisfiedSummary(peersOf(optional)), {exact:1,totalOptionalMissing:1,cordisExact:1,unsatisfied:0});
 
   invalid(prefix => edit(prefix, "pnpm-lock.yaml", l => {
     delete l.packages[`${loader}@1.0.3`].peerDependencies;
@@ -409,9 +443,24 @@ console.log("pnpm-lock-inputs: public CLI, policy, AST, pins, real dialect and p
 // These expectations are hand-authored before implementation, not graph snapshots.
 const updateVectors = json(path.join(fixtures, 'dsh-update-vectors.json'));
 const derivationVectors = json(path.join(fixtures, 'dsh-derivation-vectors.json'));
-function locked(prefix) { return readProject({prefix, kind: 'dsh'}); }
+// `locked` asserts the project is a locked dsh project through the public check and
+// returns its published graph, so a negative case reports the CLI diagnostic.
+function locked(prefix) {
+  const result = spawnSync(bin, ['pnpm-lock', 'check', 'dsh', prefix], { encoding: 'utf8', timeout: 20000 });
+  if (result.status !== 0) throw new Error(result.stderr.trim());
+  return graphOf(prefix);
+}
+function satisfiedSummary(report) {
+  assert.deepEqual(report.unsatisfied, []);
+  return {...report, unsatisfied: report.unsatisfied.length};
+}
+assert.throws(() => satisfiedSummary({exact:1,totalOptionalMissing:0,cordisExact:1,unsatisfied:["unmet peer"]}));
 function compare(before, after, requestedVersion = updateVectors.afterVersion, refresh = false) {
-  return compareDshUpdate({before: locked(before), after: locked(after), requestedVersion, refresh});
+  const args = ['dsh-lock-update', before, after, requestedVersion];
+  if (refresh) args.push('--refresh-lock');
+  const result = spawnSync(bin, [...args, '--json'], { encoding: 'utf8', timeout: 20000 });
+  if (result.status !== 0) throw new Error(result.stderr.trim());
+  return JSON.parse(result.stdout);
 }
 function changedPair() { return [copy('update-before'), copy('update-after')]; }
 function mutateAfter(change, diagnostic, refresh = false) {
@@ -428,10 +477,11 @@ try {
   assert.deepEqual(result.addedSnapshots, ['@deepseek-ai/dsh@0.1.5-rc.1', 'leaf@2.0.0']);
   assert.deepEqual(result.removedSnapshots, ['@deepseek-ai/dsh@0.1.5-rc.2', 'leaf@1.0.0']);
   assert.equal(locked(after).packages.find(p => p.id.name === cordis).integrity, updateVectors.retainedIntegrity);
-  assert.deepEqual(checkExactPeers(locked(before)), updateVectors.peerSummary);
+  assert.deepEqual(satisfiedSummary(peersOf(before)), updateVectors.peerSummary);
   assert.equal(compare(before, before, '').mode, 'equal');
   assert.equal(compare(before, before, '', true).mode, 'refresh');
-  assert.throws(() => compareDshUpdate({before:{...locked(before),packages:[]},after:locked(after),requestedVersion:updateVectors.afterVersion}), /project differs/);
+  // The retired forged-project row is unrepresentable here (D14): the CLI never
+  // accepts a project object, so there is no in-process graph to hand in.
   assert.throws(() => compare(before,after,'latest'), /semver/);
   const reorderedPins = copy('update-before');
   fs.writeFileSync(path.join(reorderedPins,pinFile),fs.readFileSync(path.join(reorderedPins,pinFile),'utf8').trimEnd().split('\n').reverse().join('\n')+'\n');
@@ -517,7 +567,7 @@ try {
       }
     }); pins(prefix);
     if (expected) assert.throws(() => locked(prefix), expected);
-    else assert.deepEqual(checkExactPeers(locked(prefix)), updateVectors.peerSummary);
+    else assert.deepEqual(satisfiedSummary(peersOf(prefix)), updateVectors.peerSummary);
   }
   const bare = `${cordis}@4.0.2`, suffixed = `${bare}(context-provider@1.0.0)`;
   contextCase(bare, [suffixed], suffixed);
@@ -558,7 +608,9 @@ try {
   }
   edit(collision[1],'pnpm-lock.yaml',l => l.snapshots['@deepseek-ai/dsh-extra@1.0.0'].dependencies = {[cordis]:'4.0.2'}); pins(collision[1]);
   assert.throws(() => compare(...collision), /retained snapshot/);
-  const wrapper = fileURLToPath(new URL('../../images/tools/dsh/check-lock-update.js', import.meta.url));
+  // The retired adapter is the `dsh-lock-update` subcommand: same argv contract,
+  // plus `--json`. `production contract directory is fixed` is asserted by
+  // script/test/dsh-project.py, which owns contract-directory authorization.
   for (const [args,expected] of [
     [[before,after,updateVectors.afterVersion],0],
     [[before,before,''],0],
@@ -566,18 +618,62 @@ try {
     [[before,after],2], [[before,after,updateVectors.afterVersion,'--unknown'],2],
     [[before,after,updateVectors.afterVersion,'--refresh-lock','--refresh-lock'],2],
   ]) {
-    const cliResult = spawnSync(process.execPath,[wrapper,...args],{encoding:'utf8'});
+    const cliResult = spawnSync(bin,['dsh-lock-update',...args],{encoding:'utf8'});
     assert.equal(cliResult.status,expected,cliResult.stderr);
     if (expected) assert.equal(cliResult.stdout,'');
     else assert.match(cliResult.stdout,/1 exact peers satisfied/);
   }
-  const productionOverride = spawnSync(process.execPath,[wrapper,'/opt/agent-vm/dsh',after,updateVectors.afterVersion],{encoding:'utf8',env:{...process.env,AGENT_VM_CONTRACT_DIR:work}});
-  assert.equal(productionOverride.status,1);
-  assert.equal(productionOverride.stdout,'');
-  assert.match(productionOverride.stderr,/production contract directory is fixed/);
+  const jsonSummary = spawnSync(bin,['dsh-lock-update',before,after,updateVectors.afterVersion,'--json'],{encoding:'utf8'});
+  assert.equal(jsonSummary.status,0,jsonSummary.stderr);
+  const comparison = JSON.parse(jsonSummary.stdout);
+  assert.equal(comparison.mode,'changed');
+  assert.deepEqual(comparison.addedArchives, result.addedArchives);
+  assert.deepEqual(comparison.retainedSnapshots, result.retainedSnapshots);
+  assert.equal(jsonSummary.stdout.includes('exact peers satisfied'),false);
+
+  // B2 raw-manifest regression: a lone surrogate in a free-text manifest field is a
+  // distinct value, so two projects that differ only there must not read as "only
+  // the selection changed". JSON is written with the escape text, so the file stays
+  // valid UTF-8 while the parsed value keeps the unpaired unit.
+  function withDescription(prefix, description) {
+    const file = path.join(prefix, 'package.json');
+    const value = JSON.parse(fs.readFileSync(file, 'utf8'));
+    value.description = description;
+    fs.writeFileSync(file, JSON.stringify(value));
+    pins(prefix);
+  }
+  function refreshPair(left, right) {
+    return spawnSync(bin, ['dsh-lock-update', left, right, '', '--refresh-lock', '--json'], { encoding: 'utf8' });
+  }
+  const surrogatePair = [copy('update-before'), copy('update-before')];
+  withDescription(surrogatePair[0], '\ud800');
+  withDescription(surrogatePair[1], '\ud801');
+  for (const prefix of surrogatePair) run(['check', 'dsh', prefix], 0);
+  const refusedRefresh = refreshPair(...surrogatePair);
+  assert.equal(refusedRefresh.status, 1, refusedRefresh.stdout);
+  assert.equal(refusedRefresh.stdout, '');
+  assert.match(refusedRefresh.stderr, /only dsh manifest selection may change/);
+  // Control: the same lone unit on both sides is no difference at all.
+  const sameSurrogate = [copy('update-before'), copy('update-before')];
+  for (const prefix of sameSurrogate) withDescription(prefix, '\ud800');
+  assert.equal(refreshPair(...sameSurrogate).status, 0);
+  // Control: a literal astral character and its surrogate-pair escape are the same
+  // value, so the comparison must not report a difference.
+  const escapedPair = [copy('update-before'), copy('update-before')];
+  withDescription(escapedPair[0], '\u{1F600}');
+  const escapedFile = path.join(escapedPair[1], 'package.json');
+  const escapedValue = JSON.parse(fs.readFileSync(escapedFile, 'utf8'));
+  escapedValue.description = '\u{1F600}';
+  fs.writeFileSync(escapedFile, JSON.stringify(escapedValue).replace('\u{1F600}', '\\ud83d\\ude00'));
+  pins(escapedPair[1]);
+  assert.equal(refreshPair(...escapedPair).status, 0);
+  // Control: U+FFFD is a different value from an unpaired surrogate.
+  const replacement = copy('update-before');
+  withDescription(replacement, '\ufffd');
+  assert.equal(refreshPair(surrogatePair[0], replacement).status, 1);
 
   const tentative = copy('derivation');
-  const derived = deriveDshCordisOverrides({prefix:tentative});
+  const derived = deriveOrThrow(tentative);
   assert.deepEqual(derived.overrides, derivationVectors.overrides);
   const timerPeer = '@deepseek-ai/cordis-plugin-timer';
   const hmr = '@deepseek-ai/cordis-plugin-hmr';
@@ -595,13 +691,13 @@ try {
     [l => l.packages['declarations@1.0.0'].peerDependencies['@deepseek-ai/cordis-plugin-timer'] = 'nonsense', /specification/],
   ]) {
     const prefix = copy('derivation'); edit(prefix,'pnpm-lock.yaml',change);
-    assert.throws(() => deriveDshCordisOverrides({prefix}), diagnostic);
+    assert.throws(() => deriveOrThrow(prefix), diagnostic);
   }
   // Two tentative selections of one family: the dependency edges are reachability
   // evidence only, so the pin comes from the declarations the graph really
   // carries (here the timer's own incompatible Cordis range prunes 1.1.7).
   const twoSelections = copy('derivation-two-selections');
-  const twoDerived = deriveDshCordisOverrides({prefix:twoSelections});
+  const twoDerived = deriveOrThrow(twoSelections);
   assert.deepEqual(twoDerived.overrides, derivationVectors.twoSelections.overrides);
   const twoGraph = json(path.join(twoSelections, 'pnpm-lock.yaml'));
   assert.deepEqual(twoGraph.packages[`${timerPeer}@1.1.4`] && twoGraph.packages[`${timerPeer}@1.1.7`] ? ['1.1.4','1.1.7'] : [], derivationVectors.twoSelections.timerSelections);
@@ -636,7 +732,7 @@ try {
     [l => { delete l.snapshots[`${timerPeer}@1.1.7`].peerDependencies; delete l.packages[`${timerPeer}@1.1.7`]; }, /missing archive|archive/],
   ]) {
     const prefix = copy('derivation-two-selections'); edit(prefix,'pnpm-lock.yaml',change);
-    assert.throws(() => deriveDshCordisOverrides({prefix}), diagnostic);
+    assert.throws(() => deriveOrThrow(prefix), diagnostic);
   }
   // The candidate rule, one vector per branch of the adopted rule.
   const candidatePrefix = () => {
@@ -650,36 +746,38 @@ try {
   // (a) unique selection: an exact peer declaration filters the second selection.
   const uniqueSelection = candidatePrefix();
   edit(uniqueSelection,'pnpm-lock.yaml',l => l.packages[`${hmr}@1.0.17`].peerDependencies[timerPeer] = '1.1.4');
-  assert.equal(deriveDshCordisOverrides({prefix:uniqueSelection}).overrides[`@deepseek-ai/dsh>${timerPeer}`], '1.1.4');
+  assert.equal(deriveOrThrow(uniqueSelection).overrides[`@deepseek-ai/dsh>${timerPeer}`], '1.1.4');
   // (b) ambiguous with the committed value among the survivors: the no-op re-pin.
   const ambiguous = candidatePrefix();
-  assert.equal(deriveDshCordisOverrides({prefix:ambiguous, committed:derivationVectors.overrides})
+  assert.equal(deriveOrThrow(ambiguous, { before: committedPrefix(derivationVectors.overrides) })
     .overrides[`@deepseek-ai/dsh>${timerPeer}`], '1.1.4');
   // The committed value may not invent a candidate the graph does not select.
-  assert.throws(() => deriveDshCordisOverrides({prefix:ambiguous,
-    committed:{...derivationVectors.overrides,[`@deepseek-ai/dsh>${timerPeer}`]:'1.1.5'}}), /ambiguous family selection/);
+  assert.throws(() => deriveOrThrow(ambiguous, {
+    before: committedPrefix({...derivationVectors.overrides, [`@deepseek-ai/dsh>${timerPeer}`]: '1.1.5'}) }),
+    /ambiguous family selection/);
   // (c) ambiguous without the committed value: a review stop, never a pick.
-  assert.throws(() => deriveDshCordisOverrides({prefix:ambiguous}),
+  assert.throws(() => deriveOrThrow(ambiguous),
     /ambiguous family selection: @deepseek-ai\/cordis-plugin-timer; candidates: 1\.1\.4, 1\.1\.7; .*pass --cordis-overrides after review/);
   // (c1) the route that stop advertises must work: an explicitly approved map is
   // passed into derivation, so it decides the graph the lockfile cannot and
   // outranks the committed no-op re-pin.
   const timerSelector = `@deepseek-ai/dsh>${timerPeer}`;
   const approvedNewer = {...derivationVectors.overrides,[timerSelector]:'1.1.7'};
-  assert.equal(deriveDshCordisOverrides({prefix:ambiguous, approved:approvedNewer}).overrides[timerSelector],'1.1.7');
-  assert.equal(deriveDshCordisOverrides({prefix:ambiguous, committed:derivationVectors.overrides,
-    approved:approvedNewer}).overrides[timerSelector],'1.1.7');
+  assert.equal(deriveOrThrow(ambiguous, { approved: approvedFile(approvedNewer) }).overrides[timerSelector],'1.1.7');
+  assert.equal(deriveOrThrow(ambiguous, { before: committedPrefix(derivationVectors.overrides),
+    approved: approvedFile(approvedNewer) }).overrides[timerSelector],'1.1.7');
   // (c2) an approved value must still be one of the surviving candidates; a
   // reviewed value that names nothing the graph selected fails and names them.
-  assert.throws(() => deriveDshCordisOverrides({prefix:ambiguous,
-    committed:derivationVectors.overrides, approved:{...derivationVectors.overrides,[timerSelector]:'1.1.5'}}),
+  assert.throws(() => deriveOrThrow(ambiguous, {
+    before: committedPrefix(derivationVectors.overrides),
+    approved: approvedFile({...derivationVectors.overrides, [timerSelector]: '1.1.5'}) }),
   /ambiguous family selection: @deepseek-ai\/cordis-plugin-timer; candidates: 1\.1\.4, 1\.1\.7; reviewed value 1\.1\.5 is not one of the candidates/);
   // The committed-value branch names itself so a reviewed map can never be
   // mistaken for it: the no-op re-pin keeps the message of a non-candidate value.
   // (d) none satisfying: the diagnostic names the declaration no candidate meets.
   const noneSatisfying = candidatePrefix();
   edit(noneSatisfying,'pnpm-lock.yaml',l => l.packages[`${hmr}@1.0.17`].peerDependencies[timerPeer] = '>=1.1.5 <1.1.7');
-  assert.throws(() => deriveDshCordisOverrides({prefix:noneSatisfying, committed:derivationVectors.overrides}),
+  assert.throws(() => deriveOrThrow(noneSatisfying, { before: committedPrefix(derivationVectors.overrides) }),
     /no family selection satisfies the declared requirements: @deepseek-ai\/cordis-plugin-timer; rejected: 1\.1\.4 \(.*wants >=1\.1\.5 <1\.1\.7\)/);
   const higherTimer = copy('derivation');
   edit(higherTimer,'pnpm-lock.yaml',l => {
@@ -688,17 +786,16 @@ try {
     l.snapshots[`${family}@1.2.0`] = {}; delete l.snapshots[`${family}@1.1.4`];
     l.snapshots[`${root}@0.1.5-rc.2`].dependencies[family] = '1.2.0';
   });
-  assert.equal(deriveDshCordisOverrides({prefix:higherTimer}).overrides['@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-timer'],'1.2.0');
+  assert.equal(deriveOrThrow(higherTimer).overrides['@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-timer'],'1.2.0');
   const noDeclaration = copy('derivation');
   edit(noDeclaration,'pnpm-lock.yaml',l => delete l.packages['declarations@1.0.0'].peerDependencies['@deepseek-ai/cordis-plugin-timer']);
-  assert.throws(() => deriveDshCordisOverrides({prefix:noDeclaration}),/missing family peer requirements/);
+  assert.throws(() => deriveOrThrow(noDeclaration),/missing family peer requirements/);
   const hidden = copy('derivation');
   edit(hidden,'pnpm-workspace.yaml', w => w.overrides = derivationVectors.overrides);
   edit(hidden,'pnpm-lock.yaml', l => l.overrides = derivationVectors.overrides);
-  assert.throws(() => deriveDshCordisOverrides({prefix:hidden}), /overrides/);
-  const adapter = fileURLToPath(new URL('../../images/tools/dsh/derive-cordis-overrides.mjs', import.meta.url));
+  assert.throws(() => deriveOrThrow(hidden), /overrides/);
   const proposal = path.join(work, 'proposal.json');
-  const invoke = args => spawnSync(process.execPath,[adapter,tentative,...args],{encoding:'utf8'});
+  const invoke = args => spawnSync(bin,['dsh-cordis-overrides',tentative,...args],{encoding:'utf8'});
   assert.equal(invoke(['--propose',proposal]).status,0);
   assert.equal(fs.readFileSync(proposal,'utf8'),JSON.stringify(derivationVectors.overrides,null,2)+'\n');
   assert.equal(invoke(['--cordis-overrides',proposal]).status,0);
@@ -714,12 +811,21 @@ try {
   fs.writeFileSync(reviewed, JSON.stringify(approvedNewer,null,2)+'\n');
   // The advertised review route on the ambiguous graph: rc 0 and the reviewed
   // candidate, not the stop it comes from.
-  const decided = spawnSync(process.execPath,[adapter,ambiguous,'--cordis-overrides',reviewed],{encoding:'utf8'});
+  const decided = spawnSync(bin,['dsh-cordis-overrides',ambiguous,'--cordis-overrides',reviewed],{encoding:'utf8'});
   assert.equal(decided.status,0,decided.stderr);
   assert.equal(JSON.parse(decided.stdout).overrides[timerSelector],'1.1.7');
   assert.equal(decided.stdout.includes('ambiguous family selection'),false);
-  const refused = spawnSync(process.execPath,[adapter,ambiguous,'--cordis-overrides',unreviewed],{encoding:'utf8'});
+  const refused = spawnSync(bin,['dsh-cordis-overrides',ambiguous,'--cordis-overrides',unreviewed],{encoding:'utf8'});
   assert.equal(refused.status,1);
   assert.match(refused.stderr,/candidates: 1\.1\.4, 1\.1\.7; reviewed value 1\.1\.5 is not one of the candidates/);
 } finally { fs.rmSync(work, {recursive:true, force:true}); }
 console.log('pnpm-lock-inputs: independent dsh comparison, identity and derivation vectors PASS');
+
+const stripFixture = fileURLToPath(new URL('fixtures/dsh/strip-cordis-overrides.mjs', import.meta.url));
+const noContract = {...process.env}; delete noContract.AGENT_VM_CONTRACT_DIR;
+const missingContract = spawnSync(process.execPath, [stripFixture,fixtures], {encoding:'utf8',env:noContract});
+assert.equal(missingContract.status,1);
+assert.match(missingContract.stderr,/AGENT_VM_CONTRACT_DIR must name/);
+const missingHelper = spawnSync(process.execPath, [stripFixture,fixtures], {encoding:'utf8',env:{...process.env,AGENT_VM_CONTRACT_DIR:path.join(os.tmpdir(),'absent-recipe-contract-test')}});
+assert.equal(missingHelper.status,1);
+assert.match(missingHelper.stderr,/ENOENT/);

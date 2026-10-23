@@ -100,6 +100,9 @@ func TestStageFinalRequiresReviewedMap(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "Cordis map changed") {
 		t.Errorf("changed map without review = %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(work, "unreviewed")); !os.IsNotExist(err) {
+		t.Fatalf("failed validation left a stage behind: %v", err)
+	}
 	// With an explicit review the same map is written.
 	approved := filepath.Join(work, "approved.json")
 	if err := os.WriteFile(approved, []byte(`{"@deepseek-ai/dsh>@deepseek-ai/cordis":"4.0.3",`+
@@ -215,5 +218,191 @@ func TestDeriveReviewedMap(t *testing.T) {
 	if _, err := Derive(DeriveRequest{Tentative: pnpmlock.Prefix(prefix), Approved: wrong, Cwd: cwd}); err == nil ||
 		!strings.Contains(err.Error(), "reviewed map differs from independent tentative requirements") {
 		t.Errorf("wrong review = %v", err)
+	}
+}
+
+const proofOverrides = `{"@deepseek-ai/dsh>@deepseek-ai/cordis":"4.0.2","@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-loader":"1.0.3","@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-timer":"1.1.4","@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-include":"1.0.7"}`
+
+// The proof used JSON.parse, not the project document parser.
+func TestProofJSONBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name, source string
+		reject       bool
+	}{
+		{"BOM", "\ufeff" + `{"overrides":` + proofOverrides + `,"requirements":[]}`, true},
+		{"duplicate", `{"overrides":null,"overrides":{},"requirements":[]}`, false},
+		{"dependency", `{"overrides":{},"requirements":[{"kind":"dependency","extra":1}]}`, false},
+		{"malformed-row-at-final", `{"overrides":{},"requirements":[{}]}`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			file := filepath.Join(t.TempDir(), "proof.json")
+			if err := os.WriteFile(file, []byte(strings.ReplaceAll(test.source, `"overrides":{}`, `"overrides":`+proofOverrides)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := readProof(file)
+			if (err != nil) != test.reject {
+				t.Fatalf("error = %v, reject = %v", err, test.reject)
+			}
+		})
+	}
+}
+
+func TestProofRowsPreserveUnknownKeys(t *testing.T) {
+	source := `{"overrides":{},"requirements":[{"owner":"a","kind":"exact-peer","peer":"b","wanted":"1.0.0","selected":"1.0.0","extra":1}]}`
+	file := filepath.Join(t.TempDir(), "proof.json")
+	if err := os.WriteFile(file, []byte(strings.ReplaceAll(source, `"overrides":{}`, `"overrides":`+proofOverrides)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proof, err := readProof(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// JS deepStrictEqual compares the original row, including unknown keys.
+	rows, err := proofRequirementRows(proof.requirements)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows.Items()) != 1 || !rows.Items()[0].Has("extra") {
+		t.Fatalf("lost unknown field: %s", rows.Describe())
+	}
+}
+
+func TestProposalInSystemTmp(t *testing.T) {
+	// /tmp is root-owned sticky on supported hosts, unlike t.TempDir's parent.
+	directory := "/tmp"
+	info, err := os.Stat(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSticky == 0 {
+		t.Skip("system /tmp is not sticky")
+	}
+	reservation, err := os.CreateTemp(directory, "dsh-proposal-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := reservation.Name()
+	if err := reservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(path) })
+	_, err = Derive(DeriveRequest{Tentative: pnpmlock.Prefix(copyFixture(t, "derivation")), Propose: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func stageCommittedDsh(t *testing.T) StageRequest {
+	t.Helper()
+	before := pnpmlock.Prefix("../../tools/dsh")
+	project, err := pnpmlock.ReadDshProject(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	tentative := filepath.Join(work, "tentative")
+	if err := StageTentative(StageRequest{Before: before, Stage: tentative, Argument: project.Selection().Version.String()}); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := os.ReadFile(filepath.Join(string(before), "pnpm-lock.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stripped, err := document.DeleteTopLevel(lock, "overrides")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tentative, "pnpm-lock.yaml"), stripped, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	proof, err := Derive(DeriveRequest{Tentative: pnpmlock.Prefix(tentative)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofPath := filepath.Join(work, "proof.json")
+	if err := os.WriteFile(proofPath, proof.AppendJS(nil), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := StageRequest{Before: before, Stage: filepath.Join(work, "final"), Argument: proofPath}
+	if err := StageFinal(request); err != nil {
+		t.Fatal(err)
+	}
+	return request
+}
+
+func TestCommittedDshCheckFinal(t *testing.T) {
+	request := stageCommittedDsh(t)
+	if _, err := CheckFinal(request); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckFinalRejectsUnknownProofKeys(t *testing.T) {
+	request := stageCommittedDsh(t)
+	proof, err := document.ReadFile(request.Argument, document.JSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requirements := proof.Get("requirements").Items()
+	changed := false
+	for index, row := range requirements {
+		kind, _ := row.Get("kind").Text()
+		if kind.Display() == "dependency" {
+			continue
+		}
+		requirements[index] = row.With("extra", document.NewNumber(1))
+		changed = true
+		break
+	}
+	if !changed {
+		t.Fatal("no peer requirement to mutate")
+	}
+	proof = proof.With("requirements", document.NewSequence(requirements))
+	if err := os.WriteFile(request.Argument, proof.AppendJS(nil), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = CheckFinal(request)
+	if err == nil || !strings.Contains(err.Error(), "tentative/final peer requirement drift") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestProofDoesNotInheritProjectBounds(t *testing.T) {
+	for _, payload := range []string{
+		`{"overrides":` + proofOverrides + `,"requirements":[],"padding":"` + strings.Repeat("a", (16<<20)+1) + `"}`,
+		`{"overrides":` + proofOverrides + `,"requirements":[],"padding":` + strings.Repeat("[", 110) + `0` + strings.Repeat("]", 110) + `}`,
+	} {
+		directory := t.TempDir()
+		file := filepath.Join(directory, "proof.json")
+		if err := os.WriteFile(file, []byte(payload), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(directory, "proof-link.json")
+		if err := os.Symlink(file, link); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readProof(link); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// JSON.parse(readFileSync(file, 'utf8')) accepted this with U+FFFD in padding.
+// The port rejects it instead; owner decision 6 approved this as a fail-closed
+// exception (proof invalid UTF-8), so the rejection is now the pinned boundary.
+func TestProofInvalidUTF8Rejected(t *testing.T) {
+	source := []byte(`{"overrides":` + proofOverrides + `,"requirements":[],"padding":"`)
+	source = append(source, 0xff)
+	source = append(source, []byte(`"}`)...)
+	file := filepath.Join(t.TempDir(), "proof.json")
+	if err := os.WriteFile(file, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readProof(file)
+	if err == nil || !strings.Contains(err.Error(), "invalid UTF-8") {
+		t.Fatalf("got %v", err)
 	}
 }

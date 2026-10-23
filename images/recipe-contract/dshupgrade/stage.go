@@ -131,7 +131,7 @@ func publishProposal(request DeriveRequest, result pnpmlock.Derivation, approved
 		return nodefs.Wrap("stat", parent, err)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	owned := info.IsDir() && ok && (int(stat.Uid) == os.Getuid() || (stat.Uid == 0 && info.Mode().Perm()&0o1000 != 0))
+	owned := info.IsDir() && ok && (int(stat.Uid) == os.Getuid() || (stat.Uid == 0 && info.Mode()&os.ModeSticky != 0))
 	if !owned {
 		return errorf("proposal parent must be owned or root-owned sticky directory")
 	}
@@ -249,12 +249,6 @@ func StageFinal(request StageRequest) error {
 		return err
 	}
 	tentative := filepath.Join(filepath.Dir(request.Argument), "tentative")
-	if err := os.Mkdir(request.Stage, 0o777); err != nil {
-		return nodefs.Wrap("mkdir", request.Stage, err)
-	}
-	if err := copyFile(filepath.Join(tentative, "package.json"), filepath.Join(request.Stage, "package.json")); err != nil {
-		return err
-	}
 	proof, err := readProof(request.Argument)
 	if err != nil {
 		return err
@@ -264,11 +258,11 @@ func StageFinal(request StageRequest) error {
 		if err != nil {
 			return err
 		}
-		if !approved.Equal(proof.derivation.Overrides) {
+		if !approved.Equal(proof.selected) {
 			return errorf("reviewed map differs from independent requirements")
 		}
 	}
-	bytes_, err := nodefs.ReadBounded(filepath.Join(string(request.Before), "pnpm-workspace.yaml"))
+	workspaceSource, err := nodefs.ReadBounded(filepath.Join(string(request.Before), "pnpm-workspace.yaml"))
 	if err != nil {
 		return err
 	}
@@ -276,14 +270,20 @@ func StageFinal(request StageRequest) error {
 	if err != nil {
 		return err
 	}
-	if !request.ExtraSet && !proof.derivation.Overrides.Equal(committed) {
+	if !request.ExtraSet && !proof.selected.Equal(committed) {
 		return errorf("Cordis map changed; use --propose-cordis-overrides FILE then --cordis-overrides FILE")
 	}
-	workspace := bytes_
-	if request.ExtraSet && !proofMatchesCommitted(proof.derivation.Overrides, committed) {
+	if err := os.Mkdir(request.Stage, 0o777); err != nil {
+		return nodefs.Wrap("mkdir", request.Stage, err)
+	}
+	if err := copyFile(filepath.Join(tentative, "package.json"), filepath.Join(request.Stage, "package.json")); err != nil {
+		return err
+	}
+	workspace := workspaceSource
+	if request.ExtraSet && !proofMatchesCommitted(proof.selected, committed) {
 		// An explicit review may replace the map; the committed bytes are otherwise
 		// the reviewed workspace.
-		workspace, err = document.ReplaceTopLevel(bytes_, "overrides", proof.overrides)
+		workspace, err = document.ReplaceTopLevel(workspaceSource, "overrides", proof.overrides)
 		if err != nil {
 			return err
 		}
@@ -329,20 +329,18 @@ func CheckFinal(request StageRequest) (CheckFinalReport, error) {
 	if err != nil {
 		return CheckFinalReport{}, err
 	}
-	workspace, err := document.Parse(workspaceSource, document.YAML)
+	workspace, err := document.DeleteTopLevel(workspaceSource, "overrides")
 	if err != nil {
 		return CheckFinalReport{}, err
 	}
-	lock, err := document.Parse(lockSource, document.YAML)
+	lock, err := document.DeleteTopLevel(lockSource, "overrides")
 	if err != nil {
 		return CheckFinalReport{}, err
 	}
-	workspace = workspace.Without("overrides")
-	lock = lock.Without("overrides")
-	if err := writeFile(filepath.Join(check, "pnpm-workspace.yaml"), workspace.AppendJS(nil)); err != nil {
+	if err := writeFile(filepath.Join(check, "pnpm-workspace.yaml"), workspace); err != nil {
 		return CheckFinalReport{}, err
 	}
-	if err := writeFile(filepath.Join(check, "pnpm-lock.yaml"), lock.AppendJS(nil)); err != nil {
+	if err := writeFile(filepath.Join(check, "pnpm-lock.yaml"), lock); err != nil {
 		return CheckFinalReport{}, err
 	}
 	committed, err := original.Overrides()
@@ -361,10 +359,13 @@ func CheckFinal(request StageRequest) (CheckFinalReport, error) {
 	if err != nil {
 		return CheckFinalReport{}, err
 	}
-	if !proof.derivation.Overrides.Equal(final.Overrides) {
+	if !proof.selected.Equal(final.Overrides) {
 		return CheckFinalReport{}, errorf("tentative/final selected family drift")
 	}
-	before := requirementRows(proof.derivation.Requirements)
+	before, err := proofRequirementRows(proof.requirements)
+	if err != nil {
+		return CheckFinalReport{}, err
+	}
 	after := requirementRows(final.Requirements)
 	if !document.DeepStrictEqual(before, after) {
 		return CheckFinalReport{}, errorf("tentative/final peer requirement drift")
@@ -406,14 +407,19 @@ func CheckFinal(request StageRequest) (CheckFinalReport, error) {
 }
 
 type proofFile struct {
-	overrides  document.Value
-	derivation pnpmlock.Derivation
+	overrides    document.Value
+	requirements document.Value
+	selected     pnpmlock.OverrideMap
 }
 
 // readProof reads the tentative proof file. It is plain JSON, not a project
 // document: the proof carries the derivation's own shape.
 func readProof(file string) (proofFile, error) {
-	value, err := document.ReadFile(file, document.JSON)
+	source, err := os.ReadFile(file)
+	if err != nil {
+		return proofFile{}, nodefs.Wrap("open", file, err)
+	}
+	value, err := document.ParsePlainJSON(source)
 	if err != nil {
 		return proofFile{}, err
 	}
@@ -422,22 +428,25 @@ func readProof(file string) (proofFile, error) {
 	if err != nil {
 		return proofFile{}, err
 	}
-	requirements := make([]pnpmlock.Requirement, 0)
-	for _, item := range value.Get("requirements").Items() {
-		requirement, err := requirementOf(item)
-		if err != nil {
-			return proofFile{}, err
-		}
-		requirements = append(requirements, requirement)
-	}
-	return proofFile{overrides: raw, derivation: pnpmlock.Derivation{Overrides: overrides, Requirements: requirements}}, nil
+	return proofFile{overrides: raw, requirements: value.Get("requirements"), selected: overrides}, nil
 }
 
-func requirementOf(value document.Value) (pnpmlock.Requirement, error) {
-	if _, err := recordOf(value); err != nil {
-		return pnpmlock.Requirement{}, err
+func proofRequirementRows(requirements document.Value) (document.Value, error) {
+	if requirements.Kind() != document.Sequence {
+		return document.Value{}, errorf("expected requirements array")
 	}
-	return pnpmlock.ParseRequirement(value)
+	items := make([]document.Value, 0, len(requirements.Items()))
+	for _, item := range requirements.Items() {
+		if item.Kind() == document.Null {
+			return document.Value{}, errorf("expected requirement row")
+		}
+		kind, _ := item.Get("kind").Text()
+		if kind.Equal(document.MustStringFromUTF8("dependency")) {
+			continue
+		}
+		items = append(items, item)
+	}
+	return document.NewSequence(items), nil
 }
 
 func requirementRows(requirements []pnpmlock.Requirement) document.Value {

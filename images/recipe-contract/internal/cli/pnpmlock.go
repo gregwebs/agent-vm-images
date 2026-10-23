@@ -6,11 +6,12 @@ import (
 	"github.com/gregwebs/agent-vm-images/images/recipe-contract/pnpmlock"
 )
 
-// runPnpmLock is the argv port of pnpm-lock.mjs: `verb kind PREFIX`.
+// runPnpmLock is the argv port of the retired pnpm-lock helper:
+// `verb kind PREFIX`.
 func (p *process) runPnpmLock(args []string) int {
-	verb := ""
+	verbArg := ""
 	if len(args) > 0 {
-		verb = args[0]
+		verbArg = args[0]
 	}
 	kindArg := ""
 	if len(args) > 1 {
@@ -21,15 +22,16 @@ func (p *process) runPnpmLock(args []string) int {
 		prefix = args[2]
 	}
 	extra := args[min(len(args), 3):]
+	verb, knownVerb := parseLockVerb(verbArg)
 	kind, knownKind := pnpmlock.ParseKind(kindArg)
-	if !knownVerb(verb) || !knownKind || prefix == "" || len(extra) != 0 {
+	if !knownVerb || !knownKind || prefix == "" || len(extra) != 0 {
 		return p.nodeUsage(2, pnpmLockUsage)
 	}
 	return p.nodeCommand(pnpmLockPrefix, func() (string, error) {
 		switch verb {
-		case "pin":
+		case lockPin:
 			return "", pnpmlock.WritePins(pnpmlock.Prefix(prefix), kind)
-		case "peers":
+		case lockPeers:
 			if kind != pnpmlock.KindDsh {
 				return "", errorOf("peer reporting is dsh-only")
 			}
@@ -38,33 +40,53 @@ func (p *process) runPnpmLock(args []string) int {
 				return "", err
 			}
 			return string(report.AppendJS(nil)) + "\n", nil
-		default:
+		case lockCheck, lockGraph:
 			project, err := pnpmlock.ReadProject(pnpmlock.Prefix(prefix), kind)
 			if err != nil {
 				return "", err
 			}
-			if verb == "check" {
+			if verb == lockCheck {
 				return project.Selection().Version.String() + "\n", nil
 			}
 			graph := project.Graph()
 			return string(graph.AppendJS(nil)) + "\n", nil
 		}
+		panic("unhandled lock verb")
 	})
 }
 
-func knownVerb(verb string) bool {
-	switch verb {
-	case "check", "graph", "pin", "peers":
-		return true
+type lockVerb uint8
+
+const (
+	lockCheck lockVerb = iota
+	lockGraph
+	lockPin
+	lockPeers
+)
+
+func parseLockVerb(text string) (lockVerb, bool) {
+	switch text {
+	case "check":
+		return lockCheck, true
+	case "graph":
+		return lockGraph, true
+	case "pin":
+		return lockPin, true
+	case "peers":
+		return lockPeers, true
 	default:
-		return false
+		return lockCheck, false
 	}
 }
 
 // runPnpmEnvironment validates the process environment and every PREFIX.
 func (p *process) runPnpmEnvironment(args []string) int {
 	return p.nodeCommand(pnpmEnvironmentPrefix, func() (string, error) {
-		return "", pnpmenv.Check(p.env.Variables, args)
+		prefixes := make([]pnpmlock.Prefix, 0, len(args))
+		for _, arg := range args {
+			prefixes = append(prefixes, pnpmlock.Prefix(arg))
+		}
+		return "", pnpmenv.Check(p.env.Variables, prefixes)
 	})
 }
 
@@ -81,11 +103,4 @@ func (p *process) runPnpmYAML(args []string) int {
 		}
 		return string(value.AppendJS(nil)) + "\n", nil
 	})
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

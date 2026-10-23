@@ -122,6 +122,9 @@ func readCapped(reader io.Reader, size int64) ([]byte, error) {
 		read, err := reader.Read(buffer[length:])
 		length += read
 		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				return nil, err
+			}
 			break
 		}
 		if read == 0 {

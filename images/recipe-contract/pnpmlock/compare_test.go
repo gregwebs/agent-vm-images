@@ -37,11 +37,14 @@ func TestCompareDshUpdate(t *testing.T) {
 	}
 	// The emitted JSON carries the retired key order.
 	printed := string(comparison.AppendJS(nil))
+	previous := -1
 	for _, key := range []string{"mode", "beforeVersion", "afterVersion", "addedArchives", "removedArchives",
 		"retainedArchives", "addedSnapshots", "removedSnapshots", "retainedSnapshots"} {
-		if !strings.Contains(printed, `"`+key+`"`) {
-			t.Errorf("comparison JSON lacks %q: %s", key, printed)
+		position := strings.Index(printed, `"`+key+`":`)
+		if position <= previous {
+			t.Errorf("comparison JSON key %q is missing or out of order: %s", key, printed)
 		}
+		previous = position
 	}
 	keep, err := ParseRequestedSelection("")
 	if err != nil {

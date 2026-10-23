@@ -2,8 +2,8 @@
 # Black-box owning tests for images/tools/dsh/prepare-lock.sh and install-dsh.sh.
 #
 # Hermetic: no registry, no Docker, no host package manager. The real
-# project.py authorization/publication code, the real pnpm-lock.mjs graph and pin
-# code and the real check-lock-update.js wrapper all run; only the manager is a
+# project.py authorization/publication code and the real recipe-contract graph and
+# pin code run; only the manager is a
 # fixture-confined fake that records argv, environment and store, and simulates
 # --version, lockfile-only resolution and the frozen install separately. A PATH
 # `npm`/`pnpm` sentinel fails the suite if any code path looks a manager up by
@@ -53,14 +53,15 @@ assert_contains() {
 # recipe-contract copy and the install-status directory are authorized once.
 ROOT="$TEST_ROOT/root"
 mkdir -p "$ROOT/pnpm" "$ROOT/install-status" "$TEST_ROOT/bin" "$TEST_ROOT/outside"
-cp -R "$REPO_ROOT/images/recipe-contract" "$ROOT/recipe-contract"
+contract_context=$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)
+cp -R "$contract_context/out" "$ROOT/recipe-contract"
 printf '{"version":"11.11.0"}\n' >"$ROOT/pnpm/pin.json"
 printf 'outside the payload\n' >"$TEST_ROOT/outside/sentinel"
 
 # A second root carries an unsupported base pin.
 ROOT12="$TEST_ROOT/root12"
 mkdir -p "$ROOT12/pnpm" "$ROOT12/install-status"
-cp -R "$REPO_ROOT/images/recipe-contract" "$ROOT12/recipe-contract"
+cp -R "$contract_context/out" "$ROOT12/recipe-contract"
 printf '{"version":"12.9.1"}\n' >"$ROOT12/pnpm/pin.json"
 
 cat >"$ROOT/pnpm-fake" <<'FAKE'
@@ -437,7 +438,7 @@ FIXTURE_ROOT=$ROOT12
 CONTRACT_DIR=$ROOT12/recipe-contract
 run_prepare '' ''
 FIXTURE_ROOT=$ROOT
-CONTRACT_DIR=
+unset CONTRACT_DIR
 assert_failure
 assert_contains 'unsupported base manager selection: 12.9.1'
 assert_manager_calls ''
@@ -606,6 +607,9 @@ run_prepare_host() {
         "HOME=$CALLER_HOME"
         "TMPDIR=$CASE/tmp"
         "AGENT_VM_SCRATCH_ROOT=$ROOT"
+        # A developer upgrade names the composed helper it built: a source
+        # checkout authorizes as a path but carries no binary to execute.
+        "AGENT_VM_CONTRACT_DIR=$ROOT/recipe-contract"
         "AGENT_VM_FIXTURE_PNPM=$ROOT/pnpm-fake"
         "AGENT_VM_FIXTURE_BASE_PNPM="
         "STUB_LOG=$CASE/manager.log"
@@ -625,7 +629,6 @@ run_prepare_host() {
     )
     case "${env_args[*]}" in
         *AGENT_VM_FIXTURE_ROOT*) fail 'the host-checkout case must not export a fixture root' ;;
-        *AGENT_VM_CONTRACT_DIR*) fail 'the host-checkout case must not select a contract directory' ;;
     esac
     mkdir -p "$CASE/tmp"
     set +e
@@ -785,7 +788,7 @@ EXTRA_ENV=("AGENT_VM_CONTRACT_DIR=$ROOT/absent-contract")
 run_install
 EXTRA_ENV=()
 assert_failure
-assert_contains 'contract directory has no graph module'
+assert_contains 'no executable recipe-contract'
 
 # A signal must exit 143 and still remove the partial tree created before it.
 new_case install-signal

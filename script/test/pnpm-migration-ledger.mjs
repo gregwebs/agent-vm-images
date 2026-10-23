@@ -16,7 +16,36 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { checkExactPeers, pinnedInputs, readProject } from "../../images/recipe-contract/pnpm-lock.mjs";
+// The graph reader is the shipped helper, spawned as a CLI: the ledger is an
+// independent oracle and no longer shares an in-process module with the parser.
+const BINARY = (() => {
+  const result = spawnSync("bash", [fileURLToPath(new URL("../../script/build/recipe-contract.sh", import.meta.url)), "--native"], { encoding: "utf8", timeout: 300000 });
+  if (result.error || result.status !== 0) throw new Error(`cannot build the native recipe-contract helper: ${result.error ?? result.stderr}`);
+  return path.join(result.stdout.trim(), "out", "recipe-contract");
+})();
+const pinnedInputs = ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"];
+
+function helper(args, status = 0) {
+  const result = spawnSync(BINARY, args, { encoding: "utf8", timeout: 60000, maxBuffer: 32 * 1024 * 1024 });
+  if (result.error) throw result.error;
+  assert.equal(result.status, status, `${args.join(" ")}: ${result.stderr}`);
+  if (status !== 0) assert.equal(result.stdout, "", "failure leaked success payload");
+  return result.stdout;
+}
+
+function readProject({ prefix, kind }) {
+  const graph = JSON.parse(helper(["pnpm-lock", "graph", kind, prefix]));
+  const report = JSON.parse(helper(["pnpm-lock", "peers", "dsh", path.join(prefix)]));
+  assert.deepEqual(report.unsatisfied, [], "the committed graph has unsatisfied exact peers");
+  return {
+    ...graph,
+    manifest: JSON.parse(fs.readFileSync(path.join(prefix, "package.json"), "utf8")),
+    workspace: JSON.parse(helper(["pnpm-yaml", path.join(prefix, "pnpm-workspace.yaml")])),
+    lock: JSON.parse(helper(["pnpm-yaml", path.join(prefix, "pnpm-lock.yaml")])),
+    prefix,
+    peerSummary: { exact: report.exact, totalOptionalMissing: report.totalOptionalMissing, cordisExact: report.cordisExact, unsatisfied: 0 },
+  };
+}
 
 const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const BASELINE = "6c51509";
@@ -413,7 +442,7 @@ function graphSection(graph) {
           project.snapshots.filter(snapshot => [...hashes].some(hash => snapshot.id.key.includes(hash))).length,
       },
     },
-    peerSummary: checkExactPeers(project),
+    peerSummary: project.peerSummary,
   };
 }
 
@@ -930,7 +959,7 @@ function build() {
     provenance: {
       baselineSha: baseline.sourceSha,
       measuredOn: RECORDED.measuredOn,
-      graphReader: "images/recipe-contract/pnpm-lock.mjs",
+      graphReader: "recipe-contract pnpm-lock (images/recipe-contract/pnpmlock)",
     },
     baseline: {
       sourceSha: baseline.sourceSha,

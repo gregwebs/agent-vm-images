@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 )
 
 // The retired parser was npm yaml@2.9.0 with {uniqueKeys, merge:false,
@@ -39,20 +40,29 @@ const (
 // transitions and the indentation bookkeeping are the lexer's because they
 // decide which bytes are scalar content and which are node starts.
 type scanner struct {
-	source      []byte
-	pos         int
-	indentNext  int
-	indentValue int
-	flowLevel   int
-	flowKey     bool
+	source        []byte
+	pos           int
+	indentNext    int
+	indentValue   int
+	flowLevel     int
+	flowKey       bool
+	endedDocument bool
 	// blockScalarIndent is the offset from the containing indentation set by an
 	// explicit `|2`-style header; -1 when the header names none.
 	blockScalarIndent int
+	blockScalarStrip  bool
 }
 
 var errTagForbidden = errors.New("anchors, aliases and explicit tags forbidden")
 
 func scanYAMLSource(source []byte) error {
+	// npm YAML preserves lone CR as content in some contexts, whereas v3
+	// normalizes it as a line break. Reject before decoding can change values.
+	for index, char := range source {
+		if char == '\r' && (index+1 == len(source) || source[index+1] != '\n') {
+			return errors.New("lone CR in YAML is unsupported")
+		}
+	}
 	if err := rejectLineSeparators(source); err != nil {
 		return err
 	}
@@ -93,6 +103,14 @@ func scanYAMLSource(source []byte) error {
 // source. npm yaml treats them as content; v3 treats them as line breaks, which
 // changes the accepted value, so the input fails closed instead (D5).
 func rejectLineSeparators(source []byte) error {
+	for _, char := range string(source) {
+		if (char < 0x20 && char != '\t' && char != '\r' && char != '\n') || (char >= 0x7f && char <= 0x9f && char != 0x85) {
+			return fmt.Errorf("unsupported YAML control character U+%04X", char)
+		}
+		if char == 0xfffe || char == 0xffff {
+			return fmt.Errorf("unsupported YAML noncharacter U+%04X", char)
+		}
+	}
 	for index := 0; index < len(source); index++ {
 		if source[index] < 0xc2 {
 			continue
@@ -273,6 +291,10 @@ func (s *scanner) parseLineStart() (scanState, error) {
 	if c == '-' || c == '.' {
 		marker := string(s.source[s.pos:min(s.pos+3, len(s.source))])
 		if (marker == "---" || marker == "...") && isEmptyChar(s.at(s.pos+3)) {
+			if marker == "..." && s.endedDocument {
+				return scanStream, errors.New("Source contains multiple documents") //nolint:staticcheck // retired diagnostic
+			}
+			s.endedDocument = marker == "..."
 			s.pushCount(3)
 			s.indentValue = 0
 			s.indentNext = 0
@@ -283,6 +305,9 @@ func (s *scanner) parseLineStart() (scanState, error) {
 		}
 	}
 	s.indentValue = s.pushSpaces(false)
+	if (s.at(s.pos) == '|' || s.at(s.pos) == '>') && s.indentValue < s.indentNext {
+		return scanDocument, errors.New("block-scalar header must be indented past its parent")
+	}
 	if s.indentNext > s.indentValue && !isEmptyChar(s.at(s.pos+1)) {
 		s.indentNext = s.indentValue
 	}
@@ -332,6 +357,9 @@ func (s *scanner) parseDocument() (scanState, error) {
 		return scanQuoted, nil
 	case '|', '>':
 		n += s.parseBlockScalarHeader()
+		if s.at(s.pos) == '#' {
+			return scanDocument, errors.New("Comments must be separated from other tokens by white space characters") //nolint:staticcheck // retired diagnostic
+		}
 		n += s.pushSpaces(true)
 		s.pushCount(len(line) - n)
 		s.pushNewline()
@@ -420,6 +448,9 @@ func (s *scanner) parseFlowCollection() (scanState, error) {
 		s.flowLevel++
 		return scanFlow, nil
 	case '}', ']':
+		if s.at(s.pos+1) == '#' {
+			return scanFlow, errors.New("Comments must be separated from other tokens by white space characters") //nolint:staticcheck // retired diagnostic
+		}
 		s.pushCount(1)
 		s.flowKey = true
 		s.flowLevel--
@@ -499,6 +530,41 @@ func (s *scanner) parseQuotedScalar() (scanState, error) {
 		}
 		offset = continuation + next - s.pos
 	}
+	if s.at(end+1) == '#' {
+		return scanDocument, errors.New("Comments must be separated from other tokens by white space characters") //nolint:staticcheck // retired diagnostic
+	}
+	if quote == '"' {
+		for index := s.pos + 1; index < end; index++ {
+			if s.at(index) != '\\' {
+				continue
+			}
+			index++
+			if s.at(index) == '/' {
+				return scanQuoted, errors.New("unsupported YAML \\/ escape")
+			}
+			digits := 0
+			if s.at(index) == 'u' {
+				digits = 4
+			} else if s.at(index) == 'U' {
+				digits = 8
+			}
+			if digits > 0 && index+digits < end {
+				var code uint32
+				valid := true
+				for offset := 1; offset <= digits; offset++ {
+					digit, ok := hexValue(s.at(index + offset))
+					valid = valid && ok
+					code = code*16 + uint32(digit)
+				}
+				if valid && code >= 0xd800 && code <= 0xdfff {
+					return scanQuoted, errors.New("unsupported YAML surrogate escape")
+				}
+			}
+		}
+	}
+	if err := s.checkFlowKey(s.pos, end+1); err != nil {
+		return scanQuoted, err
+	}
 	s.pos = end + 1
 	if flow {
 		return scanFlow, nil
@@ -508,19 +574,23 @@ func (s *scanner) parseQuotedScalar() (scanState, error) {
 
 func (s *scanner) parseBlockScalarHeader() int {
 	s.blockScalarIndent = -1
+	s.blockScalarStrip = false
 	for index := s.pos + 1; ; index++ {
 		c := s.at(index)
 		switch {
 		case c == '+':
 		case c > '0' && c <= '9':
 			s.blockScalarIndent = int(c-'0') - 1
-		case c != '-':
+		case c == '-':
+			s.blockScalarStrip = true
+		default:
 			return s.pushUntil(func(c byte) bool { return isEmptyChar(c) || c == '#' })
 		}
 	}
 }
 
 func (s *scanner) parseBlockScalar() (scanState, error) {
+	bodyStart := s.pos
 	lineBreak := s.pos - 1
 	indent := 0
 	index := s.pos
@@ -563,6 +633,22 @@ scan:
 				break
 			}
 			lineBreak = continuation + next
+		}
+	}
+	bodyEnd := min(lineBreak+1, len(s.source))
+	if bodyEnd > bodyStart {
+		body := s.source[bodyStart:bodyEnd]
+		if body[len(body)-1] != '\n' && !s.blockScalarStrip {
+			return scanBlockScalar, errors.New("unsupported block-scalar body at EOF without line break")
+		}
+		for _, line := range bytes.Split(body, []byte("\n")) {
+			line = bytes.TrimSuffix(line, []byte("\r"))
+			if len(line) > s.indentNext && len(bytes.Trim(line, " ")) == 0 {
+				return scanBlockScalar, errors.New("unsupported block-scalar over-indented whitespace-only line")
+			}
+			if s.indentNext == 0 && len(line) > 0 && line[0] == '#' {
+				return scanBlockScalar, errors.New("unsupported block-scalar column-zero comment content")
+			}
 		}
 	}
 	// Mirrors the lexer's trailing-content rule: an insufficiently indented line
@@ -634,6 +720,9 @@ func (s *scanner) parsePlainScalar() (scanState, error) {
 		}
 	}
 done:
+	if err := s.checkFlowKey(s.pos, end+1); err != nil {
+		return scanPlain, err
+	}
 	if end+1 > s.pos {
 		s.pos = end + 1
 	}
@@ -641,4 +730,27 @@ done:
 		return scanFlow, nil
 	}
 	return scanDocument, nil
+}
+
+func (s *scanner) checkFlowKey(start, end int) error {
+	if s.flowLevel == 0 {
+		return nil
+	}
+	// v3's 1024-character limit is for implicit simple keys; explicit `?`
+	// keys do not have that limit.
+	previous := start - 1
+	for isEmptyChar(s.at(previous)) && previous >= 0 {
+		previous--
+	}
+	if s.at(previous) == '?' {
+		return nil
+	}
+	colon := end
+	for s.at(colon) == ' ' || s.at(colon) == '\t' {
+		colon++
+	}
+	if s.at(colon) == ':' && utf8.RuneCount(s.source[start:colon]) > 1024 {
+		return errors.New("unsupported YAML flow key longer than 1024 characters")
+	}
+	return nil
 }

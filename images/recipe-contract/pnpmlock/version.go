@@ -154,6 +154,7 @@ func satisfiesFamilyRange(selected ExactVersion, wanted string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	any := false
 	for _, alternative := range alternativeSplit.Split(wanted, -1) {
 		terms := splitJSSpace(trimJS(alternative))
 		all := true
@@ -164,14 +165,11 @@ func satisfiesFamilyRange(selected ExactVersion, wanted string) (bool, error) {
 			}
 			if !matched {
 				all = false
-				break
 			}
 		}
-		if all {
-			return true, nil
-		}
+		any = any || all
 	}
-	return false, nil
+	return any, nil
 }
 
 func familyParts(selected, wanted string) ([3]uint64, error) {

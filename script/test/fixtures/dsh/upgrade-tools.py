@@ -33,7 +33,8 @@ def manager(args):
     graph['importers']['.']['dependencies']['@deepseek-ai/dsh'] = {'specifier': version, 'version': version}
     for field in ['packages', 'snapshots']:
         graph[field]['@deepseek-ai/dsh@' + version] = graph[field].pop('@deepseek-ai/dsh@' + old)
-    workspace = json.loads(subprocess.check_output(['node', str(Path(os.environ['DSH_TEST_REPO']) / 'script/test/fixtures/dsh/read-workspace.mjs')], text=True))
+    workspace = json.loads(subprocess.check_output(
+        [os.environ['AGENT_VM_CONTRACT_DIR'] + '/recipe-contract', 'pnpm-yaml', 'pnpm-workspace.yaml'], text=True))
     tentative = 'overrides' not in workspace
     if tentative:
         assert not Path('pnpm-lock.yaml').exists(), 'tentative graph seeded with old overrides'

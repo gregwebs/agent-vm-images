@@ -86,7 +86,10 @@ dsh uses four reviewed pnpm inputs (`package.json`, `pnpm-lock.yaml`,
 `pnpm-workspace.yaml`, `pnpm-inputs.sha256`) and the inherited base manager.
 `--pnpm` and `AGENT_VERSION_PNPM` accept only empty or the base pin;
 `packageManager` is an assertion, not another selection. Host image maintenance
-requires authenticated pnpm **11.11.0**, never a PATH `pnpm` 12. Empty/equal
+requires authenticated pnpm **11.11.0**, never a PATH `pnpm` 12, and Go: a host
+upgrade builds and authorizes the native composed helper
+(`script/build/recipe-contract.sh --native`) before the first graph check, so a
+source checkout on its own is not a runnable contract directory. Empty/equal
 preparation checks all four file bytes and the graph without starting a package
 manager. Changed exact dsh selections freeze retained identities and peer-context
 snapshots, but may replace transitives within dsh's own closure; they are not
@@ -324,6 +327,23 @@ bash script/test/contracts.sh
 bash script/test/contracts.sh --guard-only
 ```
 
+Dependencies are vendored (`images/recipe-contract/vendor/`, `-mod=vendor` in
+every build). To update one, follow ADR 0001 § Amended by #75:
+
+```sh
+cd images/recipe-contract
+GOTOOLCHAIN=auto GOFLAGS=-mod=mod go get go.yaml.in/yaml/v3@vX
+GOTOOLCHAIN=auto GOFLAGS=-mod=mod go mod tidy
+GOTOOLCHAIN=auto GOFLAGS=-mod=mod go mod vendor
+```
+
+then review the vendor diff, license/NOTICE and advisories (`govulncheck`), update
+the pinned expectations in `script/test/image-sources/tests/image_sources.rs`
+(`go.mod`, `go.sum`, `modules.txt`, the file set) and `script/test/recipe-contract-vendor.sh` (`expected_sum`),
+run the parity vectors and
+`bash script/test/recipe-contract-vendor.sh`, and update the ADR pin row. Never
+hand-edit a vendored file.
+
 Build and audit commands (mount `<context>/out`, never a Darwin binary in Linux):
 
 ```sh
@@ -342,17 +362,24 @@ prerequisite or a maintained test command.
 
 ## Bounded pnpm primitives
 
-#42 PR 1 adds build-only graph/access interfaces; PR 2 migrates dsh on top of
-them ([dsh maintenance](#dsh-maintenance-and-graph-freeze)). Read
+The default contracts gate replays the parser corpus with the retired JS oracle
+at git commit `3b21103` (test-only, no npm/network). Fetch full history before
+running it in a shallow clone (`git fetch --unshallow`); CI jobs running
+`script/test/contracts.sh` must use `fetch-depth: 0`.
+
+The graph, environment and dsh staging helpers are `recipe-contract`
+subcommands ([Go build helpers](#go-build-helpers)); dsh is built on them
+([dsh maintenance](#dsh-maintenance-and-graph-freeze)). Read
 [ownership](docs/image-source-ownership.md#bounded-pnpm-primitives-42-pr-1) and the
-[parser ADR](docs/adr/0001-build-only-pnpm-graph-parser.md). Node is required for
-the bounded CLI; no host YAML install or package-manager invocation is needed:
+[parser ADR](docs/adr/0001-build-only-pnpm-graph-parser.md). Go builds the helper;
+no host YAML install or package-manager invocation is needed:
 
 ```sh
-node images/recipe-contract/pnpm-lock.mjs check dsh script/test/fixtures/pnpm-lock/tiny-dsh
-node images/recipe-contract/pnpm-lock.mjs graph bridge script/test/fixtures/pnpm-lock/real-bridge
-node script/test/pnpm-vendor.mjs
+C="$(bash script/build/recipe-contract.sh --native)/out"
+"$C/recipe-contract" pnpm-lock check dsh script/test/fixtures/pnpm-lock/tiny-dsh
+"$C/recipe-contract" pnpm-lock graph bridge script/test/fixtures/pnpm-lock/real-bridge
 node script/test/pnpm-lock-inputs.mjs
+bash script/test/recipe-contract-vendor.sh
 bash script/test/tool-access.sh
 bash script/test/standard-node-consumers.sh --self-test
 bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer primitives --platform linux/arm64
@@ -361,10 +388,13 @@ bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer primi
 `pin KIND PREFIX` deliberately rewrites only three-input SHA-256 consistency
 pins after full structural/policy validation; builds must never re-pin failures.
 Fixtures retain independent expected graphs and a real pnpm 11.11.0 emitted v9
-lock. Never use host pnpm 12 for any lock work. Vendor files are digest-checked,
-not linted/rewritten; Rust inventory guards run without Node, while the dsh graph
-guards run this CLI as a syntax adapter. `contracts.sh`
-explicitly runs vendor/parser and harness self-tests, without Docker/network.
+lock. Never use host pnpm 12 for any lock work. The vendored dependency policy
+and drift gate are defined in [ADR 0001](docs/adr/0001-build-only-pnpm-graph-parser.md).
+Rust inventory guards run without Node, while the dsh graph guards run
+`recipe-contract pnpm-lock` as a syntax adapter. `contracts.sh` explicitly runs the
+vendor, parser and harness self-tests without Docker. The vendor drift gate
+requires the Go proxy and checksum database (and may download the selected Go
+toolchain); it is not network-free.
 
 `recipe-contract tool-access [--content | --tree] TARGET...` accepts explicit tree
 directories (bare names beneath cwd, not PATH). It audits every physical entry

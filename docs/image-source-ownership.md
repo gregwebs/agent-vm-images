@@ -61,7 +61,8 @@ READMEs may be adapted to their new owner):
 - `images/tools/dsh/install-dsh.sh`
 - `images/tools/dsh/verify-dsh.sh`
 - `images/tools/dsh/prepare-lock.sh`
-- `images/tools/dsh/check-lock-update.js`
+- `images/tools/dsh/check-lock-update.js` — historical: deleted in #75 with the
+  other Node adapters; the comparator is `recipe-contract dsh-lock-update`
 - `images/tools/dsh/package.json`
 - `images/tools/dsh/package-lock.json` — historical: deleted in #51 when dsh
   moved to the four pnpm inputs; the reviewed bytes remain in git history at
@@ -258,7 +259,8 @@ with #42 (dsh moved in #51, below). Ownership covers:
   `images/tools/opencode/install-opencode-plugins.sh`, `check-claude-runtime.mjs`,
   `probe-opencode.py`, `check-claude-payload.mjs`, `verify-opencode-plugins.sh`,
   `plugins/{check-lock.mjs,pin-pnpm-inputs.mjs,prepare-lock.sh,upgrade-plugins.sh}` and extended `README.md`.
-- Shared build-only helpers: `images/recipe-contract/{run-pnpm.sh,check-pnpm-environment.mjs}`.
+- Shared build-only helpers: `images/recipe-contract/run-pnpm.sh` and the composed
+  `recipe-contract` helper (its `pnpm-environment` subcommand is the environment guard).
 - Pinned install inputs: `images/tools/opencode/plugins/pnpm-inputs.sha256` records the reviewed bytes of
   `package.json`, `pnpm-lock.yaml` and `pnpm-workspace.yaml`. The build verifies those bytes rather than
   interpreting YAML; OpenCode does not import the shared build-only graph parser. `check-lock.mjs`
@@ -283,20 +285,23 @@ dsh is now an image-owned pnpm project. Its owning sources are:
 
 - Reviewed inputs: `images/tools/dsh/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,pnpm-inputs.sha256}`.
 - Preparation, installation and verification: `images/tools/dsh/{prepare-lock.sh,install-dsh.sh,verify-dsh.sh}`.
-- Build-only helpers: `images/tools/dsh/{project.py,check-lock-update.js,derive-cordis-overrides.mjs,upgrade-project.mjs,host-manager.py,check-runtime.mjs,probe-dsh.py}`.
+- Build-only helpers: `images/tools/dsh/{project.py,host-manager.py,check-runtime.mjs,probe-dsh.py}`.
   `project.py` owns filesystem authorization and handled-failure four-file
-  publication and is not a lock parser; it authorizes the contract directory
-  **before** anything in it is executed (the environment checker included) and
-  accepts exactly three shapes: the production build mount `/tmp/recipe-contract`
-  with a `/opt/agent-vm/dsh` prefix, a directory inside an authorized fixture
-  root, or the checkout's own tracked `images/recipe-contract` with prefixes below
-  that checkout or inside the invocation's scratch root
-  (`AGENT_VM_SCRATCH_ROOT`, the developer-upgrade spelling of the same capability,
-  which never claims a fixture root it does not have); `check-lock-update.js` and
-  `upgrade-project.mjs` are adapters over the shared graph module and delegate
-  contract-directory authorization to `project.py contract-dir`;
-  `host-manager.py` represents the authenticated stock manager as argv for host
-  maintenance (`project.py manager`). None of these ship in the image.
+  publication and is not a lock parser; it authorizes the composed contract
+  directory **before** anything in it is executed (the environment guard included)
+  and accepts exactly these shapes: the production build mount
+  `/tmp/recipe-contract` with a `/opt/agent-vm/dsh` prefix, a directory inside an
+  authorized fixture root, the checkout's own tracked `images/recipe-contract`, or
+  the composed directory that checkout's `script/build/recipe-contract.sh --native`
+  published (`target/recipe-contract/OS-ARCH/out`), with prefixes below that
+  checkout or inside the invocation's scratch root (`AGENT_VM_SCRATCH_ROOT`, the
+  developer-upgrade spelling of the same capability, which never claims a fixture
+  root it does not have). The graph reader, comparator, derivation and staging
+  helpers are `recipe-contract` subcommands (`pnpm-lock`, `dsh-lock-update`,
+  `dsh-cordis-overrides`, `dsh-upgrade-stage`) reaching
+  `images/recipe-contract/pnpmlock`; `host-manager.py` represents the authenticated
+  stock manager as argv for host maintenance (`project.py manager`). None of these
+  ship in the image.
 - Maintenance: `images/tools/dsh/upgrade-dsh.sh` (transactional four-input and
   central-Dockerfile publication, Cordis proposal/approval).
 - Tests: `script/test/{dsh-prepare-lock.sh,dsh-verify.sh,dsh-project.py,dsh-upgrade.py,upgrade-scripts.sh,standard-node-layout.py,standard-node-policy.sh,standard-node-policy.py,standard-node-policy-self-test.py,standard-node-consumers.sh,standard-node-consumers.py,standard-node-dsh.py}`,
@@ -306,8 +311,9 @@ dsh is now an image-owned pnpm project. Its owning sources are:
   [migration ledger](standard-pnpm-migration.md).
 
 Two implementations answer different questions and must not be merged: the
-production graph validator (`images/recipe-contract/pnpm-lock.mjs`) parses the
-reviewed lock and enforces policy, identity and per-context peers; the
+production graph validator (`images/recipe-contract/pnpmlock`, CLI
+`recipe-contract pnpm-lock`) parses the reviewed lock and enforces policy, identity
+and per-context peers; the
 independent Python filesystem oracle (`script/test/standard-node-layout.py`)
 reads only a virtual extraction of a finished image and resolves the installed
 files, links and manifests with no production parser import. Neither replaces
@@ -315,10 +321,12 @@ the runtime probes.
 
 ## Bounded pnpm primitives (#42, PR 1)
 
-`images/recipe-contract/pnpm-lock.mjs` and its authenticated
-`vendor/yaml/` distribution are build-only data validators, not runtime payloads.
-The [parser ADR](adr/0001-build-only-pnpm-graph-parser.md) owns the trust/update
-boundary and alternatives. OpenCode retains its independent byte-only checker.
+The `recipe-contract` helper (`pnpmlock`, `pnpmenv`, `dshupgrade`,
+`internal/document`) and its committed Go vendor closure
+(`vendor/go.yaml.in/yaml/v3`) are build-only data validators, not runtime payloads.
+They replaced the Node `pnpm-lock.mjs` and its npm `vendor/yaml/` distribution in
+#75. The [parser ADR](adr/0001-build-only-pnpm-graph-parser.md) owns the
+trust/update boundary, the pin and the compatibility ledger. OpenCode retains its independent byte-only checker.
 PR 1 (historical) changed no consumer, production lock, failure producer or
 standard recipe. dsh has since adopted the parser in #51 (above); Pi, bridge and
 Copilot still use their current npm paths until their own slices.

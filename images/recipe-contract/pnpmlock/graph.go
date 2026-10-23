@@ -46,7 +46,7 @@ func (i snapshotIndex) resolve(context PeerContext, source string) (*Snapshot, e
 		if snapshot, ok := i.byKey[typed.Key]; ok {
 			return snapshot, nil
 		}
-		matches := i.byName[typed.Package.Key()]
+		matches := i.byName[typed.Key]
 		if len(matches) > 1 {
 			return nil, errorf("%s: ambiguous peer context %s", source, typed.Key)
 		}

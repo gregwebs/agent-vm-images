@@ -20,7 +20,8 @@ exit 99
 SH
 chmod +x "$work/bin/pnpm" "$work/bin/npm"
 export PATH="$work/bin:$PATH" CALLS="$work/calls"
-export AGENT_VM_FIXTURE_ROOT="$work" AGENT_VM_CONTRACT_DIR="$ROOT/images/recipe-contract"
+CONTRACT="$(bash "$ROOT/script/build/recipe-contract.sh" --native)/out"
+export AGENT_VM_FIXTURE_ROOT="$work" AGENT_VM_CONTRACT_DIR="$CONTRACT"
 for selection in '' 1.4.1; do
     sh "$SOURCE/prepare-lock.sh" "$work/project" "$selection"
     [ ! -e "$CALLS" ]

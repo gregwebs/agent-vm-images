@@ -1,12 +1,14 @@
 package pnpmlock
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/gregwebs/agent-vm-images/images/recipe-contract/internal/document"
 	"github.com/gregwebs/agent-vm-images/images/recipe-contract/internal/nodefs"
@@ -223,7 +225,7 @@ func readProjectInputs(prefix Prefix, kind Kind, pins pinCheck, mode readMode) (
 	if err != nil {
 		return nil, err
 	}
-	packages, err := readArchives(archives, rootID)
+	packages, err := readArchives(archives)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +273,7 @@ func readProjectInputs(prefix Prefix, kind Kind, pins pinCheck, mode readMode) (
 	}
 }
 
-func readArchives(archives document.Value, rootID SnapshotID) ([]Archive, error) {
+func readArchives(archives document.Value) ([]Archive, error) {
 	keys := sortedKeys(archives)
 	packages := make([]Archive, 0, len(keys))
 	for _, key := range keys {
@@ -514,6 +516,10 @@ func verifyPinnedInputs(prefix Prefix) error {
 	if err != nil {
 		return err
 	}
+	if !utf8.Valid(source) {
+		return errorf("The encoded data was not valid for encoding utf-8")
+	}
+	source = bytes.TrimPrefix(source, []byte("\xef\xbb\xbf"))
 	entries := map[string]string{}
 	for _, line := range strings.Split(string(source), "\n") {
 		if line == "" {

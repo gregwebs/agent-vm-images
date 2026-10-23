@@ -23,6 +23,13 @@ func TestWritePinsBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Captured from the retired Node pin writer over the committed tiny-dsh bytes.
+	const expected = "e38332e820531668714bd379a665dd96ae47d0979e8f17285e67099aa626a770  package.json\n" +
+		"f5001d8aaae950eabc4d3a1519dd9aff95e1f8b1d67a2dedf522cec8b5c3c93f  pnpm-lock.yaml\n" +
+		"de7cbb8ccf9ff2a507c57f45006564333f17dea8aded17aaca2ab2e65501ddc8  pnpm-workspace.yaml\n"
+	if string(source) != expected {
+		t.Fatalf("pins = %q, want %q", source, expected)
+	}
 	lines := strings.Split(strings.TrimSuffix(string(source), "\n"), "\n")
 	if len(lines) != 3 {
 		t.Fatalf("pin file = %q", source)
@@ -187,6 +194,7 @@ func TestWritePinsFaults(t *testing.T) {
 		{"close", &fakeOps{closeErr: pathError("close", syscall.EIO)}, "i/o error", true},
 		{"rename", &fakeOps{renameErr: pathError("rename", syscall.EXDEV)}, "cross-device link", true},
 		{"cleanup", &fakeOps{writeErr: pathError("write", syscall.EIO), removeErr: pathError("unlink", syscall.EACCES)}, "permission denied", true},
+		{"cleanup-absent", &fakeOps{writeErr: pathError("write", syscall.EIO), removeErr: pathError("unlink", syscall.ENOENT)}, "input/output error", true},
 		{"collision", &fakeOps{openErr: pathError("open", syscall.EEXIST)}, "file already exists", false},
 	} {
 		prefix := fixture(t, "tiny-dsh")
@@ -211,7 +219,7 @@ func TestWritePinsFaults(t *testing.T) {
 		}
 		// A cleanup failure names the temporary path it could not remove; it never
 		// claims the file is gone.
-		if vector.ops.removeErr != nil && !strings.Contains(err.Error(), vector.ops.temporary) {
+		if vector.ops.removeErr != nil && vector.name != "cleanup-absent" && !strings.Contains(err.Error(), vector.ops.temporary) {
 			t.Errorf("%s cleanup failure does not name %q: %v", vector.name, vector.ops.temporary, err)
 		}
 		if vector.name == "collision" && len(vector.ops.removed) != 0 {

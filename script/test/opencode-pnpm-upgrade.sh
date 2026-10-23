@@ -9,7 +9,7 @@ mkdir -p "$work/repo/images/tools" "$work/repo/images/standard" "$work/repo/scri
 cp -R "$ROOT/images/tools/opencode" "$work/repo/images/tools/"
 cp -R "$ROOT/images/recipe-contract" "$work/repo/images/"
 cp "$ROOT/images/standard/Dockerfile" "$work/repo/images/standard/"
-cp "$ROOT/script/build/"{npm-pin,dockerfile-label,transactional-publish}.sh "$work/repo/script/build/"
+cp "$ROOT/script/build/"{npm-pin,dockerfile-label,transactional-publish,recipe-contract}.sh "$work/repo/script/build/"
 cat >"$work/bin/pnpm" <<'SH'
 #!/bin/sh
 case "$1" in
@@ -41,6 +41,10 @@ SH
 chmod +x "$work/bin/"*
 REAL_CP=$(command -v cp)
 export REAL_CP
+# The fixture repo builds its own composed helper inside this invocation's root:
+# a reused real context would sit outside the fixture root and could not be
+# authorized for the staged prefixes.
+unset RECIPE_CONTRACT_CONTEXT
 export PATH="$work/bin:$PATH" SEED="$ROOT/images/tools/opencode/plugins/pnpm-lock.yaml"
 export FAIL_DEST=none FAILED="$work/failed" TMPDIR="$work/scratch"
 owner="$work/repo/images/tools/opencode/plugins"

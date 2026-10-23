@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -26,23 +27,26 @@ func styleOf(node *yaml.Node) yamlStyle {
 // parseYAML runs the lexical guard, decodes exactly one document and applies
 // the policies yaml.v3 cannot express as decoder options.
 func parseYAML(source []byte) (Value, error) {
+	_, value, err := parsePoliced(source)
+	return value, err
+}
+
+func parsePoliced(source []byte) (*yaml.Node, Value, error) {
 	if err := scanYAMLSource(source); err != nil {
-		return Value{}, err
+		return nil, Value{}, err
 	}
 	root, err := decodeSingleDocument(source)
 	if err != nil {
-		return Value{}, err
-	}
-	if root == nil {
-		return NullValue(), nil
+		return nil, Value{}, err
 	}
 	if err := checkDuplicateKeys(root, 0); err != nil {
-		return Value{}, err
+		return nil, Value{}, err
 	}
 	if err := checkNodePolicies(root, 0); err != nil {
-		return Value{}, err
+		return nil, Value{}, err
 	}
-	return nodeValue(root)
+	value, err := nodeValue(root)
+	return root, value, err
 }
 
 func decodeSingleDocument(source []byte) (*yaml.Node, error) {
@@ -86,6 +90,13 @@ func documentContent(document *yaml.Node) *yaml.Node {
 	return document.Content[0]
 }
 
+type scalarKey struct {
+	kind    Kind
+	boolean bool
+	number  float64
+	text    JSString
+}
+
 // checkDuplicateKeys compares resolved scalar keys with JavaScript `===`:
 // `0x1`/`1` collide, `1`/`"1"` do not, and NaN never equals itself.
 func checkDuplicateKeys(node *yaml.Node, depth int) error {
@@ -103,17 +114,16 @@ func checkDuplicateKeys(node *yaml.Node, depth int) error {
 			}
 		}
 	case yaml.MappingNode:
+		seen := make(map[scalarKey]bool, len(node.Content)/2)
 		for index := 0; index+1 < len(node.Content); index += 2 {
 			key := node.Content[index]
 			resolved := nodeValueOfScalar(key)
-			for other := 0; other < index; other += 2 {
-				if resolved.Kind() == Undefined {
-					continue
+			if resolved.Kind() != Undefined && !(resolved.Kind() == Number && math.IsNaN(resolved.number)) {
+				identity := scalarKey{kind: resolved.kind, boolean: resolved.boolean, number: resolved.number, text: resolved.text}
+				if seen[identity] {
+					return fmt.Errorf("Map keys must be unique at line %d, column %d", key.Line, key.Column) //nolint:staticcheck // retired diagnostic
 				}
-				if StrictEqual(resolved, nodeValueOfScalar(node.Content[other])) {
-					//nolint:staticcheck // the retired parser text; tests match /unique/.
-					return fmt.Errorf("Map keys must be unique at line %d, column %d", key.Line, key.Column)
-				}
+				seen[identity] = true
 			}
 			if err := checkDuplicateKeys(node.Content[index+1], depth+1); err != nil {
 				return err
@@ -158,6 +168,11 @@ func checkNodePolicies(node *yaml.Node, depth int) error {
 			if text, _ := resolved.Text(); text.Equal(mergeKey) {
 				return errors.New("merge key forbidden")
 			}
+			// The mapping starts at its syntax indentation; an explicit or
+			// multiline key's scalar column is not the enclosing indentation.
+			if err := checkBlockIndent(value, node.Column); err != nil {
+				return err
+			}
 			if err := checkNodePolicies(key, depth+1); err != nil {
 				return err
 			}
@@ -167,10 +182,20 @@ func checkNodePolicies(node *yaml.Node, depth int) error {
 		}
 	case yaml.SequenceNode:
 		for _, child := range node.Content {
+			if err := checkBlockIndent(child, node.Column); err != nil {
+				return err
+			}
 			if err := checkNodePolicies(child, depth+1); err != nil {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+func checkBlockIndent(node *yaml.Node, parentColumn int) error {
+	if node.Kind == yaml.ScalarNode && node.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0 && node.Column <= parentColumn {
+		return errors.New("block-scalar header must be indented past its parent")
 	}
 	return nil
 }

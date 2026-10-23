@@ -71,6 +71,11 @@ def arguments(args):
 class Invocation(base.Invocation):
     def __init__(self, image, requested, inputs, version, cordis_negative=False):
         super().__init__(image, requested)
+        # Host-side helper calls need the composed helper directory, and the suite
+        # may be reached through a caller-supplied context (an outer contract run)
+        # or must build this host's own.
+        self.native = os.environ.get('AGENT_VM_CONTRACT_DIR') or str(base.contract_context_native() / 'out')
+        os.environ['AGENT_VM_CONTRACT_DIR'] = self.native
         self.inputs, self.version = inputs, version
         self.source = ''
         self.deadline = 190
@@ -131,7 +136,7 @@ class Invocation(base.Invocation):
 
     def execute(self):
         self.command('python3', '-B', str(ROOT / 'images/tools/dsh/project.py'), 'guard', str(self.inputs))
-        self.command('node', str(ROOT / 'images/recipe-contract/pnpm-lock.mjs'), 'check', 'dsh', str(self.inputs))
+        self.command(self.native + '/recipe-contract', 'pnpm-lock', 'check', 'dsh', str(self.inputs))
         self.source = self.command('git', '-C', str(ROOT), 'rev-parse', 'HEAD').strip()
         files = [*(self.inputs / name for name in INPUTS), *(ROOT / 'images/pnpm').rglob('*'),
                  *(ROOT / 'images/tools/dsh').glob('*'), *(ROOT / 'images/recipe-contract').rglob('*'),

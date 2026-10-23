@@ -116,6 +116,28 @@ func CompareDshUpdate(request UpdateRequest) (UpdateComparison, *DshProject, err
 	if err != nil {
 		return UpdateComparison{}, nil, err
 	}
+	return compareDshProjects(request, before, after)
+}
+
+// CompareDshUpdateArgument preserves the retired CLI's read-before-version-check
+// order without allowing unvalidated selections into the comparator.
+func CompareDshUpdateArgument(request UpdateRequest, argument string) (UpdateComparison, *DshProject, error) {
+	before, err := ReadDshProject(request.Before)
+	if err != nil {
+		return UpdateComparison{}, nil, err
+	}
+	after, err := ReadDshProject(request.After)
+	if err != nil {
+		return UpdateComparison{}, nil, err
+	}
+	request.Requested, err = ParseRequestedSelection(argument)
+	if err != nil {
+		return UpdateComparison{}, nil, err
+	}
+	return compareDshProjects(request, before, after)
+}
+
+func compareDshProjects(request UpdateRequest, before, after *DshProject) (UpdateComparison, *DshProject, error) {
 	requested := before.project.selection.Version
 	if version, ok := request.Requested.Version(); ok {
 		requested = version

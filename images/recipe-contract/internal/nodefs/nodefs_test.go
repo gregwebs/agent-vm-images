@@ -1,6 +1,7 @@
 package nodefs
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,5 +83,18 @@ func TestErrorShapes(t *testing.T) {
 	linkError := &os.LinkError{Op: "link", Old: "/a", New: "/b", Err: syscall.EEXIST}
 	if got := Wrap("link", "/b", linkError).Error(); got != "EEXIST: file already exists, link '/a' -> '/b'" {
 		t.Errorf("link error = %s", got)
+	}
+}
+
+type failingReader struct{}
+
+func (failingReader) Read(buffer []byte) (int, error) {
+	return copy(buffer, "partial"), syscall.EIO
+}
+
+func TestReadCappedPreservesReadError(t *testing.T) {
+	source, err := readCapped(failingReader{}, 32)
+	if !errors.Is(err, syscall.EIO) || source != nil {
+		t.Fatalf("read = %q, %v", source, err)
 	}
 }

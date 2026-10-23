@@ -8,7 +8,7 @@ import (
 
 // Kind is the JavaScript value kind the parsers produce. Undefined and Null are
 // distinct because the policies use `!== undefined` for "present but null must
-// still fail" (pnpm-lock.mjs:233-251).
+// still fail" (the retired policy reader's manifest checks).
 type Kind uint8
 
 const (
@@ -62,7 +62,7 @@ var undefined = Value{kind: Undefined}
 // UndefinedValue is the absent value; it is only equal to itself.
 func UndefinedValue() Value { return undefined }
 
-// Null is the parsed `null`.
+// NullValue is the parsed `null`.
 func NullValue() Value { return Value{kind: Null} }
 
 // NewBool is a parsed boolean.
@@ -105,16 +105,6 @@ func NewMapping(entries ...NewMappingEntry) Value {
 			order = append(order, entry.Key)
 		}
 		values[entry.Key] = entry.Value
-	}
-	return Value{kind: Mapping, mapping: &mapping{order: order, values: values}}
-}
-
-// NewMappingFromMap builds a mapping whose keys are sorted, for typed output
-// where JavaScript insertion order is not the source document's.
-func NewMappingFromMap(entries map[JSString]Value, order []JSString) Value {
-	values := make(map[JSString]Value, len(entries))
-	for key, value := range entries {
-		values[key] = value
 	}
 	return Value{kind: Mapping, mapping: &mapping{order: order, values: values}}
 }
@@ -220,9 +210,9 @@ func (v Value) Keys() []JSString {
 	return append(keys, others...)
 }
 
-// StringKeys returns the keys in JavaScript order as UTF-8 text, failing when a
+// stringKeys returns the keys in JavaScript order as UTF-8 text, failing when a
 // key is not valid UTF-8 (a raw key can be an unpaired surrogate).
-func (v Value) StringKeys() ([]string, error) {
+func (v Value) stringKeys() ([]string, error) {
 	keys := v.Keys()
 	text := make([]string, len(keys))
 	for index, key := range keys {
