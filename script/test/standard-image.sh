@@ -1282,14 +1282,14 @@ dsh_extract_checks() { # $1 virtual image root, $2 extracted inputs
 # Production graph CLI: an opaque parser, not this harness. It prints the exact
 # selection it read from the extracted project.
 dsh_graph_check() { # $1 extracted prefix
-    node "$REPO_ROOT/images/recipe-contract/pnpm-lock.mjs" check dsh "$1"
+    "$STATUS_VALIDATOR" pnpm-lock check dsh "$1"
 }
 
 # The reviewed update rule (only the dsh root selection and its closure may
 # change; workspace bytes and lock settings stay frozen). The requested version
 # is the CALLER's --expect value, never inferred from the image label.
 dsh_compare_update() { # $1 committed prefix, $2 extracted prefix, $3 requested version
-    node "$REPO_ROOT/images/tools/dsh/check-lock-update.js" "$1" "$2" "$3"
+    "$STATUS_VALIDATOR" dsh-lock-update "$1" "$2" "$3"
 }
 
 # The caller already validated $platform from --platform (or the host default),

@@ -45,6 +45,20 @@ COMMAND_TIMEOUT_SECONDS = 700
 OUTPUT_LIMIT_BYTES = 64 * 1024
 VOLUME_FREE_MIN_KIB = 524288
 PLATFORMS = {'linux/amd64': 'amd64', 'linux/arm64': 'arm64'}
+
+
+def contract_context(platform):
+    """Composed helper directory for the platform, through the shared adapter."""
+    adapter = ROOT / 'script/build/recipe-contract.sh'
+    result = subprocess.run(['bash', str(adapter), '--platform', platform],
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise Failure('cannot build the ' + platform + ' recipe-contract helper: '
+                      + (result.stderr.strip() or result.stdout.strip() or 'no diagnostic'))
+    context = Path(result.stdout.strip())
+    if not (context / 'out/recipe-contract').is_file():
+        raise Failure('the ' + platform + ' recipe-contract build published no binary under ' + str(context))
+    return context
 MIGRATED = ('dsh',)
 UNMIGRATED = ('pi', 'bridge', 'copilot')
 
@@ -272,7 +286,7 @@ class Invocation:
         inputs = [ROOT / 'images/pnpm/launcher.sh', ROOT / 'images/pnpm/pin.json',
                   ROOT / 'images/recipe-contract/run-pnpm.sh',
                   ROOT / 'images/recipe-contract/run-install.sh',
-                  ROOT / 'images/recipe-contract/check-pnpm-environment.mjs',
+                  ROOT / 'images/recipe-contract/pnpmenv/environment.go',
                   ROOT / 'script/test/fixtures/standard-node-policy.py',
                   ROOT / 'script/test/fixtures/pnpm/registry.py',
                   ROOT / 'script/test/fixtures/pnpm/packages.json',
@@ -305,9 +319,13 @@ class Invocation:
 
         self.volume = self.token + '-fixtures'
         self.docker('volume', 'create', self.volume)
+        # The owning env guard and the hard runner are the composed helper's, not a
+        # host source copy: the fixture execs `/contract/recipe-contract`.
+        self.contract = contract_context(platform)
         name = self.create(self.token + '-policy', '--platform', platform, '--network', 'none',
                            '--cap-drop', 'ALL',
                            '--mount', f'type=bind,src={ROOT},dst=/source,readonly',
+                           '--mount', f'type=bind,src={self.contract / "out"},dst=/contract,readonly',
                            '--mount', f'type=volume,src={self.volume},dst=/work',
                            self.image, 'sleep', 'infinity')
         self.docker('start', name)

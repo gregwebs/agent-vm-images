@@ -187,7 +187,7 @@ new_case() {
     cp "$REPO_ROOT/images/tools/dsh/upgrade-dsh.sh" \
         "$REPO_ROOT/images/tools/dsh/package.json" "$REPO_ROOT/images/tools/dsh/pnpm-lock.yaml" \
         "$REPO_ROOT/images/tools/dsh/pnpm-workspace.yaml" "$REPO_ROOT/images/tools/dsh/pnpm-inputs.sha256" \
-        "$REPO_ROOT/images/tools/dsh/prepare-lock.sh" "$REPO_ROOT/images/tools/dsh/check-lock-update.js" \
+        "$REPO_ROOT/images/tools/dsh/prepare-lock.sh" \
         "$CASE/images/tools/dsh/"
     mkdir -p "$CASE/images/standard" "$CASE/images/pnpm"
     cp "$REPO_ROOT/images/pnpm/pin.json" "$CASE/images/pnpm/pin.json"

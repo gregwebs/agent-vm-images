@@ -29,9 +29,9 @@ if [ "$prefix_phys" != /opt/agent-vm/opencode-plugins ]; then
     case "$prefix_phys" in "$root_phys"/*) ;; *) exit 1 ;; esac
 fi
 PREFIX=$prefix_phys
-# Reject preload injection before starting the Node policy checker itself.
+# Reject preload injection before any Node process (pnpm, check-lock.mjs) starts.
 [ -z "${NODE_OPTIONS:-}${NODE_PATH:-}${BUN_OPTIONS:-}" ] || { echo 'manager runtime overrides are unsupported' >&2; exit 1; }
-node "$CONTRACT/check-pnpm-environment.mjs" "$PREFIX"
+"$CONTRACT/recipe-contract" pnpm-environment "$PREFIX"
 committed=$(node "$CHECK" "$PREFIX")
 if [ -z "$version" ] || [ "$version" = "$committed" ]; then
     echo "prepare-lock: $committed unchanged; committed inputs reused"

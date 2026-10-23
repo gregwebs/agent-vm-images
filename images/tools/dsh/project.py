@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import platform
 import shutil
 import signal
 import stat
@@ -83,17 +84,35 @@ def checkout_root():
 
 
 def contract_dir():
-    """Directory of the shared recipe-contract helpers.
+    """Directory of the composed recipe-contract helper.
 
     The build passes the read-only mount as AGENT_VM_CONTRACT_DIR; a host
-    checkout keeps the same directory beside this module. There is deliberately
-    no search path: a bogus caller value fails instead of silently selecting a
-    different parser or environment checker.
+    checkout builds the same composed directory and passes it the same way. The
+    fallback names the tracked module beside this file, which is canonical source
+    but carries no binary, so a caller that forgot the build gets a named failure
+    instead of a different parser. There is deliberately no search path: a bogus
+    caller value fails rather than silently selecting executable policy.
     """
     value = os.environ.get('AGENT_VM_CONTRACT_DIR')
     if value:
         return absolute(value)
     return checkout_root() / 'recipe-contract'
+
+
+def host_contract_dir():
+    """Composed helper directory of this host checkout, or None.
+
+    script/build/recipe-contract.sh --native publishes `<repo>/target/
+    recipe-contract/<os>-<arch>/out`; a host can only run its own platform's
+    build, and a machine outside those spellings has no host shape at all.
+    """
+    machine = platform.machine().lower()
+    arch = {'arm64': 'arm64', 'aarch64': 'arm64',
+            'x86_64': 'amd64', 'amd64': 'amd64'}.get(machine)
+    if arch is None:
+        return None
+    return (checkout_root().parent / 'target' / 'recipe-contract'
+            / f'{platform.system().lower()}-{arch}' / 'out')
 
 
 def authorize_contract(prefixes=()):
@@ -110,11 +129,12 @@ def authorize_contract(prefixes=()):
     directory = contract_dir()
     projects = [absolute(prefix) for prefix in prefixes]
     root = None
+    host = host_contract_dir()
     if PRODUCTION in projects:
         if directory != PRODUCTION_CONTRACT:
             raise ContractFailure('production contract directory is fixed')
         no_redirect(directory)
-    elif directory == checkout_root() / 'recipe-contract':
+    elif directory == checkout_root() / 'recipe-contract' or (host is not None and directory == host):
         no_redirect(directory)
         for project in projects:
             no_redirect(project)
@@ -130,9 +150,13 @@ def authorize_contract(prefixes=()):
         below(directory, root)
         for project in projects:
             no_redirect(project, root)
-    if not directory.is_dir() or not (directory / 'pnpm-lock.mjs').is_file():
-        raise ContractFailure('contract directory has no graph module: ' + str(directory))
-    regular(directory / 'pnpm-lock.mjs')
+    binary = directory / 'recipe-contract'
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise ContractFailure(
+            'no executable recipe-contract in ' + str(directory)
+            + ' (set AGENT_VM_CONTRACT_DIR to a composed helper directory;'
+            ' a source checkout carries no binary)')
+    regular(binary)
     return directory
 
 
@@ -152,10 +176,8 @@ def guard_environment(prefixes=()):
     # The checker is executable policy from the contract directory, so the
     # directory is authorized before anything in it is spawned.
     directory = authorize_contract(prefixes)
-    checker = directory / 'check-pnpm-environment.mjs'
-    if not checker.is_file():
-        raise ValueError('environment checker missing: ' + str(checker))
-    result = subprocess.run(['node', str(checker), *(str(prefix) for prefix in prefixes)],
+    result = subprocess.run([str(directory / 'recipe-contract'), 'pnpm-environment',
+                             *(str(prefix) for prefix in prefixes)],
                             capture_output=True, text=True, timeout=30)
     if result.returncode != 0:
         raise ValueError(result.stderr.strip() or result.stdout.strip()

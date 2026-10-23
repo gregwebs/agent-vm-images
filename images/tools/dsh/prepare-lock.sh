@@ -92,11 +92,11 @@ package_manager=$(jq -er '.packageManager' "$manifest") || fail 'committed manif
 committed_dsh=$(jq -er '.dependencies["@deepseek-ai/dsh"]' "$manifest") || fail 'committed manifest selects no dsh version'
 effective_dsh=${DSH_VERSION:-$committed_dsh}
 
-# The contract directory executes policy (its graph module, its manager envelope),
-# so project.py authorizes it before any of it is spawned. The build mount is
-# named by AGENT_VM_CONTRACT_DIR; a host checkout keeps its own tracked copy.
+# The contract directory executes policy (the composed helper, its manager
+# envelope), so project.py authorizes it before any of it is spawned. The build
+# mount is named by AGENT_VM_CONTRACT_DIR; a host upgrade builds and names its own.
 CONTRACT=$(python3 "$PROJECT" contract-dir "$PREFIX") || exit 1
-[ -f "$CONTRACT/pnpm-lock.mjs" ] || fail "cannot locate the graph module in $CONTRACT"
+[ -x "$CONTRACT/recipe-contract" ] || fail "no executable recipe-contract in $CONTRACT"
 
 changed=0
 [ "$effective_dsh" = "$committed_dsh" ] || changed=1
@@ -105,7 +105,7 @@ changed=0
 if [ "$changed" -eq 0 ]; then
     # Comparing the committed project with itself proves all four bytes, the
     # structure, the effective peers and the base assertions without a manager.
-    node "$self_dir/check-lock-update.js" "$PREFIX" "$PREFIX" '' || exit 1
+    "$CONTRACT/recipe-contract" dsh-lock-update "$PREFIX" "$PREFIX" '' || exit 1
     echo "prepare-lock.sh: dsh $effective_dsh unchanged; reviewed inputs reused"
     exit 0
 fi
@@ -191,12 +191,12 @@ esac
 
 # Pins are written only after the staged structure and every effective exact
 # peer validate; the following check re-reads them as reviewed bytes.
-node "$CONTRACT/pnpm-lock.mjs" pin dsh "$stage" || fail 'staged graph failed structural validation'
-node "$CONTRACT/pnpm-lock.mjs" check dsh "$stage" || fail 'staged graph failed pinned-input validation'
+"$CONTRACT/recipe-contract" pnpm-lock pin dsh "$stage" || fail 'staged graph failed structural validation'
+"$CONTRACT/recipe-contract" pnpm-lock check dsh "$stage" || fail 'staged graph failed pinned-input validation'
 if [ "$refresh" -eq 1 ]; then
-    node "$self_dir/check-lock-update.js" "$PREFIX" "$stage" "$DSH_VERSION" --refresh-lock || exit 1
+    "$CONTRACT/recipe-contract" dsh-lock-update "$PREFIX" "$stage" "$DSH_VERSION" --refresh-lock || exit 1
 else
-    node "$self_dir/check-lock-update.js" "$PREFIX" "$stage" "$DSH_VERSION" || exit 1
+    "$CONTRACT/recipe-contract" dsh-lock-update "$PREFIX" "$stage" "$DSH_VERSION" || exit 1
 fi
 
 status=0

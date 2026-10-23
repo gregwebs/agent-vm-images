@@ -131,7 +131,7 @@ def probe(token, stage, uid, gid, expected_hash):
     command([CHECKER, 'tool-access', 'pnpm', 'pnx', 'pnpx', '/usr/bin/node',
              '/opt/agent-vm/pnpm/bin/pnpm.mjs', '/opt/agent-vm/pnpm/bin/pnpx.mjs'])
     assert launcher_hash() == expected_hash
-    assert command(['node', '/contract/pnpm-lock.mjs', 'check', 'dsh', '/fixtures/project']) == '0.1.5-rc.2\n'
+    assert command([CHECKER, 'pnpm-lock', 'check', 'dsh', '/fixtures/project']) == '0.1.5-rc.2\n'
     command([CHECKER, 'tool-access', '--tree', '/fixtures/positive'])
     for tree in ['private', 'acl', 'device']:
         result = subprocess.run([CHECKER, 'tool-access', '--tree', str(FIXTURE / tree)],

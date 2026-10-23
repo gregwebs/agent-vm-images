@@ -267,7 +267,7 @@ def dsh_tests(work, environment):
             assert actions == ['initialize', 'prepare', 'install', 'verify', 'clean'] + ['probe'] * 4, actions
             create = next(args for args in commands if args[0] == 'create' and DSH_BODY not in args and args[args.index('--name') + 1].endswith('-probe'))
             assert '/runtime-homes:rw,mode=1777' in create and '/root:rw,mode=0770,uid=0,gid=23456' in create
-            contract_mount = f'type=bind,src={ROOT / "target/recipe-contract/linux-arm64"}/out,dst=/fixtures/contract,readonly'
+            contract_mount = f'type=bind,src={ROOT / "target/fixture-helpers/linux-arm64"}/out,dst=/fixtures/contract,readonly'
             assert contract_mount in create, create
             assert not any(str(ROOT / 'images/recipe-contract') in arg for arg in create), create
             assert create[create.index('--cap-drop') + 1] == 'ALL'
@@ -343,6 +343,18 @@ def dsh_tests(work, environment):
         result = subprocess.run(['bash', str(ENTRY), 'base:fixture', '--consumer','dsh', *flags],
                                 env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         assert result.returncode == 2, flags
+    # A missing native helper fails instead of quietly rebuilding through the fake
+    # `go` on PATH. The checkout's source-only module authorizes as a path but
+    # holds no binary, which is exactly the shape both errors this control intends.
+    state_path = work / 'dsh-broken-native.json'
+    state_path.write_text(json.dumps({'commands': [], 'containers': [], 'volume': None, 'network': None}))
+    env = dict(environment, AVM_FAKE_CASE='positive', AVM_FAKE_STATE=str(state_path),
+               AGENT_VM_CONTRACT_DIR=str(ROOT / 'images/recipe-contract'))
+    result = subprocess.run(['bash', str(ENTRY), 'base:fixture', '--consumer', 'dsh', '--platform', 'linux/arm64'],
+                            env=env, capture_output=True, text=True, timeout=45)
+    assert result.returncode != 0, result.stdout
+    assert 'no executable recipe-contract' in result.stdout + result.stderr, result.stdout + result.stderr
+    print('standard-node-consumers dsh self-test: missing native helper FAILS without a rebuild PASS')
 
 
 def contract_context_tests(module, work):
@@ -364,6 +376,11 @@ def contract_context_tests(module, work):
             patch.object(module.subprocess, 'run', built_run):
         assert module.contract_context('linux/amd64') == built
     assert calls == [['bash', str(module.ROOT / 'script/build/recipe-contract.sh'), '--platform', 'linux/amd64']], calls
+    # The native shape goes through the same adapter, without a platform argument.
+    with patch.dict(os.environ, {'RECIPE_CONTRACT_CONTEXT': str(reusable)}), \
+            patch.object(module.subprocess, 'run', built_run):
+        assert module.contract_context_native() == built
+    assert calls[-1] == ['bash', str(module.ROOT / 'script/build/recipe-contract.sh'), '--native'], calls
 
     # A failed build is the harness's failure, with the adapter's diagnostic.
     failed = subprocess.CompletedProcess([], 1, '', 'go.mod selects go1.27.3\n')
@@ -390,8 +407,56 @@ def contract_context_tests(module, work):
     print('standard-node-consumers self-test: contract context selection PASS')
 
 
+def native_record_matches(context, native):
+    record = context / 'out/.recipe-contract-platform'
+    return record.is_file() and record.read_text().strip() == native
+
+
+def test_native_record():
+    with tempfile.TemporaryDirectory(prefix='native-record-control-') as directory:
+        context = Path(directory)
+        (context / 'out').mkdir()
+        record = context / 'out/.recipe-contract-platform'
+        record.write_text('linux-arm64\n')
+        assert not native_record_matches(context, 'darwin-arm64')
+        assert native_record_matches(context, 'linux-arm64')
+
+
+def native_composed():
+    """Build (or reuse) the source checkout's real composed helper.
+
+    Runs before any fake tool enters PATH, so a fake `go` can never be mistaken
+    for a build. A recordless or non-executable context is rejected: only the
+    native platform's own build can serve host-side helper calls.
+    """
+    adapter = Path(__file__).resolve().parents[2] / 'script/build/recipe-contract.sh'
+    machine = os.uname().machine.lower()
+    arch = {'arm64': 'arm64', 'aarch64': 'arm64', 'x86_64': 'amd64', 'amd64': 'amd64'}.get(machine)
+    native = f'{os.uname().sysname.lower()}-{arch}'
+    if arch is None:
+        raise AssertionError('this machine has no native recipe-contract shape')
+    supplied = os.environ.get('RECIPE_CONTRACT_CONTEXT')
+    environment = {key: value for key, value in os.environ.items() if key != 'RECIPE_CONTRACT_CONTEXT'}
+    if supplied:
+        helper = Path(supplied) / 'out/recipe-contract'
+        if native_record_matches(Path(supplied), native) and os.access(helper, os.X_OK):
+            return Path(supplied)
+    result = subprocess.run(['bash', str(adapter), '--native'], capture_output=True, text=True, env=environment)
+    assert result.returncode == 0, ('cannot build the native helper', result.stdout, result.stderr)
+    context = Path(result.stdout.strip())
+    helper = context / 'out/recipe-contract'
+    assert helper.is_file() and os.access(helper, os.X_OK), ('the native build published no executable helper', context)
+    probe = subprocess.run([str(helper), 'pnpm-lock', 'check', 'dsh', str(context / 'absent-probe')],
+                           capture_output=True, text=True)
+    assert probe.returncode == 1 and probe.stderr.startswith('pnpm-lock: '), ('the helper is not executable', probe.stderr)
+    return context
+
+
 def main():
     global ROOT, ENTRY
+    test_native_record()
+    # Before any fake tool is installed: the real helper a host upgrade would use.
+    real_native = native_composed()
     with tempfile.TemporaryDirectory(prefix='standard-node-self-test-') as directory:
         work = Path(directory)
         tools = work / 'bin'
@@ -417,15 +482,23 @@ def main():
         shutil.copytree(source_root / 'images', ROOT / 'images', symlinks=True)
         (ROOT / '.git').symlink_to(source_root / '.git')
         ENTRY = ROOT / 'script/test/standard-node-consumers.sh'
-        # The harness mounts a composed helper directory and execs `recipe-contract`
-        # from it. A fixture stands in for the host build so the fake suite never
-        # compiles and never mounts the source-only module.
-        contract = ROOT / 'target/recipe-contract/linux-arm64'
+        # Two contexts, deliberately distinct: the real native helper a host upgrade
+        # authorizes, at the exact path project.py derives for this checkout, and a
+        # non-executable stand-in for the fake Docker mount. They must never be the
+        # same directory, or the fake would overwrite the real one on a linux/arm64
+        # host.
+        native_arch = {'arm64': 'arm64', 'aarch64': 'arm64', 'x86_64': 'amd64', 'amd64': 'amd64'}[os.uname().machine.lower()]
+        host_shape = ROOT / 'target/recipe-contract' / f'{os.uname().sysname.lower()}-{native_arch}'
+        assert host_shape.resolve() != (ROOT / 'target/fixture-helpers/linux-arm64').resolve()
+        shutil.copytree(real_native / 'out', host_shape / 'out')
+        contract = ROOT / 'target/fixture-helpers/linux-arm64'
         (contract / 'out').mkdir(parents=True)
         (contract / 'out/recipe-contract').write_bytes(b'fixture helper')
         (contract / 'out/run-install.sh').write_text('fixture run-install\n')
+        assert not os.access(contract / 'out/recipe-contract', os.X_OK), 'the fake mount helper must not be executable'
         environment = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH'],
                            AGENT_VM_EVIDENCE_ROOT=str(work / 'evidence-subprocess'),
+                           AGENT_VM_CONTRACT_DIR=str(host_shape / 'out'),
                            RECIPE_CONTRACT_CONTEXT=str(contract))
         for variable in ['NODE_OPTIONS', 'NODE_PATH', 'BUN_OPTIONS']:
             environment.pop(variable, None)

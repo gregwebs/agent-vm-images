@@ -1,6 +1,7 @@
 //! Standalone image-source integrity gates; no launcher dependencies.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde_json::Value;
 
@@ -416,10 +417,10 @@ struct DshEdge {
     target: String,
 }
 
-/// A typed read of `pnpm-lock.mjs graph dsh`. A syntax adapter, never a second
-/// parser: the shared module owns YAML, pins and the effective-peer rules
-/// (`docs/adr/0001-build-only-pnpm-graph-parser.md`), so Rust only types what it
-/// printed and asserts independently authored expectations over it.
+/// A typed read of `recipe-contract pnpm-lock graph dsh`. A syntax adapter, never
+/// a second parser: the composed helper owns YAML, pins and the effective-peer
+/// rules (`docs/adr/0001-build-only-pnpm-graph-parser.md`), so Rust only types
+/// what it printed and asserts independently authored expectations over it.
 struct DshGraph {
     version: String,
     packages: Vec<DshArchive>,
@@ -503,24 +504,78 @@ impl DshGraph {
     }
 }
 
+fn native_context_matches(context: &Path, native: &str) -> bool {
+    match std::fs::read_to_string(context.join("out/.recipe-contract-platform")) {
+        Ok(text) => text.trim() == native,
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+#[test]
+fn native_context_record_is_enforced() {
+    let tree = HelperTree::copy("native-context-record");
+    assert!(native_context_matches(&tree.directory, "darwin-arm64"));
+    tree.write("out/.recipe-contract-platform", b"linux-arm64\n");
+    assert!(!native_context_matches(&tree.directory, "darwin-arm64"));
+    assert!(native_context_matches(&tree.directory, "linux-arm64"));
+}
+
+/// The composed helper this suite executes: the exported context when it is this
+/// host's own build, else the native adapter's output. A source checkout holds no
+/// binary, so the adapter is the only legitimate supplier.
+fn recipe_contract_binary() -> &'static Path {
+    static BINARY: OnceLock<PathBuf> = OnceLock::new();
+    BINARY.get_or_init(|| {
+        let arch = match std::env::consts::ARCH {
+            "aarch64" => "arm64",
+            "x86_64" => "amd64",
+            other => other,
+        };
+        let native = format!("{}-{arch}", std::env::consts::OS);
+        if let Some(context) = std::env::var_os("RECIPE_CONTRACT_CONTEXT").map(PathBuf::from) {
+            let binary = context.join("out/recipe-contract");
+            if binary.is_file() && native_context_matches(&context, &native) {
+                return binary;
+            }
+        }
+        let adapter = repo_path("script/build/recipe-contract.sh");
+        let output = std::process::Command::new("bash")
+            .arg(&adapter)
+            .arg("--native")
+            .output()
+            .unwrap_or_else(|error| panic!("cannot run {}: {error}", adapter.display()));
+        assert!(
+            output.status.success(),
+            "native recipe-contract build failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        let context = String::from_utf8(output.stdout)
+            .expect("adapter printed non-UTF-8 output")
+            .trim()
+            .to_string();
+        let binary = PathBuf::from(context).join("out/recipe-contract");
+        assert!(binary.is_file(), "native build published no binary");
+        binary
+    })
+}
+
 fn run_graph_cli(verb: &str, prefix: &Path) -> Result<String, String> {
-    let module = repo_path("images/recipe-contract/pnpm-lock.mjs");
-    let output = std::process::Command::new("node")
-        .arg(&module)
+    let binary = recipe_contract_binary();
+    let output = std::process::Command::new(binary)
+        .arg("pnpm-lock")
         .arg(verb)
         .arg("dsh")
         .arg(prefix)
         .output()
-        .map_err(|error| format!("cannot run {}: {error}", module.display()))?;
+        .map_err(|error| format!("cannot run {}: {error}", binary.display()))?;
     if !output.status.success() {
         return Err(format!(
-            "pnpm-lock.mjs {verb} rejected {}: {}",
+            "pnpm-lock {verb} rejected {}: {}",
             prefix.display(),
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    String::from_utf8(output.stdout)
-        .map_err(|_| "pnpm-lock.mjs emitted non-UTF-8 output".to_string())
+    String::from_utf8(output.stdout).map_err(|_| "pnpm-lock emitted non-UTF-8 output".to_string())
 }
 
 /// The `check` verb re-verifies the reviewed input digests and every effective
@@ -582,6 +637,7 @@ impl DshFixture {
     }
 
     fn repin(&self) {
+        // Independent hashes keep negative graph mutations outside the production pin writer.
         const SCRIPT: &str = "const fs=require('node:fs'),crypto=require('node:crypto'),path=require('node:path');const prefix=process.argv[1];fs.writeFileSync(path.join(prefix,'pnpm-inputs.sha256'),['package.json','pnpm-lock.yaml','pnpm-workspace.yaml'].map(file=>crypto.createHash('sha256').update(fs.readFileSync(path.join(prefix,file))).digest('hex')+'  '+file+'\\n').join(''));";
         let output = std::process::Command::new("node")
             .arg("-e")
@@ -1395,11 +1451,9 @@ fn exact_image_install_hooks_exist() {
         "dsh/install-dsh.sh",
         "dsh/verify-dsh.sh",
         "dsh/prepare-lock.sh",
-        "dsh/check-lock-update.js",
         "dsh/check-runtime.mjs",
         "dsh/probe-dsh.py",
         "dsh/project.py",
-        "dsh/derive-cordis-overrides.mjs",
         "pi/install-pi.sh",
         "pi/install-pi-packages.sh",
         "pi/verify-pi.sh",
@@ -2735,7 +2789,7 @@ fn opencode_pnpm_inputs_are_pinned_bytes() {
             "missing {file}"
         );
     }
-    check_pnpm_primitive_inventory();
+    check_go_vendor_inventory();
     for file in [
         "images/tools/opencode/plugins/check-lock.mjs",
         "images/tools/opencode/plugins/pin-pnpm-inputs.mjs",
@@ -2776,7 +2830,7 @@ fn opencode_pnpm_inputs_are_pinned_bytes() {
         "--ignore-scripts --ignore-pnpmfile --pm-on-fail=error",
         "--package-import-method=copy",
         "run-pnpm.sh",
-        "check-pnpm-environment.mjs",
+        "recipe-contract\" pnpm-environment",
     ] {
         assert!(install.contains(required), "missing {required}");
     }
@@ -2804,7 +2858,15 @@ fn opencode_pnpm_inputs_are_pinned_bytes() {
 }
 
 fn check_opencode_parser_boundary(source: &str) -> Result<(), String> {
-    for forbidden in ["pnpm-lock.mjs", "vendor/yaml"] {
+    // `pnpm-lock.yaml` file names stay legal; the helper's own spellings do not.
+    for forbidden in [
+        "pnpm-lock.mjs",
+        "vendor/yaml",
+        "'pnpm-lock'",
+        "\"pnpm-lock\"",
+        "pnpm-yaml",
+        "go.yaml.in",
+    ] {
         if source.contains(forbidden) {
             return Err(format!("OpenCode must not adopt {forbidden}"));
         }
@@ -2812,29 +2874,74 @@ fn check_opencode_parser_boundary(source: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn check_pnpm_primitive_inventory() {
-    use std::collections::BTreeSet;
-    let vendor = repo_path("images/recipe-contract/vendor/yaml");
-    let mut expected = BTreeSet::new();
-    for line in read_text("images/recipe-contract/vendor/yaml/upstream.sha256").lines() {
-        let (_, relative) = line.split_once("  ").expect("retained-file manifest line");
-        assert!(
-            relative == "LICENSE"
-                || relative == "package.json"
-                || (relative.starts_with("dist/") && relative.ends_with(".js"))
-        );
-        assert!(!Path::new(relative).is_absolute());
-        assert!(
-            Path::new(relative)
-                .components()
-                .all(|part| matches!(part, std::path::Component::Normal(_)))
-        );
-        assert!(
-            expected.insert(relative.to_string()),
-            "duplicate retained path"
-        );
+/// The exact vendor closure: `modules.txt` plus the pinned module's files.
+const VENDOR_MODULE_FILES: [&str; 16] = [
+    "apic.go",
+    "decode.go",
+    "emitterc.go",
+    "encode.go",
+    "LICENSE",
+    "NOTICE",
+    "parserc.go",
+    "readerc.go",
+    "README.md",
+    "resolve.go",
+    "scannerc.go",
+    "sorter.go",
+    "writerc.go",
+    "yaml.go",
+    "yamlh.go",
+    "yamlprivateh.go",
+];
+
+const VENDOR_MODULES_TXT: &str =
+    "# go.yaml.in/yaml/v3 v3.0.5\n## explicit; go 1.16\ngo.yaml.in/yaml/v3\n";
+
+const VENDOR_GO_SUM: &str = "go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=\ngo.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=\n";
+
+/// The vendor tree is the whole dependency closure, so its file set, its module
+/// list, its checksum pin and its single importing package are the provenance
+/// evidence. Each check is a pure function over text or paths so a mutation
+/// control can prove the gate rejects a doctored input.
+fn check_vendor_file_set(paths: &std::collections::BTreeSet<String>) -> Result<(), String> {
+    let mut expected = std::collections::BTreeSet::new();
+    expected.insert("modules.txt".to_string());
+    for file in VENDOR_MODULE_FILES {
+        expected.insert(format!("go.yaml.in/yaml/v3/{file}"));
     }
-    expected.extend(["README.md".to_string(), "upstream.sha256".to_string()]);
+    if paths != &expected {
+        return Err(format!(
+            "vendor closure differs: missing {:?}, extra {:?}",
+            expected.difference(paths).collect::<Vec<_>>(),
+            paths.difference(&expected).collect::<Vec<_>>()
+        ));
+    }
+    Ok(())
+}
+
+fn check_go_sum(text: &str) -> Result<(), String> {
+    if text != VENDOR_GO_SUM {
+        return Err("go.sum does not name exactly the reviewed pin".into());
+    }
+    Ok(())
+}
+
+fn check_go_mod(text: &str) -> Result<(), String> {
+    let requires: Vec<&str> = text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("require "))
+        .collect();
+    if requires != vec!["require go.yaml.in/yaml/v3 v3.0.5"] {
+        return Err(format!(
+            "go.mod requires exactly one pinned module: {requires:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn check_go_vendor_inventory() {
+    use std::collections::BTreeSet;
+    let vendor = repo_path("images/recipe-contract/vendor");
     fn inventory(root: &Path, directory: &Path, paths: &mut BTreeSet<String>) {
         for entry in std::fs::read_dir(directory).unwrap() {
             let entry = entry.unwrap();
@@ -2858,16 +2965,77 @@ fn check_pnpm_primitive_inventory() {
     }
     let mut actual = BTreeSet::new();
     inventory(&vendor, &vendor, &mut actual);
-    assert_eq!(actual, expected);
-    assert!(
-        read_text("images/recipe-contract/pnpm-lock.mjs").contains("./vendor/yaml/dist/index.js")
+    assert_eq!(check_vendor_file_set(&actual), Ok(()));
+    assert_eq!(
+        read_text("images/recipe-contract/vendor/modules.txt"),
+        VENDOR_MODULES_TXT
     );
+    assert_eq!(
+        check_go_sum(&read_text("images/recipe-contract/go.sum")),
+        Ok(())
+    );
+    assert_eq!(
+        check_go_mod(&read_text("images/recipe-contract/go.mod")),
+        Ok(())
+    );
+    // Parse import metadata with Go: aliases, escaped and raw strings are all legal.
+    let imports = std::process::Command::new("go")
+        .args([
+            "test",
+            "-mod=vendor",
+            "-count=1",
+            "-run",
+            "TestYAMLImport",
+            "./internal/buildcheck",
+        ])
+        .current_dir(repo_path("images/recipe-contract"))
+        .output()
+        .expect("run Go import boundary guard");
+    assert!(
+        imports.status.success(),
+        "Go import boundary: {}{}",
+        String::from_utf8_lossy(&imports.stdout),
+        String::from_utf8_lossy(&imports.stderr)
+    );
+
+    // Mutation controls: each gate must reject a doctored input.
+    let mut extra = actual.clone();
+    extra.insert("yaml/dist/index.js".to_string());
+    assert!(check_vendor_file_set(&extra).is_err());
+    assert!(
+        check_go_sum(&format!(
+            "{VENDOR_GO_SUM}go.yaml.in/yaml/v3 v3.0.5 h1:other=\n"
+        ))
+        .is_err()
+    );
+    assert!(
+        check_go_mod("module x\n\nrequire (\n\tgo.yaml.in/yaml/v3 v3.0.5\n\tother v1.0.0\n)\n")
+            .is_err()
+    );
+    assert!(check_go_mod("module x\n").is_err());
+
     for file in [
-        "images/recipe-contract/pnpm-lock.mjs",
-        "script/test/pnpm-vendor.mjs",
+        "images/recipe-contract/pnpmlock/compare.go",
+        "images/recipe-contract/internal/document/yaml.go",
         "script/test/pnpm-lock-inputs.mjs",
+        "script/test/recipe-contract-vendor.sh",
     ] {
         assert!(repo_path(file).is_file(), "missing primitive {file}");
+    }
+    for retired in [
+        "images/recipe-contract/pnpm-lock.mjs",
+        "images/recipe-contract/check-pnpm-environment.mjs",
+        "images/recipe-contract/vendor/yaml",
+        "images/tools/dsh/check-lock-update.js",
+        "images/tools/dsh/derive-cordis-overrides.mjs",
+        "images/tools/dsh/upgrade-project.mjs",
+        "script/test/pnpm-vendor.mjs",
+        "script/test/fixtures/dsh/read-workspace.mjs",
+    ] {
+        assert!(
+            !repo_path(retired).exists(),
+            "retired file is back: {retired}"
+        );
     }
     for recipe in ["images/Dockerfile", "images/standard/Dockerfile"] {
         let text = read_text(recipe);
@@ -2885,7 +3053,12 @@ fn check_pnpm_primitive_inventory() {
                     !line.contains("recipe-contract"),
                     "build helpers must not become runtime payloads"
                 );
-                assert!(!line.contains("pnpm-lock.mjs") && !line.contains("vendor/yaml"));
+                for forbidden in ["pnpm-lock.mjs", "vendor/yaml", "vendor/", "pnpmlock"] {
+                    assert!(
+                        !line.contains(forbidden),
+                        "the product stage must not COPY {forbidden}"
+                    );
+                }
             }
         }
     }
@@ -2898,6 +3071,9 @@ fn opencode_rejects_parser_adoption_mutations() {
     for import in [
         "import './pnpm-lock.mjs';",
         "import YAML from '../../../recipe-contract/vendor/yaml/dist/index.js';",
+        "const { spawnSync } = require('node:child_process');\nspawnSync(binary, ['pnpm-lock', 'graph', 'dsh', prefix]);",
+        "const { spawnSync } = require('node:child_process');\nspawnSync(binary, [\"pnpm-yaml\", file]);",
+        "import 'go.yaml.in/yaml/v3';",
     ] {
         assert!(check_opencode_parser_boundary(&format!("{checker}\n{import}")).is_err());
     }

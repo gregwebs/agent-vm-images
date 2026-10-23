@@ -20,7 +20,8 @@ chmod +x "$work/bin/pnpm"
 export PATH="$work/bin:$PATH" ARGV="$work/argv" PRIVATE_HOME="$work/private-home"
 export AGENT_VM_FIXTURE_ROOT="$work" AGENT_VM_FIXTURE_PNPM="$work/bin/pnpm"
 export AGENT_VM_OPENCODE_PLUGINS_PREFIX="$work/project"
-export AGENT_VM_CONTRACT_DIR="$ROOT/images/recipe-contract" AGENT_VM_OPENCODE_SOURCE_DIR="$ROOT/images/tools/opencode"
+CONTRACT="$(bash "$ROOT/script/build/recipe-contract.sh" --native)/out"
+export AGENT_VM_CONTRACT_DIR="$CONTRACT" AGENT_VM_OPENCODE_SOURCE_DIR="$ROOT/images/tools/opencode"
 export AGENT_VM_TRANSPORT_RECEIPT="$work/receipt" AGENT_INSTALL_SOFT_FAIL=1
 for result in 0 1 75 124 143; do
     if RESULT=$result sh "$ROOT/images/tools/opencode/install-opencode-plugins.sh" >"$work/log" 2>&1; then

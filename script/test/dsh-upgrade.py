@@ -11,6 +11,19 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def composed_contract():
+    """The composed helper directory: the outer context's, else a native build."""
+    exported = os.environ.get('RECIPE_CONTRACT_CONTEXT')
+    if exported and (Path(exported) / 'out/recipe-contract').is_file():
+        return Path(exported)
+    result = subprocess.run(['bash', str(ROOT / 'script/build/recipe-contract.sh'), '--native'],
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise SystemExit('cannot build the native recipe-contract helper: '
+                         + (result.stderr.strip() or 'no diagnostic'))
+    return Path(result.stdout.strip())
 INPUTS = ('package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-inputs.sha256')
 OVERRIDES = {'@deepseek-ai/dsh>@deepseek-ai/cordis': '4.0.2',
              '@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-loader': '1.0.3',
@@ -35,7 +48,7 @@ class Case:
     def __init__(self, root, name, fast_gate=False):
         self.root = root / name
         self.root.mkdir()
-        for source in ['images/tools/dsh', 'images/recipe-contract', 'images/pnpm', 'script/build']:
+        for source in ['images/tools/dsh', 'images/pnpm', 'script/build']:
             shutil.copytree(ROOT / source, self.root / source, ignore=shutil.ignore_patterns('__pycache__'))
         for source in ['script/test/standard-node-consumers.sh', 'script/test/standard-node-consumers.py',
                        'script/test/standard-node-dsh.py', 'script/test/host-watchdog.py']:
@@ -79,9 +92,14 @@ class Case:
         (self.tools / 'pnpm-fixture').unlink()
         shutil.copyfile(native, self.tools / 'pnpm-fixture')
         (self.tools / 'pnpm-fixture').chmod(0o755)
+        # A developer upgrade authorizes its composed helper directory before the
+        # first graph check, so this scratch checkout carries a real one. Building it
+        # here, before the fake `go` below enters PATH, keeps the helper authentic.
+        self.native_contract = self.root / 'native-contract'
+        shutil.copytree(composed_contract() / 'out', self.native_contract)
         # The focused consumer harness mounts a composed helper directory and execs
-        # `recipe-contract` from it. A fixture stands in for the host build, so these
-        # cases neither compile Go nor mount the source-only module.
+        # `recipe-contract` from it. A fixture stands in for the Linux cross-build,
+        # so these cases neither compile Go nor mount the source-only module.
         self.contract = self.root / 'contexts' / 'linux-arm64'
         (self.contract / 'out').mkdir(parents=True)
         (self.contract / 'out/recipe-contract').write_bytes(b'fixture helper')
@@ -94,6 +112,7 @@ class Case:
                     and key not in ['NODE_OPTIONS', 'NODE_PATH', 'BUN_OPTIONS', 'NODE_EXTRA_CA_CERTS', 'AGENT_VM_DSH_PNPM_PACKAGE', 'AGENT_VM_FIXTURE_BASE_PNPM']}
         self.env.update(PATH=str(self.tools) + os.pathsep + os.environ['PATH'], TMPDIR=str(self.root),
                         AGENT_VM_FIXTURE_ROOT=str(self.root), AGENT_VM_FIXTURE_PNPM=str(self.tools / 'pnpm-fixture'),
+                        AGENT_VM_CONTRACT_DIR=str(self.native_contract),
                         RECIPE_CONTRACT_CONTEXT=str(self.contract),
                         DSH_TEST_REPO=str(ROOT), DSH_TEST_GRAPH=str(self.graph), DSH_TEST_LOG=str(self.log),
                         DSH_TEST_TARGETS=json.dumps(list(map(str, self.targets))), AVM_FAKE_STATE=str(self.state))
@@ -317,11 +336,13 @@ def main():
                 case.unchanged()
             else:
                 assert 'ambiguous family selection' not in case.output, case.output
-                # The reviewed value reached the committed workspace map (the
-                # changed map is serialized as YAML, so read its timer line).
-                published = case.targets[2].read_text()
-                line = next(row for row in published.splitlines() if timer in row)
-                assert line.rstrip().endswith('1.1.6'), line
+                # The reviewed value reached the committed workspace map. The changed
+                # map is re-serialized by the Go encoder (D17: v3 style, not the
+                # retired npm formatter), so the value is read through the bounded
+                # parser rather than by matching a line.
+                published = json.loads(subprocess.check_output(
+                    [str(case.native_contract / 'recipe-contract'), 'pnpm-yaml', str(case.targets[2])], text=True))
+                assert published['overrides'][timer] == '1.1.6', published['overrides']
                 assert '==> pinned @deepseek-ai/dsh@0.1.5-rc.2' in case.output, case.output
             case.clean()
         print('dsh upgrade: reviewed map decides an ambiguous family PASS')

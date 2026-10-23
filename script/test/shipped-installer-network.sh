@@ -91,6 +91,12 @@ case "$platform" in
     *) echo "unsupported platform: $platform" >&2; exit 1 ;;
 esac
 
+# The installers execute the contract helpers, so they mount a composed
+# directory. The source tree stopped being one when the helpers became Go: it
+# holds sources, not a binary. Compose it once for the platform under test.
+CONTRACT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --platform "$platform")/out"
+[ -x "$CONTRACT/recipe-contract" ] || { echo "no recipe-contract in $CONTRACT" >&2; exit 1; }
+
 if [ "${#tools[@]}" -eq 0 ]; then
     tools=(codex opencode claude opencode-plugins)
 fi
@@ -509,7 +515,7 @@ run_one_combined() { # $1 = tool, $2 = version
         docker run --rm --name "$RUN_ID-inst-$RANDOM" --platform "$platform" --network "$NET_INTERNAL" \
         -v "$TMP/certs/mitmproxy-ca-cert.pem:/mitm/ca.pem:ro" \
         -v "$REPO_ROOT/images/tools/$tool/vendor:/vendor:ro" \
-        -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
+        -v "$CONTRACT:/contract:ro" \
         -v "$REPO_ROOT/images/tools/$tool/$hook:/hook:ro" \
         -e "HTTP_PROXY=http://$PROXY:8080" -e "HTTPS_PROXY=http://$PROXY:8080" \
         -e "http_proxy=http://$PROXY:8080" -e "https_proxy=http://$PROXY:8080" \
@@ -576,7 +582,7 @@ run_denial_mutation() {
         docker run --rm --name "$RUN_ID-mut-$RANDOM" --platform "$platform" --network "$NET_INTERNAL" \
         -v "$TMP/certs/mitmproxy-ca-cert.pem:/mitm/ca.pem:ro" \
         -v "$mutdir:/vendor:ro" \
-        -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
+        -v "$CONTRACT:/contract:ro" \
         -v "$REPO_ROOT/images/tools/codex/install-codex.sh:/hook:ro" \
         -e "HTTP_PROXY=http://$PROXY:8080" -e "HTTPS_PROXY=http://$PROXY:8080" \
         -e "http_proxy=http://$PROXY:8080" -e "https_proxy=http://$PROXY:8080" \
@@ -610,7 +616,7 @@ run_plugin_profile() {
     run_with_watchdog 660 docker run --rm --name "$RUN_ID-plugin-$RANDOM" --platform "$platform" --network "$NET_INTERNAL" \
         -v "$TMP/certs/mitmproxy-ca-cert.pem:/mitm/ca.pem:ro" \
         -v "$REPO_ROOT/images/tools/opencode:/source:ro" \
-        -v "$REPO_ROOT/images/recipe-contract:/contract:ro" \
+        -v "$CONTRACT:/contract:ro" \
         -e "HTTPS_PROXY=http://$PROXY:8080" -e "HTTP_PROXY=http://$PROXY:8080" \
         -e NODE_EXTRA_CA_CERTS=/mitm/ca.pem \
         -e AGENT_VM_CONTRACT_DIR=/contract -e AGENT_VM_OPENCODE_SOURCE_DIR=/source \

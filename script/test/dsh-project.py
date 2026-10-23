@@ -15,17 +15,56 @@ import unittest
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
-SOURCE = Path(__file__).resolve().parents[2] / 'images/tools/dsh/project.py'
+ROOT = Path(__file__).resolve().parents[2]
+SOURCE = ROOT / 'images/tools/dsh/project.py'
 spec = importlib.util.spec_from_file_location('dsh_project', SOURCE)
 project = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = project
 spec.loader.exec_module(project)
 
 
+def recipe_contract_helper():
+    """The real composed helper, built once per suite through the host adapter."""
+    cached = os.environ.get('RECIPE_CONTRACT_CONTEXT')
+    if cached and (Path(cached) / 'out/recipe-contract').is_file():
+        return Path(cached) / 'out/recipe-contract'
+    result = subprocess.run(['bash', str(ROOT / 'script/build/recipe-contract.sh'), '--native'],
+                            capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError('cannot build the native recipe-contract helper: '
+                           + (result.stderr.strip() or 'no diagnostic'))
+    return Path(result.stdout.strip()) / 'out/recipe-contract'
+
+
+def write_fake_contract(directory, sentinel=None):
+    """A composed-directory stand-in: an executable helper, not a graph module."""
+    directory.mkdir(parents=True, exist_ok=True)
+    helper = directory / 'recipe-contract'
+    if sentinel is None:
+        helper.write_text('#!/bin/sh\nexit 0\n')
+    else:
+        # The authorizing spawn is the only thing this fake proves: the guard
+        # rejects before the manager can run, so a write is enough evidence.
+        helper.write_text('#!/bin/sh\n'
+                          'if [ "$1" = pnpm-environment ]; then\n'
+                          f'  printf ran > {json.dumps(str(sentinel))}\n'
+                          'fi\n'
+                          'exit 0\n')
+    helper.chmod(0o755)
+    return directory
+
+
 class ProjectTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix='dsh-project-')).resolve()
-        self.env = patch.dict(os.environ, {'AGENT_VM_FIXTURE_ROOT': str(self.root)})
+        # Every guard runs the composed helper, so the fixture root carries an
+        # authorized copy of the real binary; a source checkout has none.
+        self.contract = self.root / 'recipe-contract'
+        self.contract.mkdir()
+        shutil.copyfile(recipe_contract_helper(), self.contract / 'recipe-contract')
+        (self.contract / 'recipe-contract').chmod(0o755)
+        self.env = patch.dict(os.environ, {'AGENT_VM_FIXTURE_ROOT': str(self.root),
+                                           'AGENT_VM_CONTRACT_DIR': str(self.contract)})
         self.env.start()
         self.prefix = self.make_prefix('prefix', 'old')
         self.stage = self.make_prefix('stage', 'new')
@@ -303,13 +342,13 @@ class ProjectTests(unittest.TestCase):
             project.guard_environment([self.prefix])
 
     def test_shared_checker_keeps_caller_ca_and_dsh_rejects(self):
-        checker = SOURCE.parents[2] / 'recipe-contract/check-pnpm-environment.mjs'
+        checker = recipe_contract_helper()
         # The OpenCode strict-egress profile supplies its own CA bundle to the
         # shared checker, so CA rejection belongs to dsh alone: project.py refuses
         # the same environment before the manager (or its Node preloads) can start.
         for key in project.TLS_ENV:
             env = {**os.environ, key:str(self.root / 'unreviewed-ca')}
-            shared = subprocess.run(['node', str(checker), str(self.prefix)], env=env, capture_output=True)
+            shared = subprocess.run([str(checker), 'pnpm-environment', str(self.prefix)], env=env, capture_output=True)
             self.assertEqual(shared.returncode, 0, (key, shared.stderr))
             guarded = subprocess.run([sys.executable, str(SOURCE), 'guard', str(self.prefix)],
                                      env=env, capture_output=True)
@@ -317,17 +356,14 @@ class ProjectTests(unittest.TestCase):
             self.assertIn(key.encode(), guarded.stderr)
 
     def test_contract_directory_is_authorized_by_the_filesystem_module(self):
-        contract = self.root / 'recipe-contract'
-        contract.mkdir()
-        (contract / 'pnpm-lock.mjs').write_text('// module\n')
+        contract = write_fake_contract(self.root / 'recipe-contract')
         with patch.dict(os.environ, {'AGENT_VM_CONTRACT_DIR': str(contract)}):
             self.assertEqual(project.authorize_contract([self.prefix, self.stage]), contract)
             with self.assertRaises(project.ContractFailure) as raised:
                 project.authorize_contract([project.PRODUCTION, self.stage])
             self.assertIn('production contract directory is fixed', str(raised.exception))
         outside = self.root.parent / (self.root.name + '-contract')
-        outside.mkdir()
-        (outside / 'pnpm-lock.mjs').write_text('// module\n')
+        write_fake_contract(outside)
         try:
             with patch.dict(os.environ, {'AGENT_VM_CONTRACT_DIR': str(outside)}):
                 with self.assertRaises(ValueError):
@@ -352,12 +388,7 @@ class ProjectTests(unittest.TestCase):
         # checker must never be spawned from a directory the caller was not
         # authorized to name (AGENT_VM_CONTRACT_DIR is caller-controlled).
         def scratch_contract(directory):
-            directory.mkdir()
-            (directory / 'pnpm-lock.mjs').write_text('// module\n')
-            (directory / 'check-pnpm-environment.mjs').write_text(
-                'import fs from "node:fs";\n'
-                f'fs.writeFileSync({json.dumps(str(self.root / "checker-ran"))}, "ran");\n')
-            return directory
+            return write_fake_contract(directory, sentinel=self.root / 'checker-ran')
 
         sentinel = self.root / 'checker-ran'
         outside = self.root.parent / (self.root.name + '-untrusted-contract')
@@ -381,34 +412,47 @@ class ProjectTests(unittest.TestCase):
             shutil.rmtree(outside, ignore_errors=True)
 
     def test_host_checkout_contract_shape(self):
-        # N2: a developer upgrade of a checkout keeps the checkout's own tracked
-        # contract directory; only its staged prefixes live in a scratch root.
-        tracked = SOURCE.parents[2] / 'recipe-contract'
+        # A developer upgrade stages outside the checkout, so it names both the
+        # composed helper it built and the scratch root that authorizes the staged
+        # prefixes. A source checkout authorizes as a path but carries no binary.
         host = {key: value for key, value in os.environ.items()
                 if key not in ('AGENT_VM_CONTRACT_DIR', 'AGENT_VM_FIXTURE_ROOT', 'AGENT_VM_SCRATCH_ROOT')}
         with patch.dict(os.environ, host, clear=True):
-            self.assertEqual(project.authorize_contract([SOURCE]), tracked)
-            # A prefix outside the checkout needs the invocation scratch root.
+            with self.assertRaises(project.ContractFailure) as raised:
+                project.authorize_contract([SOURCE])
+            self.assertIn('no executable recipe-contract', str(raised.exception))
+            # A prefix outside the checkout has no authorized root at all.
             with self.assertRaises(ValueError):
                 project.authorize_contract([self.prefix])
-            with patch.dict(os.environ, {'AGENT_VM_SCRATCH_ROOT': str(self.root)}):
-                self.assertEqual(project.authorize_contract([self.prefix, SOURCE]), tracked)
+        composed = project.host_contract_dir()
+        if composed is None:
+            self.skipTest('this machine has no host contract shape')
+        created = not composed.exists()
+        if created:
+            write_fake_contract(composed)
+        try:
+            named = dict(host, AGENT_VM_CONTRACT_DIR=str(composed))
+            with patch.dict(os.environ, named, clear=True):
+                self.assertEqual(project.authorize_contract([SOURCE]), composed)
+                with self.assertRaises(ValueError):
+                    project.authorize_contract([self.prefix])
+            with patch.dict(os.environ, dict(named, AGENT_VM_SCRATCH_ROOT=str(self.root)), clear=True):
+                self.assertEqual(project.authorize_contract([self.prefix, SOURCE]), composed)
             # Both spellings at once would make the authorized root ambiguous.
-            with patch.dict(os.environ, {'AGENT_VM_SCRATCH_ROOT': str(self.root),
-                                         'AGENT_VM_FIXTURE_ROOT': str(self.root)}):
+            with patch.dict(os.environ, dict(named, AGENT_VM_SCRATCH_ROOT=str(self.root),
+                                             AGENT_VM_FIXTURE_ROOT=str(self.root)), clear=True):
                 with self.assertRaises(ValueError):
                     project.authorize_contract([self.prefix])
             # AGENT_VM_SCRATCH_ROOT already grants the same contract-redirect
             # capability as a fixture root (the environment is caller-controlled), so
             # a contract copy inside the authorized root is accepted.
-            local = self.root / 'recipe-contract'
-            local.mkdir()
-            (local / 'pnpm-lock.mjs').write_text('// module\n')
+            local = write_fake_contract(self.root / 'recipe-contract')
             with patch.dict(os.environ, {'AGENT_VM_SCRATCH_ROOT': str(self.root),
-                                         'AGENT_VM_CONTRACT_DIR': str(local)}):
+                                         'AGENT_VM_CONTRACT_DIR': str(local)}, clear=True):
                 self.assertEqual(project.authorize_contract([self.prefix]), local)
-            with patch.dict(os.environ, {'AGENT_VM_CONTRACT_DIR': str(tracked)}):
-                self.assertEqual(project.authorize_contract([SOURCE]), tracked)
+        finally:
+            if created:
+                shutil.rmtree(composed)
 
     def test_signal_during_publication_rolls_back_inclusively(self):
         before = self.image()

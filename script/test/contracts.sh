@@ -41,23 +41,42 @@ if selected_goroot=$(cd "$contract_module" && GOTOOLCHAIN=auto go env GOROOT); t
 fi
 formatter="$selected_goroot/bin/gofmt"
 [ -x "$formatter" ] || { echo "missing formatter: $formatter" >&2; exit 1; }
-if format_output=$(cd "$contract_module" && "$formatter" -l .); then :; else
+# Upstream vendor bytes are never reformatted: the vendor tree is a verbatim
+# module copy whose only authenticator is the drift gate, so a formatter rewrite
+# would look like a local (reviewed) change. The file list is passed explicitly
+# because `-l .` walks vendor/.
+format_files=()
+while IFS= read -r -d '' format_file; do format_files+=("$format_file"); done \
+    < <(cd "$contract_module" && find . -path ./vendor -prune -o -name '*.go' -print0)
+if format_output=$(cd "$contract_module" && "$formatter" -l ${format_files+"${format_files[@]}"}); then :; else
     status=$?; echo "formatter failed: $formatter (status $status)" >&2; exit "$status"
 fi
 [ -z "$format_output" ] || { printf '%s\n' "$format_output" >&2; exit 1; }
 (cd "$contract_module" && GOTOOLCHAIN=auto go test ./internal/buildcheck)
-(cd "$contract_module" && GOTOOLCHAIN=auto go vet ./...)
+# Vendor mode: dependencies are committed, so the gates never reach a module
+# proxy. A missing vendor tree fails here instead of downloading.
+(cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go vet ./...)
 (cd "$contract_module" && golangci-lint run)
+# The composed helper is shared by every suite below and by the Rust graph guard,
+# so it is built once here: after the lint gates, because the formatter suite
+# replaces `go` and must stop at vet.
+contract_context=$(bash "$ROOT/script/build/recipe-contract.sh" --native) ||
+    { echo 'cannot build the native recipe-contract helper' >&2; exit 1; }
+export RECIPE_CONTRACT_CONTEXT="$contract_context"
 # The images run #!/bin/sh under dash; macOS sh is bash 3.2 and parses bashisms.
 if command -v dash >/dev/null; then posix_sh='dash'
 elif [ "${GITHUB_ACTIONS:-}" = true ]; then echo 'dash required on CI for #!/bin/sh syntax checks' >&2; exit 1
 else posix_sh='sh'; echo 'note: dash not on PATH; #!/bin/sh syntax checked with sh -n' >&2
 fi
 if [ "$guard_only" = false ]; then
-    (cd "$contract_module" && GOTOOLCHAIN=auto go test ./...)
-    contract_context=$(bash "$ROOT/script/build/recipe-contract.sh" --native) ||
-        { echo 'cannot build the native recipe-contract helper' >&2; exit 1; }
-    export RECIPE_CONTRACT_CONTEXT="$contract_context"
+    (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test ./...)
+    # Regeneration-plus-diff is the vendor drift gate: `go mod vendor` does not
+    # authenticate edits to the committed tree and `go mod verify` never reads it.
+    # It downloads through GOPROXY/GOSUMDB, so it is default-mode only.
+    bash script/test/recipe-contract-vendor.sh
+    python3 script/test/recipe-contract-oracle.py
+    node script/test/recipe-contract-oracle.mjs
+    python3 script/test/recipe-contract-adapters.py
     for suite in agent-versions claude-installer codex-installer copilot-installer copilot-verify \
         opencode-installer opencode-pnpm-prepare-lock opencode-pnpm-install opencode-pnpm-upgrade \
         opencode-plugins-verify run-pnpm dsh-prepare-lock dsh-verify pi-install pi-prepare-lock pi-verify \
@@ -68,7 +87,6 @@ if [ "$guard_only" = false ]; then
         echo "=== $suite ==="
         bash "script/test/$suite.sh"
     done
-    node script/test/pnpm-vendor.mjs
     node script/test/pnpm-lock-inputs.mjs
     bash script/test/standard-node-consumers.sh --self-test
     python3 script/test/standard-node-layout.py --self-test
@@ -181,13 +199,11 @@ python3 "$ROOT/script/test/contracts-python.py"
 # any drift. Fast and offline, but it reads the baseline commit object, so CI needs
 # the full history (contracts.yml checks out with fetch-depth: 0).
 node script/test/pnpm-migration-ledger.mjs --check
-for source in images/recipe-contract/pnpm-lock.mjs script/test/pnpm-vendor.mjs script/test/pnpm-lock-inputs.mjs \
+for source in script/test/pnpm-lock-inputs.mjs \
     script/test/pnpm-migration-ledger.mjs \
-    images/recipe-contract/check-pnpm-environment.mjs \
-    images/tools/dsh/check-lock-update.js images/tools/dsh/check-runtime.mjs \
-    images/tools/dsh/derive-cordis-overrides.mjs \
-    images/tools/dsh/upgrade-project.mjs script/test/fixtures/dsh/oracle.mjs \
-    script/test/fixtures/dsh/bin.js script/test/fixtures/dsh/read-workspace.mjs \
+    images/tools/dsh/check-runtime.mjs \
+    script/test/fixtures/dsh/oracle.mjs \
+    script/test/fixtures/dsh/bin.js \
     script/test/fixtures/dsh/strip-cordis-overrides.mjs \
     images/tools/opencode/check-claude-runtime.mjs images/tools/opencode/check-claude-payload.mjs images/tools/opencode/plugins/check-lock.mjs \
     images/tools/opencode/plugins/pin-pnpm-inputs.mjs \

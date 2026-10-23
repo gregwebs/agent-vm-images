@@ -104,7 +104,7 @@ def cordis_negative(directory):
     """The ticket's real negative leg: drop the four overrides, re-resolve, fail.
 
     A project without the reviewed overrides is not a locked project, so the
-    reviewed reader (`pnpm-lock.mjs`) cannot be the oracle here: derivation is the
+    reviewed reader (`recipe-contract pnpm-lock`) cannot be the oracle here: derivation is the
     owning reader for that shape, and its exact-requirement rules are what refuse
     to publish. A derivation that *accepts* the removed-override graph means the
     graph is already peer-consistent, so the overrides are only load-bearing at
@@ -134,7 +134,7 @@ def cordis_negative(directory):
     # global requirements conflict. Only the first is a peer rejection, so the
     # graph's own satisfaction is measured before the class is chosen.
     report = ROOT / 'cordis-negative-peers.json'
-    status, _, errors = run_status(['node', '/fixtures/contract/pnpm-lock.mjs', 'peers', 'dsh',
+    status, _, errors = run_status(['/fixtures/contract/recipe-contract', 'pnpm-lock', 'peers', 'dsh',
                                     str(prefix)], seconds=90, keep=str(report))
     assert status == 0, errors
     peers = json.loads(report.read_text())
@@ -142,7 +142,7 @@ def cordis_negative(directory):
                 '@deepseek-ai/cordis-plugin-timer', '@deepseek-ai/cordis-plugin-include')
     unmet = [row for row in peers['unsatisfied']
              if any(f'peer {family} wanted' in row for family in families)]
-    derive = ['node', str(SOURCE / 'derive-cordis-overrides.mjs'), str(prefix)]
+    derive = ['/fixtures/contract/recipe-contract', 'dsh-cordis-overrides', str(prefix)]
     status, output, errors = run_status(derive, seconds=90)
     numbers = {'exactPeers': peers['exact'], 'unsatisfiedPeers': len(unmet)}
     if status != 0 and unmet:
