@@ -87,6 +87,9 @@ if [ "$guard_only" = false ]; then
         echo "=== $suite ==="
         bash "script/test/$suite.sh"
     done
+    # The ci-boot-bind self-check is only worth its runtime while it still fails, and it is the
+    # guard for the maintenance pins, not something these suites exercise (#92).
+    python3 script/test/ci-boot-bind-mutants.py
     node script/test/pnpm-lock-inputs.mjs
     bash script/test/standard-node-consumers.sh --self-test
     python3 script/test/standard-node-layout.py --self-test
