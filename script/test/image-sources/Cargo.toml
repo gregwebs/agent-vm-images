@@ -9,4 +9,7 @@ name = "image_sources"
 path = "tests/image_sources.rs"
 
 [dev-dependencies]
+# The raw-JSON ingestion boundary needs its own Deserialize visitor to reject
+# duplicate object keys before they collapse into a map.
+serde = "=1.0.229"
 serde_json = "=1.0.149"

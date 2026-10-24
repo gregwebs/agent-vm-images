@@ -12,8 +12,10 @@ The directories under `examples/layers/` are examples, not activated by default.
 This repository also owns the maintained base/standard sources (`images/`) and a
 [tool-free base extension](../base-extension/README.md). These examples require the
 Debian-based standard image's apt/Node facilities; the minimal boot contract alone
-is insufficient. Their default parent is the immutable v0.1.3 standard index,
-overrideable with `--build-arg BASE_IMAGE=…`; no local base build is needed.
+is insufficient. Their default parent is the released standard index recorded in
+[`images/parent-pins.json`](../../images/parent-pins.json) (version and
+provenance there, digest in each recipe), overrideable with
+`--build-arg BASE_IMAGE=…`; no local base build is needed.
 
 ### Build from an agent-vm-images checkout
 
@@ -243,8 +245,11 @@ build ends with `/home/chrome` holding `.pki` only.
 
 The apt line is unchanged — official Debian packages float behind apt
 authentication. The MCP package, the parent image and the other third-party
-inputs are the pinned ones. The parent stays the released v0.1.3 digest: the
-example supplies the policy itself, and runtime needs no parent pnpm command.
+inputs are the pinned ones. The parent stays the released standard digest recorded
+in [`images/parent-pins.json`](../../images/parent-pins.json); a refreshed
+release moves that digest and this example's `ARG` together through
+`script/dev/refresh-parent-pins.sh standard-release`. The example supplies the
+policy itself, and runtime needs no parent pnpm command.
 
 ### Runtime launcher
 

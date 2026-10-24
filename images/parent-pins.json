@@ -1,0 +1,144 @@
+{
+  "schema": 1,
+  "pins": {
+    "debian": {
+      "kind": "docker-official-image",
+      "reference": "debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad",
+      "expected_source": "https://github.com/debuerreotype/docker-debian-artifacts.git",
+      "platforms": {
+        "linux/amd64": {
+          "manifest": "sha256:4876fdea29cac1a33a3195f1eb1952feb1fca7dd6dd00be3e2f1879cf20d34d2",
+          "revision": "cee78df586385250331cacba8fd1140133c054e5",
+          "source": "https://github.com/debuerreotype/docker-debian-artifacts.git",
+          "created": "2026-10-20T00:00:00Z"
+        },
+        "linux/arm64": {
+          "manifest": "sha256:a66b19aa552f595b4ab276c6b4f9b24fa4546632c5ecd88cccdced4a6866323a",
+          "revision": "9c4818e3bfd35139d3798b0420e9c46836658b2e",
+          "source": "https://github.com/debuerreotype/docker-debian-artifacts.git",
+          "created": "2026-10-20T00:00:00Z"
+        }
+      },
+      "verification": {
+        "method": "hash-only",
+        "reviewed_on": "2026-10-24",
+        "reason": "Docker Official Image for Debian. Docker Content Trust, the scheme that signed official images, is retired and its DOI certificates expire; Docker points base image consumers at signed Docker Hardened Images and no supported replacement signing scheme is published for this image. The reviewed choice is the registry digest plus the recorded source revision and creation time, re-checked on every refresh.",
+        "evidence": [
+          "https://docs.docker.com/engine/security/trust/",
+          "https://www.docker.com/blog/docker-content-trust-retirement-and-migration-guidance/",
+          "https://docs.docker.com/docker-hub/image-library/trusted-content/",
+          "https://www.docker.com/blog/retiring-docker-content-trust/"
+        ],
+        "reassess": "Stop refresh if a supported verifiable signing scheme is published for this image"
+      },
+      "resolved_on": "2026-10-24"
+    },
+    "golang-builder": {
+      "kind": "docker-official-image",
+      "reference": "golang:1.27.3-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4",
+      "expected_source": "https://github.com/docker-library/golang.git",
+      "platforms": {
+        "linux/amd64": {
+          "manifest": "sha256:8aa2821993207ae840ce09e4223217efcd14e01f71525db734faf4232bd59999",
+          "revision": "41d9b4da70324ae7b6461ac2cc401b06719ff57d",
+          "source": "https://github.com/docker-library/golang.git#41d9b4da70324ae7b6461ac2cc401b06719ff57d:1.27/trixie",
+          "created": "2026-10-21T02:16:06Z"
+        },
+        "linux/arm64": {
+          "manifest": "sha256:288557fbc328e4ef9a78bae2eb44f24447029ff08667be883d79eeaa9029cf0c",
+          "revision": "41d9b4da70324ae7b6461ac2cc401b06719ff57d",
+          "source": "https://github.com/docker-library/golang.git#41d9b4da70324ae7b6461ac2cc401b06719ff57d:1.27/trixie",
+          "created": "2026-10-21T02:15:40Z"
+        }
+      },
+      "verification": {
+        "method": "hash-only",
+        "reviewed_on": "2026-10-24",
+        "reason": "Docker Official Image for Go, used only as the build-only helper compiler. Same retired Docker Content Trust channel as the Debian parent and no published replacement signing scheme for this image; the reviewed choice is the registry digest plus the recorded source revision, which the build additionally cross-checks against go.mod.",
+        "evidence": [
+          "https://docs.docker.com/engine/security/trust/",
+          "https://www.docker.com/blog/docker-content-trust-retirement-and-migration-guidance/",
+          "https://docs.docker.com/docker-hub/image-library/trusted-content/",
+          "https://www.docker.com/blog/retiring-docker-content-trust/"
+        ],
+        "reassess": "Stop refresh if a supported verifiable signing scheme is published for this image"
+      },
+      "resolved_on": "2026-10-24"
+    },
+    "standard-release": {
+      "kind": "repository-release",
+      "reference": "ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de",
+      "version": "0.1.3",
+      "platforms": {
+        "linux/amd64": {
+          "manifest": "sha256:b10203f2e4511b7501235f4329c4cf71186b2e46373897407c0eb9604689b582"
+        },
+        "linux/arm64": {
+          "manifest": "sha256:bbfd3732893d5f76eb3dfd3d2e5f7779982b98adaa0be6b73be8084300f88a3b"
+        }
+      },
+      "verification": {
+        "method": "github-attestation",
+        "repository": "gregwebs/agent-vm-images",
+        "signer_workflow": "gregwebs/agent-vm-images/.github/workflows/release-standard.yml",
+        "source_ref": "refs/heads/main",
+        "source_sha": "087f8bad3de624a5dad38f1669e7dea96996371a",
+        "release_json_sha256": "sha256:402706fe8b213f52a2d9dff3de34a7cac63ab3f6d2df11df84dfa5e7d47532ad",
+        "invocation_url": "https://github.com/gregwebs/agent-vm-images/actions/runs/37775269427/attempts/1"
+      },
+      "resolved_on": "2026-10-24"
+    }
+  },
+  "recipes": {
+    "examples/base-extension/Dockerfile": [
+      {
+        "stage": null,
+        "local_base": "extension"
+      }
+    ],
+    "examples/layers/chrome-devtools/Dockerfile": [
+      {
+        "stage": null,
+        "pin": "standard-release"
+      }
+    ],
+    "examples/layers/go-dev/Dockerfile": [
+      {
+        "stage": null,
+        "pin": "standard-release"
+      }
+    ],
+    "examples/layers/rust-dev/Dockerfile": [
+      {
+        "stage": null,
+        "pin": "standard-release"
+      }
+    ],
+    "examples/layers/wirenboard-cpp/Dockerfile": [
+      {
+        "stage": null,
+        "pin": "standard-release"
+      }
+    ],
+    "images/Dockerfile": [
+      {
+        "stage": "recipe-contract-bin",
+        "pin": "golang-builder"
+      },
+      {
+        "stage": null,
+        "pin": "debian"
+      }
+    ],
+    "images/standard/Dockerfile": [
+      {
+        "stage": "recipe-contract-bin",
+        "pin": "golang-builder"
+      },
+      {
+        "stage": null,
+        "local_base": "standard"
+      }
+    ]
+  }
+}

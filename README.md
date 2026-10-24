@@ -18,8 +18,16 @@ No launcher, project configuration, Rust or contributor tooling is required to
 build. The base is never published; the standard image is published as an
 independent, versioned, digest-addressed OCI product at
 `ghcr.io/gregwebs/agent-vm-standard` plus matching archive/SBOM release assets.
-OS/apt inputs and optional Claude plugins float; committed agent selections,
-locks and reviewed installer snapshots are not silently refreshed.
+External parents are digest-pinned (see [image input policy](docs/image-input-policy.md)):
+Debian base, Go helper compiler and the released standard image. The local
+`agent-vm-base:local` consumers (`images/standard/Dockerfile`,
+`examples/base-extension/Dockerfile`) are bound in a later #95 change, so until
+then they still accept a stale local tag. Official Debian
+apt packages may float with normal apt authentication. NodeSource and the GitHub
+CLI apt installs and the optional Claude plugins remain unpinned violations owned
+by [#96](https://github.com/gregwebs/agent-vm-images/issues/96) and
+[#101](https://github.com/gregwebs/agent-vm-images/issues/101). Committed agent
+selections, locks and reviewed installer snapshots are not silently refreshed.
 
 ## Clone and build
 
@@ -125,6 +133,7 @@ Ordinary user-owned Dockerfiles; each README is the canonical build guide.
 Scripts installed outside HOME survive HOME mounts. Use non-login `bash -c`
 for agent commands: `bash -lc` can reset the image PATH through `/etc/profile`.
 
+- [Pinned parent images and the apt exception](docs/image-input-policy.md)
 - [Node package defaults and override limits](docs/node-package-defaults.md)
 - [dsh graph-freeze decision](docs/adr/0003-dsh-graph-freeze.md)
 - [Go build helpers and their delivery seam](docs/adr/0004-go-build-helpers.md)

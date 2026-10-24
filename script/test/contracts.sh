@@ -107,6 +107,9 @@ if [ "$guard_only" = false ]; then
     bash script/test/example-layers.sh --self-test
     # Updater transaction and signal table (#41): the host-only writer's statuses.
     python3 script/test/chrome-mcp-upgrade.py
+    # Parent-pin resolver/publisher table (#95): authenticated resolution,
+    # mutation refusals and publication containment, all hermetic.
+    python3 script/test/parent-pins.py
 fi
 # --- no embedded Python in shell sources -------------------------------------
 # Python belongs in its own file, invoked as `python3 FILE`; see CODING_STANDARDS
