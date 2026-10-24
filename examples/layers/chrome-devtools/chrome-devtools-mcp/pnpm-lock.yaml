@@ -1,0 +1,24 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: false
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      chrome-devtools-mcp:
+        specifier: 1.0.1
+        version: 1.0.1
+
+packages:
+
+  chrome-devtools-mcp@1.0.1:
+    resolution: {integrity: sha512-h80dfsji5fHKoHce4fESVHHpx0jw18TyULDevLEpEsAFl92oy7DSR2l7gbRjGgRWETrtAENgT+7xotBv+7dkxg==}
+    engines: {node: ^20.19.0 || ^22.12.0 || >=23}
+    hasBin: true
+
+snapshots:
+
+  chrome-devtools-mcp@1.0.1: {}

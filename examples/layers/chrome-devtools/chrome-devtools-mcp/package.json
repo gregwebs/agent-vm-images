@@ -1,0 +1,9 @@
+{
+  "name": "agent-vm-chrome-devtools-mcp",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "pnpm@11.11.0",
+  "dependencies": {
+    "chrome-devtools-mcp": "1.0.1"
+  }
+}

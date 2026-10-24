@@ -6,7 +6,7 @@ ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
 cd "$ROOT"
 BASE_IMAGE=${BASE_IMAGE:-agent-vm-standard:local}
 WATCHDOG_SECONDS=${WATCHDOG_SECONDS:-60}
-WATCHDOG_GRACE_SECONDS=75
+WATCHDOG_GRACE_SECONDS=110
 export CHROME_EXAMPLE_WATCHDOG_GRACE_SECONDS=$WATCHDOG_GRACE_SECONDS
 # Never let a previous invocation's completion files satisfy this run.
 EVID=${EVIDENCE_DIR:-"$ROOT/target/chrome-example/watchdog-positive"}/run-$(date +%s)-$$
@@ -66,7 +66,7 @@ SHIM
         # Deliberate daemon outage, not ordinary listing latency: shorten only
         # this scratch harness's total budget so one 5 s timeout exhausts it.
         harness="$shim/slow.sh"
-        sed -e "s|^ROOT=.*|ROOT='$ROOT'|" -e 's/^CLEANUP_SECONDS=60 /CLEANUP_SECONDS=9 /' \
+        sed -e "s|^ROOT=.*|ROOT='$ROOT'|" -e 's/^CLEANUP_SECONDS=90 /CLEANUP_SECONDS=9 /' \
             script/test/chrome-example.sh > "$harness"
     fi
     status=0
