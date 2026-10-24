@@ -12,7 +12,7 @@ ignores SIGTERM (or is reparented) survives a leader-only wait, so the group is
 polled until it is actually empty and then SIGKILLed. An inherited SIGINT,
 SIGTERM or SIGHUP is forwarded to the child group before the watchdog exits.
 
-Usage: host-watchdog.py SECONDS COMMAND [ARG...]
+Usage: host-watchdog.py [--grace-seconds SECONDS] SECONDS COMMAND [ARG...]
 
 Exit status mirrors coreutils ``timeout``: the command's own status, the
 signal-derived 128+N when the command is killed by a signal, or 124 when the
@@ -31,8 +31,21 @@ POLL_SECONDS = 0.05
 
 
 def main(argv):
+    global TERM_GRACE_SECONDS
+    if len(argv) > 1 and argv[1] == "--grace-seconds":
+        try:
+            grace = float(argv[2])
+            if not 0 < grace < float("inf"):
+                raise ValueError
+        except (IndexError, ValueError):
+            sys.stderr.write("host-watchdog: grace must be positive and finite\n")
+            return 2
+        TERM_GRACE_SECONDS = grace
+        argv = [argv[0]] + argv[3:]
     if len(argv) < 3:
-        sys.stderr.write("usage: host-watchdog.py SECONDS COMMAND [ARG...]\n")
+        sys.stderr.write(
+            "usage: host-watchdog.py [--grace-seconds SECONDS] SECONDS COMMAND [ARG...]\n"
+        )
         return 2
     try:
         seconds = float(argv[1])

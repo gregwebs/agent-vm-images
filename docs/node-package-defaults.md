@@ -172,6 +172,19 @@ surface fail to start. Point `TMPDIR` at an exec-capable directory instead. Do
 not work around it with `node --expose-internals`: that skips the native-binding
 path real users run.
 
+## Chrome example consumer
+
+The [Chrome example](../examples/layers/README.md#pinned-mcp-package) installs
+`chrome-devtools-mcp` at build time from four committed inputs. The five
+settings above are written explicitly by
+`examples/layers/chrome-devtools/chrome-devtools-mcp.sh` instead of being
+inherited from the parent image. Its environment guard is stricter than the
+`pnpmenv` contract: this build rejects equal-valued and empty managed names,
+which the standard guard accepts, because a Docker build of the example has no
+legitimate source for them. Runtime no longer invokes a package manager by
+design: the wrapper maps the launcher's `npx -y chrome-devtools-mcp@<installed>`
+argv onto the installed bin and refuses other direct manager commands.
+
 ## Build-only graph primitives
 
 The [bounded parser ADR](adr/0001-build-only-pnpm-graph-parser.md) documents

@@ -105,6 +105,8 @@ if [ "$guard_only" = false ]; then
     bash script/test/pnpm-defaults.sh --hermetic
     bash script/test/standard-image.sh --self-test
     bash script/test/example-layers.sh --self-test
+    # Updater transaction and signal table (#41): the host-only writer's statuses.
+    python3 script/test/chrome-mcp-upgrade.py
 fi
 # --- no embedded Python in shell sources -------------------------------------
 # Python belongs in its own file, invoked as `python3 FILE`; see CODING_STANDARDS
@@ -197,6 +199,9 @@ while IFS= read -r -d '' script; do
     shellcheck --severity=warning "$script"
 done < <(find images script examples -type f \( -name '*.sh' -o -name hello-image \) ! -name '*.upstream.sh' ! -path '*/target/*' -print0)
 bash script/test/example-layers.sh
+# The Chrome container checks assert subprocess status separately from the text
+# they match; these stand-in producers prove that, without Docker.
+"$posix_sh" script/test/fixtures/chrome-example/checks.sh self-test
 python3 "$ROOT/script/test/contracts-python.py"
 # The migration ledger is a generated record: regenerate it in memory and fail on
 # any drift. Fast and offline, but it reads the baseline commit object, so CI needs
@@ -214,9 +219,10 @@ for source in script/test/pnpm-lock-inputs.mjs \
     images/tools/pi/extensions/agent-vm-codex.js \
     images/tools/pi/extensions/guest-credential-warning.js \
     script/test/fixtures/pi-codex/oracle.mjs script/test/pi-codex-read.mjs \
-    script/test/fixtures/pi-codex/registration-probe.js; do
+    script/test/fixtures/pi-codex/registration-probe.js \
+    script/test/fixtures/chrome-example/mcp-probe.mjs; do
     node --check "$source"
 done
 (cd script/test/image-sources && cargo test --locked && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings)
-actionlint .github/workflows/contracts.yml .github/workflows/build-local.yml .github/workflows/installer-network.yml .github/workflows/release-standard.yml .github/workflows/release-rehearsal.yml .github/workflows/release-transports.yml .github/workflows/verify-release-boot.yml
+actionlint .github/workflows/chrome-example.yml .github/workflows/contracts.yml .github/workflows/build-local.yml .github/workflows/installer-network.yml .github/workflows/release-standard.yml .github/workflows/release-rehearsal.yml .github/workflows/release-transports.yml .github/workflows/verify-release-boot.yml
 echo 'image contracts passed'

@@ -76,9 +76,73 @@ require reviewed `script/test/fixtures/installer-egress/selections.tsv` updates
 and strict restricted-egress tests, never automatic allowlist broadening.
 
 Example images under `examples/layers/` are not part of the standard product.
-`contracts.sh` checks them statically; building them is manual until
+`contracts.sh` checks them statically. `chrome-devtools` is built and runtime-checked
+natively on amd64 and arm64 by `chrome-example.yml`; the interrupted-run path
+(cleanup after the workflow watchdog fires) is re-proved by
+`bash script/test/chrome-example-watchdog.sh` in the arm64 CI row after the suite,
+reusing its inspected parent image ID; the other examples remain manual until
 [#33](https://github.com/gregwebs/agent-vm-images/issues/33). Their pin policy and
 bump order are in [Example images](docs/image-source-ownership.md#example-images-exampleslayers).
+
+The Chrome harness reserves 90 seconds total for cleanup (5 seconds per client,
+plus escalation and evidence). Any supervising watchdog's TERM grace must exceed
+that budget plus a 5-second margin; use `host-watchdog.py --grace-seconds 110`.
+Its default 10-second grace can kill cleanup before evidence or removal finishes.
+Set `CHROME_EXAMPLE_WATCHDOG_GRACE_SECONDS=110` alongside that flag to enable the
+harness's fail-fast contract check; it cannot discover arbitrary parent settings.
+The interrupted-run control uses the same grace. Its slow-cleanup case simulates
+a daemon outage with a reduced, scratch-only 9-second cleanup budget: a listing
+must time out, the next must be `skipped-deadline`, and cleanup must report failure.
+Ordinary listings and real suite runs must instead complete cleanup successfully.
+
+## Chrome example MCP maintenance
+
+The Chrome example installs one pinned `chrome-devtools-mcp` selection. Only
+`script/dev/upgrade-chrome-devtools-mcp.sh` writes the committed inputs; a build
+only verifies them. Run it on a maintainer host, never in CI (it refuses
+`GITHUB_ACTIONS=true`):
+
+```bash
+bash script/dev/upgrade-chrome-devtools-mcp.sh [VERSION]
+```
+
+`VERSION` defaults to the registry's `latest`, which discovery only proposes: the
+resolve step still applies the pinned age and trust policy. The script
+re-resolves the lock inside the parent image, pins the bytes, requires the
+published tarball's SHA-512 to equal the lock integrity, verifies the npm SLSA
+provenance under the identity in `script/build/chrome-mcp-provenance.sh`
+(repository `ChromeDevTools/chrome-devtools-mcp`, its publish workflow, OIDC
+issuer `https://token.actions.githubusercontent.com`, source ref
+`refs/tags/chrome-devtools-mcp-vX.Y.Z`, `--deny-self-hosted-runners`, empty
+`GH_CONFIG_DIR`, no token), and publishes the four inputs plus the bundle as one
+transaction. Missing or unverifiable provenance is a hard failure; do not add a
+hash-only exception.
+
+Prerequisites: Docker with a running daemon, `jq`, `gh` (tested 2.97.0; needs no
+login or token), `curl`, GNU coreutils (`timeout` must be GNU; `sha256sum`,
+`sha512sum`, `base64`, `od`, `awk` and `cmp` are also called), and network
+access. The first adoption, with no lock, pins or bundle committed, skips the
+committed-input check; every later run requires the committed inputs to pass
+`check` first, and any other mix of missing files is refused as partial pinned
+state.
+
+Status 0 means published or unchanged (a repeat run prints `unchanged`); 1 means
+failed with the sources unchanged or fully restored; 2 is usage; 3 means the
+publication result is undecided or a rollback is incomplete — the scratch
+directory is retained and its path printed, and must be recovered from before
+further edits, builds or commits; a signal reports 128+N, or 3 when its window
+cannot restore the sources. Never hand-edit a pin to clear a failure.
+
+agent-vm launches `npx -y chrome-devtools-mcp@1.0.1` and the wrapper maps exactly
+that spelling. Publishing a different version makes the launcher's MCP entry
+refuse with exit status 2 until agent-vm changes its argv, so coordinate such a
+bump before merging; the updater warns for that case. The pinned policy and
+wrapper behaviour are documented in
+[Example images](docs/image-source-ownership.md#chrome-mcp-pin) and
+[the Chrome example README](examples/layers/README.md#pinned-mcp-package).
+
+`bash script/test/chrome-example.sh` re-verifies the committed bundle under the
+same identity, so it requires `gh` too.
 
 ## dsh maintenance and graph freeze
 
@@ -228,8 +292,13 @@ bash script/test/shipped-installer-network.sh agent-vm-base:local --platform lin
 ```
 
 CI uses read-only permissions, pinned actions and checkout without persisted
-credentials. `contracts.yml` is PR/push/manual and reusable via `workflow_call`;
-both expensive workflows invoke it as a local prerequisite job (`needs`).
+credentials. `chrome-example.yml` has provisional bounds of 5 minutes checkout,
+20 prerequisites, 60 suite (3300-second watchdog plus 110-second TERM grace),
+13 arm64 watchdog control (600-second watchdog plus 110-second TERM grace),
+5 summary and 10 upload inside a 120-minute job (113 minutes of steps plus
+7 minutes margin); reset bounds to at least 1.5× first green per-architecture
+measurements, keeping these floors. `contracts.yml` is PR/push/manual and reusable via `workflow_call`;
+expensive build/audit workflows invoke it as a local prerequisite job (`needs`).
 `build-local.yml` builds/audits one full product on native `ubuntu-24.04` amd64
 and `ubuntu-24.04-arm`. Every bounded step plus the evidence upload fits the job:
 20 minutes prerequisites + 20 minutes capacity/builder + 180 minutes build +

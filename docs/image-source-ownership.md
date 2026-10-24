@@ -174,12 +174,41 @@ name agent-vm records.
 |---|---|
 | `script/test/chrome-example-contract.sh` Dockerfile/wrapper content | here: `script/test/example-layers.sh` (literal paths) |
 | same script, marker/wrapper paths vs `crates/agent-vm/src/defaults.rs` | agent-vm (see below) |
+| `script/test/chrome-layer-runtime.sh` runtime checks | here: `script/test/chrome-example.sh` / `chrome-example.yml`; API-1 composition case retired (no layer-composition contract) |
 | `script/test/ci-contracts.sh` `bash -n` + shellcheck of the wrapper and Go/Rust installers | here: `script/test/example-layers.sh`, default shellcheck severity |
 | `script/check-rust-toolchain.sh` rust-dev digest-verification requirement | here: `script/test/example-layers.sh` |
 | same script, rust-dev `ARG` values vs agent-vm pins | retired; policy below |
 
 `script/test/contracts.sh` runs `example-layers.sh` in both modes and its
 `--self-test` mutation controls in default mode.
+
+### Chrome MCP pin
+
+[#41](https://github.com/gregwebs/agent-vm-images/issues/41) makes the example's
+`chrome-devtools-mcp` selection a maintained payload rather than a build-time
+fetch. Its owned files are:
+
+- `examples/layers/chrome-devtools/chrome-devtools-mcp/`: the four pinned inputs
+  `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml` and
+  `pnpm-inputs.sha256` that the image installs from.
+- `examples/layers/chrome-devtools/chrome-devtools-mcp.sh`: the build helper
+  (`check`, `install`, `verify`, `resolve`), bind-mounted at build time and never
+  stored in the image.
+- `examples/layers/chrome-devtools/chrome-devtools-mcp.sigstore.json`: the npm
+  SLSA provenance bundle kept as review evidence; not copied into the image.
+- `script/build/chrome-mcp-provenance.sh`: repo-only trusted identity and
+  verification helpers, sourced by the updater and by
+  `script/test/chrome-example.sh`.
+- `script/dev/upgrade-chrome-devtools-mcp.sh`: repo-only maintainer-host writer
+  of the five files above.
+
+The updater is the only writer of the committed inputs; the helper's `resolve`
+writes a lock into a maintenance directory, and a build only verifies the
+committed bytes. Maintenance is host-only (see
+[CONTRIBUTING](../CONTRIBUTING.md#chrome-example-mcp-maintenance)); no build
+step resolves or refreshes a selection. Chrome capability paths are unchanged:
+the example still writes `/etc/agent-vm-capabilities/chrome-devtools-mcp` and
+installs `/usr/local/bin/agent-vm-chrome-mcp`.
 
 ### Chrome capability paths
 
@@ -244,8 +273,8 @@ package) is unrelated to this pin.
 3. When agent-vm adopts a standard release built from a commit containing
    `examples/layers/`, its submodule-based Chrome agreement read activates.
 
-Not covered by CI here yet: example image builds ([#33](https://github.com/gregwebs/agent-vm-images/issues/33))
-and Chrome runtime checks ([#24](https://github.com/gregwebs/agent-vm-images/issues/24)).
+Not covered by CI here yet: other example image builds
+([#33](https://github.com/gregwebs/agent-vm-images/issues/33)).
 
 ## Maintained OpenCode 2 additions
 
