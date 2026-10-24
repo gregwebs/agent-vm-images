@@ -208,10 +208,90 @@ agent-vm build --builder native-oci \
 agent-vm claude --image agent-vm-chrome:dev
 ```
 
-It installs Chromium and the Chrome DevTools MCP integration; see
-[agent-vm USAGE](https://github.com/gregwebs/agent-vm/blob/main/USAGE.md#chrome-devtools-mcp) for the runtime behavior. The
-Dockerfile pre-warms the npm cache for root mode only: arbitrary non-root guest
-homes remain persistent but download on first use.
+It installs Chromium, the Chrome DevTools MCP integration and one pinned
+`chrome-devtools-mcp`; see
+[agent-vm USAGE](https://github.com/gregwebs/agent-vm/blob/main/USAGE.md#chrome-devtools-mcp) for the runtime behavior.
+
+### Pinned MCP package
+
+The Dockerfile installs `chrome-devtools-mcp` at build time into
+`/opt/agent-vm/chrome-devtools-mcp`. The inputs are four committed files in
+[`chrome-devtools-mcp/`](chrome-devtools/chrome-devtools-mcp/): `package.json`
+(one exact selection plus `packageManager: pnpm@11.11.0`),
+`pnpm-workspace.yaml` (the install policy), `pnpm-lock.yaml` (a single-package
+closure) and `pnpm-inputs.sha256` (SHA-256 of the other three). A bind-mounted
+helper, [`chrome-devtools-mcp.sh`](chrome-devtools/chrome-devtools-mcp.sh), runs
+the install; it is the only code in this example that starts pnpm.
+
+The install is `pnpm install --frozen-lockfile --prod --no-optional
+--ignore-scripts --ignore-pnpmfile`, with a private store, private
+HOME/XDG/TMPDIR and a fixed PATH. The five
+[runtime defaults](../../docs/node-package-defaults.md) — age 1440 minutes,
+strict, missing publish time rejected, `no-downgrade`, scripts off — are
+exported by the helper rather than inherited from the parent. The workspace keeps
+`allowBuilds: {}`.
+
+Any deviation fails the build: an unexpected or missing input, bytes that differ
+from the pins, a selection that is not one canonical exact version, a policy
+escape in the workspace file (any `minimumReleaseAge*`, `trustPolicy*`,
+`onlyBuiltDependencies`, `overrides`, `registry` or similar key), a changed
+dependency closure, a pnpm other than the `packageManager` pin, an ambient
+package-manager or Node runtime variable, a failed install, or an installed tree
+that fails the post-install invariant on ownership, modes, links, lock and pnpm's
+recorded policy. There is no skip path and no build-time per-user cache: the
+build ends with `/home/chrome` holding `.pki` only.
+
+The apt line is unchanged — official Debian packages float behind apt
+authentication. The MCP package, the parent image and the other third-party
+inputs are the pinned ones. The parent stays the released v0.1.3 digest: the
+example supplies the policy itself, and runtime needs no parent pnpm command.
+
+### Runtime launcher
+
+`/usr/local/bin/agent-vm-chrome-mcp` maps exactly two spellings onto the
+installed file: `npx -y chrome-devtools-mcp@<installed version> ARGS…` (the
+argv agent-vm launches) and the bare `chrome-devtools-mcp ARGS…`. Every later
+word is passed through verbatim. Other direct package-manager commands are
+refused with exit status 2: `npx` with any other package or spelling; `npm`,
+`pnpm`, `pnpx`, `pnx`, `corepack`, `yarn`, `yarnpkg`, `bun`, `bunx`, including a
+manager named by an explicit path; any command whose first word starts with `-`;
+and an empty argv.
+
+The guarantee covers the launcher's direct MCP entry: it executes the installed,
+build-verified bytes and starts no package manager. Not covered: commands that
+start a manager indirectly (`sh -c 'npx …'`, `env npx …`,
+`sudo -u chrome npx …`, `node …/npm-cli.js …`), any other path the caller
+names, the bin shim resolving `node` through the caller's `PATH`, user-requested
+installs anywhere in the guest, and root inside the guest replacing or
+overmounting `/opt`.
+
+The prefix is outside HOME, so a HOME overmount cannot hide it: with
+`--tmpfs /home/chrome` the wrapper still creates the NSS DB there and imports
+the microsandbox CA, and with `--user 12345:12345 -e HOME=/tmp` it runs the
+installed bin directly as that numeric UID.
+
+### Maintaining the pin
+
+Maintenance is maintainer-host only and never runs in CI:
+
+```bash
+bash script/dev/upgrade-chrome-devtools-mcp.sh [VERSION]
+```
+
+It resolves the lock inside the parent image, pins the bytes, requires the
+published tarball's SHA-512 to equal the lock integrity, and verifies the npm
+SLSA provenance under an explicit trusted identity — repository
+`ChromeDevTools/chrome-devtools-mcp`, its publish workflow, issuer
+`https://token.actions.githubusercontent.com`, source ref
+`refs/tags/chrome-devtools-mcp-vX.Y.Z`, self-hosted runners denied, empty gh
+config, no token — before publishing the five files as one transaction. Missing
+or unverifiable provenance is a hard failure; there is no hash-only exception.
+Prerequisites, statuses and recovery are in
+[CONTRIBUTING](../../CONTRIBUTING.md#chrome-example-mcp-maintenance).
+
+agent-vm launches `npx -y chrome-devtools-mcp@1.0.1`. Publishing another
+version makes the wrapper refuse that argv until agent-vm changes it, so
+coordinate the bump; the updater prints a warning for that case.
 
 ### Chrome runtime checks
 
@@ -223,11 +303,12 @@ bash script/test/chrome-example.sh
 ```
 
 The [Chrome example (native) workflow](../../.github/workflows/chrome-example.yml)
-builds and checks amd64 and arm64. The suite checks parent exclusions, account
-and sudo scope, wrapper identity, numeric UID, HOME overmount, NSS/CA import and
-headless Chromium. Evidence and phase verdicts go to `target/chrome-example/`.
-Image-content checks remain in `script/test/example-layers.sh`; launcher path
-agreement belongs to agent-vm (see
+builds and checks amd64 and arm64; both rows must be green before merge. The
+suite checks parent exclusions, account and sudo scope, wrapper identity, numeric
+UID, HOME overmount, NSS/CA import and headless Chromium. Evidence and phase
+verdicts go to `target/chrome-example/`. Image-content checks remain in
+`script/test/example-layers.sh`; launcher path agreement belongs to agent-vm
+(see
 [Example image ownership](../../docs/image-source-ownership.md#example-images-exampleslayers)).
 
 Chromium's sandbox requires unprivileged user namespaces; Docker additionally

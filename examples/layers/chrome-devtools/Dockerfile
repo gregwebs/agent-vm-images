@@ -33,8 +33,12 @@ RUN apt-get update \
  && chmod 0440 /etc/sudoers.d/agent-vm-chrome
 
 COPY --chmod=0755 agent-vm-chrome-mcp /usr/local/bin/agent-vm-chrome-mcp
-RUN sudo -u chrome -H npx -y chrome-devtools-mcp@1.0.1 --help >/dev/null 2>&1 \
- || echo '==> pre-warm skipped (will lazy-fetch chrome-devtools-mcp at first MCP call)'
+# The reviewed selection is installed here, at build time, from the committed
+# inputs (#41). The helper verifies bytes and pins before it runs pnpm and
+# fails the build on any deviation: first use never resolves or fetches.
+COPY chrome-devtools-mcp/ /opt/agent-vm/chrome-devtools-mcp/
+RUN --mount=type=bind,source=chrome-devtools-mcp.sh,target=/tmp/chrome-devtools-mcp.sh,ro \
+    sh /tmp/chrome-devtools-mcp.sh install
 RUN chromium --version \
  && test "$(readlink -f /usr/bin/google-chrome)" = /usr/bin/chromium \
  && test "$(readlink -f /usr/bin/google-chrome-stable)" = /usr/bin/chromium \
@@ -49,5 +53,6 @@ RUN chromium --version \
  && sudo -n -u chrome -- id -u | grep -qx 9999 \
  && sudo -u chrome -H -- test -w /home/chrome/.pki/nssdb \
  && test -x /usr/local/bin/agent-vm-chrome-mcp \
+ && test "$(ls -A /home/chrome)" = .pki \
  && mkdir -p /etc/agent-vm-capabilities \
  && : > /etc/agent-vm-capabilities/chrome-devtools-mcp

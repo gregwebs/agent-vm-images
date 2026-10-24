@@ -1,0 +1,10 @@
+packages:
+  - .
+autoInstallPeers: false
+strictPeerDependencies: true
+nodeLinker: isolated
+hoist: false
+enableGlobalVirtualStore: false
+pmOnFail: error
+sideEffectsCache: false
+allowBuilds: {}

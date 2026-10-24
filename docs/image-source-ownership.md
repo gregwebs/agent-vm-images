@@ -182,6 +182,34 @@ name agent-vm records.
 `script/test/contracts.sh` runs `example-layers.sh` in both modes and its
 `--self-test` mutation controls in default mode.
 
+### Chrome MCP pin
+
+[#41](https://github.com/gregwebs/agent-vm-images/issues/41) makes the example's
+`chrome-devtools-mcp` selection a maintained payload rather than a build-time
+fetch. Its owned files are:
+
+- `examples/layers/chrome-devtools/chrome-devtools-mcp/`: the four pinned inputs
+  `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml` and
+  `pnpm-inputs.sha256` that the image installs from.
+- `examples/layers/chrome-devtools/chrome-devtools-mcp.sh`: the build helper
+  (`check`, `install`, `verify`, `resolve`), bind-mounted at build time and never
+  stored in the image.
+- `examples/layers/chrome-devtools/chrome-devtools-mcp.sigstore.json`: the npm
+  SLSA provenance bundle kept as review evidence; not copied into the image.
+- `script/build/chrome-mcp-provenance.sh`: repo-only trusted identity and
+  verification helpers, sourced by the updater and by
+  `script/test/chrome-example.sh`.
+- `script/dev/upgrade-chrome-devtools-mcp.sh`: repo-only maintainer-host writer
+  of the five files above.
+
+The updater is the only writer of the committed inputs; the helper's `resolve`
+writes a lock into a maintenance directory, and a build only verifies the
+committed bytes. Maintenance is host-only (see
+[CONTRIBUTING](../CONTRIBUTING.md#chrome-example-mcp-maintenance)); no build
+step resolves or refreshes a selection. Chrome capability paths are unchanged:
+the example still writes `/etc/agent-vm-capabilities/chrome-devtools-mcp` and
+installs `/usr/local/bin/agent-vm-chrome-mcp`.
+
 ### Chrome capability paths
 
 The example writes `/etc/agent-vm-capabilities/chrome-devtools-mcp` as its last

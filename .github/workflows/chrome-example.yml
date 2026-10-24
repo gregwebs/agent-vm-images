@@ -35,12 +35,14 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
-    # PROVISIONAL bounds: 5 checkout + 20 prerequisites + 50 suite + 12 arm64 control + 5 summary + 10 upload = 102,
-    # inside a 110-minute job so setup and post-steps keep an 8-minute margin. The suite watchdog (2700 s) is
-    # 300 s under its 50-minute step bound. Both watchdogs use 75 s grace; even two escalation windows fit:
-    # suite 2700 + 150 < 3000 s; control 540 + 150 < 720 s. Summary/upload keep their own budgets.
+    # PROVISIONAL bounds: 5 checkout + 20 prerequisites + 60 suite + 13 arm64 control + 5 summary + 10 upload = 113,
+    # inside a 120-minute job so setup and post-steps keep a 7-minute margin. The suite watchdog (3300 s) is
+    # 300 s under its 60-minute step bound. Both watchdogs use 110 s grace (it must exceed the suite's 90-second
+    # cleanup budget); even two escalation windows fit: suite 3300 + 220 < 3600 s; control 600 + 220 < 780 s.
+    # Summary/upload keep their own budgets. This suite installs a package from the registry and derives images,
+    # so it is materially longer than PR A's browser-only run.
     # Replace with >= 1.5x the first green per-arch durations (keep these floors).
-    timeout-minutes: 103
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         timeout-minutes: 5
@@ -50,25 +52,25 @@ jobs:
         timeout-minutes: 20
         run: bash script/ci/apt-install.sh jq coreutils python3
       - name: Chrome example suite
-        timeout-minutes: 50
+        timeout-minutes: 60
         env:
           NATIVE_ARCH: ${{ matrix.arch }}
-          CHROME_EXAMPLE_WATCHDOG_GRACE_SECONDS: 75
+          CHROME_EXAMPLE_WATCHDOG_GRACE_SECONDS: 110
         run: |
           mkdir -p target/ci-logs
           set -o pipefail
-          python3 script/test/host-watchdog.py --grace-seconds 75 2700 bash script/test/chrome-example.sh \
+          python3 script/test/host-watchdog.py --grace-seconds 110 3300 bash script/test/chrome-example.sh \
             --platform "linux/$NATIVE_ARCH" --evidence-dir target/ci-logs/chrome-example 2>&1 | tee target/ci-logs/chrome-example.log
       - name: Interrupted-run watchdog control
         if: matrix.arch == 'arm64'
-        timeout-minutes: 12
+        timeout-minutes: 13
         run: |
           BASE_IMAGE=$(jq -er '.[0].Id' target/ci-logs/chrome-example/parent-inspect.log)
           export BASE_IMAGE
           set -o pipefail
-          # PROVISIONAL: the three per-case watchdogs (60 s each plus 75 s grace) worst-case ~405 s,
-          # so 540 s bounds them; 540 s plus two 75 s escalation windows stays under this 720 s step.
-          EVIDENCE_DIR=target/ci-logs/chrome-watchdog python3 script/test/host-watchdog.py --grace-seconds 75 540 \
+          # PROVISIONAL: the three per-case watchdogs (60 s each plus 110 s grace) worst-case ~510 s,
+          # so 600 s bounds them; 600 s plus two 110 s escalation windows stays under this 780 s step.
+          EVIDENCE_DIR=target/ci-logs/chrome-watchdog python3 script/test/host-watchdog.py --grace-seconds 110 600 \
             bash script/test/chrome-example-watchdog.sh 2>&1 | tee target/ci-logs/chrome-watchdog.log
       - name: Evidence summary
         if: always()

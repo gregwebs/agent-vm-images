@@ -105,6 +105,8 @@ if [ "$guard_only" = false ]; then
     bash script/test/pnpm-defaults.sh --hermetic
     bash script/test/standard-image.sh --self-test
     bash script/test/example-layers.sh --self-test
+    # Updater transaction and signal table (#41): the host-only writer's statuses.
+    python3 script/test/chrome-mcp-upgrade.py
 fi
 # --- no embedded Python in shell sources -------------------------------------
 # Python belongs in its own file, invoked as `python3 FILE`; see CODING_STANDARDS
@@ -217,7 +219,8 @@ for source in script/test/pnpm-lock-inputs.mjs \
     images/tools/pi/extensions/agent-vm-codex.js \
     images/tools/pi/extensions/guest-credential-warning.js \
     script/test/fixtures/pi-codex/oracle.mjs script/test/pi-codex-read.mjs \
-    script/test/fixtures/pi-codex/registration-probe.js; do
+    script/test/fixtures/pi-codex/registration-probe.js \
+    script/test/fixtures/chrome-example/mcp-probe.mjs; do
     node --check "$source"
 done
 (cd script/test/image-sources && cargo test --locked && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings)
