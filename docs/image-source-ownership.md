@@ -174,6 +174,7 @@ name agent-vm records.
 |---|---|
 | `script/test/chrome-example-contract.sh` Dockerfile/wrapper content | here: `script/test/example-layers.sh` (literal paths) |
 | same script, marker/wrapper paths vs `crates/agent-vm/src/defaults.rs` | agent-vm (see below) |
+| `script/test/chrome-layer-runtime.sh` runtime checks | here: `script/test/chrome-example.sh` / `chrome-example.yml`; API-1 composition case retired (no layer-composition contract) |
 | `script/test/ci-contracts.sh` `bash -n` + shellcheck of the wrapper and Go/Rust installers | here: `script/test/example-layers.sh`, default shellcheck severity |
 | `script/check-rust-toolchain.sh` rust-dev digest-verification requirement | here: `script/test/example-layers.sh` |
 | same script, rust-dev `ARG` values vs agent-vm pins | retired; policy below |
@@ -244,8 +245,8 @@ package) is unrelated to this pin.
 3. When agent-vm adopts a standard release built from a commit containing
    `examples/layers/`, its submodule-based Chrome agreement read activates.
 
-Not covered by CI here yet: example image builds ([#33](https://github.com/gregwebs/agent-vm-images/issues/33))
-and Chrome runtime checks ([#24](https://github.com/gregwebs/agent-vm-images/issues/24)).
+Not covered by CI here yet: other example image builds
+([#33](https://github.com/gregwebs/agent-vm-images/issues/33)).
 
 ## Maintained OpenCode 2 additions
 

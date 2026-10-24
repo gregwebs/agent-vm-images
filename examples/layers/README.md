@@ -213,28 +213,31 @@ It installs Chromium and the Chrome DevTools MCP integration; see
 Dockerfile pre-warms the npm cache for root mode only: arbitrary non-root guest
 homes remain persistent but download on first use.
 
-### Manual Chrome runtime check
+### Chrome runtime checks
 
-Image-content checks run in this repository's `script/test/example-layers.sh`.
-Agreement of the marker and wrapper paths with the launcher is agent-vm's check
-(see [Example image ownership](../../docs/image-source-ownership.md#example-images-exampleslayers)).
-No CI runs this image yet ([#24](https://github.com/gregwebs/agent-vm-images/issues/24)). On a native Docker host, build this ordinary
-Dockerfile with `docker build -t av-chrome-check examples/layers/chrome-devtools`,
-then check the dedicated account, sudo scope and headless browser:
+Run the current-recipe suite with a native Docker daemon and its daemon-backed
+`docker` builder:
 
 ```bash
-docker run --rm av-chrome-check bash -c 'set -e; test "$(id -u chrome)" = 9999; visudo -cf /etc/sudoers.d/agent-vm-chrome; sudo -n -u chrome -H -- test -w /home/chrome/.pki/nssdb; sudo -n -u chrome -H -- chromium --headless --disable-gpu --dump-dom about:blank'
+bash script/test/chrome-example.sh
 ```
 
-Chromium's namespace sandbox needs a host that permits unprivileged user
-namespaces, or a setuid `chromium-sandbox` the Debian package does not install
-here. Where the container runtime blocks user namespaces, this command fails
-with `No usable sandbox!`; add `--no-sandbox` to that `chromium` command to
-smoke-test the browser, which does not exercise the sandbox.
+The [Chrome example (native) workflow](../../.github/workflows/chrome-example.yml)
+builds and checks amd64 and arm64. The suite checks parent exclusions, account
+and sudo scope, wrapper identity, numeric UID, HOME overmount, NSS/CA import and
+headless Chromium. Evidence and phase verdicts go to `target/chrome-example/`.
+Image-content checks remain in `script/test/example-layers.sh`; launcher path
+agreement belongs to agent-vm (see
+[Example image ownership](../../docs/image-source-ownership.md#example-images-exampleslayers)).
 
-Also test an arbitrary numeric UID with writable HOME and the wrapper's NSS/CA
-handling before changing this example. Docker checks are not VM MCP integration
-proof; agent-vm's custom-image native suite owns the launcher-side capability join.
+Chromium's sandbox requires unprivileged user namespaces; Docker additionally
+needs `--security-opt seccomp=unconfined`, which the suite supplies. Where these
+are unavailable the check fails. Do not add `--no-sandbox`: that would stop
+testing the sandbox the MCP uses.
+
+Docker checks are not VM MCP integration proof; agent-vm's custom-image native
+suite owns the launcher-side capability join. The retired API-1 composition
+case is not revived: these examples are boot images, not launcher layers.
 
 ## Combining examples
 

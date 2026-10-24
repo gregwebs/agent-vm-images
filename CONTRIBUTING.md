@@ -76,9 +76,24 @@ require reviewed `script/test/fixtures/installer-egress/selections.tsv` updates
 and strict restricted-egress tests, never automatic allowlist broadening.
 
 Example images under `examples/layers/` are not part of the standard product.
-`contracts.sh` checks them statically; building them is manual until
+`contracts.sh` checks them statically. `chrome-devtools` is built and runtime-checked
+natively on amd64 and arm64 by `chrome-example.yml`; the interrupted-run path
+(cleanup after the workflow watchdog fires) is re-proved by
+`bash script/test/chrome-example-watchdog.sh` in the arm64 CI row after the suite,
+reusing its inspected parent image ID; the other examples remain manual until
 [#33](https://github.com/gregwebs/agent-vm-images/issues/33). Their pin policy and
 bump order are in [Example images](docs/image-source-ownership.md#example-images-exampleslayers).
+
+The Chrome harness reserves 60 seconds total for cleanup (5 seconds per client,
+plus escalation and evidence). Any supervising watchdog's TERM grace must exceed
+that budget plus a 5-second margin; use `host-watchdog.py --grace-seconds 75`.
+Its default 10-second grace can kill cleanup before evidence or removal finishes.
+Set `CHROME_EXAMPLE_WATCHDOG_GRACE_SECONDS=75` alongside that flag to enable the
+harness's fail-fast contract check; it cannot discover arbitrary parent settings.
+The interrupted-run control uses the same grace. Its slow-cleanup case simulates
+a daemon outage with a reduced, scratch-only 9-second cleanup budget: a listing
+must time out, the next must be `skipped-deadline`, and cleanup must report failure.
+Ordinary listings and real suite runs must instead complete cleanup successfully.
 
 ## dsh maintenance and graph freeze
 
@@ -228,8 +243,13 @@ bash script/test/shipped-installer-network.sh agent-vm-base:local --platform lin
 ```
 
 CI uses read-only permissions, pinned actions and checkout without persisted
-credentials. `contracts.yml` is PR/push/manual and reusable via `workflow_call`;
-both expensive workflows invoke it as a local prerequisite job (`needs`).
+credentials. `chrome-example.yml` has provisional bounds of 5 minutes checkout,
+20 prerequisites, 50 suite (2700-second watchdog plus 75-second TERM grace),
+12 arm64 watchdog control (540-second watchdog plus 75-second TERM grace),
+5 summary and 10 upload inside a 110-minute job (102 minutes of steps plus
+8 minutes margin); reset bounds to at least 1.5× first green per-architecture
+measurements, keeping these floors. `contracts.yml` is PR/push/manual and reusable via `workflow_call`;
+expensive build/audit workflows invoke it as a local prerequisite job (`needs`).
 `build-local.yml` builds/audits one full product on native `ubuntu-24.04` amd64
 and `ubuntu-24.04-arm`. Every bounded step plus the evidence upload fits the job:
 20 minutes prerequisites + 20 minutes capacity/builder + 180 minutes build +
