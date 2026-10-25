@@ -19,10 +19,15 @@ version bump, Rust application build, submodule or launcher packaging is needed.
   helpers or audits. CI's explicit unused SDK cleanup is disposable-runner only.
 - Review exact pins, integrity/lock diffs, vendor licenses/provenance and modes.
   No `curl | shell` replacement or automatic latest lookup during builds/CI.
-  External parents are digest-pinned; the local-base consumers
+  External parents are digest-pinned, and the local-base consumers
   (`images/standard/Dockerfile`, `examples/base-extension/Dockerfile`) are bound
-  to committed base inputs in a later #95 change, not yet. See
-  [image input policy](docs/image-input-policy.md).
+  to `images/base-inputs.sha256`, the committed list of the sources the base is
+  built from. Editing a listed input, or adding one, requires regenerating that
+  manifest and the extension's `AGENT_VM_BASE_IDENTITY` default with
+  `bash script/build/base-inputs.sh --write` before either consumer builds; a
+  build only verifies the committed bytes. See
+  [image input policy](docs/image-input-policy.md#repository-base-identity-a-committed-input-manifest)
+  and [the ADR](docs/adr/0005-repository-base-identity.md).
   Official Debian apt packages may float with normal apt authentication;
   NodeSource and GitHub CLI stay unpinned violations owned by
   [#96](https://github.com/gregwebs/agent-vm-images/issues/96), optional plugins
@@ -55,11 +60,16 @@ A parent-layer fix — including a `ca-certificates` revision or a withdrawn CA
 root — needs a reviewed refresh and a rebuild of both products; rebuilding alone
 keeps the frozen parent, and a floating `apt-get install` needs cache
 invalidation (`--no-cache`) to requery the archive. Never add `apt-get upgrade`.
+A refresh that moves a local parent also republishes `images/base-inputs.sha256`
+and the extension default, because a listed input moved; review both files in the
+diff, and run `bash script/build/base-inputs.sh --check` after committing.
 
-The first adoption was `--bootstrap`. A refresh prints old/new references,
-per-platform digests and provenance, and the apt policy diff, then publishes the
-inventory, the affected recipes and the extracted Debian baseline in one
-transaction. Status 3 means an undecided or incomplete rollback: `recovery.json`
+The first adoption was `--bootstrap` (the manifest and extension default are
+adopted separately with `bash script/build/base-inputs.sh --write`). A refresh
+prints old/new references, per-platform digests and provenance, and the apt
+policy diff, then publishes the inventory, the affected recipes, the extracted
+Debian baseline and — for a local parent — the base-input manifest and extension
+default in one transaction. Status 3 means an undecided or incomplete rollback: `recovery.json`
 and the numbered backups are retained and must be recovered from before further
 work. A changed hash-only exception digest prints
 `hash-only exception requires renewed review`; re-date it in the diff before
@@ -251,7 +261,8 @@ bash script/test/standard-node-policy.sh agent-vm-base:local --consumer dsh --pl
 ## Contributor prerequisites and fast gates
 
 Build users need Docker only. Contributors running contracts need Bash, git >= 2.30, jq,
-Node/npm, Python 3, GNU coreutils `timeout`, `xz` on Linux (GNU `tar -cJf` in the
+Node/npm, Python 3, GNU coreutils (`timeout`, and `sha256sum` for the committed
+base-input manifest), `xz` on Linux (GNU `tar -cJf` in the
 shellcheck suite's fixture), **ShellCheck 0.11.0**, **actionlint v1.7.7**, and
 Rust/rustfmt/clippy **1.98.1** for the independent test-only Cargo package.
 The fixture tests trace `commit`'s maintenance child, which git 2.30 introduced.
@@ -274,7 +285,9 @@ bash script/test/contracts.sh
 /bin/bash script/test/upgrade-scripts.sh
 ```
 
-`contracts.sh [--guard-only]` works from any cwd. Default runs the explicitly
+`contracts.sh [--guard-only]` works from any cwd; both modes first run
+`bash script/build/base-inputs.sh --check`, so a stale manifest or extension
+default fails before any suite. Default runs the explicitly
 listed hermetic suites, watchdog, transactional/gate/helper controls, the
 dsh project authorization/publisher unit table, the independent layout oracle
 `--self-test`, the policy harness `--self-test`, the finished-image oracle
@@ -295,6 +308,8 @@ SC2016; warning-level lint does not rewrite reviewed runtime bytes to silence it
 (cd script/test/image-sources && cargo clippy --locked --all-targets -- -D warnings)
 actionlint .github/workflows/*.yml
 bash script/test/standard-image.sh --self-test
+python3 script/test/base-inputs.py
+bash script/build/base-inputs.sh --check
 ```
 
 Rust guards retain lock/parser mutation checks and narrow source-presence checks;
@@ -327,6 +342,9 @@ content check fails independently; CI runs it in the native audit phase.
 
 ```bash
 bash script/test/shipped-installer-network.sh agent-vm-base:local --platform linux/arm64
+# Repository base identity: base stamp == this checkout, stale/stamp-less bases
+# refused by both consumers, and the same identity under both helper deliveries.
+bash script/test/parent-identity.sh agent-vm-base:local --platform linux/arm64
 # Strict defaults: all three vendored installers, the separate pnpm plugin profile and denied-latest control.
 # --overrides adds tracked exact alternates; --observe is NEVER acceptance.
 # Redacted request evidence (one log per selection plus the mutation) is written

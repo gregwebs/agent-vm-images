@@ -3799,7 +3799,10 @@ fn from_parsing_keeps_raw_and_resolved_forms() {
     assert_eq!(last.raw_image, "${BASE_IMAGE}");
     assert_eq!(last.resolved_image, LOCAL_BASE);
     let extension = parse_froms(&read_text("examples/base-extension/Dockerfile")).unwrap();
-    assert_eq!(extension[0].raw_image, LOCAL_BASE);
+    assert_eq!(
+        extension[0].raw_image, "${BASE_IMAGE}",
+        "the extension takes its base from the documented ARG"
+    );
     assert_eq!(extension[0].resolved_image, LOCAL_BASE);
     let joined = parse_froms(
         "ARG BASE_IMAGE=agent-vm-base:local\n\
@@ -3892,6 +3895,917 @@ fn no_build_path_refreshes_parent_pins() {
         scanned > 10,
         "the maintenance scan covered only {scanned} sources"
     );
+}
+
+// --- repository base identity (#95) -----------------------------------------
+//
+// `images/base-inputs.sha256` is the committed list of images/ files the base is
+// built from. The in-build verifier re-hashes exactly those entries, the base
+// stamps the manifest's own hash, and a local consumer compares its expectation
+// with that stamp. This gate owns what the recipes and the extension can get
+// wrong without running Docker: a mount list that no longer matches the root
+// list, a stamp that is not the last build step, a consumer check that runs after
+// the work it guards, a context source outside the roots, an ignore rule that
+// hides a listed file, and an extension default that is not a real manifest hash.
+
+const BASE_INPUT_MANIFEST: &str = "images/base-inputs.sha256";
+/// The canonical root list, also declared by `script/build/base-inputs.sh`
+/// (`generated_base_input_roots` proves the two agree).
+const BASE_INPUT_ROOTS: [&str; 9] = [
+    ".dockerignore",
+    "Dockerfile",
+    "apt-policy",
+    "install-build-ca.sh",
+    "install-pnpm.sh",
+    "install-zellij.sh",
+    "pnpm",
+    "recipe-contract",
+    "verify-base-inputs.sh",
+];
+const BASE_SOURCE_ROOT: &str = "/tmp/base-source";
+const BASE_STAMP: &str = "/opt/agent-vm/base/source-identity";
+const BASE_VERIFIER: &str = "verify-base-inputs.sh";
+const BASE_IDENTITY_ARG: &str = "AGENT_VM_BASE_IDENTITY";
+const BASE_EXTENSION_CHECK: &str = "check-base-identity.sh";
+
+/// A Dockerfile-specific ignore file replaces `images/.dockerignore` for that
+/// build, so the reviewed ignore policy would no longer be the one the manifest
+/// was generated under. Checked against a root argument so the mutation control
+/// can create one without touching the checkout.
+fn check_ignore_overrides(root: &Path) -> Result<(), String> {
+    for path in [
+        "images/Dockerfile.dockerignore",
+        "images/standard/Dockerfile.dockerignore",
+    ] {
+        if root.join(path).exists() {
+            return Err(format!(
+                "a Dockerfile-specific ignore override is not reviewed: {path}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn under_base_input_roots(path: &str) -> bool {
+    BASE_INPUT_ROOTS.iter().any(|root| {
+        path == *root
+            || path
+                .strip_prefix(root)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BaseInput {
+    path: String,
+    digest: String,
+}
+
+fn validate_manifest_path(path: &str) -> Result<(), String> {
+    if path.is_empty() || path.starts_with('/') {
+        return Err(format!("manifest path must be images-relative: {path:?}"));
+    }
+    if !path
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte))
+    {
+        return Err(format!("unsupported character in manifest path: {path}"));
+    }
+    for component in path.split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            return Err(format!("unsupported manifest path component in: {path}"));
+        }
+    }
+    if path == "base-inputs.sha256" {
+        return Err("the manifest lists itself".into());
+    }
+    if !under_base_input_roots(path) {
+        return Err(format!(
+            "manifest entry is outside the base input roots: {path}"
+        ));
+    }
+    Ok(())
+}
+
+/// The committed format is one line per input, byte-sorted, two spaces between
+/// the hash and the path. A file that only happens to be *readable* as
+/// `sha256sum -c` input is not the format the generator writes.
+fn parse_base_inputs(text: &str) -> Result<Vec<BaseInput>, String> {
+    if text.is_empty() || !text.ends_with('\n') {
+        return Err("the manifest must be non-empty and end with a newline".into());
+    }
+    if text.contains('\r') {
+        return Err("the manifest must use LF line endings".into());
+    }
+    let mut entries: Vec<BaseInput> = Vec::new();
+    for line in text.lines() {
+        if line.len() < 67 {
+            return Err(format!("malformed manifest entry: {line:?}"));
+        }
+        let digest = &line[..64];
+        if !is_lower_hex(digest, 64) {
+            return Err(format!("malformed manifest hash: {digest}"));
+        }
+        if &line[64..66] != "  " {
+            return Err(format!("malformed manifest separator: {line:?}"));
+        }
+        let path = &line[66..];
+        validate_manifest_path(path)?;
+        if let Some(previous) = entries.last()
+            && path <= previous.path.as_str()
+        {
+            return Err(format!(
+                "manifest paths are not strictly byte-ordered at {path}"
+            ));
+        }
+        entries.push(BaseInput {
+            path: path.to_owned(),
+            digest: digest.to_owned(),
+        });
+    }
+    if entries.is_empty() {
+        return Err("the manifest is empty".into());
+    }
+    Ok(entries)
+}
+
+/// Each root must contribute at least one entry: an emptied root is a recipe
+/// that stopped consuming it, or a manifest that silently lost its inputs.
+fn check_base_input_coverage(entries: &[BaseInput]) -> Result<(), String> {
+    for root in BASE_INPUT_ROOTS {
+        if !entries.iter().any(|entry| {
+            entry.path == root
+                || entry
+                    .path
+                    .strip_prefix(root)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        }) {
+            return Err(format!(
+                "base input root contributes no manifest entry: {root}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Read the generator's own root array, so the two lists cannot drift apart
+/// silently: adding a root in one place fails this gate until it is added in
+/// both places and in the mount lists.
+fn generated_base_input_roots() -> Result<Vec<String>, String> {
+    let source = read_text("script/build/base-inputs.sh");
+    let prefix = "BASE_INPUT_ROOTS=(";
+    let mut collected = String::new();
+    let mut inside = false;
+    for line in source.lines() {
+        if !inside {
+            let Some(rest) = line.trim_start().strip_prefix(prefix) else {
+                continue;
+            };
+            inside = true;
+            collected.push_str(rest);
+        } else {
+            collected.push_str(line);
+        }
+        if collected.trim_end().ends_with(')') {
+            break;
+        }
+        collected.push(' ');
+    }
+    let Some(body) = collected.trim_end().strip_suffix(')') else {
+        return Err("base-inputs.sh no longer declares a closed BASE_INPUT_ROOTS array".into());
+    };
+    Ok(body.split_whitespace().map(str::to_owned).collect())
+}
+
+/// BuildKit reads a mount flag wherever it sits on a RUN, so the context-source
+/// gate must not stop at the first non-mount flag. A positional walk is a
+/// different question and uses `leading_mount_specs`.
+fn mount_specs(instruction: &str) -> Vec<String> {
+    instruction
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|token| token.strip_prefix("--mount="))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn leading_mount_specs(instruction: &str) -> Vec<String> {
+    instruction
+        .split_whitespace()
+        .skip(1)
+        .take_while(|token| token.starts_with("--mount="))
+        .map(|token| token["--mount=".len()..].to_owned())
+        .collect()
+}
+
+/// The context source a mount consumes, if any. A missing `type` is a context
+/// bind, `src` is an alias of `source`, and only `from=` names something other
+/// than the build context.
+fn mount_context_source(spec: &str) -> Result<Option<String>, String> {
+    if mount_field(spec, "from").is_some() {
+        return Ok(None);
+    }
+    if mount_field(spec, "type").as_deref().unwrap_or("bind") != "bind" {
+        return Ok(None);
+    }
+    let source = mount_field(spec, "source")
+        .or_else(|| mount_field(spec, "src"))
+        .ok_or_else(|| format!("binding mount without a source: {spec}"))?;
+    Ok(Some(source))
+}
+
+fn mount_field(spec: &str, key: &str) -> Option<String> {
+    spec.split(',')
+        .filter_map(|part| part.split_once('='))
+        .find(|(name, _)| *name == key)
+        .map(|(_, value)| value.to_owned())
+}
+
+fn mount_flag(spec: &str, flag: &str) -> bool {
+    spec.split(',').any(|part| part == flag)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StampRun {
+    mounts: Vec<String>,
+    sources: Vec<String>,
+    action: String,
+}
+
+/// The one instruction that runs the repository-base-identity verifier. Every
+/// bind mount must land inside `/tmp/base-source/<source>` so the same
+/// images-relative paths the manifest lists are the ones hashed.
+fn parse_stamp_run(source: &str) -> Result<StampRun, String> {
+    let mut runs: Vec<StampRun> = Vec::new();
+    for instruction in dockerfile_instructions(source) {
+        if !instruction.starts_with("RUN ") || !instruction.contains(BASE_VERIFIER) {
+            continue;
+        }
+        let tokens: Vec<&str> = instruction.split_whitespace().collect();
+        let mounts = leading_mount_specs(&instruction);
+        let mut sources = Vec::new();
+        for spec in &mounts {
+            if mount_field(spec, "type").as_deref() != Some("bind") {
+                return Err(format!(
+                    "the base identity run must use binding mounts only: {spec}"
+                ));
+            }
+            let source = mount_field(spec, "source")
+                .ok_or_else(|| format!("binding mount without a source: {spec}"))?;
+            let target = mount_field(spec, "target")
+                .ok_or_else(|| format!("binding mount without a target: {spec}"))?;
+            if target != format!("{BASE_SOURCE_ROOT}/{source}") {
+                return Err(format!(
+                    "binding mount target {target} is not {BASE_SOURCE_ROOT}/{source}"
+                ));
+            }
+            if !mount_flag(spec, "ro") {
+                return Err(format!("binding mount is not read-only: {spec}"));
+            }
+            sources.push(source);
+        }
+        let tail = &tokens[1 + mounts.len()..];
+        let verifier = format!("{BASE_SOURCE_ROOT}/{BASE_VERIFIER}");
+        if tail.len() != 5
+            || tail[0] != "sh"
+            || tail[1] != verifier
+            || tail[2] != BASE_SOURCE_ROOT
+            || tail[4] != BASE_STAMP
+        {
+            return Err(format!(
+                "the base identity run must be `sh {verifier} {BASE_SOURCE_ROOT} \
+                 ACTION {BASE_STAMP}`, found {tail:?}"
+            ));
+        }
+        runs.push(StampRun {
+            mounts,
+            sources,
+            action: tail[3].to_owned(),
+        });
+    }
+    match runs.len() {
+        0 => Err(format!(
+            "no recipe runs the base identity verifier ({BASE_VERIFIER})"
+        )),
+        1 => Ok(runs.remove(0)),
+        _ => Err("the base identity verifier runs more than once in one recipe".into()),
+    }
+}
+
+fn expected_mount_sources() -> Vec<String> {
+    let mut sources = vec!["base-inputs.sha256".to_owned()];
+    sources.extend(BASE_INPUT_ROOTS.iter().map(|root| (*root).to_owned()));
+    sources
+}
+
+fn check_stamp_runs(base: &str, standard: &str) -> Result<(), String> {
+    let base_run = parse_stamp_run(base)?;
+    let standard_run = parse_stamp_run(standard)?;
+    if base_run.action != "stamp" {
+        return Err(format!(
+            "the base recipe must stamp the identity, found action {}",
+            base_run.action
+        ));
+    }
+    if standard_run.action != "verify" {
+        return Err(format!(
+            "the standard recipe must verify the parent stamp, found action {}",
+            standard_run.action
+        ));
+    }
+    if base_run.mounts != standard_run.mounts {
+        return Err("the two base identity runs must mount identical sets".into());
+    }
+    if base_run.sources != expected_mount_sources() {
+        return Err(format!(
+            "the base identity run mounts {:?}, not the root list plus the manifest",
+            base_run.sources
+        ));
+    }
+    Ok(())
+}
+
+/// The stamp is the last build step, so it covers everything the recipe
+/// installed; only CMD may follow it.
+fn check_base_stamp_is_last_run(base: &str) -> Result<(), String> {
+    let instructions = dockerfile_instructions(base);
+    let Some(position) = instructions
+        .iter()
+        .rposition(|instruction| instruction.starts_with("RUN "))
+    else {
+        return Err("the base recipe has no RUN instruction".into());
+    };
+    if !instructions[position].contains(BASE_VERIFIER) {
+        return Err("the base identity stamp is not the last RUN instruction".into());
+    }
+    for instruction in &instructions[position + 1..] {
+        if !instruction.starts_with("CMD ") {
+            return Err(format!(
+                "only CMD may follow the base identity stamp, found {instruction}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The consumer check is the first thing the product stage does, so a base from
+/// other sources fails before any agent installation can succeed.
+fn check_standard_verify_is_first_product_run(standard: &str) -> Result<(), String> {
+    let instructions = dockerfile_instructions(standard);
+    let Some(start) = instructions.iter().rposition(|instruction| {
+        instruction.to_ascii_uppercase().starts_with("FROM ")
+            && instruction.contains("${BASE_IMAGE}")
+    }) else {
+        return Err("the standard recipe no longer declares the product stage".into());
+    };
+    let product = &instructions[start + 1..];
+    let Some(first) = product.iter().position(|instruction| {
+        matches!(
+            instruction.split_whitespace().next(),
+            Some("RUN" | "COPY" | "ADD")
+        )
+    }) else {
+        return Err("the product stage does no work".into());
+    };
+    if !product[first].starts_with("RUN ") || !product[first].contains(BASE_VERIFIER) {
+        return Err(format!(
+            "the parent stamp must be verified before any product work, found {}",
+            product[first]
+        ));
+    }
+    Ok(())
+}
+
+/// Everything the base recipe takes from its context is a base input. A new
+/// `COPY` or bind mount outside the roots is a source the manifest does not
+/// describe, and the generator and mount list have to grow together.
+fn check_base_context_sources(base: &str) -> Result<(), String> {
+    for instruction in dockerfile_instructions(base) {
+        let tokens: Vec<&str> = instruction.split_whitespace().collect();
+        let Some(name) = tokens.first() else { continue };
+        match name.to_ascii_uppercase().as_str() {
+            "COPY" | "ADD" => {
+                let mut rest = &tokens[1..];
+                let mut from_stage = false;
+                while let Some(flag) = rest.first() {
+                    if !flag.starts_with("--") {
+                        break;
+                    }
+                    if flag.starts_with("--from") {
+                        from_stage = true;
+                    }
+                    rest = &rest[1..];
+                }
+                if from_stage {
+                    continue;
+                }
+                if rest.len() < 2 {
+                    return Err(format!("malformed context copy: {instruction}"));
+                }
+                for source in &rest[..rest.len() - 1] {
+                    check_context_source(source.trim_end_matches('/'))?;
+                }
+            }
+            "RUN" => {
+                for spec in mount_specs(&instruction) {
+                    if let Some(source) = mount_context_source(&spec)? {
+                        check_context_source(source.trim_end_matches('/'))?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn check_context_source(source: &str) -> Result<(), String> {
+    if source == "base-inputs.sha256" {
+        return Ok(());
+    }
+    if !under_base_input_roots(source) {
+        return Err(format!(
+            "base context source is outside the base input roots: {source}"
+        ));
+    }
+    Ok(())
+}
+
+/// Docker's ignore file is the last word on what the mounts contain, so a
+/// pattern that excludes a listed file would turn the manifest check into a
+/// silent partial check. Later rules win, and a `!` rule re-includes.
+fn dockerignore_hidden(patterns: &str, path: &str) -> bool {
+    let segments: Vec<&str> = path.split('/').collect();
+    let mut hidden = false;
+    for line in patterns.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (negated, pattern) = match line.strip_prefix('!') {
+            Some(rest) => (true, rest.trim()),
+            None => (false, line),
+        };
+        let pattern = pattern.strip_prefix('/').unwrap_or(pattern);
+        let pattern = pattern.strip_suffix('/').unwrap_or(pattern);
+        if pattern.is_empty() {
+            continue;
+        }
+        let pattern: Vec<&str> = pattern.split('/').collect();
+        let matched = (1..=segments.len()).any(|end| dirtree_match(&pattern, &segments[..end]));
+        if matched {
+            hidden = !negated;
+        }
+    }
+    hidden
+}
+
+fn dirtree_match(pattern: &[&str], path: &[&str]) -> bool {
+    let Some((head, tail)) = pattern.split_first() else {
+        return path.is_empty();
+    };
+    if *head == "**" {
+        return (0..=path.len()).any(|skip| dirtree_match(tail, &path[skip..]));
+    }
+    match path.split_first() {
+        Some((first, rest)) => segment_match(head, first) && dirtree_match(tail, rest),
+        None => false,
+    }
+}
+
+/// Only `*` and `?` are interpreted. A character class or any other
+/// metacharacter is treated as matching, because this gate must never conclude
+/// "not hidden" from a pattern it cannot read.
+fn segment_match(pattern: &str, segment: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let segment = segment.as_bytes();
+    match pattern.split_first() {
+        None => segment.is_empty(),
+        Some((b'*', rest)) => (0..=segment.len()).any(|skip| glob_match(rest, &segment[skip..])),
+        Some((b'?', rest)) => !segment.is_empty() && glob_match(rest, &segment[1..]),
+        Some((b'[', _)) => true,
+        Some((byte, rest)) => segment
+            .split_first()
+            .is_some_and(|(first, tail)| first == byte && glob_match(rest, tail)),
+    }
+}
+
+fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
+    match pattern.split_first() {
+        None => text.is_empty(),
+        Some((b'*', rest)) => (0..=text.len()).any(|skip| glob_match(rest, &text[skip..])),
+        Some((b'?', rest)) => !text.is_empty() && glob_match(rest, &text[1..]),
+        Some((b'[', _)) => true,
+        Some((byte, rest)) => text
+            .split_first()
+            .is_some_and(|(first, tail)| first == byte && glob_match(rest, tail)),
+    }
+}
+
+/// The copied extension is the one consumer that carries its expectation in its
+/// own bytes: the generated default is this checkout's manifest identity.
+fn extension_identity(extension: &str) -> Result<String, String> {
+    let instructions = dockerfile_instructions(extension);
+    let defaults = global_defaults(&instructions);
+    if defaults.get("BASE_IMAGE").map(String::as_str) != Some(LOCAL_BASE) {
+        return Err(format!(
+            "the extension's default base must be {LOCAL_BASE}, found {:?}",
+            defaults.get("BASE_IMAGE")
+        ));
+    }
+    let identity = defaults
+        .get(BASE_IDENTITY_ARG)
+        .ok_or_else(|| format!("the extension declares no default {BASE_IDENTITY_ARG}"))?
+        .clone();
+    let Some(hex) = identity.strip_prefix("sha256:") else {
+        return Err(format!(
+            "the extension identity is not a digest: {identity}"
+        ));
+    };
+    if !is_lower_hex(hex, 64) {
+        return Err(format!(
+            "the extension identity is not a digest: {identity}"
+        ));
+    }
+    if hex == "0".repeat(64) {
+        return Err(format!(
+            "the extension identity is the reserved placeholder, not a manifest hash: {identity}"
+        ));
+    }
+    let declarations = instructions
+        .iter()
+        .filter(|instruction| {
+            instruction.starts_with("ARG ")
+                && instruction
+                    .split_whitespace()
+                    .any(|word| word.starts_with(&format!("{BASE_IDENTITY_ARG}=")))
+        })
+        .count();
+    if declarations != 1 {
+        return Err(format!(
+            "the extension must declare exactly one {BASE_IDENTITY_ARG} default, found {declarations}"
+        ));
+    }
+    let stage_local = instructions
+        .iter()
+        .any(|instruction| instruction == &format!("ARG {BASE_IDENTITY_ARG}"));
+    if !stage_local {
+        return Err(format!(
+            "the extension must redeclare {BASE_IDENTITY_ARG} inside the stage without a default"
+        ));
+    }
+    let checks: Vec<&String> = instructions
+        .iter()
+        .filter(|instruction| instruction.contains(BASE_EXTENSION_CHECK))
+        .collect();
+    if checks.len() != 1 {
+        return Err(format!(
+            "the extension must run {BASE_EXTENSION_CHECK} exactly once, found {}",
+            checks.len()
+        ));
+    }
+    let expected = format!("sh /tmp/{BASE_EXTENSION_CHECK} \"${BASE_IDENTITY_ARG}\"");
+    if !checks[0].ends_with(&expected) {
+        return Err(format!(
+            "the extension check must run {expected}, found {}",
+            checks[0]
+        ));
+    }
+    let spec =
+        format!("type=bind,source={BASE_EXTENSION_CHECK},target=/tmp/{BASE_EXTENSION_CHECK},ro");
+    if !mount_specs(checks[0]).contains(&spec) {
+        return Err(format!(
+            "the extension check must bind-mount {BASE_EXTENSION_CHECK} read-only"
+        ));
+    }
+    Ok(identity)
+}
+
+#[test]
+fn the_committed_base_inputs_bind_both_recipes_and_the_extension() {
+    let entries = parse_base_inputs(&read_text(BASE_INPUT_MANIFEST)).unwrap();
+    check_base_input_coverage(&entries).unwrap();
+    assert_eq!(
+        generated_base_input_roots().unwrap(),
+        BASE_INPUT_ROOTS.map(str::to_owned).to_vec(),
+        "BASE_INPUT_ROOTS and script/build/base-inputs.sh disagree"
+    );
+    let base = read_text("images/Dockerfile");
+    let standard = read_text("images/standard/Dockerfile");
+    check_stamp_runs(&base, &standard).unwrap();
+    check_base_stamp_is_last_run(&base).unwrap();
+    check_standard_verify_is_first_product_run(&standard).unwrap();
+    check_base_context_sources(&base).unwrap();
+    let ignore = read_text("images/.dockerignore");
+    for entry in &entries {
+        assert!(
+            !dockerignore_hidden(&ignore, &entry.path),
+            "images/.dockerignore hides the listed input {}",
+            entry.path
+        );
+    }
+    check_ignore_overrides(&repo_path("")).unwrap();
+    let identity = extension_identity(&read_text("examples/base-extension/Dockerfile")).unwrap();
+    assert!(
+        identity.starts_with("sha256:"),
+        "the extension carries a manifest identity"
+    );
+}
+
+#[test]
+fn base_input_identity_mutations_are_refused() {
+    let manifest = read_text(BASE_INPUT_MANIFEST);
+    let base = read_text("images/Dockerfile");
+    let standard = read_text("images/standard/Dockerfile");
+    let extension = read_text("examples/base-extension/Dockerfile");
+    let ignore = read_text("images/.dockerignore");
+    let entries = parse_base_inputs(&manifest).unwrap();
+    let verifier_entry = entries
+        .iter()
+        .find(|entry| entry.path == BASE_VERIFIER)
+        .expect("the verifier is a listed input");
+    let first_entry = entries.first().unwrap();
+    let second_entry = entries.get(1).unwrap();
+
+    let manifest_mutations: Vec<(&str, String)> = vec![
+        (
+            "duplicate entry",
+            format!("{manifest}{}\n", manifest.lines().next().unwrap()),
+        ),
+        (
+            "out-of-order entries",
+            manifest.replacen(
+                &format!(
+                    "{}  {}\n{}  {}\n",
+                    first_entry.digest, first_entry.path, second_entry.digest, second_entry.path
+                ),
+                &format!(
+                    "{}  {}\n{}  {}\n",
+                    second_entry.digest, second_entry.path, first_entry.digest, first_entry.path
+                ),
+                1,
+            ),
+        ),
+        (
+            "absolute path",
+            manifest.replace("  Dockerfile\n", "  /Dockerfile\n"),
+        ),
+        (
+            "traversal path",
+            manifest.replace("  Dockerfile\n", "  ../Dockerfile\n"),
+        ),
+        (
+            "path outside the roots",
+            manifest.replace("  Dockerfile\n", "  standard/Dockerfile\n"),
+        ),
+        (
+            "self entry",
+            manifest.replace("  Dockerfile\n", "  base-inputs.sha256\n"),
+        ),
+        (
+            "uppercase hash",
+            manifest.replacen(&first_entry.digest, &first_entry.digest.to_uppercase(), 1),
+        ),
+        (
+            "single-space separator",
+            manifest.replacen("  Dockerfile\n", " Dockerfile\n", 1),
+        ),
+        (
+            "missing verifier entry",
+            manifest.replace(
+                &format!("{}  {}\n", verifier_entry.digest, verifier_entry.path),
+                "",
+            ),
+        ),
+        (
+            "CRLF line endings",
+            manifest.replacen("  Dockerfile\n", "  Dockerfile\r\n", 1),
+        ),
+        ("empty manifest", String::new()),
+    ];
+    for (label, edited) in manifest_mutations {
+        assert_ne!(edited, manifest, "{label}: mutation did not apply");
+        let accepted = parse_base_inputs(&edited).is_ok()
+            && check_base_input_coverage(&parse_base_inputs(&edited).unwrap_or_default()).is_ok();
+        assert!(!accepted, "accepted a manifest mutation: {label}");
+    }
+
+    let drop_mount: String = base
+        .lines()
+        .filter(|line| !line.contains("source=pnpm,target=/tmp/base-source/pnpm"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let renamed_action = base.replacen(
+        " stamp /opt/agent-vm/base/source-identity",
+        " verify /opt/agent-vm/base/source-identity",
+        1,
+    );
+    let extra_source = base.replace(
+        "CMD [\"/bin/bash\"]",
+        "COPY tools/dsh/package.json /opt/agent-vm/unlisted/package.json\n\nCMD [\"/bin/bash\"]",
+    );
+    let moved_stamp = base.replace("CMD [\"/bin/bash\"]", "RUN true\n\nCMD [\"/bin/bash\"]");
+    let no_stamp = base
+        .lines()
+        .filter(|line| !line.contains("verify-base-inputs.sh"))
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+    assert_ne!(drop_mount, base, "the drop-mount mutation applies");
+    assert_ne!(renamed_action, base, "the action mutation applies");
+    assert_ne!(extra_source, base, "the extra-source mutation applies");
+    assert_ne!(moved_stamp, base, "the moved-stamp mutation applies");
+    for (label, edited) in [
+        ("dropped mount", drop_mount.clone()),
+        ("base verifies instead of stamping", renamed_action),
+        ("unlisted base context source", extra_source),
+        ("stamp is no longer the last RUN", moved_stamp),
+    ] {
+        assert!(
+            check_stamp_runs(&edited, &standard).is_err()
+                || check_base_stamp_is_last_run(&edited).is_err()
+                || check_base_context_sources(&edited).is_err(),
+            "accepted a base identity mutation: {label}"
+        );
+    }
+    assert!(
+        parse_stamp_run(&no_stamp).is_err(),
+        "a base recipe without the identity stamp must fail"
+    );
+
+    // The context-source gate is the only control on a new base input, so every
+    // BuildKit spelling that reaches the context must be seen.
+    let typeless_mount = base.replacen(
+        "--mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro",
+        "--mount=source=unlisted,target=/tmp/pnpm-source,ro",
+        1,
+    );
+    let src_alias_mount = base.replacen(
+        "--mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro",
+        "--mount=type=bind,src=unlisted,target=/tmp/pnpm-source,ro",
+        1,
+    );
+    let mount_after_flag = base.replacen(
+        "RUN --mount=type=bind,source=install-pnpm.sh,target=/tmp/install-pnpm.sh,ro",
+        "RUN --network=none --mount=type=bind,source=unlisted,target=/tmp/install-pnpm.sh,ro",
+        1,
+    );
+    for (label, edited) in [
+        ("typeless context mount", typeless_mount),
+        ("src alias of source", src_alias_mount),
+        ("context mount after a non-mount flag", mount_after_flag),
+    ] {
+        assert_ne!(edited, base, "{label}: mutation did not apply");
+        let error = check_base_context_sources(&edited)
+            .expect_err(&format!("accepted a base context source mutation: {label}"));
+        assert!(
+            error.contains("outside the base input roots: unlisted"),
+            "{label}: unexpected refusal: {error}"
+        );
+    }
+    // Mounts that read no context stay allowed: a cache mount and a mount from
+    // another stage.
+    let cache_mount = base.replacen(
+        "RUN mkdir -p /opt/agent && chmod 755 /opt/agent",
+        "RUN --mount=type=cache,target=/var/cache/apt mkdir -p /opt/agent && chmod 755 /opt/agent",
+        1,
+    );
+    let from_mount = base.replacen(
+        "--mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro",
+        "--mount=type=bind,from=recipe-contract-bin,source=/out,target=/tmp/pnpm-source,ro",
+        1,
+    );
+    assert_ne!(cache_mount, base, "the cache-mount control applies");
+    assert_ne!(from_mount, base, "the from-mount control applies");
+    for (label, edited) in [("cache mount", cache_mount), ("from mount", from_mount)] {
+        check_base_context_sources(&edited)
+            .unwrap_or_else(|error| panic!("refused a context-free mount ({label}): {error}"));
+    }
+
+    let late_verify = standard.replacen(
+        "reviewed exact selections.\"\n",
+        "reviewed exact selections.\"\nCOPY tools/dsh/package.json /opt/agent-vm/unlisted.json\n",
+        1,
+    );
+    let moved_verify = standard
+        .lines()
+        .filter(|line| !line.contains("verify-base-inputs.sh /tmp/base-source verify"))
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+    assert_ne!(late_verify, standard, "the late-verify mutation applies");
+    for (label, edited) in [
+        ("product work before the check", late_verify),
+        ("standard without the check", moved_verify),
+    ] {
+        assert!(
+            check_stamp_runs(&base, &edited).is_err()
+                || check_standard_verify_is_first_product_run(&edited).is_err(),
+            "accepted a standard identity mutation: {label}"
+        );
+    }
+
+    for (label, pattern) in [
+        ("exact listed file", verifier_entry.path.clone()),
+        ("listed directory", "pnpm".to_owned()),
+        ("nested listed file", "pnpm/pin.json".to_owned()),
+        ("glob at any depth", "**/pin.json".to_owned()),
+        ("star within a segment", "pnpm/*.json".to_owned()),
+        ("character class", "pnpm/[p]in.json".to_owned()),
+        ("anchored path", "/pnpm/pin.json".to_owned()),
+        ("directory form", "pnpm/".to_owned()),
+    ] {
+        let hiding = format!("{ignore}{pattern}\n");
+        assert!(
+            entries
+                .iter()
+                .any(|entry| dockerignore_hidden(&hiding, &entry.path)),
+            "did not notice an ignore rule hiding a listed input: {label}"
+        );
+    }
+    // A Dockerfile-specific ignore file would hide files this gate cannot see.
+    let overridden = std::env::temp_dir().join(format!(
+        "image-sources-ignore-override-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&overridden);
+    std::fs::create_dir_all(overridden.join("images/standard")).expect("override fixture");
+    assert!(check_ignore_overrides(&overridden).is_ok(), "clean fixture");
+    std::fs::write(overridden.join("images/Dockerfile.dockerignore"), "pnpm\n")
+        .expect("override file");
+    assert!(
+        check_ignore_overrides(&overridden).is_err(),
+        "accepted a Dockerfile-specific ignore override"
+    );
+    std::fs::remove_file(overridden.join("images/Dockerfile.dockerignore")).expect("remove");
+    std::fs::write(
+        overridden.join("images/standard/Dockerfile.dockerignore"),
+        "pnpm\n",
+    )
+    .expect("standard override file");
+    assert!(
+        check_ignore_overrides(&overridden).is_err(),
+        "accepted a standard Dockerfile ignore override"
+    );
+    let _ = std::fs::remove_dir_all(&overridden);
+
+    let re_included = format!("{ignore}**/pin.json\n!pnpm/pin.json\n");
+    assert!(
+        !dockerignore_hidden(&re_included, "pnpm/pin.json"),
+        "a later negation must re-include the path"
+    );
+    assert!(
+        !dockerignore_hidden(&ignore, "pnpm/pin.json"),
+        "the committed ignore file does not hide a listed input"
+    );
+
+    let identity = extension_identity(&extension).unwrap();
+    let placeholder = format!("sha256:{}", "0".repeat(64));
+    let extension_mutations: Vec<(&str, String)> = vec![
+        (
+            "missing identity default",
+            extension.replace(
+                &format!("ARG {BASE_IDENTITY_ARG}={identity}\n"),
+                &format!("ARG {BASE_IDENTITY_ARG}\n"),
+            ),
+        ),
+        (
+            "non-digest identity",
+            extension.replace(&identity, "agent-vm-base:local"),
+        ),
+        (
+            "placeholded identity",
+            extension.replace(&identity, &placeholder),
+        ),
+        (
+            "uppercase identity",
+            extension.replace(&identity, &identity.to_uppercase()),
+        ),
+        (
+            "missing stage-local redeclaration",
+            extension.replace(
+                &format!("FROM ${{BASE_IMAGE}}\nARG {BASE_IDENTITY_ARG}\n"),
+                "FROM ${BASE_IMAGE}\n",
+            ),
+        ),
+        (
+            "missing extension check",
+            extension
+                .lines()
+                .filter(|line| !line.contains(BASE_EXTENSION_CHECK))
+                .map(|line| format!("{line}\n"))
+                .collect::<String>(),
+        ),
+        (
+            "literal identity instead of the argument",
+            extension.replace(&format!("\"${BASE_IDENTITY_ARG}\""), &identity),
+        ),
+    ];
+    for (label, edited) in extension_mutations {
+        assert_ne!(edited, extension, "{label}: mutation did not apply");
+        assert!(
+            extension_identity(&edited).is_err(),
+            "accepted an extension mutation: {label}"
+        );
+    }
 }
 
 /// One shell-ish word plus whether any of it came from a quoted string.

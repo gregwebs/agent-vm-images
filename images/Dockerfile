@@ -129,4 +129,22 @@ RUN set -e \
  && zellij --version >/dev/null \
  && echo "== sanity OK =="
 
+# Nothing above proves which sources this base consumed: another checkout with
+# the same pinned parents installs the same packages and still looks like this
+# image. Re-hashing the committed manifest stamps the source identity that
+# standard and a copied extension compare against, and it runs last so it covers
+# everything the recipe produced. The mounts are read-only bind mounts, not
+# COPYs, so no source bytes persist in a layer.
+RUN --mount=type=bind,source=base-inputs.sha256,target=/tmp/base-source/base-inputs.sha256,ro \
+    --mount=type=bind,source=.dockerignore,target=/tmp/base-source/.dockerignore,ro \
+    --mount=type=bind,source=Dockerfile,target=/tmp/base-source/Dockerfile,ro \
+    --mount=type=bind,source=apt-policy,target=/tmp/base-source/apt-policy,ro \
+    --mount=type=bind,source=install-build-ca.sh,target=/tmp/base-source/install-build-ca.sh,ro \
+    --mount=type=bind,source=install-pnpm.sh,target=/tmp/base-source/install-pnpm.sh,ro \
+    --mount=type=bind,source=install-zellij.sh,target=/tmp/base-source/install-zellij.sh,ro \
+    --mount=type=bind,source=pnpm,target=/tmp/base-source/pnpm,ro \
+    --mount=type=bind,source=recipe-contract,target=/tmp/base-source/recipe-contract,ro \
+    --mount=type=bind,source=verify-base-inputs.sh,target=/tmp/base-source/verify-base-inputs.sh,ro \
+    sh /tmp/base-source/verify-base-inputs.sh /tmp/base-source stamp /opt/agent-vm/base/source-identity
+
 CMD ["/bin/bash"]

@@ -28,7 +28,7 @@ repositories, and it is not a pinned image input.
 | Debian base | Docker Official Image | `debian:13-slim` + index digest | registry digest plus per-platform source revision |
 | Go helper compiler | Docker Official Image | `golang:<toolchain>-trixie` + index digest | registry digest plus per-platform source revision, build fragment bound to the tag |
 | Standard image | this repository's release | index digest only | GitHub attestation (metadata and index), source SHA, run invocation |
-| Local base (`agent-vm-base:local`) | local build | local tag | **not pinned yet**: [C] binds `images/standard/Dockerfile` and `examples/base-extension/Dockerfile` to the committed base inputs, so today they still accept a stale local tag |
+| Local base (`agent-vm-base:local`) | local build | local tag | committed [base-input manifest](#repository-base-identity-a-committed-input-manifest) plus a stamp the consumers compare |
 
 Pinning does not establish that a release is safe. It establishes which identity
 was selected and reviewed, so that a wrong or changed input fails loudly instead
@@ -60,17 +60,15 @@ what you build:
   bytes must select and trust an immutable image ID separately.
 - The local daemon store is trusted, and untracked files, file modes, empty
   directories, effective build arguments, Docker's exporter output and a recipe
-  supplied through `docker build -f OTHER` are outside this guarantee.
-- [C] An inherited base stamp and any externally supplied host-helper context are
-  trusted. A forged or stale inherited stamp cannot attest descendant
-  modifications.
+  supplied through `docker build -f OTHER` are outside this guarantee. The normal
+  `-f images/Dockerfile` path is covered, because the Dockerfile the identity
+  mounts is the one the build used.
+- The inherited base stamp is trusted, and so is an externally supplied
+  host-helper context (`images/build.sh --host-helpers`). A forged or stale stamp
+  cannot attest descendant modifications; the stamp is a receipt the base wrote
+  about its own sources, never authentication of the image.
 
-Items marked [C] describe the committed base-input manifest and the parent
-stamp that a later #95 change adds. A recipe in this change verifies no inherited
-stamp, so read those limits as the boundary the next change must keep, not as
-protection that exists today.
-
-Say "pinned parent", never "all inputs" or "same image".
+Say "pinned parent" or "this base's sources", never "all inputs" or "same image".
 
 ## Official Debian apt packages may float
 
@@ -127,6 +125,89 @@ reviewed parent refresh (below) and a rebuild; rebuilding alone cannot update a
 frozen parent, and a floating `apt-get install` needs cache invalidation
 (`--no-cache`) to requery the archive. Do not claim a rebuild fixes a parent
 vulnerability.
+
+## Repository base identity: a committed input manifest
+
+The external pins above bound *parents*. A local base is a source input to the
+standard image and to a copied extension, and the tag `agent-vm-base:local` can
+point at a base built from any checkout. The committed manifest binds that local
+edge to reviewed source bytes:
+
+```
+reviewed external pin ──Docker digest check──► base
+tracked base files ─────host generator───────► images/base-inputs.sha256
+                                                  │ sha256sum -c in base and standard
+                                                  └─ manifest hash ──► parent stamp == consumer expectation
+```
+
+- [`images/base-inputs.sha256`](../images/base-inputs.sha256) lists every
+  git-tracked file under the fixed roots `.dockerignore Dockerfile apt-policy
+  install-build-ca.sh install-pnpm.sh install-zellij.sh pnpm recipe-contract
+  verify-base-inputs.sh` — one `<64-hex>  <images-relative path>` line per file,
+  byte-sorted, no header and no self entry. New files must be `git add`ed before
+  they can be listed. The **identity** is `sha256:` plus the SHA-256 of the
+  manifest bytes.
+- `script/build/base-inputs.sh` is the only writer: `inputs`, `--check`,
+  `--write` and an internal `--stage TREE OUT`. No image build can regenerate it.
+  `--check` and `--write` hash the *worktree* under `images/` on purpose, so they
+  publish exactly the bytes a local build would read; the tracked set still comes
+  from the git index. Only `--stage`, which the parent-pin refresh uses, reads a
+  tree the caller assembled and therefore isolates the identity from local edits.
+- The base's **last** RUN re-hashes exactly the listed entries
+  (`images/verify-base-inputs.sh`) and stamps the manifest hash at
+  `/opt/agent-vm/base/source-identity`.
+- The standard recipe's **first** product RUN re-hashes the same entries with an
+  identical mount list and compares the inherited stamp, so a base from other
+  sources fails before any agent installation.
+- `examples/base-extension/Dockerfile` carries the generated default
+  `AGENT_VM_BASE_IDENTITY` and compares it with the inherited stamp.
+  `--build-arg AGENT_VM_BASE_IDENTITY=<identity>` is an explicit acceptance of
+  another base, not authentication of it, and a copied extension keeps the
+  default of the checkout it came from.
+
+Limits, in addition to [what the guarantee is and is not](#what-this-guarantee-is-and-is-not):
+
+- **Source identity, not byte identity.** Two builds of these sources can still
+  differ: apt state and caches, platform, build arguments, Zellij overrides and a
+  persisted build CA are outside the identity. Such bases and their descendants
+  pass; a consumer that needs exact bytes must select and trust an immutable
+  image ID separately.
+- **Untracked content is outside it.** `sha256sum -c` checks listed entries and
+  never walks the mount, so an untracked file that a directory `COPY` or mount
+  happens to include is not described. Whether the list is *complete* is a
+  host/CI question (`--check` compares the rendered manifest with the committed
+  one; a build never discovers a missing entry), not something a single build can
+  answer.
+- **No protection against a forged stamp.** The daemon store and the inherited
+  stamp are trusted, a stale stamp cannot attest later modifications, and an
+  externally supplied host-helper context stays outside the identity.
+- **`docker build -f OTHER` is outside it.** The identity covers the normal
+  `-f images/Dockerfile` path, where the mounted Dockerfile is the recipe used.
+
+A listed input that changed without regeneration fails with
+`base-inputs: inputs/default drift; run: bash script/build/base-inputs.sh --write`
+(the host gate names the differing files). A consumer that inherits a base
+without a stamp fails with `base-inputs: BASE_IMAGE has no repository base
+identity; rebuild the base from this checkout`, and a stale one with
+`base-inputs: BASE_IMAGE declares <stamp>; this checkout expects <identity>;
+rebuild the base`. The extension says `use --build-arg AGENT_VM_BASE_IDENTITY=<stamp>
+only if you intend that base` instead. Editing a listed input requires:
+
+```bash
+bash script/build/base-inputs.sh --check   # green before you start
+# edit images/… (or add a file and `git add` it)
+bash script/build/base-inputs.sh --write   # manifest + extension default, one transaction
+git add images/base-inputs.sha256 examples/base-extension/Dockerfile
+bash images/build.sh base && bash images/build.sh standard
+```
+
+`--write` publishes both files transactionally: `0` published or unchanged, `1`
+failed with the sources unchanged or fully restored, `2` usage, `3` undecided or
+incomplete recovery — the work directory is retained and printed, its numbered
+backups are `0` for the manifest and `1` for the extension, and you recover them
+before any further edit, build or commit. It is never automatic: a build verifies
+the committed bytes and nothing else. It needs GNU coreutils `sha256sum`; without
+it the generator refuses with `1` and names the missing tool.
 
 ## Build CA: verified content, refused in public releases
 
@@ -226,13 +307,20 @@ changes while resolution runs. Only tracked files are enumerated, so an untracke
 file elsewhere in the checkout neither blocks a refresh nor is covered by this
 check. It never deletes a path it did not back up or create.
 
+A refresh also republishes `images/base-inputs.sha256` and the extension
+default, because a moved local parent changes a listed input. Review those two
+files with the diff; the inventory itself is metadata the base does not consume
+and is deliberately not listed.
+
 Then review the diff, run the gates and rebuild both products:
 
 ```bash
 git diff -- images examples
 python3 script/test/parent-pins.py
+python3 script/test/base-inputs.py
 bash script/test/contracts.sh
 bash images/build.sh base && bash images/build.sh standard
+bash script/test/parent-identity.sh agent-vm-base:local --platform linux/arm64
 ```
 
 `golang-builder` selection must equal the `go.mod` toolchain; a Go toolchain
@@ -246,10 +334,7 @@ change.
   NodeSource / GitHub CLI apt installs; today they are recorded violations.
 - [#101](https://github.com/gregwebs/agent-vm-images/issues/101) owns optional
   Claude plugin inputs.
-- Later #95 work: [C] binds local base consumers to a committed input manifest
-  and a parent stamp, and owns the final source-identity documentation. This change
-  ([B]) enforces the Debian baseline in the build and verifies the persisted
-  build-CA content.
-- [#106](https://github.com/gregwebs/agent-vm-images/issues/106) is the final
-  all-input reconciliation; it cannot substitute for this policy or for the
-  native evidence in [CONTRIBUTING](../CONTRIBUTING.md).
+- The local edge is closed by the committed base-input manifest and the parent
+  stamp described [above](#repository-base-identity-a-committed-input-manifest);
+  it adds no new input owner. Broader all-input reconciliation is
+  [#106](https://github.com/gregwebs/agent-vm-images/issues/106)'s.

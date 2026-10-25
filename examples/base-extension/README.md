@@ -20,12 +20,40 @@ needed. The Bash script is readable/executable in `/usr/local/bin`, outside
 HOME where mounts could hide it. Native executables must match the Linux image
 architecture; a macOS binary does not become a Linux executable through COPY.
 
+The extension also carries this checkout's **base source identity**. The
+`AGENT_VM_BASE_IDENTITY` default is generated from
+[`images/base-inputs.sha256`](../../images/base-inputs.sha256) (the honest
+`sha256:` of the committed base-input manifest), and `check-base-identity.sh`
+compares it with the stamp the base wrote at
+`/opt/agent-vm/base/source-identity`. A base built from other sources fails the
+build instead of being extended silently. That is source identity, not
+image-byte identity: two builds of the same sources may still differ, and a
+forged stamp is not prevented. To extend a base you deliberately built from a
+different tree, accept it explicitly:
+
+```bash
+docker build --builder "$BUILDER" --platform linux/arm64 \
+  --build-arg AGENT_VM_BASE_IDENTITY="$(docker run --rm --entrypoint cat \
+    your-base:tag /opt/agent-vm/base/source-identity)" \
+  -t my-agent-vm:local "$HOME/my-base-extension"
+```
+
+Changing a file the base consumes is a reviewed source change, not a rebuild:
+edit it (adding a new one means `git add`), run
+`bash script/build/base-inputs.sh --write`, review the manifest and this default,
+then rebuild the base before the extension. `bash script/build/base-inputs.sh --check`
+names what drifted. See
+[repository base identity](../../docs/adr/0005-repository-base-identity.md).
+
 Copy the example into your own directory; from this repository root:
 
 ```bash
 cp -R examples/base-extension "$HOME/my-base-extension"
 # Edit hello-image: change the greeting to "hello from my edited extension".
-# Edit FROM if you chose a different local base tag.
+# Edit the BASE_IMAGE default if you chose a different local base tag. Keep the
+# AGENT_VM_BASE_IDENTITY default unless that tag was built from a *different*
+# checkout: a base built from this checkout's sources needs no override, and
+# copying a stamp into the default only makes the check agree with itself.
 docker build --builder "$BUILDER" --platform linux/arm64 \
   -t my-edited-agent-vm:local "$HOME/my-base-extension"
 docker run --rm --user 12345:23456 --cap-drop ALL --network none \

@@ -20,9 +20,12 @@ independent, versioned, digest-addressed OCI product at
 `ghcr.io/gregwebs/agent-vm-standard` plus matching archive/SBOM release assets.
 External parents are digest-pinned (see [image input policy](docs/image-input-policy.md)):
 Debian base, Go helper compiler and the released standard image. The local
-`agent-vm-base:local` consumers (`images/standard/Dockerfile`,
-`examples/base-extension/Dockerfile`) are bound in a later #95 change, so until
-then they still accept a stale local tag. Official Debian
+`agent-vm-base:local` edge is bound by a committed
+[base-input manifest](images/base-inputs.sha256): the base stamps the manifest
+hash of this checkout, and `images/standard/Dockerfile` and
+`examples/base-extension/Dockerfile` refuse a base whose stamp disagrees. That is
+source identity, not image-byte identity — see
+[the ADR](docs/adr/0005-repository-base-identity.md). Official Debian
 apt packages may float with normal apt authentication. NodeSource and the GitHub
 CLI apt installs and the optional Claude plugins remain unpinned violations owned
 by [#96](https://github.com/gregwebs/agent-vm-images/issues/96) and
@@ -70,8 +73,25 @@ and [ADR 0004](docs/adr/0004-go-build-helpers.md).
 
 The helper builds only the selected recipe, never auto-builds a missing base,
 resolves latest, prunes, pushes or reads launcher configuration. Ordinary Docker
-commands are the full customization interface; edit either Dockerfile or pass
-`--build-arg BASE_IMAGE=your-local-base` to standard.
+commands are the full customization interface. Standard accepts only a base whose
+`/opt/agent-vm/base/source-identity` stamp equals the identity of this checkout's
+committed manifest, and it has no override: `--build-arg BASE_IMAGE=your-local-base`
+is for another tag built from this checkout's `images/` sources. The copied
+extension carries one escape hatch, `--build-arg AGENT_VM_BASE_IDENTITY=<identity>`,
+for a base deliberately built from a different tree. Editing a file the base
+consumes is therefore a reviewed source change, not a rebuild:
+
+```bash
+bash script/build/base-inputs.sh --check   # drift gate; names the differing inputs
+# edit images/… (new files: git add them first — the selection is the git index)
+bash script/build/base-inputs.sh --write   # manifest + extension default in one transaction
+git add images/base-inputs.sha256 examples/base-extension/Dockerfile
+bash images/build.sh base && bash images/build.sh standard
+```
+
+See [repository base identity](docs/adr/0005-repository-base-identity.md) for the
+trust boundary and [image input policy](docs/image-input-policy.md#repository-base-identity-a-committed-input-manifest)
+for the recovery commands.
 
 ### Local FROM and builders
 
@@ -153,6 +173,7 @@ Scripts installed outside HOME survive HOME mounts. Use non-login `bash -c`
 for agent commands: `bash -lc` can reset the image PATH through `/etc/profile`.
 
 - [Pinned parent images and the apt exception](docs/image-input-policy.md)
+- [Committed base-input manifest decision](docs/adr/0005-repository-base-identity.md)
 - [Node package defaults and override limits](docs/node-package-defaults.md)
 - [dsh graph-freeze decision](docs/adr/0003-dsh-graph-freeze.md)
 - [Go build helpers and their delivery seam](docs/adr/0004-go-build-helpers.md)

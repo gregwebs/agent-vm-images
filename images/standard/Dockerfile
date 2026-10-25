@@ -22,6 +22,22 @@ FROM ${BASE_IMAGE}
 LABEL org.opencontainers.image.title="agent-vm standard coding-agent image"
 LABEL org.opencontainers.image.description="dsh, Pi, Codex, OpenCode, Claude and Copilot with reviewed exact selections."
 
+# The inherited stamp proves which sources the base was built from; comparing it
+# with this checkout's manifest is the first product RUN so a base from other
+# sources fails before any agent installation, and the mount list matches the
+# base's exactly so one manifest never describes two different input sets.
+RUN --mount=type=bind,source=base-inputs.sha256,target=/tmp/base-source/base-inputs.sha256,ro \
+    --mount=type=bind,source=.dockerignore,target=/tmp/base-source/.dockerignore,ro \
+    --mount=type=bind,source=Dockerfile,target=/tmp/base-source/Dockerfile,ro \
+    --mount=type=bind,source=apt-policy,target=/tmp/base-source/apt-policy,ro \
+    --mount=type=bind,source=install-build-ca.sh,target=/tmp/base-source/install-build-ca.sh,ro \
+    --mount=type=bind,source=install-pnpm.sh,target=/tmp/base-source/install-pnpm.sh,ro \
+    --mount=type=bind,source=install-zellij.sh,target=/tmp/base-source/install-zellij.sh,ro \
+    --mount=type=bind,source=pnpm,target=/tmp/base-source/pnpm,ro \
+    --mount=type=bind,source=recipe-contract,target=/tmp/base-source/recipe-contract,ro \
+    --mount=type=bind,source=verify-base-inputs.sh,target=/tmp/base-source/verify-base-inputs.sh,ro \
+    sh /tmp/base-source/verify-base-inputs.sh /tmp/base-source verify /opt/agent-vm/base/source-identity
+
 # dsh
 ARG AGENT_VERSION_DSH=
 # Compatibility assertion only; base owns the pnpm selection and launcher.

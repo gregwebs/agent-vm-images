@@ -111,6 +111,11 @@ case "$phase" in
             echo 'invalid exact selection succeeded' >&2; exit 1
         fi
         [ "$(docker image inspect agent-vm-standard:local --format '{{.Id}}')" = "$prior" ]
+        # Repository base identity (#95): the base stamps this checkout's manifest,
+        # a stale or stamp-less local tag fails both consumers, and the stamp does
+        # not depend on untracked context files or on the helper delivery. Native
+        # only, because the whole point is the images this host just built.
+        timed parent-identity bash script/test/parent-identity.sh agent-vm-base:local --platform "$platform"
         timed final-controls bash script/test/standard-certification.sh
         check_audit_budget "$audit_durations_start"
         ;;

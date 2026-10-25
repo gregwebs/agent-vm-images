@@ -23,11 +23,18 @@ PYTHON=script/dev/parent_pins.py
 INVENTORY=images/parent-pins.json
 OWNED_DIRECTORY=images/apt-policy
 # Inputs the base image consumes besides the destinations. A local edit here
-# would silently change what a published identity describes, so a dirty one
-# stops a refresh even when it is not itself a destination. Names that do not
-# exist yet are skipped: a later PR adds the input manifest.
-BASE_INPUTS=(.dockerignore Dockerfile apt-policy install-build-ca.sh install-pnpm.sh
-             install-zellij.sh pnpm recipe-contract)
+# would silently change what a published source identity describes, so a dirty
+# one stops a refresh even when it is not itself a destination. The canonical
+# list belongs to the generator that turns it into `images/base-inputs.sha256`:
+# one list, so the preflight and the manifest cannot disagree.
+BASE_INPUTS=()
+while IFS= read -r base_input_root; do
+    BASE_INPUTS+=("$base_input_root")
+done < <(bash "$ROOT/script/build/base-inputs.sh" inputs)
+[ "${#BASE_INPUTS[@]}" -gt 0 ] || {
+    echo 'parent-pins: cannot read the base input roots from script/build/base-inputs.sh' >&2
+    exit 1
+}
 
 usage() {
     cat >&2 <<'USAGE'
