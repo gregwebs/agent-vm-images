@@ -141,16 +141,5 @@
       }
     ]
   },
-  "apt_open_gaps": [
-    {
-      "recipe": "images/Dockerfile",
-      "instruction": "RUN install -dm 755 /etc/apt/keyrings \\\n && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \\\n        > /etc/apt/keyrings/githubcli-archive-keyring.gpg \\\n && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \\\n && echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\" \\\n        > /etc/apt/sources.list.d/github-cli.list \\\n && apt-get update \\\n && apt-get install -y --no-install-recommends gh \\\n && rm -rf /var/lib/apt/lists/*",
-      "owner": "https://github.com/gregwebs/agent-vm-images/issues/96"
-    },
-    {
-      "recipe": "images/Dockerfile",
-      "instruction": "RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \\\n && apt-get install -y --no-install-recommends nodejs \\\n && rm -rf /var/lib/apt/lists/*",
-      "owner": "https://github.com/gregwebs/agent-vm-images/issues/96"
-    }
-  ]
+  "apt_open_gaps": []
 }

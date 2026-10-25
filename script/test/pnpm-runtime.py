@@ -271,8 +271,15 @@ def main() -> None:
         # Native npm scripts and npx already-local bins, without public network access.
         cwd, env = scenario()
         import shutil
+        node = Path(shutil.which('node')).resolve()
         npm, npx = Path(shutil.which('npm')).resolve(), Path(shutil.which('npx')).resolve()
-        assert str(npm).startswith('/usr/lib/node_modules/npm/') and str(npx).startswith('/usr/lib/node_modules/npm/')
+        # npm and npx belong to the npm tree bundled in the pinned Node archive,
+        # not a second copy: take the prefix from the running node instead of
+        # hardcoding a layout, so a moved installation cannot silently satisfy
+        # this by shipping another npm (#96).
+        bundled = (node.parent.parent / 'lib/node_modules/npm').resolve()
+        assert bundled.is_dir(), f'{bundled} is not the bundled npm tree'
+        assert npm.is_relative_to(bundled) and npx.is_relative_to(bundled), (npm, npx, bundled)
         before = (npm.read_bytes(), npx.read_bytes())
         run(['install', '--registry=' + registry.url, 'fixture-hooks@1.0.0'], cwd, env, command='npm')
         assert {'fixture-hooks', 'fixture-dependency'} <= set((cwd / 'markers').read_text().splitlines())

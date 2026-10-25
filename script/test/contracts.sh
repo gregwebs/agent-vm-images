@@ -10,7 +10,7 @@ case "${1:-}" in
     *) echo "usage: $0 [--guard-only]" >&2; exit 2 ;;
 esac
 missing=false
-for tool in bash git jq node npm python3 timeout shellcheck actionlint cargo; do
+for tool in bash git gpg jq node npm python3 timeout shellcheck actionlint cargo; do
     if ! command -v "$tool" >/dev/null; then echo "missing prerequisite: $tool" >&2; missing=true; fi
 done
 [ "$missing" = false ] || exit 1
@@ -82,6 +82,11 @@ if [ "$guard_only" = false ]; then
     python3 script/test/recipe-contract-oracle.py
     node script/test/recipe-contract-oracle.mjs
     python3 script/test/recipe-contract-adapters.py
+    # Pinned third-party release artifacts (#96): the offline case table for the
+    # installer and the fault-injection table for the maintenance writer, named
+    # here because this file is the list of what runs.
+    bash script/test/artifact-pins.sh
+    python3 script/test/pin-artifact-maintenance.py
     for suite in agent-versions apt-sources claude-installer codex-installer copilot-installer copilot-verify \
         opencode-installer opencode-pnpm-prepare-lock opencode-pnpm-install opencode-pnpm-upgrade \
         opencode-plugins-verify run-pnpm dsh-prepare-lock dsh-verify pi-install pi-prepare-lock pi-verify \

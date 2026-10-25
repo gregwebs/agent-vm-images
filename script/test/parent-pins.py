@@ -53,9 +53,14 @@ RELEASE_DESTINATIONS = sorted([
 STAGED = {
     # `images/apt-policy/` is deliberately absent: bootstrap is the only refresh
     # that creates it, and T8c/T12 start from that state.
-    'images': ['Dockerfile', 'standard/Dockerfile', '.dockerignore', 'install-build-ca.sh',
-               'install-pnpm.sh', 'install-zellij.sh', 'verify-base-inputs.sh',
-               'base-inputs.sha256',
+    'images': ['Dockerfile', 'standard/Dockerfile', '.dockerignore', 'install-artifact.sh',
+               'install-build-ca.sh', 'install-pnpm.sh', 'install-zellij.sh',
+               'verify-base-inputs.sh', 'base-inputs.sha256',
+               'artifacts/artifact_pin.py', 'artifacts/install_artifact.py',
+               'artifacts/read-pin-version.py', 'artifacts/node.json', 'artifacts/gh.json',
+               'artifacts/node-release-key.asc',
+               'artifacts/gh-2.103.2-linux-amd64.bundle.jsonl',
+               'artifacts/gh-2.103.2-linux-arm64.bundle.jsonl',
                'pnpm/pin.json', 'pnpm/verify-pnpm.sh', 'recipe-contract/go.mod'],
     'examples': ['base-extension/Dockerfile', 'base-extension/check-base-identity.sh',
                  'layers/README.md',
@@ -1381,65 +1386,63 @@ GAP_INSTRUCTION = ('RUN echo "deb http://legacy.example stable main" \\\n'
 
 
 def t17(root):
-    """A refresh preserves recorded apt gap instructions exactly (#96)."""
+    """The closed apt gap record stays empty and refuses to grow (#96)."""
     source = module()
     case = Case(root, 't17')
     case.adopt()
     assert case.inventory()['apt_open_gaps'] == [], \
-        'bootstrap records no exemption; a human adds the exact instruction'
+        'bootstrap records no exemption; #96 removed both recorded instructions'
     base = case.repo / BASE_DOCKERFILE
     base.write_text(base.read_text().replace(
         'CMD ["/bin/bash"]', GAP_INSTRUCTION + '\n\nCMD ["/bin/bash"]'))
-    inventory = case.inventory()
-    inventory['apt_open_gaps'] = [{'recipe': BASE_DOCKERFILE,
-                                   'instruction': GAP_INSTRUCTION,
-                                   'owner': source.APT_GAP_OWNER}]
-    (case.repo / INVENTORY).write_text(json.dumps(inventory, indent=2) + '\n')
-    assert source.parse_inventory((case.repo / INVENTORY).read_text()) is not None
     case.render_base_inputs()
-    case.commit('record a reviewed legacy instruction')
+    case.commit('re-add a legacy third-party apt instruction')
     case.snapshot()
 
-    for arguments in (['debian'], ['golang-builder'], ['standard-release', '0.1.3']):
-        assert case.run(arguments) == 0, case.output
-        assert case.inventory()['apt_open_gaps'] == inventory['apt_open_gaps'], \
-            'a refresh dropped or rewrote a recorded gap'
-        case.unchanged()
-
-    # An edited instruction stops being the recorded one; the stager refuses it
-    # instead of regenerating the exemption from whatever the recipe now says.
-    base.write_text(base.read_text().replace('legacy.list', 'legacy-other.list'))
-    case.commit('edit the recorded instruction')
-    case.snapshot()
-    assert case.run(['debian']) == 1, case.output
-    assert 'apt gap changed/closed: review or remove exact instruction entry for ' \
-        + BASE_DOCKERFILE + ' (owner #96)' in case.output, case.output
+    # A refresh publishes the empty record and says so: the recipe itself is the
+    # image-source gate's business, so a hand-added instruction cannot acquire an
+    # exemption here.
+    assert case.run(['debian']) == 0, case.output
+    assert case.inventory()['apt_open_gaps'] == [], 'a refresh dropped the empty record'
+    assert 'apt open gaps: none' in case.output, case.output
     case.unchanged()
     case.no_work()
 
-    # Parse-level mutations of the record itself.
+    # Parse-level: an inventory that records a gap is refused in every shape, and
+    # neither the owner nor a well-formed instruction buys an exemption.
     template = json.loads((case.repo / INVENTORY).read_text())
-    for label, transform in {
-        'wrong owner': lambda value: value['apt_open_gaps'][0].update(
-            {'owner': 'https://github.com/gregwebs/agent-vm-images/issues/95'}),
-        'non-RUN instruction': lambda value: value['apt_open_gaps'][0].update(
-            {'instruction': GAP_INSTRUCTION.replace('RUN ', 'CMD ', 1)}),
-        'unknown field': lambda value: value['apt_open_gaps'][0].update({'reviewed': True}),
-        'unknown recipe': lambda value: value['apt_open_gaps'][0].update(
-            {'recipe': 'images/Other/Dockerfile'}),
-        'dangling continuation': lambda value: value['apt_open_gaps'][0].update(
-            {'instruction': GAP_INSTRUCTION + ' \\'}),
+    for label, entry in {
+        'exact instruction': {'recipe': BASE_DOCKERFILE, 'instruction': GAP_INSTRUCTION,
+                              'owner': source.APT_GAP_OWNER},
+        'wrong owner': {'recipe': BASE_DOCKERFILE, 'instruction': GAP_INSTRUCTION,
+                        'owner': 'https://github.com/gregwebs/agent-vm-images/issues/95'},
+        'unknown field': {'recipe': BASE_DOCKERFILE, 'instruction': GAP_INSTRUCTION,
+                          'owner': source.APT_GAP_OWNER, 'reviewed': True},
+        'unknown recipe': {'recipe': 'images/Other/Dockerfile', 'instruction': GAP_INSTRUCTION,
+                           'owner': source.APT_GAP_OWNER},
     }.items():
         value = json.loads(json.dumps(template))
-        transform(value)
+        value['apt_open_gaps'] = [entry]
         text = json.dumps(value, indent=2) + '\n'
-        assert text != json.dumps(template, indent=2) + '\n', label
         try:
             source.parse_inventory(text)
-        except source.Refusal:
-            continue
-        raise AssertionError('accepted an apt gap mutation: ' + label)
-    report('T17', 'preserves recorded apt gap instructions and refuses edited records')
+        except source.Refusal as error:
+            assert 'apt_open_gaps is closed' in str(error), (label, error)
+        else:
+            raise AssertionError('accepted a recorded apt gap: ' + label)
+
+    # The same record on disk stops a refresh before it publishes anything.
+    value = json.loads(json.dumps(template))
+    value['apt_open_gaps'] = [{'recipe': BASE_DOCKERFILE, 'instruction': GAP_INSTRUCTION,
+                               'owner': source.APT_GAP_OWNER}]
+    (case.repo / INVENTORY).write_text(json.dumps(value, indent=2) + '\n')
+    case.commit('record a gap by hand')
+    case.snapshot()
+    assert case.run(['debian']) == 1, case.output
+    assert 'apt_open_gaps is closed' in case.output, case.output
+    case.unchanged()
+    case.no_work()
+    report('T17', 'keeps the closed apt gap record empty and refuses any recorded gap')
 
 
 ABSOLUTE_STAGER = r'''#!/usr/bin/env python3

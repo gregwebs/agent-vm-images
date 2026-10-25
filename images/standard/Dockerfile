@@ -30,6 +30,8 @@ RUN --mount=type=bind,source=base-inputs.sha256,target=/tmp/base-source/base-inp
     --mount=type=bind,source=.dockerignore,target=/tmp/base-source/.dockerignore,ro \
     --mount=type=bind,source=Dockerfile,target=/tmp/base-source/Dockerfile,ro \
     --mount=type=bind,source=apt-policy,target=/tmp/base-source/apt-policy,ro \
+    --mount=type=bind,source=artifacts,target=/tmp/base-source/artifacts,ro \
+    --mount=type=bind,source=install-artifact.sh,target=/tmp/base-source/install-artifact.sh,ro \
     --mount=type=bind,source=install-build-ca.sh,target=/tmp/base-source/install-build-ca.sh,ro \
     --mount=type=bind,source=install-pnpm.sh,target=/tmp/base-source/install-pnpm.sh,ro \
     --mount=type=bind,source=install-zellij.sh,target=/tmp/base-source/install-zellij.sh,ro \

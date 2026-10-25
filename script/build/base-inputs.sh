@@ -24,8 +24,9 @@ IDENTITY_ARG=AGENT_VM_BASE_IDENTITY
 # Every images/ entry the base image consumes, and nothing else. Each listed
 # root must contribute at least one tracked file; the manifest, the mount list in
 # both recipes and this array change together.
-BASE_INPUT_ROOTS=(.dockerignore Dockerfile apt-policy install-build-ca.sh install-pnpm.sh
-                  install-zellij.sh pnpm recipe-contract verify-base-inputs.sh)
+BASE_INPUT_ROOTS=(.dockerignore Dockerfile apt-policy artifacts install-artifact.sh
+                  install-build-ca.sh install-pnpm.sh install-zellij.sh pnpm recipe-contract
+                  verify-base-inputs.sh)
 
 usage() {
     cat >&2 <<'USAGE'
