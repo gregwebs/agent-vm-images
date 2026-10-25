@@ -22,6 +22,11 @@ FROM debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455
 LABEL org.opencontainers.image.title="agent-vm coding-agent-free base"
 LABEL org.opencontainers.image.description="Debian 13 building block with Node 22, pnpm, Python, Docker prerequisites and diagnostic utilities."
 LABEL org.agent-vm.version.pnpm="11.11.0"
+# The two pinned third-party artifacts (#96). The gate cross-checks each value
+# against images/artifacts/<name>.json, so a pin refresh that misses the label
+# fails instead of shipping an image that misreports what it contains.
+LABEL org.agent-vm.version.node="22.23.4"
+LABEL org.agent-vm.version.gh="2.103.2"
 LABEL org.opencontainers.image.source="https://github.com/gregwebs/agent-vm-images"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
@@ -31,7 +36,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/usr/local/bin:/usr/bin:/usr/sbin:/bin \
     LANG=C.UTF-8
 
-# Verify the parent Debian baseline, not the final source set (#96 remains open).
+# Verify the parent's shipped apt baseline before anything is installed. No
+# instruction below adds an apt source or key any more (#96), so the check
+# immediately before the identity stamp re-runs this and the built image's
+# final source set is the same baseline.
 RUN --mount=type=bind,source=apt-policy,target=/tmp/apt-policy,ro \
     bash /tmp/apt-policy/check-sources.sh --policy /tmp/apt-policy
 
@@ -64,23 +72,26 @@ RUN apt-get update \
         net-tools iproute2 \
         openssh-client sshpass \
         dnsutils netcat-openbsd tcpdump \
-        less vim-tiny file unzip zip rsync \
+        less vim-tiny file unzip zip xz-utils rsync \
         htop lsof strace tmux \
  && rm -rf /var/lib/apt/lists/*
 
-RUN install -dm 755 /etc/apt/keyrings \
- && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        > /etc/apt/keyrings/githubcli-archive-keyring.gpg \
- && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
- && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        > /etc/apt/sources.list.d/github-cli.list \
- && apt-get update \
- && apt-get install -y --no-install-recommends gh \
- && rm -rf /var/lib/apt/lists/*
-
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
- && apt-get install -y --no-install-recommends nodejs \
- && rm -rf /var/lib/apt/lists/*
+# Node and the GitHub CLI come from committed release archives, not from a live
+# setup script or a third-party apt repository: images/artifacts/<name>.json pins
+# the exact per-architecture URL and SHA-256, and images/install-artifact.sh
+# refuses a changed byte, a changed signed manifest, a hostile archive member and
+# an attestation bundle the installed verifier cannot tie to the archive. There
+# is no apt, npm, mirror or `latest` fallback, so a build without network fails
+# instead of resolving something unreviewed. TARGETARCH is the platform token
+# every pin is keyed by; xz-utils above is what unpacks Node's `.tar.xz`.
+ARG TARGETARCH
+RUN --mount=type=bind,source=install-artifact.sh,target=/tmp/artifact-source/install-artifact.sh,ro \
+    --mount=type=bind,source=artifacts,target=/tmp/artifact-source/artifacts,ro \
+    ARTIFACT_SOURCE_DIR=/tmp/artifact-source \
+    bash /tmp/artifact-source/install-artifact.sh node \
+        /tmp/artifact-source/artifacts/node.json "$TARGETARCH" \
+ && bash /tmp/artifact-source/install-artifact.sh gh \
+        /tmp/artifact-source/artifacts/gh.json "$TARGETARCH"
 
 # pnpm's reviewed pin owns the inherited selection; npm/npx remain Node's commands.
 RUN --mount=type=bind,source=install-pnpm.sh,target=/tmp/install-pnpm.sh,ro \
@@ -125,9 +136,17 @@ RUN set -e \
  && ping -V >/dev/null 2>&1 \
  && bash --version >/dev/null \
  && node --version >/dev/null \
+ && gh --version >/dev/null \
  && python3 --version >/dev/null \
  && zellij --version >/dev/null \
  && echo "== sanity OK =="
+
+# The final apt source set, checked again after every package step: with no
+# third-party repository left (#96) this must still be the committed baseline.
+# It is a separate RUN, not part of the stamp below, so a failure names the apt
+# source set rather than the source identity.
+RUN --mount=type=bind,source=apt-policy,target=/tmp/apt-policy,ro \
+    bash /tmp/apt-policy/check-sources.sh --policy /tmp/apt-policy
 
 # Nothing above proves which sources this base consumed: another checkout with
 # the same pinned parents installs the same packages and still looks like this
@@ -139,6 +158,8 @@ RUN --mount=type=bind,source=base-inputs.sha256,target=/tmp/base-source/base-inp
     --mount=type=bind,source=.dockerignore,target=/tmp/base-source/.dockerignore,ro \
     --mount=type=bind,source=Dockerfile,target=/tmp/base-source/Dockerfile,ro \
     --mount=type=bind,source=apt-policy,target=/tmp/base-source/apt-policy,ro \
+    --mount=type=bind,source=artifacts,target=/tmp/base-source/artifacts,ro \
+    --mount=type=bind,source=install-artifact.sh,target=/tmp/base-source/install-artifact.sh,ro \
     --mount=type=bind,source=install-build-ca.sh,target=/tmp/base-source/install-build-ca.sh,ro \
     --mount=type=bind,source=install-pnpm.sh,target=/tmp/base-source/install-pnpm.sh,ro \
     --mount=type=bind,source=install-zellij.sh,target=/tmp/base-source/install-zellij.sh,ro \

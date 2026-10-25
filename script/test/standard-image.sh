@@ -257,14 +257,19 @@ assert_expected_selection() { # $1 image, $2 newline-separated suffix=value
     done <<<"$lines"
 }
 
-# Released artifacts have no local base image, but still expose all nine selections.
+# Released artifacts have no local base image, but still expose every selection,
+# including the three the base owns: node, gh and pnpm (#96).
+# The base owns the three selections it installs from committed pins: Node, the
+# GitHub CLI and pnpm (#96). The standard inherits those and adds its own nine,
+# so its set is the base's three plus the agents.
 assert_selection_label_sets() { # base standard artifact-mode
-    local want
-    want=$(for suffix in codex opencode claude copilot dsh pnpm pi pi-claude-bridge opencode-claude; do echo "org.agent-vm.version.$suffix"; done | sort)
+    local want base_want
+    base_want=$(for suffix in gh node pnpm; do echo "org.agent-vm.version.$suffix"; done | sort)
+    want=$(for suffix in codex opencode claude copilot dsh gh node pnpm pi pi-claude-bridge opencode-claude; do echo "org.agent-vm.version.$suffix"; done | sort)
     if [ "$3" = false ]; then
-        [ "$(version_keys "$1")" = org.agent-vm.version.pnpm ] || { echo 'base must own exactly pnpm selection' >&2; return 1; }
+        [ "$(version_keys "$1")" = "$base_want" ] || { echo 'base must own exactly the node, gh and pnpm selections' >&2; return 1; }
     fi
-    [ "$(version_keys "$2")" = "$want" ] || { echo 'standard must have exactly nine selection labels' >&2; return 1; }
+    [ "$(version_keys "$2")" = "$want" ] || { echo 'standard must have exactly eleven selection labels' >&2; return 1; }
 }
 
 # assert_recipe_labels IMG RECIPE [EXPECTED_LABELS_FILE] [STRICT]
@@ -792,14 +797,18 @@ oracle_self_test() {
     (
         version_keys() {
             case "$1" in
-                fixture-base) echo org.agent-vm.version.pnpm ;;
-                fixture-standard) for suffix in codex opencode claude copilot dsh pnpm pi pi-claude-bridge opencode-claude; do echo "org.agent-vm.version.$suffix"; done | sort ;;
+                fixture-base) for suffix in gh node pnpm; do echo "org.agent-vm.version.$suffix"; done | sort ;;
+                fixture-standard) for suffix in codex opencode claude copilot dsh gh node pnpm pi pi-claude-bridge opencode-claude; do echo "org.agent-vm.version.$suffix"; done | sort ;;
                 *) echo 'unexpected base query in artifact mode' >&2; return 1 ;;
             esac
         }
         assert_selection_label_sets '' fixture-standard true || exit 1
         assert_selection_label_sets fixture-base fixture-standard false || exit 1
         if assert_selection_label_sets '' fixture-standard false 2>/dev/null; then exit 1; fi
+        # A base that lost the node or gh selection, and a standard missing one,
+        # must both be rejected.
+        version_keys() { for suffix in gh pnpm; do echo "org.agent-vm.version.$suffix"; done | sort; }
+        if assert_selection_label_sets fixture-base fixture-standard false 2>/dev/null; then exit 1; fi
         version_keys() { echo org.agent-vm.version.pnpm; }
         if assert_selection_label_sets '' fixture-standard true 2>/dev/null; then exit 1; fi
     ) || fail 'artifact/local selection-label mode controls failed'

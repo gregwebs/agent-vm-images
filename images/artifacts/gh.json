@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "name": "gh",
+  "kind": "release-archive",
+  "version": "2.103.2",
+  "upstream": {
+    "project": "https://github.com/cli/cli",
+    "release": "v2.103.2"
+  },
+  "install": {
+    "destination": "/usr/local",
+    "payload": [
+      "bin/gh",
+      "share/man"
+    ],
+    "links": []
+  },
+  "platforms": {
+    "linux/amd64": {
+      "url": "https://github.com/cli/cli/releases/download/v2.103.2/gh_2.103.2_linux_amd64.tar.gz",
+      "archive": "tar.gz",
+      "member_prefix": "gh_2.103.2_linux_amd64/",
+      "sha256": "62ccf747115ddc61237efffdde66a3c8f70ba249433dc64f70801089b59c59c8",
+      "bundle": {
+        "path": "gh-2.103.2-linux-amd64.bundle.jsonl",
+        "sha256": "b0ef1505f3924bed67164a182962ece94c2e2f1991c65eead69009414ab079af"
+      }
+    },
+    "linux/arm64": {
+      "url": "https://github.com/cli/cli/releases/download/v2.103.2/gh_2.103.2_linux_arm64.tar.gz",
+      "archive": "tar.gz",
+      "member_prefix": "gh_2.103.2_linux_arm64/",
+      "sha256": "4c3e99a50bd8b181a3fe9d69b25dd978bac768148d88f01507c6b4d1ef61a443",
+      "bundle": {
+        "path": "gh-2.103.2-linux-arm64.bundle.jsonl",
+        "sha256": "b0ef1505f3924bed67164a182962ece94c2e2f1991c65eead69009414ab079af"
+      }
+    }
+  },
+  "authentication": {
+    "method": "sigstore-attestation",
+    "checksums": {
+      "url": "https://github.com/cli/cli/releases/download/v2.103.2/gh_2.103.2_checksums.txt",
+      "sha256": "414d6009dc7f9f936d70831af818d1a32aa0ff07a77646861efd207356a36b2d"
+    },
+    "policy": {
+      "repository": "cli/cli",
+      "signer_workflow": "cli/cli/.github/workflows/deployment.yml",
+      "cert_oidc_issuer": "https://token.actions.githubusercontent.com",
+      "deny_self_hosted_runners": true
+    },
+    "verified_on": "2026-10-25",
+    "evidence": [
+      "https://github.com/cli/cli/releases/tag/v2.103.2",
+      "https://github.com/cli/cli/attestations",
+      "https://github.com/cli/cli/blob/trunk/.github/workflows/deployment.yml"
+    ],
+    "reason": "cli/cli publishes no detached OpenPGP signature or standalone Sigstore bundle; its SLSA provenance is readable only by `gh attestation verify`, and the GitHub CLI is the artifact being installed, so the authoritative verification is the pin-time one recorded here and the build's check binds the committed bundle to the committed archive with the installed verifier. One statement covers every release asset, so the two committed bundle files carry the same bytes; each platform entry still hashes its own copy. The committed checksums file is the pin-time cross-check that the arch line equals the committed digest, and its bytes are committed so an upstream rewrite is visible; ordinary builds do not fetch it, because the bundle proves more."
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "name": "node",
+  "kind": "release-archive",
+  "version": "22.23.4",
+  "upstream": {
+    "project": "https://nodejs.org/dist",
+    "release": "v22.23.4"
+  },
+  "install": {
+    "destination": "/usr/local",
+    "payload": [
+      "bin",
+      "include",
+      "lib",
+      "share",
+      "CHANGELOG.md",
+      "LICENSE",
+      "README.md"
+    ],
+    "links": [
+      {
+        "path": "/usr/bin/node",
+        "target": "/usr/local/bin/node"
+      }
+    ]
+  },
+  "platforms": {
+    "linux/amd64": {
+      "url": "https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz",
+      "archive": "tar.xz",
+      "member_prefix": "node-v22.23.4-linux-x64/",
+      "sha256": "1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce"
+    },
+    "linux/arm64": {
+      "url": "https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-arm64.tar.xz",
+      "archive": "tar.xz",
+      "member_prefix": "node-v22.23.4-linux-arm64/",
+      "sha256": "6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b"
+    }
+  },
+  "bundled": {
+    "npm": "10.9.9"
+  },
+  "authentication": {
+    "method": "openpgp-signed-manifest",
+    "manifest": {
+      "url": "https://nodejs.org/dist/v22.23.4/SHASUMS256.txt",
+      "sha256": "c90c3f1478fda8308b22cc1a1b0dc536169196444e67ee8b5c582fd351d02bce"
+    },
+    "signature": {
+      "url": "https://nodejs.org/dist/v22.23.4/SHASUMS256.txt.sig",
+      "sha256": "062fe0561f4e93d54dcb2f826a50a4ff26e2563f88b254dd8a3324809abffcd9"
+    },
+    "key": {
+      "path": "node-release-key.asc",
+      "fingerprint": "5BE8A3F6C8A5C01D106C0AD820B1A390B168D356",
+      "sha256": "5115095e2f8010c75da052ecb1cfb3af630e084f0f8daa93a863557b01b0f90a"
+    },
+    "verified_on": "2026-10-25",
+    "reason": "The signed manifest is the selection authority: the build verifies the detached signature over SHASUMS256.txt against the committed release key, requires the pinned issuer fingerprint, and refuses unless the signed line for the archive equals the committed digest before the archive is fetched. The npm, npx and corepack commands are the ones bundled in this reviewed archive; there is no separate npm pin."
+  }
+}

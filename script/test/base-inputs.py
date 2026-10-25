@@ -28,8 +28,9 @@ MANIFEST = 'images/base-inputs.sha256'
 EXTENSION = 'examples/base-extension/Dockerfile'
 IDENTITY_ARG = 'AGENT_VM_BASE_IDENTITY'
 DRIFT = 'base-inputs: inputs/default drift; run: bash script/build/base-inputs.sh --write'
-ROOTS = ['.dockerignore', 'Dockerfile', 'apt-policy', 'install-build-ca.sh', 'install-pnpm.sh',
-         'install-zellij.sh', 'pnpm', 'recipe-contract', 'verify-base-inputs.sh']
+ROOTS = ['.dockerignore', 'Dockerfile', 'apt-policy', 'artifacts', 'install-artifact.sh',
+         'install-build-ca.sh', 'install-pnpm.sh', 'install-zellij.sh', 'pnpm',
+         'recipe-contract', 'verify-base-inputs.sh']
 PLACEHOLDER = 'sha256:' + '0' * 64
 EMPTY_BLOB = 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391'
 FAKE_CP = r'''#!/usr/bin/env python3
@@ -82,6 +83,10 @@ FIXTURE_FILES = {
     'images/.dockerignore': '**/*.log\n**/node_modules\n',
     'images/Dockerfile': 'FROM debian:13-slim\nCMD ["/bin/bash"]\n',
     'images/apt-policy/debian.sources': 'Types: deb\nURIs: http://deb.debian.org/debian\n',
+    'images/artifacts/gh.json': '{"version": "0.0.0"}\n',
+    'images/artifacts/node.json': '{"version": "0.0.0"}\n',
+    'images/artifacts/node-release-key.asc': '-----BEGIN PGP PUBLIC KEY BLOCK-----\n',
+    'images/install-artifact.sh': '#!/bin/sh\nset -eu\n',
     'images/install-build-ca.sh': '#!/bin/sh\nset -eu\n',
     'images/install-pnpm.sh': '#!/bin/sh\nset -eu\n',
     'images/install-zellij.sh': '#!/bin/sh\nset -eu\n',

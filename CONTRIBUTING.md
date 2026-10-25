@@ -29,21 +29,57 @@ version bump, Rust application build, submodule or launcher packaging is needed.
   [image input policy](docs/image-input-policy.md#repository-base-identity-a-committed-input-manifest)
   and [the ADR](docs/adr/0005-repository-base-identity.md).
   Official Debian apt packages may float with normal apt authentication;
-  NodeSource and GitHub CLI stay unpinned violations owned by
-  [#96](https://github.com/gregwebs/agent-vm-images/issues/96), optional plugins
-  by [#101](https://github.com/gregwebs/agent-vm-images/issues/101). This is a
+  optional plugins stay with [#101](https://github.com/gregwebs/agent-vm-images/issues/101).
+  Node and the GitHub CLI are
+  [pinned release artifacts](docs/image-input-policy.md#pinned-third-party-release-artifacts):
+  exact upstream archives whose per-architecture SHA-256, evidence files and
+  version labels are committed, installed by `images/install-artifact.sh` and
+  refreshed only by `script/dev/pin-artifact.py` (see
+  [ADR 0006](docs/adr/0006-third-party-artifact-pins.md)). This is a
   pinned-parent boundary, not byte-reproducible distro construction. The base
-  build verifies that parent baseline with `images/apt-policy/check-sources.sh`;
-  the exact remaining #96 apt instructions are recorded in
-  `images/parent-pins.json` `apt_open_gaps`, and any other apt source or key
+  build verifies the Debian baseline with `images/apt-policy/check-sources.sh`
+  both before and after the package steps, `images/parent-pins.json`
+  `apt_open_gaps` is a closed empty record, and any apt source or key
   installation written in a spelling the image-source gate knows (`/etc/apt`
   with any suffix, `sources.list`, `.sources`, `Signed-By`, `trusted.gpg`, the
-  keyring directories, `URIs:`, `Types: deb`, `Dir::Etc`, `apt-config`) fails it.
+  keyring directories, `URIs:`, `Types: deb`, `Dir::Etc`, `apt-config`, the
+  NodeSource and GitHub CLI marks), a downloaded script piped into a shell, or
+  `nodejs`/`npm`/`gh` through apt fails it.
 - `CODING_STANDARDS.md` is generated from the shared standards and stays
   unchanged. Its immutable-input rule applies here with exactly one exception:
   packages from official Debian apt repositories, with the reviewed policy in
   `images/apt-policy/` and normal apt authentication retained. That exception
   does not cover parent images, other apt repositories or plugins.
+
+## Release-artifact maintenance
+
+Node and the GitHub CLI come from committed release archives. Only
+`script/dev/pin-artifact.py` writes their pins, evidence and labels, on a
+maintainer host (it refuses `GITHUB_ACTIONS=true`):
+
+```bash
+python3 script/dev/pin-artifact.py --artifact node --version 22.23.5
+python3 script/dev/pin-artifact.py --artifact gh --version 2.104.0
+python3 script/dev/pin-artifact.py --check
+```
+
+It resolves both architectures, verifies every piece of evidence (the Node
+manifest signature against the committed release key, or `gh attestation
+download` plus `gh attestation verify` under the pinned policy for the GitHub
+CLI, which needs your `gh` login) and only then publishes
+`images/artifacts/<name>.json`, its evidence files and the
+`org.agent-vm.version.<name>` label as one transaction. A partial upstream
+failure leaves the committed files byte-identical; status `3` means the rollback
+was incomplete and prints the work directory to recover. It never commits and
+never adopts a newer version by itself. Because `artifacts/` and
+`install-artifact.sh` are base inputs, finish with:
+
+```bash
+bash script/build/base-inputs.sh --write
+bash script/test/artifact-pins.sh
+python3 script/test/pin-artifact-maintenance.py   # the writer's own fault cases
+bash images/build.sh base    # then: bash script/test/node-toolchain.sh agent-vm-base:local --platform linux/arm64
+```
 
 ## Parent-pin maintenance
 

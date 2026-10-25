@@ -2,7 +2,8 @@
 
 Editable Docker sources, independent of the agent-vm launcher:
 
-- **Base:** Debian 13, Bash, Node 22, Python, Docker prerequisites, diagnostic
+- **Base:** Debian 13, Bash, Node 22 (pinned release archive), GitHub CLI
+  (pinned release archive), Python, Docker prerequisites, diagnostic
   utilities, zellij and pinned pnpm. No coding-agent CLI or fixed guest account.
 - **Standard:** the base plus dsh, Pi, Codex, OpenCode, Claude and Copilot;
   inherited base pnpm and the Pi Claude bridge are also mandatory.
@@ -26,11 +27,13 @@ hash of this checkout, and `images/standard/Dockerfile` and
 `examples/base-extension/Dockerfile` refuse a base whose stamp disagrees. That is
 source identity, not image-byte identity — see
 [the ADR](docs/adr/0005-repository-base-identity.md). Official Debian
-apt packages may float with normal apt authentication. NodeSource and the GitHub
-CLI apt installs and the optional Claude plugins remain unpinned violations owned
-by [#96](https://github.com/gregwebs/agent-vm-images/issues/96) and
-[#101](https://github.com/gregwebs/agent-vm-images/issues/101). Committed agent
-selections, locks and reviewed installer snapshots are not silently refreshed.
+apt packages may float with normal apt authentication; Node and the GitHub CLI are
+[pinned release artifacts](docs/image-input-policy.md#pinned-third-party-release-artifacts)
+instead of apt or setup-script inputs (see
+[ADR 0006](docs/adr/0006-third-party-artifact-pins.md)), and the optional Claude
+plugins remain owned by [#101](https://github.com/gregwebs/agent-vm-images/issues/101).
+Committed agent selections, locks and reviewed installer snapshots are not
+silently refreshed.
 
 ## Clone and build
 

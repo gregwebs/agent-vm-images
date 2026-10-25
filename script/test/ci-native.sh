@@ -87,6 +87,9 @@ case "$phase" in
         # readiness. One extra resolution, inside the measured audit budget.
         timed dsh-cordis-negative bash script/test/standard-node-consumers.sh agent-vm-base:local \
             --consumer dsh --cordis-negative --platform "$platform"
+        # The pinned Node/gh identity in the image itself (#96): versions, the
+        # bundled npm/npx, /usr/bin/node and pnpm through it. Seconds, offline.
+        timed node-toolchain bash script/test/node-toolchain.sh agent-vm-base:local --platform "$platform"
         timed pnpm-runtime bash script/test/pnpm-runtime.sh agent-vm-base:local agent-vm-standard:local --platform "$platform"
         timed standard-uid-t5 bash script/test/standard-image.sh agent-vm-base:local agent-vm-standard:local --platform "$platform"
         # Artifact mode is the only path that runs the three rendered guest helper

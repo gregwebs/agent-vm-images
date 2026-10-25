@@ -41,8 +41,10 @@ the Debian base, the build-only Go helper compiler and the released standard
 image, each with its digest, per-platform provenance and reviewed verification
 method. `images/apt-policy/` records the reviewed Debian repository/key baseline
 extracted from the pinned parent; `images/apt-policy/check-sources.sh` is the
-build-time check of that parent baseline and `images/parent-pins.json`
-`apt_open_gaps` records the exact remaining #96 apt instructions.
+build-time check of that baseline, and `images/parent-pins.json`
+`apt_open_gaps` is a closed, empty record: [#96](https://github.com/gregwebs/agent-vm-images/issues/96)
+removed both remaining third-party instructions, so no maintained recipe may add
+one.
 `images/install-build-ca.sh` owns the optional host build CA: it verifies the
 reviewed `BUILD_CA_SHA256`, installs the certificate, and records the hash in
 the image and in a label the public release refuses. The only writer
@@ -64,6 +66,21 @@ parent refresh republishes the manifest and the default, since a moved local
 parent changes a listed input. `images/parent-pins.json` is metadata the base
 does not consume and is deliberately not listed. Decision and limits:
 [ADR 0005](adr/0005-repository-base-identity.md).
+
+## Third-party release artifacts (#96)
+
+`images/artifacts/<name>.json` owns the reviewed selection of Node and the GitHub
+CLI: the exact upstream archive per architecture with its SHA-256, the member
+prefix, the declared payload and the authentication evidence (a committed Node
+release key, or a Sigstore bundle per architecture). `images/install-artifact.sh`
+(with `images/artifacts/install_artifact.py` and `artifact_pin.py`) is the only
+installer and the only reader of a pin in an image;
+`script/dev/pin-artifact.py` is the only writer, and it also owns the
+`org.agent-vm.version.<name>` labels in `images/Dockerfile`. `artifacts/` and
+`install-artifact.sh` are base inputs, so a pin refresh is followed by
+`bash script/build/base-inputs.sh --write`. Decision, limits and evidence:
+[ADR 0006](adr/0006-third-party-artifact-pins.md) and the
+[image input policy](image-input-policy.md#pinned-third-party-release-artifacts).
 
 ## Current pnpm ownership
 
