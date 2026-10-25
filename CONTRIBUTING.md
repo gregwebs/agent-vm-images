@@ -19,7 +19,40 @@ version bump, Rust application build, submodule or launcher packaging is needed.
   helpers or audits. CI's explicit unused SDK cleanup is disposable-runner only.
 - Review exact pins, integrity/lock diffs, vendor licenses/provenance and modes.
   No `curl | shell` replacement or automatic latest lookup during builds/CI.
-  OS/apt inputs still float; this is not byte-reproducible distro construction.
+  External parents are digest-pinned; the local-base consumers
+  (`images/standard/Dockerfile`, `examples/base-extension/Dockerfile`) are bound
+  to committed base inputs in a later #95 change, not yet. See
+  [image input policy](docs/image-input-policy.md).
+  Official Debian apt packages may float with normal apt authentication;
+  NodeSource and GitHub CLI stay unpinned violations owned by
+  [#96](https://github.com/gregwebs/agent-vm-images/issues/96), optional plugins
+  by [#101](https://github.com/gregwebs/agent-vm-images/issues/101). This is a
+  pinned-parent boundary, not byte-reproducible distro construction.
+- `CODING_STANDARDS.md` is generated from the shared standards and stays
+  unchanged. Its immutable-input rule applies here with exactly one exception:
+  packages from official Debian apt repositories, with the reviewed policy in
+  `images/apt-policy/` and normal apt authentication retained. That exception
+  does not cover parent images, other apt repositories or plugins.
+
+## Parent-pin maintenance
+
+Only `script/dev/refresh-parent-pins.sh` writes parent pins, on a maintainer host
+(the script refuses `GITHUB_ACTIONS=true`). Builds never resolve a parent:
+
+```bash
+bash script/dev/refresh-parent-pins.sh debian
+bash script/dev/refresh-parent-pins.sh golang-builder [golang:VERSION-trixie]
+bash script/dev/refresh-parent-pins.sh standard-release X.Y.Z
+```
+
+The first adoption was `--bootstrap`. A refresh prints old/new references,
+per-platform digests and provenance, and the apt policy diff, then publishes the
+inventory, the affected recipes and the extracted Debian baseline in one
+transaction. Status 3 means an undecided or incomplete rollback: `recovery.json`
+and the numbered backups are retained and must be recovered from before further
+work. A changed hash-only exception digest prints
+`hash-only exception requires renewed review`; re-date it in the diff before
+merging. Policy and the exact exception language: [image input policy](docs/image-input-policy.md).
 
 ## Selection ownership and maintenance
 

@@ -17,7 +17,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 # Coding-agent-free source building block; install agents with standard/Dockerfile
 # or extend this base with an ordinary user-owned Dockerfile.
-FROM debian:13-slim
+FROM debian:13-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 
 LABEL org.opencontainers.image.title="agent-vm coding-agent-free base"
 LABEL org.opencontainers.image.description="Debian 13 building block with Node 22, pnpm, Python, Docker prerequisites and diagnostic utilities."

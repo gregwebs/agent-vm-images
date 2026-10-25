@@ -34,6 +34,19 @@ launcher/submodule integration remains #265 and is not claimed here, and
 container/fixture checks do not demonstrate microsandbox boot or authenticated
 sessions.
 
+## Parent pins (#95)
+
+`images/parent-pins.json` owns the external parents of every maintained recipe:
+the Debian base, the build-only Go helper compiler and the released standard
+image, each with its digest, per-platform provenance and reviewed verification
+method. `images/apt-policy/` records the reviewed Debian repository/key baseline
+extracted from the pinned parent. The only writer of both is
+`script/dev/refresh-parent-pins.sh` (with `script/dev/parent_pins.py`), which
+refuses CI execution; builds and the isolated release entrypoints only read them.
+`images/Dockerfile:20` and the four `examples/layers/*` `ARG BASE_IMAGE`
+declarations must name the pinned references literally. Policy, exceptions and
+statuses: [image input policy](image-input-policy.md).
+
 ## Current pnpm ownership
 
 Base owns `images/pnpm/`, authenticated bootstrap and the pnpm selection label.

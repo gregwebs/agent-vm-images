@@ -1,8 +1,12 @@
 //! Standalone image-source integrity gates; no launcher dependencies.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 fn repo_path(relative: &str) -> PathBuf {
@@ -1813,6 +1817,1472 @@ fn the_two_builder_declarations_agree_with_go_mod() {
 /// caller mentions it; and a path assembled from two shell variables
 /// (`"$DIR/$(echo tool_access)"`) is not resolved here.
 const RETIRED_HELPERS: [&str; 2] = ["install-status.py", "check-tool-access.py"];
+
+// --- parent inventory (#95) -------------------------------------------------
+//
+// `images/parent-pins.json` is the single record of what every maintained recipe
+// builds on. This gate owns what the host resolver cannot: it re-derives the pins
+// from the committed recipes, refuses a hostile edit of the JSON (beginning with
+// duplicate keys, which a `Value` would already have collapsed), and keeps the
+// maintenance path out of every build entrypoint. Ordinary builds only read pins.
+
+const PARENT_INVENTORY: &str = "images/parent-pins.json";
+const DEBIAN_PIN: &str = "debian";
+const GO_PIN: &str = "golang-builder";
+const RELEASE_PIN: &str = "standard-release";
+const LOCAL_BASE: &str = "agent-vm-base:local";
+/// The trusted release identity, tied to `script/release/attestations.py`
+/// (`REPO`/`WORKFLOW`) by `the_signer_identity_agrees_with_the_release_verifier`;
+/// composing the signer from the parsed repository would accept any repository
+/// that signs with a workflow of the same name.
+const RELEASE_REPOSITORY: &str = "gregwebs/agent-vm-images";
+const RELEASE_WORKFLOW: &str = ".github/workflows/release-standard.yml";
+const PLATFORMS: [&str; 2] = ["linux/amd64", "linux/arm64"];
+const HASH_ONLY_EVIDENCE: [&str; 4] = [
+    "https://docs.docker.com/engine/security/trust/",
+    "https://www.docker.com/blog/docker-content-trust-retirement-and-migration-guidance/",
+    "https://docs.docker.com/docker-hub/image-library/trusted-content/",
+    "https://www.docker.com/blog/retiring-docker-content-trust/",
+];
+
+/// Raw JSON ingestion boundary: reject duplicate object keys at every level
+/// before they can collapse into a map.
+struct StrictJson(Value);
+
+impl<'de> Deserialize<'de> for StrictJson {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(StrictVisitor)
+    }
+}
+
+struct StrictVisitor;
+
+impl<'de> Visitor<'de> for StrictVisitor {
+    type Value = StrictJson;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("any JSON value")
+    }
+
+    fn visit_bool<E: de::Error>(self, value: bool) -> Result<StrictJson, E> {
+        Ok(StrictJson(Value::Bool(value)))
+    }
+
+    fn visit_i64<E: de::Error>(self, value: i64) -> Result<StrictJson, E> {
+        Ok(StrictJson(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E: de::Error>(self, value: u64) -> Result<StrictJson, E> {
+        Ok(StrictJson(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E: de::Error>(self, value: f64) -> Result<StrictJson, E> {
+        Ok(StrictJson(
+            serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number),
+        ))
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<StrictJson, E> {
+        Ok(StrictJson(Value::String(value.to_owned())))
+    }
+
+    fn visit_string<E: de::Error>(self, value: String) -> Result<StrictJson, E> {
+        Ok(StrictJson(Value::String(value)))
+    }
+
+    fn visit_none<E: de::Error>(self) -> Result<StrictJson, E> {
+        Ok(StrictJson(Value::Null))
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<StrictJson, E> {
+        Ok(StrictJson(Value::Null))
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<StrictJson, D::Error> {
+        deserializer.deserialize_any(StrictVisitor)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut access: A) -> Result<StrictJson, A::Error> {
+        let mut items = Vec::new();
+        while let Some(item) = access.next_element::<StrictJson>()? {
+            items.push(item.0);
+        }
+        Ok(StrictJson(Value::Array(items)))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<StrictJson, A::Error> {
+        let mut members = serde_json::Map::new();
+        while let Some(key) = access.next_key::<String>()? {
+            if members.contains_key(&key) {
+                return Err(de::Error::custom(format!("duplicate JSON key: {key}")));
+            }
+            members.insert(key, access.next_value::<StrictJson>()?.0);
+        }
+        Ok(StrictJson(Value::Object(members)))
+    }
+}
+
+fn strict_json(text: &str) -> Result<Value, String> {
+    serde_json::from_str::<StrictJson>(text)
+        .map(|value| value.0)
+        .map_err(|error| error.to_string())
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_date(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+}
+
+fn is_rfc3339(value: &str) -> bool {
+    value.len() == 20
+        && is_date(&value[..10])
+        && value.as_bytes()[10] == b'T'
+        && value.ends_with('Z')
+        && value[11..19]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b':')
+}
+
+fn is_exact_version(value: &str) -> bool {
+    let parts: Vec<&str> = value.split('.').collect();
+    parts.len() == 3
+        && parts.iter().all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (*part == "0" || !part.starts_with('0'))
+        })
+}
+
+fn text(value: &Value, context: &str) -> Result<String, String> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{context}: string required"))
+}
+
+fn object<'a>(
+    value: &'a Value,
+    context: &str,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    value
+        .as_object()
+        .ok_or_else(|| format!("{context}: JSON object required"))
+}
+
+fn array<'a>(value: &'a Value, context: &str) -> Result<&'a Vec<Value>, String> {
+    value
+        .as_array()
+        .ok_or_else(|| format!("{context}: JSON array required"))
+}
+
+fn exact<'a>(
+    value: &'a Value,
+    keys: &[&str],
+    context: &str,
+) -> Result<&'a serde_json::Map<String, Value>, String> {
+    let members = object(value, context)?;
+    let wanted: BTreeSet<&str> = keys.iter().copied().collect();
+    let found: BTreeSet<&str> = members.keys().map(String::as_str).collect();
+    if wanted != found {
+        return Err(format!(
+            "{context}: expected exactly {wanted:?}, found {found:?}"
+        ));
+    }
+    Ok(members)
+}
+
+fn exact_platforms<'a>(
+    value: &'a Value,
+    keys: &[&str],
+    context: &str,
+) -> Result<Vec<&'a serde_json::Map<String, Value>>, String> {
+    let platforms = object(value, context)?;
+    if platforms
+        .keys()
+        .map(String::as_str)
+        .ne(PLATFORMS.iter().copied())
+    {
+        return Err(format!(
+            "{context}: exactly the amd64 and arm64 platforms are supported"
+        ));
+    }
+    PLATFORMS
+        .iter()
+        .map(|platform| {
+            exact(
+                &platforms[*platform],
+                keys,
+                &format!("{context} {platform}"),
+            )
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Digest(String);
+
+impl Digest {
+    fn parse(value: &Value, context: &str) -> Result<Digest, String> {
+        let raw = text(value, context)?;
+        match raw.strip_prefix("sha256:") {
+            Some(hex) if is_lower_hex(hex, 64) => Ok(Digest(raw)),
+            _ => Err(format!("{context}: invalid SHA-256 digest")),
+        }
+    }
+
+    fn value(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct SourceRevision(String);
+
+impl SourceRevision {
+    fn parse(value: &Value, context: &str) -> Result<SourceRevision, String> {
+        let raw = text(value, context)?;
+        if is_lower_hex(&raw, 40) {
+            Ok(SourceRevision(raw))
+        } else {
+            Err(format!("{context}: invalid 40-hex source revision"))
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Repository(String);
+
+impl Repository {
+    fn parse(raw: &str, context: &str) -> Result<Repository, String> {
+        let head = raw.bytes().next();
+        let head_ok = head.is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+        let body_ok = raw.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._/-".contains(&byte)
+        });
+        if !head_ok || !body_ok {
+            return Err(format!("{context}: invalid image repository"));
+        }
+        Ok(Repository(raw.to_owned()))
+    }
+
+    fn value(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A digest reference plus the tag that selected it. Official images are
+/// selected by tag and pinned by digest; the released standard image is
+/// addressed by digest alone, so its tag is absent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PinnedReference {
+    repository: Repository,
+    tag: Option<String>,
+    digest: Digest,
+}
+
+impl PinnedReference {
+    fn parse(value: &Value, context: &str, require_tag: bool) -> Result<PinnedReference, String> {
+        let raw = text(value, context)?;
+        let (name, digest) = raw
+            .split_once('@')
+            .ok_or_else(|| format!("{context}: a pinned reference must carry a digest"))?;
+        let digest = Digest::parse(&Value::String(digest.to_owned()), context)?;
+        let (repository, tag) = match name.rsplit_once(':') {
+            Some((repository, tag)) if !tag.is_empty() && !tag.contains('/') => {
+                (repository.to_owned(), Some(tag.to_owned()))
+            }
+            _ => (name.to_owned(), None),
+        };
+        if require_tag && tag.is_none() {
+            return Err(format!(
+                "{context}: an official-image reference requires a tag"
+            ));
+        }
+        if !require_tag && tag.is_some() {
+            return Err(format!(
+                "{context}: this pin must reference a digest without a tag"
+            ));
+        }
+        Ok(PinnedReference {
+            repository: Repository::parse(&repository, context)?,
+            tag,
+            digest,
+        })
+    }
+
+    fn text(&self) -> String {
+        match &self.tag {
+            Some(tag) => format!("{}:{tag}@{}", self.repository.value(), self.digest.value()),
+            None => format!("{}@{}", self.repository.value(), self.digest.value()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OfficialPlatform {
+    manifest: Digest,
+    revision: SourceRevision,
+    source: String,
+    created: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReleasePlatform {
+    manifest: Digest,
+}
+
+/// Reviewed provenance. A hash-only exception is digest-bound and carries its
+/// reason and reassessment condition; a released pin must carry GitHub
+/// attestation provenance under this repository's composed signer workflow.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Verification {
+    HashOnly {
+        reviewed_on: String,
+        reason: String,
+        evidence: Vec<String>,
+        reassess: String,
+    },
+    GithubAttestation {
+        repository: String,
+        signer_workflow: String,
+        source_ref: String,
+        source_sha: SourceRevision,
+        release_json_sha256: Digest,
+        invocation_url: String,
+    },
+}
+
+/// The release path composes its workflow from the repository constant, so the
+/// inventory must name that same composed value rather than a look-alike.
+fn signer_workflow(repository: &str) -> String {
+    format!("{repository}/{RELEASE_WORKFLOW}")
+}
+
+impl Verification {
+    fn parse(value: &Value, context: &str) -> Result<Verification, String> {
+        let members = object(value, context)?;
+        match members.get("method").and_then(Value::as_str) {
+            Some("hash-only") => {
+                let members = exact(
+                    value,
+                    &["method", "reviewed_on", "reason", "evidence", "reassess"],
+                    context,
+                )?;
+                let reviewed_on = text(&members["reviewed_on"], context)?;
+                if !is_date(&reviewed_on) {
+                    return Err(format!("{context}: invalid review date"));
+                }
+                let reason = text(&members["reason"], context)?;
+                let reassess = text(&members["reassess"], context)?;
+                if reason.trim().is_empty() || reassess.trim().is_empty() {
+                    return Err(format!(
+                        "{context}: a hash-only exception needs a reason and a reassessment condition"
+                    ));
+                }
+                let evidence = array(&members["evidence"], context)?
+                    .iter()
+                    .map(|item| text(item, context))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if evidence.is_empty() {
+                    return Err(format!("{context}: a hash-only exception needs evidence"));
+                }
+                Ok(Verification::HashOnly {
+                    reviewed_on,
+                    reason,
+                    evidence,
+                    reassess,
+                })
+            }
+            Some("github-attestation") => {
+                let members = exact(
+                    value,
+                    &[
+                        "method",
+                        "repository",
+                        "signer_workflow",
+                        "source_ref",
+                        "source_sha",
+                        "release_json_sha256",
+                        "invocation_url",
+                    ],
+                    context,
+                )?;
+                let repository = text(&members["repository"], context)?;
+                let signer = text(&members["signer_workflow"], context)?;
+                let invocation_url = text(&members["invocation_url"], context)?;
+                if repository.is_empty() || invocation_url.is_empty() {
+                    return Err(format!("{context}: empty attestation identity"));
+                }
+                // The trusted identity is this repository and its release
+                // workflow, not whatever pair the inventory names: composing the
+                // signer from the parsed repository would accept any repository
+                // that signs with its own workflow of the same name.
+                if repository != RELEASE_REPOSITORY {
+                    return Err(format!(
+                        "{context}: signer repository is not {RELEASE_REPOSITORY}"
+                    ));
+                }
+                if signer != signer_workflow(RELEASE_REPOSITORY) {
+                    return Err(format!(
+                        "{context}: signer workflow is not the composed release workflow"
+                    ));
+                }
+                if members["source_ref"].as_str() != Some("refs/heads/main") {
+                    return Err(format!("{context}: source ref must be refs/heads/main"));
+                }
+                Ok(Verification::GithubAttestation {
+                    repository,
+                    signer_workflow: signer,
+                    source_ref: "refs/heads/main".to_owned(),
+                    source_sha: SourceRevision::parse(&members["source_sha"], context)?,
+                    release_json_sha256: Digest::parse(&members["release_json_sha256"], context)?,
+                    invocation_url,
+                })
+            }
+            _ => Err(format!("{context}: unknown verification method")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OfficialPin {
+    reference: PinnedReference,
+    expected_source: String,
+    platforms: BTreeMap<String, OfficialPlatform>,
+    verification: Verification,
+    resolved_on: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReleasePin {
+    reference: PinnedReference,
+    version: String,
+    platforms: BTreeMap<String, ReleasePlatform>,
+    verification: Verification,
+    resolved_on: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Pin {
+    Official(OfficialPin),
+    Release(ReleasePin),
+}
+
+impl Pin {
+    fn reference(&self) -> &PinnedReference {
+        match self {
+            Pin::Official(pin) => &pin.reference,
+            Pin::Release(pin) => &pin.reference,
+        }
+    }
+}
+
+fn parsed_date(value: &Value, context: &str) -> Result<String, String> {
+    let date = text(value, context)?;
+    if is_date(&date) {
+        Ok(date)
+    } else {
+        Err(format!("{context}: invalid resolution date"))
+    }
+}
+
+fn parse_official_pin(name: &str, value: &Value) -> Result<Pin, String> {
+    let context = format!("pin {name}");
+    let members = exact(
+        value,
+        &[
+            "kind",
+            "reference",
+            "expected_source",
+            "platforms",
+            "verification",
+            "resolved_on",
+        ],
+        &context,
+    )?;
+    if members["kind"].as_str() != Some("docker-official-image") {
+        return Err(format!("{context}: unknown pin kind"));
+    }
+    let reference = PinnedReference::parse(&members["reference"], &context, true)?;
+    let expected_source = text(&members["expected_source"], &context)?;
+    if expected_source.is_empty() {
+        return Err(format!("{context}: expected_source is required"));
+    }
+    let verification = Verification::parse(&members["verification"], &context)?;
+    if !matches!(verification, Verification::HashOnly { .. }) {
+        return Err(format!(
+            "{context}: an official image carries a reviewed hash-only exception"
+        ));
+    }
+    let mut platforms = BTreeMap::new();
+    for (platform, entry) in PLATFORMS.iter().zip(exact_platforms(
+        &members["platforms"],
+        &["manifest", "revision", "source", "created"],
+        &context,
+    )?) {
+        let source = text(&entry["source"], &context)?;
+        let created = text(&entry["created"], &context)?;
+        if source.is_empty() || !is_rfc3339(&created) {
+            return Err(format!("{context} {platform}: provenance is incomplete"));
+        }
+        platforms.insert(
+            (*platform).to_owned(),
+            OfficialPlatform {
+                manifest: Digest::parse(&entry["manifest"], &context)?,
+                revision: SourceRevision::parse(&entry["revision"], &context)?,
+                source,
+                created,
+            },
+        );
+    }
+    let resolved_on = parsed_date(&members["resolved_on"], &context)?;
+    Ok(Pin::Official(OfficialPin {
+        reference,
+        expected_source,
+        platforms,
+        verification,
+        resolved_on,
+    }))
+}
+
+fn parse_release_pin(name: &str, value: &Value) -> Result<Pin, String> {
+    let context = format!("pin {name}");
+    let members = exact(
+        value,
+        &[
+            "kind",
+            "reference",
+            "version",
+            "platforms",
+            "verification",
+            "resolved_on",
+        ],
+        &context,
+    )?;
+    if members["kind"].as_str() != Some("repository-release") {
+        return Err(format!("{context}: unknown pin kind"));
+    }
+    let reference = PinnedReference::parse(&members["reference"], &context, false)?;
+    let version = text(&members["version"], &context)?;
+    if !is_exact_version(&version) {
+        return Err(format!("{context}: invalid release version"));
+    }
+    let verification = Verification::parse(&members["verification"], &context)?;
+    if !matches!(verification, Verification::GithubAttestation { .. }) {
+        return Err(format!(
+            "{context}: a release pin requires GitHub attestation provenance"
+        ));
+    }
+    let mut platforms = BTreeMap::new();
+    for (platform, entry) in PLATFORMS.iter().zip(exact_platforms(
+        &members["platforms"],
+        &["manifest"],
+        &context,
+    )?) {
+        platforms.insert(
+            (*platform).to_owned(),
+            ReleasePlatform {
+                manifest: Digest::parse(&entry["manifest"], &context)?,
+            },
+        );
+    }
+    let resolved_on = parsed_date(&members["resolved_on"], &context)?;
+    Ok(Pin::Release(ReleasePin {
+        reference,
+        version,
+        platforms,
+        verification,
+        resolved_on,
+    }))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Binding {
+    Pin(String),
+    LocalBase(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParentSpec {
+    stage: Option<String>,
+    binding: Binding,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ParentInventory {
+    pins: BTreeMap<String, Pin>,
+    recipes: BTreeMap<String, Vec<ParentSpec>>,
+}
+
+fn parse_recipes(value: &Value) -> Result<BTreeMap<String, Vec<ParentSpec>>, String> {
+    let mut recipes = BTreeMap::new();
+    for (path, specs) in object(value, "recipes")? {
+        let context = format!("recipe {path}");
+        if !path
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte))
+        {
+            return Err("recipe path must be checkout-relative".into());
+        }
+        let mut entries = Vec::new();
+        let mut stages = BTreeSet::new();
+        for spec in array(specs, &context)? {
+            let members = object(spec, &context)?;
+            let keys: BTreeSet<&str> = members.keys().map(String::as_str).collect();
+            let pin_only: BTreeSet<&str> = ["stage", "pin"].into_iter().collect();
+            let local_only: BTreeSet<&str> = ["stage", "local_base"].into_iter().collect();
+            if keys != pin_only && keys != local_only {
+                return Err(format!("{context}: expected stage plus pin or local_base"));
+            }
+            let stage = match &members["stage"] {
+                Value::Null => None,
+                value => Some(text(value, &context)?),
+            };
+            if let Some(name) = &stage
+                && !stages.insert(name.clone())
+            {
+                return Err(format!("{context}: duplicate stage {name}"));
+            }
+            let binding = match (members.get("pin"), members.get("local_base")) {
+                (Some(value), None) => Binding::Pin(text(value, &context)?),
+                (None, Some(value)) => Binding::LocalBase(text(value, &context)?),
+                _ => return Err(format!("{context}: expected stage plus pin or local_base")),
+            };
+            entries.push(ParentSpec { stage, binding });
+        }
+        if entries.is_empty() {
+            return Err(format!("{context}: at least one parent is required"));
+        }
+        recipes.insert(path.clone(), entries);
+    }
+    Ok(recipes)
+}
+
+fn parse_parent_inventory(text_source: &str) -> Result<ParentInventory, String> {
+    let value = strict_json(text_source)?;
+    let members = exact(&value, &["schema", "pins", "recipes"], PARENT_INVENTORY)?;
+    if members["schema"].as_u64() != Some(1) {
+        return Err("unsupported parent inventory schema".into());
+    }
+    let pin_values = object(&members["pins"], "pins")?;
+    if let Some(unknown) = pin_values
+        .keys()
+        .find(|name| !matches!(name.as_str(), DEBIAN_PIN | GO_PIN | RELEASE_PIN))
+    {
+        return Err(format!("unknown pin: {unknown}"));
+    }
+    let mut pins = BTreeMap::new();
+    for name in [DEBIAN_PIN, GO_PIN, RELEASE_PIN] {
+        let value = pin_values
+            .get(name)
+            .ok_or_else(|| format!("pin inventory is incomplete: {name}"))?;
+        let parsed = if name == RELEASE_PIN {
+            parse_release_pin(name, value)?
+        } else {
+            parse_official_pin(name, value)?
+        };
+        pins.insert(name.to_owned(), parsed);
+    }
+    Ok(ParentInventory {
+        pins,
+        recipes: parse_recipes(&members["recipes"])?,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FromInstruction {
+    raw_image: String,
+    resolved_image: String,
+    stage: Option<String>,
+    platform: Option<String>,
+}
+
+/// Join continuations and drop comment/blank lines, preserving instruction order.
+fn dockerfile_instructions(source: &str) -> Vec<String> {
+    let mut instructions = Vec::new();
+    let mut current = String::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if current.is_empty() && (trimmed.is_empty() || trimmed.starts_with('#')) {
+            continue;
+        }
+        let continued = line.trim_end().ends_with('\\');
+        if continued {
+            current.push_str(line.trim_end().trim_end_matches('\\'));
+        } else {
+            current.push_str(line);
+        }
+        if continued {
+            continue;
+        }
+        if !current.trim().is_empty() {
+            instructions.push(current.trim().to_owned());
+        }
+        current.clear();
+    }
+    if !current.trim().is_empty() {
+        instructions.push(current.trim().to_owned());
+    }
+    instructions
+}
+
+/// Global `ARG NAME=default` declarations, i.e. those before the first `FROM`.
+/// A stage-local redeclaration carries no default and must not be mistaken for
+/// the global value a `${NAME}` FROM expands to.
+fn global_defaults(instructions: &[String]) -> BTreeMap<String, String> {
+    let mut defaults = BTreeMap::new();
+    for instruction in instructions {
+        let upper = instruction.to_ascii_uppercase();
+        if upper.starts_with("FROM ") {
+            break;
+        }
+        let split = instruction.split_once(' ');
+        let Some(("ARG" | "arg", rest)) = split else {
+            continue;
+        };
+        for declaration in rest.split_whitespace() {
+            if let Some((name, value)) = declaration.split_once('=') {
+                defaults.insert(name.to_owned(), value.to_owned());
+            }
+        }
+    }
+    defaults
+}
+
+fn resolve_from_image(raw: &str, defaults: &BTreeMap<String, String>) -> Result<String, String> {
+    if !raw.contains('$') {
+        return Ok(raw.to_owned());
+    }
+    let name = raw
+        .strip_prefix("${")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .filter(|name| {
+            !name.is_empty()
+                && !name.contains('$')
+                && !name.contains('{')
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+        .ok_or_else(|| format!("unresolved or nested FROM expansion: {raw}"))?;
+    defaults
+        .get(name)
+        .cloned()
+        .ok_or_else(|| format!("FROM references an undeclared or defaultless ARG: {name}"))
+}
+
+fn parse_froms(source: &str) -> Result<Vec<FromInstruction>, String> {
+    let instructions = dockerfile_instructions(source);
+    let defaults = global_defaults(&instructions);
+    let mut froms = Vec::new();
+    for instruction in &instructions {
+        if !instruction.to_ascii_uppercase().starts_with("FROM ") {
+            continue;
+        }
+        let tokens: Vec<&str> = instruction.split_whitespace().collect();
+        let mut index = 1;
+        let mut platform = None;
+        while let Some(token) = tokens.get(index) {
+            if !token.starts_with("--") {
+                break;
+            }
+            if let Some(value) = token.strip_prefix("--platform=") {
+                platform = Some(value.to_owned());
+            }
+            index += 1;
+        }
+        let raw = tokens
+            .get(index)
+            .ok_or_else(|| format!("FROM without an image: {instruction}"))?;
+        let stage = match (tokens.get(index + 1), tokens.get(index + 2)) {
+            (Some(alias), Some(name)) if alias.eq_ignore_ascii_case("as") => {
+                Some((*name).to_owned())
+            }
+            _ => None,
+        };
+        froms.push(FromInstruction {
+            raw_image: (*raw).to_owned(),
+            resolved_image: resolve_from_image(raw, &defaults)?,
+            stage,
+            platform,
+        });
+    }
+    Ok(froms)
+}
+
+/// The local base a maintained recipe consumes. Only the copied extension
+/// example consumes the base extension; every other recipe the local standard.
+fn local_base_for(path: &str) -> &'static str {
+    if path.starts_with("examples/base-extension/") {
+        "extension"
+    } else {
+        "standard"
+    }
+}
+
+fn check_recipe_parents(
+    inventory: &ParentInventory,
+    recipes: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    if recipes.keys().ne(inventory.recipes.keys()) {
+        return Err(format!(
+            "recipe inventory mismatch: inventory [{}], recipes [{}]",
+            inventory
+                .recipes
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", "),
+            recipes.keys().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    for (path, source) in recipes {
+        let froms = parse_froms(source)?;
+        let specs = &inventory.recipes[path];
+        if froms.len() != specs.len() {
+            return Err(format!(
+                "{path}: {} FROM instructions but {} inventory entries",
+                froms.len(),
+                specs.len()
+            ));
+        }
+        for (instruction, spec) in froms.iter().zip(specs) {
+            if instruction.stage != spec.stage {
+                return Err(format!("{path}: FROM stage does not match the inventory"));
+            }
+            match &spec.binding {
+                Binding::Pin(name) => {
+                    let pin = inventory
+                        .pins
+                        .get(name)
+                        .ok_or_else(|| format!("{path}: unknown pin {name}"))?;
+                    let wanted = pin.reference().text();
+                    if instruction.resolved_image != wanted {
+                        return Err(format!(
+                            "{path}: FROM {} is not the pinned {name} reference {wanted}",
+                            instruction.resolved_image
+                        ));
+                    }
+                    if !instruction.raw_image.contains('$') && instruction.raw_image != wanted {
+                        return Err(format!(
+                            "{path}: a literal FROM must stay inside its pinned repository"
+                        ));
+                    }
+                }
+                Binding::LocalBase(name) => {
+                    if name != local_base_for(path) {
+                        return Err(format!(
+                            "{path}: local base {name} does not describe this recipe"
+                        ));
+                    }
+                    if instruction.resolved_image != LOCAL_BASE {
+                        return Err(format!("{path}: local base must resolve to {LOCAL_BASE}"));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn repository_files(
+    root: &str,
+    name: Option<&str>,
+    extension: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut found = BTreeMap::new();
+    let mut stack = vec![repo_path(root)];
+    while let Some(directory) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let matches_name =
+                name.is_some_and(|wanted| path.file_name().is_some_and(|found| found == wanted));
+            let matches_extension = extension
+                .is_some_and(|wanted| path.extension().is_some_and(|found| found == wanted));
+            if !matches_name && !matches_extension {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(repo_path(""))
+                .expect("maintained source inside the repository")
+                .to_string_lossy()
+                .replace('\\', "/");
+            found.insert(
+                relative,
+                std::fs::read_to_string(&path).expect("read maintained source"),
+            );
+        }
+    }
+    found
+}
+
+fn maintained_recipes() -> BTreeMap<String, String> {
+    let mut recipes = repository_files("images", Some("Dockerfile"), None);
+    recipes.extend(repository_files("examples", Some("Dockerfile"), None));
+    recipes
+}
+
+/// Every digest *reference* (`@sha256:<64 hex>`) in a document that points at a
+/// parent must be a committed pin digest; a stale one is a wrong parent identity.
+/// Bare hashes elsewhere in the docs describe other artifacts, not parents.
+fn check_digest_mentions(
+    documents: &BTreeMap<String, String>,
+    inventory: &ParentInventory,
+) -> Result<(), String> {
+    let known: BTreeSet<String> = inventory
+        .pins
+        .values()
+        .map(|pin| pin.reference().digest.value().to_owned())
+        .collect();
+    for (path, source) in documents {
+        let mut rest = source.as_str();
+        while let Some(at) = rest.find("@sha256:") {
+            rest = &rest[at + "@sha256:".len()..];
+            let hex: String = rest.chars().take(64).collect();
+            if hex.len() < 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                continue;
+            }
+            let digest = format!("sha256:{hex}");
+            if !known.contains(&digest) {
+                return Err(format!("{path}: stale parent digest {digest}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parent_documents() -> BTreeMap<String, String> {
+    let mut documents = BTreeMap::new();
+    for relative in [PARENT_INVENTORY, "README.md", "examples/layers/README.md"] {
+        if let Ok(source) = std::fs::read_to_string(repo_path(relative)) {
+            documents.insert(relative.to_owned(), source);
+        }
+    }
+    documents.extend(repository_files("docs", None, Some("md")));
+    documents.extend(maintained_recipes());
+    documents
+}
+
+#[test]
+fn the_parent_inventory_pins_every_maintained_recipe() {
+    let inventory = parse_parent_inventory(&read_text(PARENT_INVENTORY)).unwrap();
+    let recipes = maintained_recipes();
+    assert_eq!(
+        recipes.len(),
+        7,
+        "seven maintained recipes: {:?}",
+        recipes.keys().collect::<Vec<_>>()
+    );
+    check_recipe_parents(&inventory, &recipes).unwrap();
+    let debian = match &inventory.pins[DEBIAN_PIN] {
+        Pin::Official(pin) => pin,
+        Pin::Release(_) => panic!("the Debian parent is an official image"),
+    };
+    assert_eq!(debian.reference.repository.value(), "debian");
+    assert_eq!(debian.reference.tag.as_deref(), Some("13-slim"));
+    let base = read_text("images/Dockerfile");
+    let from_debian = base
+        .lines()
+        .find_map(|line| line.strip_prefix("FROM debian:13-slim@"))
+        .expect("the base recipe pins Debian");
+    assert_eq!(debian.reference.digest.value(), from_debian.trim());
+    assert_eq!(
+        debian.platforms.keys().collect::<Vec<_>>(),
+        vec!["linux/amd64", "linux/arm64"]
+    );
+    assert_eq!(
+        debian.expected_source,
+        "https://github.com/debuerreotype/docker-debian-artifacts.git"
+    );
+    match &debian.verification {
+        Verification::HashOnly {
+            reviewed_on,
+            evidence,
+            reassess,
+            ..
+        } => {
+            assert!(is_date(reviewed_on));
+            assert!(reassess.starts_with("Stop refresh if a supported verifiable signing scheme"));
+            let cited: Vec<&str> = evidence.iter().map(String::as_str).collect();
+            for url in HASH_ONLY_EVIDENCE {
+                assert!(cited.contains(&url), "evidence misses {url}");
+            }
+        }
+        other => panic!("the Debian exception must be hash-only, got {other:?}"),
+    }
+    let go = match &inventory.pins[GO_PIN] {
+        Pin::Official(pin) => pin,
+        Pin::Release(_) => panic!("the Go builder is an official image"),
+    };
+    assert_eq!(go.reference.repository.value(), "golang");
+    let toolchain = read_text("images/recipe-contract/go.mod")
+        .lines()
+        .find_map(|line| line.strip_prefix("toolchain go"))
+        .expect("go.mod declares a toolchain")
+        .trim()
+        .to_owned();
+    let wanted_tag = format!("{toolchain}-trixie");
+    assert_eq!(go.reference.tag.as_deref(), Some(wanted_tag.as_str()));
+    assert_eq!(
+        go.expected_source,
+        "https://github.com/docker-library/golang.git"
+    );
+    let major_minor = toolchain
+        .rsplit_once('.')
+        .map(|(major_minor, _)| major_minor)
+        .expect("the go.mod toolchain is an X.Y.Z release");
+    for platform in PLATFORMS {
+        let record = &go.platforms[platform];
+        let fragment = record
+            .source
+            .strip_prefix("https://github.com/docker-library/golang.git#")
+            .unwrap_or_else(|| panic!("{platform}: unexpected Go source {}", record.source));
+        let (fragment_revision, directory) = fragment.split_once(':').expect("revision:directory");
+        assert_eq!(
+            fragment_revision, record.revision.0,
+            "the fragment revision equals the annotation"
+        );
+        assert_eq!(
+            directory,
+            format!("{major_minor}/trixie"),
+            "the fragment directory tracks the tag"
+        );
+        assert!(is_rfc3339(&record.created));
+    }
+    let release = match &inventory.pins[RELEASE_PIN] {
+        Pin::Release(pin) => pin,
+        Pin::Official(_) => panic!("the released standard image is a repository release"),
+    };
+    assert_eq!(
+        release.reference.repository.value(),
+        "ghcr.io/gregwebs/agent-vm-standard"
+    );
+    assert!(
+        release.reference.tag.is_none(),
+        "a released pin is digest-addressed"
+    );
+    // The gate binds the *inventory and the recipes* to one another; the version
+    // itself is refreshed by `refresh-parent-pins.sh standard-release X.Y.Z`, so a
+    // literal here would make that documented refresh fail this gate.
+    assert!(
+        is_exact_version(&release.version),
+        "the release pin records an exact X.Y.Z version, got {}",
+        release.version
+    );
+    match &release.verification {
+        Verification::GithubAttestation {
+            repository,
+            signer_workflow: workflow,
+            source_ref,
+            source_sha,
+            invocation_url,
+            ..
+        } => {
+            assert_eq!(repository, "gregwebs/agent-vm-images");
+            assert_eq!(workflow, &signer_workflow(repository));
+            assert_eq!(source_ref, "refs/heads/main");
+            assert!(is_lower_hex(&source_sha.0, 40));
+            assert!(
+                invocation_url
+                    .starts_with("https://github.com/gregwebs/agent-vm-images/actions/runs/")
+            );
+        }
+        other => panic!("the release pin needs GitHub attestation, got {other:?}"),
+    }
+    for recipe in [
+        "examples/layers/chrome-devtools/Dockerfile",
+        "examples/layers/go-dev/Dockerfile",
+        "examples/layers/rust-dev/Dockerfile",
+        "examples/layers/wirenboard-cpp/Dockerfile",
+        "examples/layers/README.md",
+    ] {
+        assert!(
+            read_text(recipe).contains(&release.reference.text()),
+            "{recipe} is stale"
+        );
+    }
+    let apt = read_text("images/apt-policy/debian.sources");
+    assert_eq!(
+        apt.matches("Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp")
+            .count(),
+        2
+    );
+    assert!(apt.starts_with("Types: deb\n# http://snapshot.debian.org/"));
+    let keyrings = read_text("images/apt-policy/keyrings.sha256");
+    assert!(!keyrings.is_empty());
+    for line in keyrings.lines() {
+        let (hex, path) = line.split_once("  ").expect("two-space separator");
+        assert!(is_lower_hex(hex, 64), "invalid keyring hash: {line}");
+        assert!(
+            path.starts_with("usr/share/keyrings/") || path.starts_with("etc/apt/trusted.gpg.d/")
+        );
+        assert!(!path.contains("..") && !path.starts_with('/'));
+    }
+    assert!(keyrings.contains("  usr/share/keyrings/debian-archive-keyring.pgp"));
+    check_digest_mentions(&parent_documents(), &inventory).unwrap();
+}
+
+/// `attestations.py` is the verifier that refuses an inventory naming any other
+/// signer, and it reads `REPO`/`WORKFLOW` from its own module. The gate composes
+/// the same identity from two Rust literals, so a rename in the release module
+/// would make Python follow and Rust silently not.
+#[test]
+fn the_signer_identity_agrees_with_the_release_verifier() {
+    let source = read_text("script/release/attestations.py");
+    for declaration in [
+        format!("REPO = '{RELEASE_REPOSITORY}'"),
+        format!("WORKFLOW = REPO + '/{RELEASE_WORKFLOW}'"),
+    ] {
+        assert!(
+            source.lines().any(|line| line.trim() == declaration),
+            "attestations.py no longer declares `{declaration}`; update RELEASE_REPOSITORY \
+             and RELEASE_WORKFLOW with it"
+        );
+    }
+}
+
+#[test]
+fn parent_inventory_blocks_reject_edits() {
+    let inventory = parse_parent_inventory(&read_text(PARENT_INVENTORY)).unwrap();
+    let recipes = maintained_recipes();
+    let debian = inventory.pins[DEBIAN_PIN].reference().text();
+    let go = inventory.pins[GO_PIN].reference().text();
+    let release = inventory.pins[RELEASE_PIN].reference().text();
+    let mut mutations: Vec<(&str, BTreeMap<String, String>)> = Vec::new();
+    for (label, path, from, to) in [
+        (
+            "changed Debian digest",
+            "images/Dockerfile",
+            debian.clone(),
+            format!("debian:13-slim@sha256:{}", "0".repeat(64)),
+        ),
+        (
+            "tag-only parent",
+            "images/Dockerfile",
+            debian.clone(),
+            "debian:13-slim".to_owned(),
+        ),
+        (
+            "same digest at another repository",
+            "images/Dockerfile",
+            debian.clone(),
+            format!(
+                "debianx:13-slim@{}",
+                debian.rsplit('@').next().unwrap_or_default()
+            ),
+        ),
+        (
+            "inconsistent Go declaration",
+            "images/standard/Dockerfile",
+            go,
+            format!("golang:0.0.0-trixie@sha256:{}", "1".repeat(64)),
+        ),
+        (
+            "local base replaced",
+            "examples/base-extension/Dockerfile",
+            LOCAL_BASE.to_owned(),
+            "agent-vm-base:other".to_owned(),
+        ),
+        (
+            "stale released parent",
+            "examples/layers/go-dev/Dockerfile",
+            release,
+            format!(
+                "ghcr.io/gregwebs/agent-vm-standard@sha256:{}",
+                "2".repeat(64)
+            ),
+        ),
+        (
+            "new FROM",
+            "images/Dockerfile",
+            "CMD [\"/bin/bash\"]".to_owned(),
+            "FROM busybox:1\n\nCMD [\"/bin/bash\"]".to_owned(),
+        ),
+    ] {
+        let mut edited = recipes.clone();
+        let source = recipes[path].clone();
+        let changed = source.replace(&from, &to);
+        assert_ne!(changed, source, "{label}: mutation did not apply");
+        edited.insert(path.to_owned(), changed);
+        mutations.push((label, edited));
+    }
+    for (label, mutate) in [("unlisted recipe", 0_u8), ("missing recipe", 1_u8)] {
+        let mut edited = recipes.clone();
+        if mutate == 0 {
+            edited.insert(
+                "examples/layers/new/Dockerfile".to_owned(),
+                format!("FROM {}\n", inventory.pins[DEBIAN_PIN].reference().text()),
+            );
+        } else {
+            edited.remove("examples/layers/go-dev/Dockerfile");
+        }
+        mutations.push((label, edited));
+    }
+    for (label, edited) in mutations {
+        assert!(
+            check_recipe_parents(&inventory, &edited).is_err(),
+            "accepted a recipe mutation: {label}"
+        );
+    }
+
+    let source = read_text(PARENT_INVENTORY);
+    let index = inventory.pins[RELEASE_PIN]
+        .reference()
+        .digest
+        .value()
+        .to_owned();
+    for (label, from, to) in [
+        (
+            "tagged release reference",
+            format!("@{index}"),
+            format!(":0.1.3@{index}"),
+        ),
+        (
+            "unknown pin kind",
+            "docker-official-image".to_owned(),
+            "docker-official-image-x".to_owned(),
+        ),
+        (
+            "missing arm64 platform",
+            "linux/arm64".to_owned(),
+            "linux/armv8".to_owned(),
+        ),
+        (
+            "wrong signer workflow",
+            "release-standard.yml".to_owned(),
+            "release-other.yml".to_owned(),
+        ),
+        (
+            "wrong source ref",
+            "refs/heads/main".to_owned(),
+            "refs/heads/dev".to_owned(),
+        ),
+        (
+            "blank reassess",
+            "Stop refresh if a supported verifiable signing scheme is published for this image"
+                .to_owned(),
+            "   ".to_owned(),
+        ),
+        (
+            "unknown field",
+            "\"expected_source\":".to_owned(),
+            "\"expected-source\":".to_owned(),
+        ),
+        (
+            "missing provenance",
+            "\"revision\":".to_owned(),
+            "\"revised\":".to_owned(),
+        ),
+    ] {
+        let edited = source.replacen(&from, &to, 1);
+        assert_ne!(edited, source, "{label}: inventory mutation did not apply");
+        assert!(
+            parse_parent_inventory(&edited).is_err(),
+            "accepted an inventory mutation: {label}"
+        );
+    }
+    // The trusted signer is this repository's release workflow, not whatever
+    // pair the inventory names: a fork that signs with its own workflow of the
+    // same name is internally consistent but is not the trusted identity.
+    let forked = source.replace("gregwebs/agent-vm-images", "gregwebs/agent-vm-images-fork");
+    assert_ne!(forked, source, "the fork mutation did not apply");
+    assert!(
+        parse_parent_inventory(&forked).is_err(),
+        "accepted a fork signing with its own release workflow"
+    );
+    // A local-base record describes the recipe it is listed for: only the copied
+    // extension example consumes the base extension, everything else the local
+    // standard. The value is not decoration, so swapping it must fail the gate
+    // even though the inventory alone still parses.
+    let swapped = source.replacen(
+        "\"local_base\": \"extension\"",
+        "\"local_base\": \"standard\"",
+        1,
+    );
+    assert_ne!(swapped, source, "the local-base mutation did not apply");
+    let swapped_inventory = parse_parent_inventory(&swapped).unwrap();
+    assert!(
+        check_recipe_parents(&swapped_inventory, &recipes).is_err(),
+        "accepted a local base that does not describe its recipe"
+    );
+    // Literal duplicate keys must fail in the raw text, not in a rebuilt map.
+    let duplications: [(&str, String, String); 4] = [
+        (
+            "pin",
+            format!("\"{DEBIAN_PIN}\": {{"),
+            format!("\"{DEBIAN_PIN}\": {{}}, \"{DEBIAN_PIN}\": {{"),
+        ),
+        (
+            "platform",
+            "\"linux/amd64\": {".to_owned(),
+            "\"linux/amd64\": {}, \"linux/amd64\": {".to_owned(),
+        ),
+        (
+            "nested verification",
+            "\"method\": \"hash-only\",".to_owned(),
+            "\"method\": \"hash-only\", \"method\": \"hash-only\",".to_owned(),
+        ),
+        (
+            "recipe entry",
+            "\"stage\": \"recipe-contract-bin\",".to_owned(),
+            "\"stage\": \"recipe-contract-bin\", \"stage\": \"recipe-contract-bin\",".to_owned(),
+        ),
+    ];
+    for (label, needle, duplicated) in duplications {
+        let text = source.replacen(&needle, &duplicated, 1);
+        assert_ne!(
+            text, source,
+            "{label}: duplicate-key mutation did not apply"
+        );
+        let error = parse_parent_inventory(&text).expect_err("duplicate keys must be refused");
+        assert!(error.contains("duplicate JSON key"), "{label}: {error}");
+    }
+}
+
+#[test]
+fn from_parsing_keeps_raw_and_resolved_forms() {
+    let inventory = parse_parent_inventory(&read_text(PARENT_INVENTORY)).unwrap();
+    let base = parse_froms(&read_text("images/Dockerfile")).unwrap();
+    assert_eq!(base.len(), 2);
+    assert_eq!(base[0].stage.as_deref(), Some("recipe-contract-bin"));
+    assert_eq!(base[0].platform.as_deref(), Some("$BUILDPLATFORM"));
+    // A documented `refresh-parent-pins.sh golang-builder golang:VERSION-trixie`
+    // moves the pin and the FROM together, so bind the parsed raw form to the
+    // inventory instead of to the toolchain that happens to be reviewed now.
+    assert_eq!(
+        base[0].raw_image,
+        inventory.pins[GO_PIN].reference().text(),
+        "the builder FROM must be the pinned Go parent"
+    );
+    assert_eq!(base[0].raw_image, base[0].resolved_image);
+    assert_eq!(
+        base[1].raw_image,
+        inventory.pins[DEBIAN_PIN].reference().text(),
+        "the base FROM must be the pinned Debian parent"
+    );
+    assert_eq!(
+        base[1].raw_image, base[1].resolved_image,
+        "a literal FROM resolves to itself"
+    );
+    let standard = parse_froms(&read_text("images/standard/Dockerfile")).unwrap();
+    let last = standard.last().unwrap();
+    assert_eq!(last.raw_image, "${BASE_IMAGE}");
+    assert_eq!(last.resolved_image, LOCAL_BASE);
+    let extension = parse_froms(&read_text("examples/base-extension/Dockerfile")).unwrap();
+    assert_eq!(extension[0].raw_image, LOCAL_BASE);
+    assert_eq!(extension[0].resolved_image, LOCAL_BASE);
+    let joined = parse_froms(
+        "ARG BASE_IMAGE=agent-vm-base:local\n\
+         FROM --platform=$BUILDPLATFORM golang:0.0.0-trixie \\\n    AS builder\n\
+         # comment between instructions\n\
+         FROM ${BASE_IMAGE}\n",
+    )
+    .unwrap();
+    assert_eq!(joined.len(), 2);
+    assert_eq!(joined[0].stage.as_deref(), Some("builder"));
+    assert_eq!(joined[1].resolved_image, LOCAL_BASE);
+    let stage_local = parse_froms(
+        "ARG BASE_IMAGE=agent-vm-base:local\nFROM ${BASE_IMAGE}\nARG BASE_IMAGE=somewhere:else\n",
+    )
+    .unwrap();
+    assert_eq!(
+        stage_local[0].resolved_image, LOCAL_BASE,
+        "a stage-local ARG is not the global default"
+    );
+    for bad in [
+        "FROM ${BASE_IMAGE}\n",
+        "FROM ${BASE_IMAGE:-agent-vm-base:local}\n",
+        "FROM pre${BASE_IMAGE}\n",
+        "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n",
+    ] {
+        assert!(
+            parse_froms(bad).is_err(),
+            "accepted an unresolved FROM: {bad}"
+        );
+    }
+}
+
+/// Ordinary builds never invoke the maintenance path: no maintained recipe or
+/// installer, build entrypoint or workflow may resolve parents or call the
+/// refresher. Documentation may describe the maintenance commands; the test and
+/// maintenance sources are the ones that implement them.
+#[test]
+fn no_build_path_refreshes_parent_pins() {
+    let mut scanned = 0;
+    let mut offenders = Vec::new();
+    let mut build_sources = maintained_recipes();
+    build_sources.extend(repository_files("script/release", None, Some("py")));
+    build_sources.extend(repository_files("images", None, Some("sh")));
+    for (relative, source) in build_sources {
+        for needle in ["refresh-parent-pins", "imagetools inspect"] {
+            if source.contains(needle) {
+                offenders.push(format!("{relative}: {needle}"));
+            }
+        }
+        scanned += 1;
+    }
+    for (relative, source) in repository_files("script/build", None, Some("sh")) {
+        for needle in ["refresh-parent-pins", "imagetools inspect"] {
+            if source.contains(needle) {
+                offenders.push(format!("{relative}: {needle}"));
+            }
+        }
+        scanned += 1;
+    }
+    // The native CI entrypoints build images too, so they are build paths in the
+    // plan's sense even though they live with the tests and under script/ci.
+    let mut entrypoints = repository_files("script/test", Some("ci-native.sh"), None);
+    entrypoints.extend(repository_files("script/ci", None, Some("sh")));
+    assert!(
+        entrypoints.contains_key("script/test/ci-native.sh") && entrypoints.len() > 1,
+        "the maintenance scan missed the native CI entrypoints: {:?}",
+        entrypoints.keys().collect::<Vec<_>>()
+    );
+    for (relative, source) in entrypoints {
+        for needle in ["refresh-parent-pins", "imagetools inspect"] {
+            if source.contains(needle) {
+                offenders.push(format!("{relative}: {needle}"));
+            }
+        }
+        scanned += 1;
+    }
+    for (relative, source) in repository_files(".github/workflows", None, Some("yml")) {
+        for needle in ["refresh-parent-pins", "imagetools inspect"] {
+            if source.contains(needle) {
+                offenders.push(format!("{relative}: {needle}"));
+            }
+        }
+        scanned += 1;
+    }
+    assert!(
+        offenders.is_empty(),
+        "parent maintenance reached a build path: {offenders:?}"
+    );
+    assert!(
+        scanned > 10,
+        "the maintenance scan covered only {scanned} sources"
+    );
+}
 
 /// One shell-ish word plus whether any of it came from a quoted string.
 struct Word {
