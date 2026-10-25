@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import io
 import shutil
 import tarfile
 from dataclasses import replace
@@ -420,6 +421,19 @@ def commit_fixture(repo: Path) -> str:
                  ['config', 'core.fsmonitor', 'false'], ['add', '.'], [*FIXTURE_AUTHOR, 'commit', '-qm', 'fixture']):
         subprocess.run(['git', '-C', str(repo), *argv], check=True, capture_output=True)
     return subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
+
+
+def build_repo(base: Path) -> tuple[Path, str]:
+    """A disposable checkout the real build CLI can run against."""
+    repo = base / 'repo'
+    repo.mkdir()
+    shutil.copytree(ROOT / 'images', repo / 'images')
+    shutil.copytree(ROOT / 'script/release', repo / 'script/release',
+                    ignore=shutil.ignore_patterns('__pycache__'))
+    # committed_version() compares against the checked-in file, so pin the
+    # fixture's own version instead of tracking the repository's bump.
+    (repo / 'images/standard/version').write_text('0.1.0\n')
+    return repo, commit_fixture(repo)
 
 
 def fsmonitor_daemon_builtin() -> bool:
@@ -865,13 +879,8 @@ class ReviewRegressionTests(unittest.TestCase):
         import platform
         arch = 'arm64' if platform.machine() in ('arm64', 'aarch64') else 'amd64'
         with tempfile.TemporaryDirectory() as directory:
-            base = Path(directory); repo = base / 'repo'; repo.mkdir()
-            shutil.copytree(ROOT / 'images', repo / 'images')
-            shutil.copytree(ROOT / 'script/release', repo / 'script/release', ignore=shutil.ignore_patterns('__pycache__'))
-            # committed_version() compares against the checked-in file, so pin the
-            # fixture's own version instead of tracking the repository's bump.
-            (repo / 'images/standard/version').write_text('0.1.0\n')
-            sha = commit_fixture(repo)
+            base = Path(directory)
+            repo, sha = build_repo(base)
             selected = operations.selections()
             image = {'Id': 'sha256:' + 'd'*64, 'Config': {'Labels': {
                 **{'org.agent-vm.version.' + name: value for name, value in selected.items()},
@@ -903,6 +912,9 @@ class ReviewRegressionTests(unittest.TestCase):
                         kwargs['output'].write_text('fixture command output\n')
                     if argv[:3] == ['docker', 'context', 'show']: return b'fixture-builder\n'
                     if argv[:3] == ['docker', 'buildx', 'inspect']: return b'Driver: docker\n'
+                    # The base label inspection: JSON, so public_trust can decide.
+                    if argv[:3] == ['docker', 'image', 'inspect'] and argv[-2] == '--format':
+                        return b'{"org.agent-vm.build-ca.sha256":""}'
                     if stage == 'standard':
                         dest = next(x.split('dest=')[1].split(',')[0] for x in argv if x.startswith('type=oci,'))
                         make_layout(Path(dest), arch)
@@ -918,6 +930,7 @@ class ReviewRegressionTests(unittest.TestCase):
                        'GITHUB_RUN_ID': '264', 'GITHUB_RUN_ATTEMPT': '1'}
                 with mock.patch.dict(os.environ, env), mock.patch.object(operations, 'ROOT', repo), \
                      mock.patch.object(operations, 'run', side_effect=command), \
+                     mock.patch.object(operations, 'public_build', wraps=operations.public_build) as public_build, \
                      mock.patch.object(operations, 'docker_matches', return_value=image), \
                      mock.patch.object(build.capability, 'check'), \
                      mock.patch.object(build.storage, 'measure', return_value=stats), \
@@ -932,6 +945,9 @@ class ReviewRegressionTests(unittest.TestCase):
                 else:
                     recipe_builds = [argv for argv in calls if '-f' in argv and 'build' in argv]
                     self.assertEqual(len(recipe_builds), 2)
+                    # Both product builds go through the public interface, so the
+                    # build-trust refusal cannot be bypassed by a direct run().
+                    self.assertEqual(public_build.call_count, 2)
                     self.assertEqual(sum('/standard/Dockerfile' in ' '.join(argv) for argv in recipe_builds), 1)
                     self.assertTrue(all(argv[-1] == str(repo / 'images') for argv in recipe_builds))
                     self.assertTrue(all('linux/' + arch in argv for argv in recipe_builds))
@@ -939,6 +955,137 @@ class ReviewRegressionTests(unittest.TestCase):
                     self.assertTrue((out / 'platform.json').exists())
                     self.assertEqual(content.PlatformInventory.parse(content.read_json(out / 'platform.json')).selections,
                                      tuple(sorted(selected.items())))
+                self.assertEqual(subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo), b'')
+
+    def test_public_build_and_trust_refuse_build_material(self):
+        operations.public_trust({operations.BUILD_CA_LABEL: ''})
+        # The base always declares the label, so an absent key is a broken
+        # inspection: requiring it fails closed if the label is renamed or lost.
+        for labels in (None, [], 'x', [('k', 'v')], {}, {operations.BUILD_CA_LABEL: None},
+                       {operations.BUILD_CA_LABEL: 1}, {1: 'x'}):
+            with self.assertRaises(ValueError, msg=repr(labels)):
+                operations.public_trust(labels)
+        with self.assertRaisesRegex(ValueError, 'the build-CA label is required'):
+            operations.public_trust({})
+        with self.assertRaisesRegex(ValueError, 'public release base carries build trust material'):
+            operations.public_trust({operations.BUILD_CA_LABEL: 'a' * 64})
+        # The key name is written in the Dockerfile and in this module; a rename
+        # on either side would leave the refusal reading a label no image has.
+        self.assertEqual(operations.BUILD_CA_LABEL, 'org.agent-vm.build-ca.sha256')
+        dockerfile = (ROOT / 'images/Dockerfile').read_text()
+        self.assertIn(f'LABEL {operations.BUILD_CA_LABEL}="${{BUILD_CA_SHA256}}"', dockerfile)
+        allowed = [
+            ['python3', '/tmp/host-watchdog.py', '10800', 'docker', 'build', '-t', 'local', '.'],
+            ['docker', 'buildx', 'build', '--build-arg', 'BASE_IMAGE=local', '-f', 'Dockerfile', '.'],
+            ['docker', 'build', '--label', 'org.opencontainers.image.version=0.1.0', '.'],
+            ['docker', 'build', '--label=org.opencontainers.image.source=fixture', '.'],
+        ]
+        # Docker can source a bare `--build-arg NAME` from the environment, so the
+        # environment supplies real values for every refused form.
+        refused = [
+            ['docker', 'build', '--secret', 'id=hostca,src=ca.crt', '.'],
+            ['docker', 'build', '--secret=id=hostca,src=ca.crt', '.'],
+            ['docker', 'build', '--build-arg', 'BUILD_CA_SHA256=' + 'a' * 64, '.'],
+            ['docker', 'build', '--build-arg=BUILD_CA_SHA256=' + 'a' * 64, '.'],
+            ['docker', 'build', '--build-arg', 'BUILD_CA_SHA256', '.'],
+            ['docker', 'build', '--build-arg=BUILD_CA_SHA256', '.'],
+            ['docker', 'buildx', 'build', '--build-arg', 'CA_SHIM_CACHEBUST=' + 'a' * 64, '.'],
+            ['docker', 'buildx', 'build', '--build-arg=CA_SHIM_CACHEBUST', '.'],
+            ['python3', 'watchdog.py', '60', 'docker', 'build', '--build-arg', 'BUILD_CA_SHA256=', '.'],
+            # An explicit CA label would overwrite the label the release reads
+            # back, so it is refused like the CA build argument it replaces.
+            ['docker', 'build', '--label', operations.BUILD_CA_LABEL + '=' + 'a' * 64, '.'],
+            ['docker', 'build', '--label=' + operations.BUILD_CA_LABEL + '=' + 'a' * 64, '.'],
+            ['docker', 'build', '--label', operations.BUILD_CA_LABEL + '=', '.'],
+            ['docker', 'buildx', 'build', '--label=' + operations.BUILD_CA_LABEL, '.'],
+            ['python3', 'watchdog.py', '60', 'docker', 'build', '--label',
+             operations.BUILD_CA_LABEL + '=none', '.'],
+            ['docker', 'image', 'inspect', 'local'],
+            ['bash', 'script/release/build-standard.sh'],
+        ]
+        environment = {'BUILD_CA_SHA256': 'a' * 64, 'CA_SHIM_CACHEBUST': 'a' * 64}
+        with mock.patch.dict(os.environ, environment), \
+             mock.patch.object(operations, 'run', return_value=b'ok') as run:
+            for argv in allowed:
+                self.assertEqual(operations.public_build(argv), b'ok')
+            self.assertEqual(run.call_count, len(allowed))
+            run.reset_mock()
+            for argv in refused:
+                with self.assertRaises(ValueError, msg=argv):
+                    operations.public_build(argv)
+            run.assert_not_called()
+        # The public entrypoint never supplies trust material itself: both product
+        # builds use the guarded interface and no CA argument appears in build.py.
+        source = (ROOT / 'script/release/build.py').read_text()
+        self.assertEqual(source.count('op.public_build('), 2)
+        self.assertNotIn('--secret', source)
+        self.assertNotIn('BUILD_CA_SHA256', source)
+        self.assertNotIn('CA_SHIM_CACHEBUST', source)
+
+    def test_base_build_trust_label_stops_publication(self):
+        import platform
+        arch = 'arm64' if platform.machine() in ('arm64', 'aarch64') else 'amd64'
+        stats = {'scratch_host': 'fixture-client', 'daemon_filesystems': [{'host': 'fixture-daemon',
+            'filesystem': 'disk', 'path': '/owned', 'free_bytes': 100 * capacity.GIB}]}
+        cases = [
+            ('nonempty CA label', json.dumps({operations.BUILD_CA_LABEL: 'a' * 64}).encode(),
+             False, 'public release base carries build trust material'),
+            ('malformed labels', b'{not json', False, 'Expecting property name'),
+            ('null labels', b'null', False, 'base build labels: JSON object required'),
+            ('non-string label value', json.dumps({operations.BUILD_CA_LABEL: 1}).encode(),
+             False, 'base build labels: string keys and values required'),
+            # The base recipe declares the label, so a document without it is a
+            # renamed or broken inspection and must not read as "no CA".
+            ('absent CA label', b'{}', False, 'base build labels: the build-CA label is required'),
+            ('failed inspection', b'', True, 'returned non-zero exit status 3'),
+        ]
+        for label, labels, inspection_failure, reason in cases:
+            with tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                repo, sha = build_repo(base)
+                original = operations.run
+                calls = []
+
+                def command(argv, **kwargs):
+                    calls.append(argv)
+                    if argv[0] == 'git':
+                        return original(argv, **kwargs)
+                    if argv[:3] == ['docker', 'context', 'show']: return b'fixture-builder\n'
+                    if argv[:3] == ['docker', 'buildx', 'inspect']: return b'Driver: docker\n'
+                    if argv[:3] == ['docker', 'image', 'inspect'] and argv[-2] == '--format':
+                        if inspection_failure:
+                            raise subprocess.CalledProcessError(3, argv)
+                        return labels
+                    if kwargs.get('output') is not None:
+                        kwargs['output'].write_text('fixture command output\n')
+                    return b''
+
+                out, scratch = base / 'out', base / 'scratch'
+                env = {'GITHUB_REPOSITORY': preflight.REPO, 'GITHUB_SHA': sha,
+                       'GITHUB_REF': 'refs/heads/main', 'GITHUB_RUN_ID': '264',
+                       'GITHUB_RUN_ATTEMPT': '1'}
+                with mock.patch.dict(os.environ, env), mock.patch.object(operations, 'ROOT', repo), \
+                     mock.patch.object(operations, 'run', side_effect=command), \
+                     mock.patch.object(build.capability, 'check'), \
+                     mock.patch.object(build.storage, 'measure', return_value=stats), \
+                     mock.patch.object(build.peaks.Sampler, 'start'), \
+                     mock.patch.object(build.peaks.Sampler, 'stop'), \
+                     mock.patch.object(sys, 'argv', ['build', '--arch', arch, '--version', '0.1.0',
+                                                    '--out', str(out), '--scratch-root', str(scratch)]):
+                    with mock.patch('sys.stderr', new=io.StringIO()) as stderr:
+                        self.assertEqual(build.main(), 1, label)
+                # The refusal must come from the label inspection: a fixture that
+                # drifted and failed earlier would otherwise pass this test.
+                inspections = [argv for argv in calls if argv[:3] == ['docker', 'image', 'inspect']]
+                self.assertEqual(len(inspections), 1, (label, calls))
+                self.assertEqual(inspections[0][-2:], ['--format', '{{json .Config.Labels}}'], label)
+                self.assertIn(reason, stderr.getvalue(), label)
+                self.assertFalse(any('/standard/Dockerfile' in ' '.join(argv) for argv in calls), label)
+                self.assertFalse(any('archive-oci.sh' in ' '.join(argv) for argv in calls), label)
+                self.assertFalse(any(argv[0] == 'syft' for argv in calls), label)
+                self.assertEqual(list(out.iterdir()), [], label)
+                # Failure retains the scratch as evidence and leaves source clean.
+                self.assertTrue(scratch.is_dir(), label)
                 self.assertEqual(subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo), b'')
 
     def test_preflight_sigterm_auth_scratch_is_outside_artifact_root(self):

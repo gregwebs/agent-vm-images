@@ -78,19 +78,25 @@ def main() -> int:
         for key in ('GITHUB_TOKEN', 'GH_TOKEN', 'PUBLISH_TOKEN', 'GHCR_PACKAGE_INVENTORY_TOKEN'):
             env.pop(key, None)
         watchdog = ['python3', str(op.ROOT / 'script/test/host-watchdog.py')]
-        op.run(watchdog + ['10800', 'docker', 'build', '--builder', builder, '--platform', 'linux/' + arch,
-                          '-t', base, '-f', str(op.ROOT / 'images/Dockerfile'), str(op.ROOT / 'images')],
-               output=scratch / 'base-build.log', env=env, timeout=10860)
+        op.public_build(
+            watchdog + ['10800', 'docker', 'build', '--builder', builder, '--platform', 'linux/' + arch,
+                        '-t', base, '-f', str(op.ROOT / 'images/Dockerfile'), str(op.ROOT / 'images')],
+            output=scratch / 'base-build.log', env=env, timeout=10860)
+        # The base records any persisted build CA in a label; a public release
+        # must not carry that trust material. Inspection failure fails closed.
+        op.public_trust(json.loads(op.run(['docker', 'image', 'inspect', base,
+                                           '--format', '{{json .Config.Labels}}'])))
         check('build')
         layout = scratch / 'layout'
-        op.run(watchdog + ['10800', 'docker', 'buildx', 'build', '--builder', builder, '--platform', 'linux/' + arch,
-                          '--provenance=false', '--sbom=false', '-t', standard, '--build-arg', 'BASE_IMAGE=' + base,
-                          '--label', 'org.opencontainers.image.version=' + args.version,
-                          '--label', 'org.opencontainers.image.revision=' + sha,
-                          '--label', 'org.opencontainers.image.source=' + c.SOURCE,
-                          '--output', f'type=oci,dest={layout},tar=false,compression=gzip',
-                          '-f', str(op.ROOT / 'images/standard/Dockerfile'), str(op.ROOT / 'images')],
-               output=scratch / 'standard-build.log', env=env, timeout=10860)
+        op.public_build(
+            watchdog + ['10800', 'docker', 'buildx', 'build', '--builder', builder, '--platform', 'linux/' + arch,
+                        '--provenance=false', '--sbom=false', '-t', standard, '--build-arg', 'BASE_IMAGE=' + base,
+                        '--label', 'org.opencontainers.image.version=' + args.version,
+                        '--label', 'org.opencontainers.image.revision=' + sha,
+                        '--label', 'org.opencontainers.image.source=' + c.SOURCE,
+                        '--output', f'type=oci,dest={layout},tar=false,compression=gzip',
+                        '-f', str(op.ROOT / 'images/standard/Dockerfile'), str(op.ROOT / 'images')],
+            output=scratch / 'standard-build.log', env=env, timeout=10860)
         graph = c.inventory_layout(layout, arch)
         c.normalize_root(layout, graph)
         c.atomic_json(scratch / 'graph.json', graph.json())

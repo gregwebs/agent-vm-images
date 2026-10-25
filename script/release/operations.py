@@ -30,6 +30,10 @@ IMAGE = 'ghcr.io/gregwebs/agent-vm-standard'
 # without any publication step. The allowed ref is disjoint from `main`, so a
 # rehearsal invocation can never be mistaken for a publication invocation.
 REHEARSAL_REF_PREFIX = 'refs/heads/test/release-standard/'
+# The base build records the reviewed host-CA SHA-256 in this label, or an empty
+# value when no certificate was installed. Publishing such material is refused.
+BUILD_CA_LABEL = 'org.agent-vm.build-ca.sha256'
+BUILD_TRUST_ARGUMENTS = ('BUILD_CA_SHA256', 'CA_SHIM_CACHEBUST')
 
 
 @dataclass(frozen=True)
@@ -117,6 +121,75 @@ def run(argv: list[str], *, output: Path | None = None, timeout: int = 1800,
     if proc.returncode:
         raise subprocess.CalledProcessError(proc.returncode, argv)
     return b''
+
+
+def docker_operation(argv: list[str]) -> list[str]:
+    """The docker operation of an argv that may carry a watchdog prefix."""
+    for index, token in enumerate(argv):
+        if token == 'docker':
+            return argv[index + 1:]
+    raise ValueError('public build: no docker command in argv')
+
+
+def flag_value(tokens: list[str], position: int, flag: str) -> str | None:
+    """The value of `--flag=value` or `--flag value`, or None when absent."""
+    token = tokens[position]
+    if token.startswith(flag + '='):
+        return token[len(flag) + 1:]
+    if token == flag and position + 1 < len(tokens):
+        return tokens[position + 1]
+    return None
+
+
+def public_build(argv: list[str], **kwargs) -> bytes:
+    """Run a product build, refusing any interface that could add build trust.
+
+    The guard is operation- and argument-specific: Docker can source a bare
+    `--build-arg NAME` from the environment, so the name alone is enough to
+    refuse, `--secret` is refused in every spelling, and an explicit
+    `--label <BUILD_CA_LABEL>=...` would overwrite the label the release reads
+    back after the base build. Capability probes and fixture inspections keep
+    using `run`.
+    """
+    operation = docker_operation(argv)
+    if operation[:1] == ['build']:
+        build = operation[1:]
+    elif operation[:2] == ['buildx', 'build']:
+        build = operation[2:]
+    else:
+        raise ValueError('public build: only docker build/buildx build may build a release image')
+    for position, token in enumerate(build):
+        if token == '--secret' or token.startswith('--secret='):
+            raise ValueError('public release build must not supply build trust material: --secret')
+        argument = flag_value(build, position, '--build-arg')
+        if argument is not None:
+            name = argument.split('=', 1)[0]
+            if name in BUILD_TRUST_ARGUMENTS:
+                raise ValueError('public release build must not supply ' + name)
+        label = flag_value(build, position, '--label')
+        if label is not None and label.split('=', 1)[0] == BUILD_CA_LABEL:
+            raise ValueError('public release build must not set ' + BUILD_CA_LABEL)
+    return run(argv, **kwargs)
+
+
+def public_trust(labels: object) -> None:
+    """Refuse a base whose persisted trust material would reach a public image.
+
+    The base recipe always declares the CA label, so an absent key is a broken
+    or renamed inspection rather than an implicit absence and fails closed;
+    only the empty value means no certificate was installed and the build is
+    publishable. A null, array or malformed label document is an error rather
+    than an implicit absence, so an inspection change fails closed.
+    """
+    if not isinstance(labels, dict):
+        raise ValueError('base build labels: JSON object required')
+    for key, value in labels.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            raise ValueError('base build labels: string keys and values required')
+    if BUILD_CA_LABEL not in labels:
+        raise ValueError('base build labels: the build-CA label is required')
+    if labels[BUILD_CA_LABEL]:
+        raise ValueError('public release base carries build trust material')
 
 
 def native(arch: c.Arch) -> None:

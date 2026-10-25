@@ -40,6 +40,16 @@ images/Dockerfile --local FROM--> images/standard/Dockerfile (built once/arch)
   canonical OCI config digest. On the supported containerd-backed Docker store
   it reports the platform manifest hash; it is never asserted to equal the
   config digest.
+- The base build records any persisted host CA in
+  `org.agent-vm.build-ca.sha256`. `script/release/build.py` inspects that label
+  immediately after the base build and refuses to continue when it is missing,
+  nonempty, malformed or unreadable, and a public build may not pass
+  `--label org.agent-vm.build-ca.sha256=...`, so a standard image is never
+  published through this repository's build-CA interface. The refusal is that
+  label read plus that command-line check, not an inspection of image content:
+  a base built or labelled by other means, and the standard recipe's own bytes,
+  are outside it. See
+  [image input policy](image-input-policy.md#build-ca-verified-content-refused-in-public-releases).
 
 ## Versioning and release dispatch
 

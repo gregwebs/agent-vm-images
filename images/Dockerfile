@@ -31,20 +31,24 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PATH=/usr/local/bin:/usr/bin:/usr/sbin:/bin \
     LANG=C.UTF-8
 
-# Optional explicitly supplied trust material persists in the image. Secret contents
-# do not invalidate cache: supply the certificate SHA-256 as CA_SHIM_CACHEBUST.
-ARG CA_SHIM_CACHEBUST=
+# Verify the parent Debian baseline, not the final source set (#96 remains open).
+RUN --mount=type=bind,source=apt-policy,target=/tmp/apt-policy,ro \
+    bash /tmp/apt-policy/check-sources.sh --policy /tmp/apt-policy
+
+# An explicitly supplied host CA persists as trust material, so the caller must
+# name its SHA-256: the hash is the cache key and the reviewed identity, while
+# secret bytes alone are not. The CA_SHIM_CACHEBUST declaration is a tombstone
+# that rejects the removed interface; Docker silently ignores an undeclared
+# build argument, so no legacy value is accepted. The label records the reviewed
+# hash and the public release refuses a nonempty one.
+ARG BUILD_CA_SHA256=
+ARG CA_SHIM_CACHEBUST=__removed_use_BUILD_CA_SHA256__
+LABEL org.agent-vm.build-ca.sha256="${BUILD_CA_SHA256}"
 RUN --mount=type=secret,id=hostca,target=/tmp/hostca.crt,required=false \
-    : "${CA_SHIM_CACHEBUST}" \
- && if [ -s /tmp/hostca.crt ]; then \
-        apt-get update \
-        && apt-get install -y --no-install-recommends ca-certificates \
-        && install -d /usr/local/share/ca-certificates \
-        && install -m 0644 /tmp/hostca.crt /usr/local/share/ca-certificates/agent-vm-build.crt \
-        && update-ca-certificates \
-        && rm -rf /var/lib/apt/lists/* \
-        && echo "==> host CA trusted for this build"; \
-    fi
+    --mount=type=bind,source=install-build-ca.sh,target=/tmp/install-build-ca.sh,ro \
+    BUILD_CA_SHA256="${BUILD_CA_SHA256}" \
+    REMOVED_CA_SHIM_CACHEBUST="${CA_SHIM_CACHEBUST}" \
+    bash /tmp/install-build-ca.sh /tmp/hostca.crt
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \

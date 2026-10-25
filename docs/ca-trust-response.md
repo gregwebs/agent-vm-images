@@ -10,10 +10,13 @@ actually depend on.
 
 1. Read the advisory's fixed-version list (package revision, runtime release,
    toolchain release) and keep its test chains.
-2. **Rebuild before believing anything.** The base floats `debian:13-slim` and
-   NodeSource `setup_22.x`, so a rebuild resolves the current `ca-certificates`
-   revision and the current Node release. A pre-advisory tag carries
-   pre-advisory stores; a clean check against it is not evidence.
+2. **Rebuild before believing anything.** The base parents are digest-pinned,
+   so a rebuild resolves the current `ca-certificates` revision inside the
+   reviewed Debian parent and the current Node release from NodeSource
+   `setup_22.x`. A parent-layer fix needs a reviewed parent refresh and a
+   rebuild: rebuilding cannot change a frozen parent, and a floating
+   `apt-get install` needs `--no-cache` to requery the archive. A pre-advisory
+   tag carries pre-advisory stores; a clean check against it is not evidence.
 3. Check each store below offline (see [Verify offline](#verify-offline)).
 4. Bump only what a rebuild cannot fix — in practice an example-layer pin.
    Example layers are not built by CI ([#33](https://github.com/gregwebs/agent-vm-images/issues/33)),
@@ -37,8 +40,8 @@ withdrawn root R
 
 | Store | Comes from | Who fixes it | Check in a built image |
 |---|---|---|---|
-| System bundle `/etc/ssl/certs/ca-certificates.crt` | `ca-certificates` apt package in `debian:13-slim`; no version pin in this repo | a rebuild that lands the fixed package revision | `dpkg -s ca-certificates` |
-| Host CA shim `/usr/local/share/ca-certificates/agent-vm-build.crt` | the builder's `--secret id=hostca` ([optional build trust](../README.md#optional-build-trust)); `update-ca-certificates` merges it into the system bundle | the builder — a distro bump never removes it, and it is indistinguishable inside the bundle | `ls /usr/local/share/ca-certificates` |
+| System bundle `/etc/ssl/certs/ca-certificates.crt` | `ca-certificates` apt package in the pinned `debian:13-slim` parent; no version pin in this repo | a reviewed parent refresh for a parent-layer fix, or a cache-invalidated rebuild that lands the fixed package revision | `dpkg -s ca-certificates` |
+| Host CA shim `/usr/local/share/ca-certificates/agent-vm-build.crt` | the builder's `--secret id=hostca` plus the reviewed `BUILD_CA_SHA256` ([optional build trust](../README.md#optional-build-trust)); the installer verifies the hash and the PEM structure, `update-ca-certificates` merges it into the system bundle, and the image records `sha256:<hash>` and a label that the public release refuses | the builder — a distro bump never removes it, and it is indistinguishable inside the bundle | `ls /usr/local/share/ca-certificates` and the `org.agent-vm.build-ca.sha256` label |
 | pip's vendored certifi (`pip/_vendor/certifi`) | `python3-pip` from Debian, which patches `certifi.where()` to `DEBIAN_CA_CERTS_PATH` | nobody: it resolves to the system bundle | `python3 -c 'from pip._vendor import certifi; print(certifi.where())'` |
 | Node bundled roots | NodeSource `setup_22.x`; Node does not read the system store | the Node release, then a rebuild | `tls.getCACertificates("default")` |
 | Go toolchain (`go-dev` example pin) | go.dev tarball, digest-pinned in `examples/layers/go-dev/Dockerfile` | nothing in the trust path: `GOROOT` ships no Mozilla bundle (only `platform_root_*.pem` for macOS/Windows pinning), so Linux reads the system bundle | `find "$(go env GOROOT)/src/crypto/x509" -maxdepth 1 -name '*.pem'` |

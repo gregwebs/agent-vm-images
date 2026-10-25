@@ -40,7 +40,13 @@ sessions.
 the Debian base, the build-only Go helper compiler and the released standard
 image, each with its digest, per-platform provenance and reviewed verification
 method. `images/apt-policy/` records the reviewed Debian repository/key baseline
-extracted from the pinned parent. The only writer of both is
+extracted from the pinned parent; `images/apt-policy/check-sources.sh` is the
+build-time check of that parent baseline and `images/parent-pins.json`
+`apt_open_gaps` records the exact remaining #96 apt instructions.
+`images/install-build-ca.sh` owns the optional host build CA: it verifies the
+reviewed `BUILD_CA_SHA256`, installs the certificate, and records the hash in
+the image and in a label the public release refuses. The only writer
+of the pins and the baseline is
 `script/dev/refresh-parent-pins.sh` (with `script/dev/parent_pins.py`), which
 refuses CI execution; builds and the isolated release entrypoints only read them.
 `images/Dockerfile:20` and the four `examples/layers/*` `ARG BASE_IMAGE`

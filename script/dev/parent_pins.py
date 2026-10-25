@@ -50,6 +50,10 @@ import operations
 
 INVENTORY = 'images/parent-pins.json'
 DEBIAN_SOURCES = 'images/apt-policy/debian.sources'
+# The one owner of the recorded legacy apt instructions. A gap is an exact
+# exception for a reviewed RUN, never a marker or a pattern: changing it needs a
+# human to re-review the instruction and update the record.
+APT_GAP_OWNER = 'https://github.com/gregwebs/agent-vm-images/issues/96'
 KEYRINGS = 'images/apt-policy/keyrings.sha256'
 POLICY_FILES = (DEBIAN_SOURCES, KEYRINGS)
 
@@ -346,9 +350,22 @@ class ParentSpec:
 
 
 @dataclass(frozen=True)
+class AptOpenGap:
+    """One reviewed legacy apt source installation, recorded verbatim."""
+
+    recipe: str
+    instruction: str
+    owner: str
+
+    def json(self) -> dict:
+        return {'recipe': self.recipe, 'instruction': self.instruction, 'owner': self.owner}
+
+
+@dataclass(frozen=True)
 class ParentInventory:
     pins: dict[str, 'OfficialPin | ReleasePin']
     recipes: dict[str, tuple[ParentSpec, ...]]
+    apt_open_gaps: tuple[AptOpenGap, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -427,6 +444,27 @@ def logical_instructions(text: str) -> list[str]:
         current = ''
     if current.strip():
         instructions.append(current.strip())
+    return instructions
+
+
+def physical_instructions(text: str) -> list[str]:
+    """Instruction blocks with their own bytes: continuations kept, no final LF.
+
+    An apt gap is an exact exception, so the record has to be compared with the
+    recipe's physical text. `logical_instructions` deliberately normalizes
+    whitespace and cannot express that distinction.
+    """
+    instructions, current = [], []
+    for line in text.split('\n'):
+        stripped = line.strip()
+        if not current and (not stripped or stripped.startswith('#')):
+            continue
+        current.append(line)
+        if not line.rstrip().endswith('\\'):
+            instructions.append('\n'.join(current))
+            current = []
+    if current:
+        instructions.append('\n'.join(current))
     return instructions
 
 
@@ -594,8 +632,34 @@ def parse_recipes(value: object) -> dict[str, tuple[ParentSpec, ...]]:
     return recipes
 
 
+def parse_apt_open_gaps(value: object, recipes: dict[str, tuple[ParentSpec, ...]]) \
+        -> tuple[AptOpenGap, ...]:
+    gaps, seen = [], set()
+    for item in _sequence(value, 'apt_open_gaps'):
+        members = _exact(item, {'recipe', 'instruction', 'owner'}, 'apt_open_gaps entry')
+        recipe, instruction = members['recipe'], members['instruction']
+        if not isinstance(recipe, str) or recipe not in recipes:
+            raise Refusal(f'apt gap recipe is not a recorded recipe: {recipe!r}')
+        if members['owner'] != APT_GAP_OWNER:
+            raise Refusal(f'apt gap in {recipe}: owner must be {APT_GAP_OWNER}')
+        if not isinstance(instruction, str) or not instruction.startswith('RUN ') \
+                or '\r' in instruction or instruction.endswith('\n'):
+            raise Refusal(f'apt gap in {recipe}: an exact RUN instruction is required')
+        lines = instruction.split('\n')
+        if any(not line.strip() for line in lines) \
+                or any(not line.rstrip().endswith('\\') for line in lines[:-1]) \
+                or lines[-1].rstrip().endswith('\\'):
+            raise Refusal(f'apt gap in {recipe}: instruction boundaries are malformed')
+        if (recipe, instruction) in seen:
+            raise Refusal(f'apt gap in {recipe}: duplicate recorded instruction')
+        seen.add((recipe, instruction))
+        gaps.append(AptOpenGap(recipe, instruction, members['owner']))
+    return tuple(gaps)
+
+
 def parse_inventory(text: str) -> ParentInventory:
-    members = _exact(strict_json(text.encode(), INVENTORY), {'schema', 'pins', 'recipes'}, INVENTORY)
+    members = _exact(strict_json(text.encode(), INVENTORY),
+                     {'schema', 'pins', 'recipes', 'apt_open_gaps'}, INVENTORY)
     if members['schema'] != 1:
         raise Refusal('unsupported parent inventory schema')
     pins = {}
@@ -605,20 +669,24 @@ def parse_inventory(text: str) -> ParentInventory:
         pins[name] = parse_pin(name, value)
     if set(pins) != set(PINS):
         raise Refusal(f'pin inventory is incomplete: {sorted(set(PINS) - set(pins))}')
-    return ParentInventory(pins, parse_recipes(members['recipes']))
+    recipes = parse_recipes(members['recipes'])
+    return ParentInventory(pins, recipes, parse_apt_open_gaps(members['apt_open_gaps'], recipes))
 
 
-def inventory_json(pins: dict, recipes: dict[str, tuple[ParentSpec, ...]]) -> dict:
+def inventory_json(pins: dict, recipes: dict[str, tuple[ParentSpec, ...]],
+                   apt_open_gaps: tuple[AptOpenGap, ...] = ()) -> dict:
     return {'schema': 1,
             'pins': {name: pins[name].json() for name in PINS},
             'recipes': {path: [{'stage': spec.stage,
                                 ('pin' if spec.binding == 'pin' else 'local_base'): spec.pin}
                                for spec in recipes[path]]
-                        for path in sorted(recipes)}}
+                        for path in sorted(recipes)},
+            'apt_open_gaps': [gap.json() for gap in apt_open_gaps]}
 
 
-def inventory_text(pins: dict, recipes: dict[str, tuple[ParentSpec, ...]]) -> bytes:
-    return (json.dumps(inventory_json(pins, recipes), indent=2) + '\n').encode()
+def inventory_text(pins: dict, recipes: dict[str, tuple[ParentSpec, ...]],
+                   apt_open_gaps: tuple[AptOpenGap, ...] = ()) -> bytes:
+    return (json.dumps(inventory_json(pins, recipes, apt_open_gaps), indent=2) + '\n').encode()
 
 
 # --- recipe binding rules ---------------------------------------------------
@@ -704,11 +772,30 @@ def check_recipe_parents(inventory: ParentInventory, recipes: dict[str, str]) ->
                               f'{instruction.resolved_image}')
             elif spec.pin != local_base_for(path):
                 raise Refusal(f'{path}: local base {spec.pin} does not describe this recipe')
+            elif pin_for_image(instruction.resolved_image) is not None:
+                raise Refusal(f'{path}: a local base must not address a pinned parent')
+
+
+def check_apt_open_gaps(inventory: ParentInventory, recipes: dict[str, str]) -> None:
+    """Every recorded gap must still be exactly one instruction of its recipe.
+
+    The image-source gate owns which instructions need an entry; the stager owns
+    preservation, so a refresh can never drop, move or silently rewrite the
+    reviewed legacy instructions it is not allowed to regenerate.
+    """
+    for gap in inventory.apt_open_gaps:
+        if gap.recipe not in recipes:
+            raise Refusal(f'apt gap recipe is not a maintained recipe: {gap.recipe}')
+        found = physical_instructions(recipes[gap.recipe]).count(gap.instruction)
+        if found != 1:
+            raise Refusal(f'apt gap changed/closed: review or remove exact instruction entry for '
+                          f'{gap.recipe} (owner #96)')
 
 
 def staged_inventory(text: str, recipes: dict[str, str]) -> ParentInventory:
     inventory = parse_inventory(text)
     check_recipe_parents(inventory, recipes)
+    check_apt_open_gaps(inventory, recipes)
     return inventory
 
 
@@ -1389,7 +1476,10 @@ def stage(request: Request, root: Path, out: Path) -> list[Destination]:
         notes.append(f'{RELEASE_PIN}: {note}')
     pins = merge_pins(inventory.pins if inventory else None, resolved)
     recipes = inventory.recipes if inventory is not None else derive_recipes(root)
-    staged: dict[str, bytes] = {INVENTORY: inventory_text(pins, recipes)}
+    # Bootstrap records no exception: a legacy instruction needs a human to add
+    # the exact entry, and the image-source gate refuses to commit without it.
+    gaps = inventory.apt_open_gaps if inventory is not None else ()
+    staged: dict[str, bytes] = {INVENTORY: inventory_text(pins, recipes, gaps)}
     staged.update(rewrite_recipes(inventory, pins, request, root))
     if RELEASE_PIN in request.pins:
         text = (root / LAYERS_README).read_text()
@@ -1471,6 +1561,13 @@ def summary(request: Request, root: Path, inventory: ParentInventory | None, pin
                              f'{pins[name].reference.digest.value} (reviewed_on '
                              f'{pins[name].verification.reviewed_on.value}; set it to the review date)')
     lines += notes
+    gaps = inventory.apt_open_gaps if inventory is not None else ()
+    if gaps:
+        lines.append(f'apt open gaps preserved exactly ({len(gaps)} instructions, owner #96)')
+        lines += [f'  {gap.recipe}: ' + gap.instruction.split('\n', 1)[0] for gap in gaps]
+    elif request.bootstrap:
+        lines.append('apt open gaps: bootstrap records none; a legacy apt source or key '
+                     'installation must be added by hand for review (#96)')
     for relative in POLICY_FILES:
         if relative not in staged:
             continue
