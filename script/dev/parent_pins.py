@@ -33,7 +33,9 @@ import datetime
 import difflib
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 import urllib.parse
 from dataclasses import dataclass
@@ -76,6 +78,14 @@ STANDARD_VERSION = '0.1.3'
 STANDARD_BOOTSTRAP_DIGEST = 'sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de'
 LOCAL_BASE = 'agent-vm-base:local'
 LAYERS_README = 'examples/layers/README.md'
+# The committed repository base identity (#95): a manifest of the images/ sources
+# the base is built from, and the copied extension's generated default. Both are
+# derived from the staged recipes, so a refresh that moves a local parent input
+# must republish them or the base and its consumers disagree.
+BASE_INPUTS = 'script/build/base-inputs.sh'
+BASE_MANIFEST = 'images/base-inputs.sha256'
+EXTENSION = 'examples/base-extension/Dockerfile'
+LOCAL_PINS = (DEBIAN_PIN, GO_PIN)
 
 # Reviewed Debian repository policy for the pinned parent. A future parent
 # carrying a different URI, suite or key path is a policy change, not a refresh.
@@ -1303,6 +1313,101 @@ def parse_selection(pin: str | None, selection: str | None, bootstrap: bool,
 
 # --- admission, destinations and staging -----------------------------------
 
+def base_input_roots(root: Path) -> tuple[str, ...]:
+    """The canonical images/ root names, read from the generator that owns them."""
+    result = subprocess.run(['/bin/bash', str(root / BASE_INPUTS), 'inputs'], cwd=str(root),
+                            capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise Refusal(f'{BASE_INPUTS} inputs failed ({result.returncode}): '
+                      f'{result.stderr.strip() or result.stdout.strip()}')
+    roots = tuple(line for line in result.stdout.splitlines() if line)
+    if not roots:
+        raise Refusal(f'{BASE_INPUTS} reported no base input roots')
+    return roots
+
+
+def git_command(root: Path, arguments: list[str], environment: dict | None = None,
+                stdin: bytes | None = None) -> str:
+    result = subprocess.run(['git', '-C', str(root), *arguments], input=stdin, env=environment,
+                            capture_output=True, check=False)
+    if result.returncode != 0:
+        raise Refusal(f'git {arguments[0]} failed ({result.returncode}): '
+                      + result.stderr.decode(errors='replace').strip())
+    return result.stdout.decode()
+
+
+def candidate_index(root: Path, staged: dict[str, bytes], tracked: list[str],
+                    index: Path) -> dict:
+    """An index that also lists the paths this proposal publishes.
+
+    The manifest names the *tracked* inputs, and a refresh can publish a newly
+    tracked one before anybody can `git add` it (the first apt extraction). Git's
+    own answer is an index that is not the real one: a copy of the committed
+    index plus a placeholder entry for each published path, so the generator sees
+    the same selection the following commit will produce. The real index and the
+    worktree are untouched.
+    """
+    git_dir = Path(git_command(root, ['rev-parse', '--absolute-git-dir']).strip())
+    environment = dict(os.environ, GIT_INDEX_FILE=str(index))
+    if (git_dir / 'index').exists():
+        shutil.copyfile(git_dir / 'index', index)
+    else:
+        git_command(root, ['read-tree', 'HEAD'], environment)
+    published = [path for path in staged if path.startswith('images/')]
+    extra = [path for path in published if path not in tracked]
+    if extra:
+        # The generator reads mode and stage from the index and hashes the tree,
+        # so a placeholder object is enough and no blob has to be written.
+        blob = git_command(root, ['hash-object', '--stdin'], stdin=b'').strip()
+        for path in extra:
+            git_command(root, ['update-index', '--add', '--cacheinfo', f'100644,{blob},{path}'],
+                        environment)
+    return environment
+
+
+def base_input_identity(root: Path, staged: dict[str, bytes], out: Path) -> dict[str, bytes]:
+    """Render the base manifest and the extension default for this proposal.
+
+    The generator hashes a tree, never the working copy: an unrelated local edit
+    in an input this selection did not stage must not reach the identity, and the
+    reviewed manifest must describe exactly the bytes the proposal publishes.
+    """
+    tree = out.parent / (out.name + '.base-inputs')
+    rendered = out.parent / (out.name + '.base-inputs.out')
+    index = out.parent / (out.name + '.base-inputs.index')
+    for scratch in (tree, rendered, index):
+        if scratch.exists():
+            raise Refusal(f'refusing an existing base-input scratch path: {scratch}')
+    pathspecs = [f'images/{name}' for name in base_input_roots(root)]
+    tracked = [entry for entry in
+               git_command(root, ['ls-files', '-z', '--', *pathspecs]).split('\0') if entry]
+    if not tracked:
+        raise Refusal('the tracked base input set is empty')
+    environment = candidate_index(root, staged, tracked, index)
+    tree.mkdir(parents=True)
+    for path in tracked:
+        relative = PurePosixPath(path).relative_to('images')
+        destination = tree.joinpath(*relative.parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        # The preflight proved every tracked input clean, so the working copy is
+        # the committed bytes; this export makes that explicit.
+        destination.write_bytes((root / path).read_bytes())
+    for path, raw in staged.items():
+        if not path.startswith('images/'):
+            continue
+        relative = PurePosixPath(path).relative_to('images')
+        destination = tree.joinpath(*relative.parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(raw)
+    external('rendering the repository base identity', lambda: subprocess.run(
+        ['/bin/bash', str(root / BASE_INPUTS), '--stage', str(tree), str(rendered)],
+        cwd=str(root), env=environment, capture_output=True, text=True, check=True))
+    return {
+        BASE_MANIFEST: (rendered / 'base-inputs.sha256').read_bytes(),
+        EXTENSION: (rendered / 'extension.Dockerfile').read_bytes(),
+    }
+
+
 def committed_inventory(root: Path) -> ParentInventory | None:
     path = root / INVENTORY
     return parse_inventory(path.read_text()) if path.exists() else None
@@ -1343,6 +1448,10 @@ def destination_paths(request: Request, root: Path,
         paths.add(LAYERS_README)
     if DEBIAN_PIN in request.pins:
         paths |= set(POLICY_FILES)
+    if any(pin in request.pins for pin in LOCAL_PINS):
+        # Only the local parents change base inputs; a release refresh touches the
+        # example layers, whose sources are not part of the base manifest.
+        paths |= {BASE_MANIFEST, EXTENSION}
     return sorted(paths)
 
 
@@ -1494,6 +1603,8 @@ def stage(request: Request, root: Path, out: Path) -> list[Destination]:
         if apt_scratch.exists():
             raise Refusal(f'refusing an existing apt scratch directory: {apt_scratch}')
         staged.update(extract_apt_policy(resolved[DEBIAN_PIN], apt_scratch))
+    if any(pin in request.pins for pin in LOCAL_PINS):
+        staged.update(base_input_identity(root, staged, out))
     # Overlay the staged bytes on the recipes that exist on disk, not on the
     # recipes the inventory lists: otherwise an unlisted new recipe could never
     # be seen here and a refresh would leave it at the old digest.
@@ -1568,6 +1679,12 @@ def summary(request: Request, root: Path, inventory: ParentInventory | None, pin
     elif request.bootstrap:
         lines.append('apt open gaps: bootstrap records none; a legacy apt source or key '
                      'installation must be added by hand for review (#96)')
+    if BASE_MANIFEST in staged:
+        identity = 'sha256:' + hashlib.sha256(staged[BASE_MANIFEST]).hexdigest()
+        committed = root / BASE_MANIFEST
+        state = 'unchanged' if committed.exists() \
+            and committed.read_bytes() == staged[BASE_MANIFEST] else 'changed'
+        lines.append(f'base identity {identity} ({state}; {EXTENSION} default follows it)')
     for relative in POLICY_FILES:
         if relative not in staged:
             continue

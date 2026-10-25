@@ -63,6 +63,11 @@ fi
 contract_context=$(bash "$ROOT/script/build/recipe-contract.sh" --native) ||
     { echo 'cannot build the native recipe-contract helper' >&2; exit 1; }
 export RECIPE_CONTRACT_CONTEXT="$contract_context"
+# The committed repository base identity is derived from tracked bytes, so a
+# stale manifest or extension default is a source defect every mode can see
+# without Docker. It runs after the helper export so a formatter failure above
+# still stops the gate first.
+bash script/build/base-inputs.sh --check
 # The images run #!/bin/sh under dash; macOS sh is bash 3.2 and parses bashisms.
 if command -v dash >/dev/null; then posix_sh='dash'
 elif [ "${GITHUB_ACTIONS:-}" = true ]; then echo 'dash required on CI for #!/bin/sh syntax checks' >&2; exit 1
@@ -110,6 +115,9 @@ if [ "$guard_only" = false ]; then
     # Parent-pin resolver/publisher table (#95): authenticated resolution,
     # mutation refusals and publication containment, all hermetic.
     python3 script/test/parent-pins.py
+    # Repository base identity (#95): the committed manifest, the generator, the
+    # in-build verifier and the copied extension default, all hermetic.
+    python3 script/test/base-inputs.py
 fi
 # --- no embedded Python in shell sources -------------------------------------
 # Python belongs in its own file, invoked as `python3 FILE`; see CODING_STANDARDS

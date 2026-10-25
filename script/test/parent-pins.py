@@ -37,23 +37,32 @@ LAYER_RECIPES = ['examples/layers/chrome-devtools/Dockerfile',
                  'examples/layers/wirenboard-cpp/Dockerfile']
 BASE_DOCKERFILE = 'images/Dockerfile'
 STANDARD_DOCKERFILE = 'images/standard/Dockerfile'
+# The repository base identity is derived from the staged recipes, so every
+# selection that moves a local parent republishes it; a release refresh does not.
+BASE_MANIFEST = 'images/base-inputs.sha256'
+EXTENSION = 'examples/base-extension/Dockerfile'
+LOCAL_IDENTITY = [BASE_MANIFEST, EXTENSION]
 BOOTSTRAP_DESTINATIONS = sorted([
     INVENTORY, *POLICY_FILES, LAYERS_README, BASE_DOCKERFILE, STANDARD_DOCKERFILE,
-    *LAYER_RECIPES])
-DEBIAN_DESTINATIONS = sorted([INVENTORY, *POLICY_FILES, BASE_DOCKERFILE])
+    *LOCAL_IDENTITY, *LAYER_RECIPES])
+DEBIAN_DESTINATIONS = sorted([INVENTORY, *POLICY_FILES, BASE_DOCKERFILE, *LOCAL_IDENTITY])
 RELEASE_DESTINATIONS = sorted([
     INVENTORY, LAYERS_README, *LAYER_RECIPES])
 # A disposable checkout is assembled from exactly the tracked files the tooling
 # reads; it is not a copy of the maintained tree, so a test can never write into it.
 STAGED = {
-    'images': ['Dockerfile', 'standard/Dockerfile', '.dockerignore', 'install-pnpm.sh',
-               'install-zellij.sh', 'pnpm/pin.json', 'pnpm/verify-pnpm.sh',
-               'recipe-contract/go.mod'],
-    'examples': ['base-extension/Dockerfile', 'layers/README.md',
+    # `images/apt-policy/` is deliberately absent: bootstrap is the only refresh
+    # that creates it, and T8c/T12 start from that state.
+    'images': ['Dockerfile', 'standard/Dockerfile', '.dockerignore', 'install-build-ca.sh',
+               'install-pnpm.sh', 'install-zellij.sh', 'verify-base-inputs.sh',
+               'base-inputs.sha256',
+               'pnpm/pin.json', 'pnpm/verify-pnpm.sh', 'recipe-contract/go.mod'],
+    'examples': ['base-extension/Dockerfile', 'base-extension/check-base-identity.sh',
+                 'layers/README.md',
                  'layers/chrome-devtools/Dockerfile', 'layers/go-dev/Dockerfile',
                  'layers/rust-dev/Dockerfile', 'layers/wirenboard-cpp/Dockerfile'],
     'script': ['dev/parent_pins.py', 'dev/refresh-parent-pins.sh',
-               'build/transactional-publish.sh'],
+               'build/base-inputs.sh', 'build/transactional-publish.sh'],
 }
 RELEASED = 'ghcr.io/gregwebs/agent-vm-standard'
 INVOCATION = 'https://github.com/gregwebs/agent-vm-images/actions/runs/37775269427/attempts/1'
@@ -223,6 +232,18 @@ class Case:
         self.git('add', '-A')
         self.git('commit', '-qm', message)
         self.before = self.snapshot()
+
+    def render_base_inputs(self):
+        """Regenerate the committed base identity, as the documented edit flow does.
+
+        A hand edit of a listed input makes the manifest stale by definition; the
+        maintainer's repair is `--write`, not a parent-pin refresh that happens to
+        notice. T17 goes through it so its refreshes start from a green tree.
+        """
+        result = subprocess.run(['/bin/bash', 'script/build/base-inputs.sh', '--write'],
+                                cwd=str(self.repo), env=self.environment(),
+                                capture_output=True, text=True, check=False)
+        assert result.returncode == 0, result.stdout + result.stderr
 
     # --- running -----------------------------------------------------------
 
@@ -466,7 +487,10 @@ def t2(root):
     assert standard[-1].raw_image == '${BASE_IMAGE}'
     assert standard[-1].resolved_image == 'agent-vm-base:local'
     extension = source.parse_froms((ROOT / 'examples/base-extension/Dockerfile').read_text())
-    assert extension[0].raw_image == extension[0].resolved_image == 'agent-vm-base:local'
+    # Part C moved the extension's base into a documented ARG, so its raw form is
+    # the expansion while the resolved form still names the local base.
+    assert extension[0].raw_image == '${BASE_IMAGE}', extension[0]
+    assert extension[0].resolved_image == 'agent-vm-base:local', extension[0]
     joined = source.parse_froms(
         'ARG BASE_IMAGE=agent-vm-base:local\n'
         'FROM --platform=$BUILDPLATFORM golang:1.27.3-trixie \\\n    AS builder\n'
@@ -1360,7 +1384,7 @@ def t17(root):
     """A refresh preserves recorded apt gap instructions exactly (#96)."""
     source = module()
     case = Case(root, 't17')
-    case.bootstrap()
+    case.adopt()
     assert case.inventory()['apt_open_gaps'] == [], \
         'bootstrap records no exemption; a human adds the exact instruction'
     base = case.repo / BASE_DOCKERFILE
@@ -1372,6 +1396,7 @@ def t17(root):
                                    'owner': source.APT_GAP_OWNER}]
     (case.repo / INVENTORY).write_text(json.dumps(inventory, indent=2) + '\n')
     assert source.parse_inventory((case.repo / INVENTORY).read_text()) is not None
+    case.render_base_inputs()
     case.commit('record a reviewed legacy instruction')
     case.snapshot()
 
@@ -1462,6 +1487,90 @@ for relative in ('images/parent-pins.json', 'examples/layers/extra'):
                                                    'examples/layers/extra']))
 (out / 'summary.txt').write_text('proposal\n')
 '''
+def t18(root):
+    """A local refresh co-publishes the base manifest and the extension default."""
+    case = Case(root, 't18')
+    case.adopt()
+    manifest = (case.repo / BASE_MANIFEST).read_bytes()
+    identity = 'sha256:' + sha256_bytes(manifest)
+    extension = (case.repo / EXTENSION).read_text()
+    assert 'ARG AGENT_VM_BASE_IDENTITY=' + identity in extension, \
+        'the committed extension default is not the manifest identity'
+    for line in manifest.decode().splitlines():
+        entry, path = line.split('  ', 1)
+        assert sha256_bytes((case.repo / 'images' / path).read_bytes()) == entry, line
+    lines = manifest.decode().splitlines()
+    assert [line.split('  ', 1)[1] for line in lines] == \
+        sorted(line.split('  ', 1)[1] for line in lines), 'the manifest must be byte-ordered'
+    assert not any(line.endswith('  parent-pins.json') for line in lines), \
+        'the inventory is metadata the base does not consume'
+    # A moved local parent changes the recipes, so the manifest and the default
+    # have to move with them in the same transaction.
+    case.shift_debian()
+    case.commit('shift the Debian fixture')
+    assert case.run(['debian']) == 0, case.output
+    case.published_only(DEBIAN_DESTINATIONS)
+    moved = (case.repo / BASE_MANIFEST).read_bytes()
+    assert moved != manifest, 'the moved recipe did not change the manifest'
+    moved_identity = 'sha256:' + sha256_bytes(moved)
+    assert 'ARG AGENT_VM_BASE_IDENTITY=' + moved_identity in (case.repo / EXTENSION).read_text()
+    entry = [line for line in moved.decode().splitlines() if line.endswith('  Dockerfile')][0]
+    assert entry.split('  ', 1)[0] == sha256_bytes((case.repo / BASE_DOCKERFILE).read_bytes())
+    assert moved_identity in case.output, 'the proposal must name the published identity'
+    case.no_work()
+    case.commit('refresh the local parent')
+    assert case.run(['debian']) == 0, case.output
+    assert 'unchanged' in case.output, case.output
+    case.unchanged()
+
+    # An untracked collision at either derived destination is refused rather than
+    # overwritten; removing the index entry leaves the file in place.
+    for name, relative in (('t18b', BASE_MANIFEST), ('t18c', EXTENSION)):
+        collision = Case(root, name)
+        collision.adopt()
+        collision.git('rm', '-q', '--cached', relative)
+        collision.snapshot()
+        refused(collision.run(['debian']), collision,
+                'refusing dirty or untracked input/destination: ' + relative)
+        collision.no_work()
+
+    # The default is published before the manifest (sorted destination order), so
+    # a failed manifest copy must restore the already-written default too.
+    failed = Case(root, 't18d')
+    failed.adopt()
+    failed.shift_debian()
+    failed.commit('shift the Debian fixture')
+    before = failed.files()
+    # The needle names the staged source, so only the publication copy fails: the
+    # restore copies read from the backup directory and must succeed.
+    failed.flag({'needle': 'staged/' + BASE_MANIFEST, 'phase': 'publish', 'action': 'fail',
+                 'truncate': True})
+    assert failed.run(['debian']) == 1, failed.output
+    assert 'restoring attempted files inclusively' in failed.output, failed.output
+    after = failed.files()
+    for relative in (BASE_MANIFEST, EXTENSION, BASE_DOCKERFILE):
+        assert after[relative] == before[relative], 'not restored: ' + relative
+    failed.no_work()
+    (failed.root / 'fail-copy').unlink()
+    assert failed.run(['debian']) == 0, failed.output
+    failed.published_only(DEBIAN_DESTINATIONS)
+
+    # A signal during the same publication restores both derived destinations too.
+    interrupted = Case(root, 't18e')
+    interrupted.adopt()
+    interrupted.shift_debian()
+    interrupted.commit('shift the Debian fixture')
+    before = interrupted.files()
+    interrupted.flag({'needle': 'staged/' + BASE_MANIFEST, 'phase': 'publish', 'action': 'TERM'})
+    assert interrupted.run(['debian']) == 143, interrupted.output
+    assert 'publication interrupted; sources restored' in interrupted.output, interrupted.output
+    after = interrupted.files()
+    for relative in (BASE_MANIFEST, EXTENSION, BASE_DOCKERFILE):
+        assert after[relative] == before[relative], 'not restored: ' + relative
+    interrupted.no_work(retained=True)
+    report('T18', 'co-publishes the base manifest and the extension default')
+
+
 PARTIAL_STAGER = r'''#!/usr/bin/env python3
 import json, sys
 from pathlib import Path
@@ -1495,7 +1604,7 @@ def main():
     root = Path(tempfile.mkdtemp(prefix='parent-pins-tests.'))
     try:
         for test in (t1, t2, t3, t3b, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15,
-                     t15b, t16, t17):
+                     t15b, t16, t17, t18):
             test(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)

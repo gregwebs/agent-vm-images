@@ -53,6 +53,18 @@ refuses CI execution; builds and the isolated release entrypoints only read them
 declarations must name the pinned references literally. Policy, exceptions and
 statuses: [image input policy](image-input-policy.md).
 
+The *local* edge has its own owners: `images/base-inputs.sha256` is the committed
+manifest of the images/ sources the base is built from;
+`script/build/base-inputs.sh` is its only writer (it also rewrites the
+`AGENT_VM_BASE_IDENTITY` default in `examples/base-extension/Dockerfile`);
+`images/verify-base-inputs.sh` is the in-build check that stamps the base and
+compares a consumer's inherited stamp; and
+`examples/base-extension/check-base-identity.sh` is the extension's check. A
+parent refresh republishes the manifest and the default, since a moved local
+parent changes a listed input. `images/parent-pins.json` is metadata the base
+does not consume and is deliberately not listed. Decision and limits:
+[ADR 0005](adr/0005-repository-base-identity.md).
+
 ## Current pnpm ownership
 
 Base owns `images/pnpm/`, authenticated bootstrap and the pnpm selection label.
