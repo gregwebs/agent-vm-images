@@ -77,11 +77,11 @@ if [ "$guard_only" = false ]; then
     python3 script/test/recipe-contract-oracle.py
     node script/test/recipe-contract-oracle.mjs
     python3 script/test/recipe-contract-adapters.py
-    for suite in agent-versions claude-installer codex-installer copilot-installer copilot-verify \
+    for suite in agent-versions apt-sources claude-installer codex-installer copilot-installer copilot-verify \
         opencode-installer opencode-pnpm-prepare-lock opencode-pnpm-install opencode-pnpm-upgrade \
         opencode-plugins-verify run-pnpm dsh-prepare-lock dsh-verify pi-install pi-prepare-lock pi-verify \
         pi-wrapper shipped-installer-contracts tool-access vendored-installers upgrade-scripts \
-        install-shellcheck install-zellij install-pnpm host-watchdog transactional-publish \
+        install-build-ca install-shellcheck install-zellij install-pnpm host-watchdog transactional-publish \
         standard-certification build-entrypoint contracts-formatter release-content release-operations release-http \
         ci-boot-bind ci-boot-runtime ci-boot-evidence ci-boot-prepare; do
         echo "=== $suite ==="

@@ -27,7 +27,13 @@ version bump, Rust application build, submodule or launcher packaging is needed.
   NodeSource and GitHub CLI stay unpinned violations owned by
   [#96](https://github.com/gregwebs/agent-vm-images/issues/96), optional plugins
   by [#101](https://github.com/gregwebs/agent-vm-images/issues/101). This is a
-  pinned-parent boundary, not byte-reproducible distro construction.
+  pinned-parent boundary, not byte-reproducible distro construction. The base
+  build verifies that parent baseline with `images/apt-policy/check-sources.sh`;
+  the exact remaining #96 apt instructions are recorded in
+  `images/parent-pins.json` `apt_open_gaps`, and any other apt source or key
+  installation written in a spelling the image-source gate knows (`/etc/apt`
+  with any suffix, `sources.list`, `.sources`, `Signed-By`, `trusted.gpg`, the
+  keyring directories, `URIs:`, `Types: deb`, `Dir::Etc`, `apt-config`) fails it.
 - `CODING_STANDARDS.md` is generated from the shared standards and stays
   unchanged. Its immutable-input rule applies here with exactly one exception:
   packages from official Debian apt repositories, with the reviewed policy in
@@ -44,6 +50,11 @@ bash script/dev/refresh-parent-pins.sh debian
 bash script/dev/refresh-parent-pins.sh golang-builder [golang:VERSION-trixie]
 bash script/dev/refresh-parent-pins.sh standard-release X.Y.Z
 ```
+
+A parent-layer fix — including a `ca-certificates` revision or a withdrawn CA
+root — needs a reviewed refresh and a rebuild of both products; rebuilding alone
+keeps the frozen parent, and a floating `apt-get install` needs cache
+invalidation (`--no-cache`) to requery the archive. Never add `apt-get upgrade`.
 
 The first adoption was `--bootstrap`. A refresh prints old/new references,
 per-platform digests and provenance, and the apt policy diff, then publishes the

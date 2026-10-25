@@ -25,9 +25,9 @@ OWNED_DIRECTORY=images/apt-policy
 # Inputs the base image consumes besides the destinations. A local edit here
 # would silently change what a published identity describes, so a dirty one
 # stops a refresh even when it is not itself a destination. Names that do not
-# exist yet are skipped: later PRs add install-build-ca.sh and the manifest.
-BASE_INPUTS=(.dockerignore Dockerfile install-build-ca.sh install-pnpm.sh install-zellij.sh
-             pnpm recipe-contract apt-policy)
+# exist yet are skipped: a later PR adds the input manifest.
+BASE_INPUTS=(.dockerignore Dockerfile apt-policy install-build-ca.sh install-pnpm.sh
+             install-zellij.sh pnpm recipe-contract)
 
 usage() {
     cat >&2 <<'USAGE'

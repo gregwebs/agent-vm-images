@@ -747,6 +747,8 @@ def t6(root):
     assert 'after  debian: debian:13-slim@sha256:' in case.output
     assert 'linux/arm64: ' + digest(FIXTURES / 'registry/debian-arm64.json') in case.output
     assert 'proposal' in case.output, 'bootstrap must mark the exceptions as proposals'
+    assert case.inventory()['apt_open_gaps'] == [], \
+        'bootstrap records no exemption; a human adds each exact #96 instruction'
     assert '+FROM debian:13-slim@' in case.output, 'the proposal must show the diff'
     assert 'authenticated v0.1.3 at ' + INVOCATION in case.output
     case.no_work()
@@ -1349,6 +1351,72 @@ def t16(root):
     report('T16', 'refuses unplanned, absolute, traversal and empty destination sets')
 
 
+GAP_INSTRUCTION = ('RUN echo "deb http://legacy.example stable main" \\\n'
+                   '        > /etc/apt/sources.list.d/legacy.list \\\n'
+                   ' && rm -rf /var/lib/apt/lists/*')
+
+
+def t17(root):
+    """A refresh preserves recorded apt gap instructions exactly (#96)."""
+    source = module()
+    case = Case(root, 't17')
+    case.bootstrap()
+    assert case.inventory()['apt_open_gaps'] == [], \
+        'bootstrap records no exemption; a human adds the exact instruction'
+    base = case.repo / BASE_DOCKERFILE
+    base.write_text(base.read_text().replace(
+        'CMD ["/bin/bash"]', GAP_INSTRUCTION + '\n\nCMD ["/bin/bash"]'))
+    inventory = case.inventory()
+    inventory['apt_open_gaps'] = [{'recipe': BASE_DOCKERFILE,
+                                   'instruction': GAP_INSTRUCTION,
+                                   'owner': source.APT_GAP_OWNER}]
+    (case.repo / INVENTORY).write_text(json.dumps(inventory, indent=2) + '\n')
+    assert source.parse_inventory((case.repo / INVENTORY).read_text()) is not None
+    case.commit('record a reviewed legacy instruction')
+    case.snapshot()
+
+    for arguments in (['debian'], ['golang-builder'], ['standard-release', '0.1.3']):
+        assert case.run(arguments) == 0, case.output
+        assert case.inventory()['apt_open_gaps'] == inventory['apt_open_gaps'], \
+            'a refresh dropped or rewrote a recorded gap'
+        case.unchanged()
+
+    # An edited instruction stops being the recorded one; the stager refuses it
+    # instead of regenerating the exemption from whatever the recipe now says.
+    base.write_text(base.read_text().replace('legacy.list', 'legacy-other.list'))
+    case.commit('edit the recorded instruction')
+    case.snapshot()
+    assert case.run(['debian']) == 1, case.output
+    assert 'apt gap changed/closed: review or remove exact instruction entry for ' \
+        + BASE_DOCKERFILE + ' (owner #96)' in case.output, case.output
+    case.unchanged()
+    case.no_work()
+
+    # Parse-level mutations of the record itself.
+    template = json.loads((case.repo / INVENTORY).read_text())
+    for label, transform in {
+        'wrong owner': lambda value: value['apt_open_gaps'][0].update(
+            {'owner': 'https://github.com/gregwebs/agent-vm-images/issues/95'}),
+        'non-RUN instruction': lambda value: value['apt_open_gaps'][0].update(
+            {'instruction': GAP_INSTRUCTION.replace('RUN ', 'CMD ', 1)}),
+        'unknown field': lambda value: value['apt_open_gaps'][0].update({'reviewed': True}),
+        'unknown recipe': lambda value: value['apt_open_gaps'][0].update(
+            {'recipe': 'images/Other/Dockerfile'}),
+        'dangling continuation': lambda value: value['apt_open_gaps'][0].update(
+            {'instruction': GAP_INSTRUCTION + ' \\'}),
+    }.items():
+        value = json.loads(json.dumps(template))
+        transform(value)
+        text = json.dumps(value, indent=2) + '\n'
+        assert text != json.dumps(template, indent=2) + '\n', label
+        try:
+            source.parse_inventory(text)
+        except source.Refusal:
+            continue
+        raise AssertionError('accepted an apt gap mutation: ' + label)
+    report('T17', 'preserves recorded apt gap instructions and refuses edited records')
+
+
 ABSOLUTE_STAGER = r'''#!/usr/bin/env python3
 import json, sys
 from pathlib import Path
@@ -1427,7 +1495,7 @@ def main():
     root = Path(tempfile.mkdtemp(prefix='parent-pins-tests.'))
     try:
         for test in (t1, t2, t3, t3b, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15,
-                     t15b, t16):
+                     t15b, t16, t17):
             test(root)
     finally:
         shutil.rmtree(root, ignore_errors=True)

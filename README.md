@@ -106,15 +106,34 @@ An explicitly supplied public CA can be added with ordinary base-build options:
 
 ```bash
 bash images/build.sh base -- --secret id=hostca,src=/path/to/ca.crt \
-  --build-arg CA_SHIM_CACHEBUST="$(shasum -a 256 /path/to/ca.crt | awk '{print $1}')"
+  --build-arg BUILD_CA_SHA256="$(sha256sum /path/to/ca.crt | cut -d ' ' -f1)"
 ```
 
+The hash is **required**: it is the reviewed identity of the certificate, and
+reviewing the CA file before you select its hash is the trust decision. A secret
+without a hash, a hash without a secret, a malformed hash, a certificate that
+contains anything other than exactly one PEM certificate, and a hash that does
+not match the secret all fail before apt runs or trust is written. A successful
+build installs `/usr/local/share/ca-certificates/agent-vm-build.crt` (0644),
+refreshes the bundle and records `sha256:<hash>` in the image.
+
+`CA_SHIM_CACHEBUST` is removed, and no legacy value is accepted: Docker ignores
+undeclared build arguments it does not know, so the base declares a tombstone
+only to reject the old interface. A legacy invocation fails with
+`CA_SHIM_CACHEBUST was removed; use BUILD_CA_SHA256=<64-hex SHA-256 of hostca>`.
+
 The certificate becomes **persisted trust material**. Do not bake a private
-corporate CA into a public image. Secret contents are not cache keys; the hash
-invalidates the trust RUN when they change. Builder/pull TLS trust is separate
-from RUN-layer trust: this secret cannot fix daemon registry TLS errors. There
-is no CA auto-detection, host-network mode or softened download failure.
-Persisted shim certificates survive distro CA updates; see the
+corporate CA into a public image. Secret bytes are not part of the build cache
+key: the hash is, so a changed hash reruns verification while changed bytes with
+an unchanged hash can reuse a previous valid layer. Prove a mismatch with
+`--no-cache`; do not read a cached `0` as proof about new secret bytes. The base
+records the hash in the `org.agent-vm.build-ca.sha256` label, and the public
+release build refuses a base that carries a nonempty one or that omits the
+label, and refuses `--label org.agent-vm.build-ca.sha256=...` on the build it
+runs. Builder/pull TLS
+trust is separate from RUN-layer trust: this secret cannot fix daemon registry
+TLS errors. There is no CA auto-detection, host-network mode or softened
+download failure. Persisted shim certificates survive distro CA updates; see the
 [root-store advisory response](docs/ca-trust-response.md).
 
 ## Examples

