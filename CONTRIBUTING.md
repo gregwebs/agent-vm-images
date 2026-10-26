@@ -359,7 +359,11 @@ the network: off-host traffic is denied and only loopback is usable. Executable
 allowlisting is macOS-only: `sandbox-exec` checks every `exec` against the
 declared paths, so a copy of an allowed binary does not start. Linux needs
 `bubblewrap` (`apt-get install bubblewrap`) and a kernel with Landlock
-(`CONFIG_SECURITY_LANDLOCK`, 5.13+): the network namespace and the filesystem view
+(`CONFIG_SECURITY_LANDLOCK`, 5.13+). Ubuntu 24.04 also restricts unprivileged
+user namespaces; on a disposable runner that needs
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (the contracts
+job sets it) or bubblewrap cannot configure its network namespace. The network
+namespace and the filesystem view
 are the OS layer's guarantee, and Landlock's `EXECUTE` rules refuse a *direct*
 `exec` outside the list — but a listed ELF loader can start another program
 without a kernel `exec` of that file, so this is not an executable allowlist. On

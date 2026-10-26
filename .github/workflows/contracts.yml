@@ -45,6 +45,11 @@ jobs:
           # isolation control refuses rather than silently weakening when it is
           # absent (#102).
           bash script/ci/apt-install.sh jq coreutils python3 bubblewrap
+          # Ubuntu 24.04 restricts unprivileged user namespaces, which makes
+          # bubblewrap fail to configure its new network namespace on this
+          # disposable runner. The fixtures' isolation control is fail-closed,
+          # so the restriction is lifted for this job only (#102).
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bash script/dev/install-shellcheck.sh "$RUNNER_TEMP/shellcheck"
           echo "$RUNNER_TEMP/shellcheck" >> "$GITHUB_PATH"
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
