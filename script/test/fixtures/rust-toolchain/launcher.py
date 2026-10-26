@@ -80,6 +80,7 @@ def dependencies() -> model.Dependencies:
     runner = driver.RecordingRunner(model.Architecture.AMD64, fixture.CHANNEL,
                                     fixture.RUSTUP_VERSION)
     return model.Dependencies(transport=transport, runner=runner,
+                              github_actions=False,
                               gpg=model.GpgProgram(driver._gpg_path()), trust=trust)
 
 

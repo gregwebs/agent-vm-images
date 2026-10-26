@@ -1440,7 +1440,8 @@ def test_unaudited_rustup(fixture_root: driver.Fixture) -> None:
     transport = driver.FixtureTransport(fixture_root.dist.files)
     dependencies = fixture_root.dependencies()
     dependencies = model.Dependencies(transport=transport, runner=dependencies.runner,
-                                      gpg=dependencies.gpg, trust=dependencies.trust)
+                                      gpg=dependencies.gpg, trust=dependencies.trust,
+                                      github_actions=False)
     out = Path(tempfile.mkdtemp(dir=fixture_root.root)) / 'stage-out'
     code = driver.updater.main(
         ['stage', '--channel', fixture.CHANNEL, '--rustup', '1.29.0',
@@ -1456,28 +1457,21 @@ def test_ci_stage_refusal(fixture_root: driver.Fixture) -> None:
     transport = driver.FixtureTransport(fixture_root.dist.files)
     base = fixture_root.dependencies()
     dependencies = model.Dependencies(transport=transport, runner=base.runner,
-                                      gpg=base.gpg, trust=base.trust)
+                                      gpg=base.gpg, trust=base.trust,
+                                      github_actions=True)
     out = Path(tempfile.mkdtemp(dir=fixture_root.root)) / 'ci-stage'
     arguments = ['stage', '--channel', fixture.CHANNEL, '--current',
                  str(fixture_root.pinned), '--out', str(out)]
-    gate = os.environ.get('GITHUB_ACTIONS')
-    os.environ['GITHUB_ACTIONS'] = 'true'
-    try:
-        code = driver.updater.main(arguments, dependencies)
-        check('the stager command refuses stage in CI with status 2', code == 2)
-        check('the CI refusal fetches nothing', transport.fetches == [], f'({transport.fetches})')
-        check('the CI refusal creates no candidate', not out.exists())
-        refuses('the callable boundary refuses stage in CI too',
-                lambda: driver.updater.stage(driver.updater.StageRequest(
-                    channel=model.Channel(fixture.CHANNEL),
-                    rustup=model.Semver(fixture.RUSTUP_VERSION), key=None,
-                    current=fixture_root.pinned, out=out, reviewed_on=None, reviewer=None),
-                    dependencies), 'refused in GitHub Actions')
-    finally:
-        if gate is None:
-            del os.environ['GITHUB_ACTIONS']
-        else:
-            os.environ['GITHUB_ACTIONS'] = gate
+    code = driver.updater.main(arguments, dependencies)
+    check('the stager command refuses stage in CI with status 2', code == 2)
+    check('the CI refusal fetches nothing', transport.fetches == [], f'({transport.fetches})')
+    check('the CI refusal creates no candidate', not out.exists())
+    refuses('the callable boundary refuses stage in CI too',
+            lambda: driver.updater.stage(driver.updater.StageRequest(
+                channel=model.Channel(fixture.CHANNEL),
+                rustup=model.Semver(fixture.RUSTUP_VERSION), key=None,
+                current=fixture_root.pinned, out=out, reviewed_on=None, reviewer=None),
+                dependencies), 'refused in GitHub Actions')
 
 
 def test_install_refusals(fixture_root: driver.Fixture) -> None:

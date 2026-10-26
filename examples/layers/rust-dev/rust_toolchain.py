@@ -2288,12 +2288,23 @@ class Dependencies:
     runner: Runner
     gpg: GpgProgram
     trust: TrustPolicy = REVIEWED_TRUST_POLICY
+    # None means "read the environment at the call site". Tests that run the real
+    # stager in a fixture child set False because they are not CI work; the CI
+    # refusal control sets True. Production always resolves the environment once.
+    github_actions: bool | None = None
 
     @staticmethod
     def production() -> 'Dependencies':
         gpg = shutil.which('gpg') or '/usr/bin/gpg'
         return Dependencies(transport=HttpsTransport(), runner=ProcessRunner(),
-                            gpg=GpgProgram(gpg), trust=REVIEWED_TRUST_POLICY)
+                            gpg=GpgProgram(gpg), trust=REVIEWED_TRUST_POLICY,
+                            github_actions=os.environ.get('GITHUB_ACTIONS') == 'true')
+
+
+def in_github_actions(dependencies: Dependencies) -> bool:
+    if dependencies.github_actions is not None:
+        return dependencies.github_actions
+    return os.environ.get('GITHUB_ACTIONS') == 'true'
 
 
 def _with_verifier(arguments: argparse.Namespace, dependencies: Dependencies):

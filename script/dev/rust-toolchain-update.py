@@ -170,21 +170,21 @@ class StageRequest:
     reviewer: str | None
 
 
-def require_maintainer_host() -> None:
+def require_maintainer_host(dependencies: model.Dependencies) -> None:
     """Stage mode resolves and adopts upstream bytes, so it is never CI work.
 
     Checked here as well as in the shell writer: this module is a public entrypoint
     (and an importable one), and a caller that skips the shell must still be
     refused before any network or scratch activity.
     """
-    if os.environ.get('GITHUB_ACTIONS') == 'true':
+    if model.in_github_actions(dependencies):
         refuse('stage mode is refused in GitHub Actions; pin maintenance is maintainer-host '
                'work and ordinary CI only runs the offline check')
 
 
 def stage(request: StageRequest, dependencies: model.Dependencies,
           dockerfile: Path = DOCKERFILE) -> Proposal:
-    require_maintainer_host()
+    require_maintainer_host(dependencies)
     if request.rustup.value not in model.SUPPORTED_RUSTUP_VERSIONS:
         # The exception text, format preference and installation behaviour are
         # bound to the audited installer; a different version cannot inherit them.
@@ -428,7 +428,7 @@ def main(argv: Sequence[str] | None = None,
         print(f'reviewed_on={pin.bootstrap_exception.reviewed_on.value}')
         print(f'reviewer={pin.bootstrap_exception.reviewer}')
         return 0
-    if os.environ.get('GITHUB_ACTIONS') == 'true':
+    if model.in_github_actions(dependencies):
         print('rust-toolchain-update: refusing stage in GitHub Actions; pin maintenance is '
               'maintainer-host work and ordinary CI only runs the offline check',
               file=sys.stderr)

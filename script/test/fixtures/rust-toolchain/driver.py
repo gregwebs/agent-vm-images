@@ -296,7 +296,8 @@ class Fixture:
                                   runner=runner or RecordingRunner(model.Architecture.ARM64,
                                                                    fixture.CHANNEL,
                                                                    fixture.RUSTUP_VERSION),
-                                  gpg=model.GpgProgram(_gpg_path()), trust=self.trust)
+                                  gpg=model.GpgProgram(_gpg_path()), trust=self.trust,
+                                  github_actions=False)
 
 
 def _gpg_path() -> str:
@@ -318,7 +319,8 @@ def build(root: Path) -> Fixture:
                                       runner=RecordingRunner(model.Architecture.ARM64,
                                                              fixture.CHANNEL,
                                                              fixture.RUSTUP_VERSION),
-                                      gpg=model.GpgProgram(_gpg_path()), trust=trust)
+                                      gpg=model.GpgProgram(_gpg_path()), trust=trust,
+                                      github_actions=False)
     dockerfile = root / 'Dockerfile'
     dockerfile.write_text(f'ARG RUST_TOOLCHAIN={fixture.CHANNEL}\nFROM fixture\n')
     out = root / 'pinned'
