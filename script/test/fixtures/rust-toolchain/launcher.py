@@ -12,6 +12,10 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+
+# This child imports modules from the checkout when the tree under test is a
+# temporary copy; a documented command must not leave bytecode behind.
+sys.dont_write_bytecode = True
 import tempfile
 import time
 from pathlib import Path
