@@ -222,7 +222,17 @@ def write_launcher(launcher_dir: Path) -> None:
     shim.chmod(0o755)
 
 
+# Only caches this suite creates are its concern: contracts.sh runs other suites
+# that import script/dev modules earlier in the same job.
+BYTECODE_ROOTS = ('examples/layers/rust-dev', 'script/dev',
+                  'script/test/fixtures/rust-toolchain')
+_BYTECODE_BEFORE: set[str] = set()
+
+
 def main() -> int:
+    global _BYTECODE_BEFORE
+    _BYTECODE_BEFORE = {str(path) for relative in BYTECODE_ROOTS
+                        for path in (driver.REPOSITORY_ROOT / relative).glob('__pycache__')}
     root = Path(tempfile.mkdtemp(prefix='rust-toolchain-maintenance-')).resolve()
     launcher_dir = root / 'bin'
     try:
@@ -698,10 +708,11 @@ def main() -> int:
                   f'({result.returncode}) {result.stderr[-300:]}')
             caches = sorted(path.relative_to(work).as_posix() for path in work.rglob('__pycache__'))
             check(f'{label} writes no bytecode into the tree', caches == [], f'({caches})')
-        for relative in ('examples/layers/rust-dev', 'script/dev',
-                         'script/test/fixtures/rust-toolchain'):
+        for relative in BYTECODE_ROOTS:
             caches = sorted((driver.REPOSITORY_ROOT / relative).glob('__pycache__'))
-            check(f'this suite left no bytecode in {relative}', caches == [], f'({caches})')
+            new_caches = [path for path in caches if str(path) not in _BYTECODE_BEFORE]
+            check(f'this suite left no bytecode in {relative}', new_caches == [],
+                  f'({new_caches})')
 
         # --- signal during staging -------------------------------------------
         print('signal during staging')
