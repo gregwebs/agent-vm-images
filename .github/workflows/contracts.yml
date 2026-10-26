@@ -41,7 +41,10 @@ jobs:
       - name: Contributor prerequisites
         timeout-minutes: 20
         run: |
-          bash script/ci/apt-install.sh jq coreutils python3
+          # bubblewrap confines the rust-toolchain fixture children; the
+          # isolation control refuses rather than silently weakening when it is
+          # absent (#102).
+          bash script/ci/apt-install.sh jq coreutils python3 bubblewrap
           bash script/dev/install-shellcheck.sh "$RUNNER_TEMP/shellcheck"
           echo "$RUNNER_TEMP/shellcheck" >> "$GITHUB_PATH"
           go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
