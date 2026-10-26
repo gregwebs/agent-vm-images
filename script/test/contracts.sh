@@ -87,6 +87,11 @@ if [ "$guard_only" = false ]; then
     # here because this file is the list of what runs.
     bash script/test/artifact-pins.sh
     python3 script/test/pin-artifact-maintenance.py
+    # The Rust example's pinned toolchain closure (#102): the offline pin/install
+    # table and the maintenance writer's staging/publication faults. Both are
+    # hermetic; the real updater and the native installer are never run here.
+    python3 script/test/rust-toolchain-pins.py
+    python3 script/test/rust-toolchain-maintenance.py
     for suite in agent-versions apt-sources claude-installer codex-installer copilot-installer copilot-verify \
         opencode-installer opencode-pnpm-prepare-lock opencode-pnpm-install opencode-pnpm-upgrade \
         opencode-plugins-verify run-pnpm dsh-prepare-lock dsh-verify pi-install pi-prepare-lock pi-verify \
@@ -115,6 +120,10 @@ if [ "$guard_only" = false ]; then
     bash script/test/pnpm-defaults.sh --hermetic
     bash script/test/standard-image.sh --self-test
     bash script/test/example-layers.sh --self-test
+    # The native Rust harness's own controls (unavailable daemon, interrupted
+    # run, parent argument on every build) need no daemon, so they run here; its
+    # native phases stay the evidence phase's work.
+    bash script/test/rust-example.sh --self-test
     # Updater transaction and signal table (#41): the host-only writer's statuses.
     python3 script/test/chrome-mcp-upgrade.py
     # Parent-pin resolver/publisher table (#95): authenticated resolution,

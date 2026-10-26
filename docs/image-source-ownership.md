@@ -276,41 +276,83 @@ helper-installed content. Harmless comments containing those tokens also fail.
 
 ### Rust and Verus pins
 
-agent-vm owns the canonical pins: the Rust channel in its `rust-toolchain.toml`
-and the Verus release/digest in its `.github/workflows/verus.yml`.
-`examples/layers/rust-dev/Dockerfile` mirrors them (`ARG RUST_TOOLCHAIN`,
-`ARG VERUS_RELEASE`, `ARG VERUS_SHA256`).
+agent-vm owns the canonical selections: the Rust channel in its
+`rust-toolchain.toml` and the Verus release/digest in its
+`.github/workflows/verus.yml`. `examples/layers/rust-dev/Dockerfile` mirrors them
+(`ARG RUST_TOOLCHAIN`, `ARG VERUS_RELEASE`, `ARG VERUS_SHA256`).
 
 Bump order: agent-vm lands its pin bump first; then a PR here moves the mirrored
-`ARG`s (both Verus values together), citing the agent-vm commit.
+selection (both Verus values together), citing the agent-vm commit.
 
-Machine-checked:
-- here: the three `ARG` lines match their anchor shapes, the Verus digest
-  is 64 hex, and `install-verus.sh` has a non-comment `sha256sum` token (same
-  token/ARG-shape guards for Go and golangci-lint). These static checks do not
-  prove execution, digest consumption or fail-closed behavior. Execution evidence
-  comes only from successful native builds; Verus requires native amd64, not
-  exercised on the local arm64 host;
-- in agent-vm: its own consumers (Cargo, workflows, macOS build) agree with its
-  canonical pin.
+#### Rust: reviewed closure, not a channel name (#102)
 
-Not machine-checked: equality of the rust-dev `ARG`s with agent-vm's pins. This
-coverage is deliberately given up; a self-consistent stale Rust/Verus pair can go
-undetected, including through the bundled Verus smoke test. Neither CI checks
-out/reads the other's current tree in this design. A separate checkout/fetch is
-possible; reading through the release-pinned submodule would block launcher
-bumps on image releases. Use-time failures are possible, not guaranteed: rustup
-normally selects the checkout's channel and may attempt installation, which may
-fail with a missing toolchain or write-permission error; explicitly using older
-cargo may hit `rust-version`; Verus may fail with newer launcher vstd. None is an
-equality check. An inconsistent Verus release/digest should fail when the amd64
-installer executes, but that is not local arm64 evidence.
+`examples/layers/rust-dev/rust-toolchain/` is the reviewed input set for the
+Rust layer and the example owns it, like the Chrome MCP pin:
 
-This is a documented trade-off for optional user-built examples: independent
-ownership and non-blocking launcher bumps, written bump order and build-arg
-overrides, not guaranteed mismatch detection. A networked drift report is deferred.
-This repository's contributor Rust toolchain (`contracts.yml`, test-only Cargo
-package) is unrelated to this pin.
+- exact `rustup-init` per architecture with its original upstream `.sha256`
+  sidecar bytes as evidence;
+- the original signed `channel-rust-<version>.toml`, its `.sha256` and detached
+  `.asc`, and Rust's release key (primary fingerprint
+  `108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE`);
+- SHA-256 and detached OpenPGP signature for each selected archive: `rustc`,
+  `cargo`, `rust-std`, `clippy-preview`, `rustfmt-preview` for the GNU host and
+  `rust-std` for the matching musl target, for both `linux/amd64` and
+  `linux/arm64`.
+
+`rust_toolchain.py` is the only program that verifies and installs this; an
+ordinary build never resolves a channel, rewrites the signed manifest, refreshes
+a hash or falls back to another origin. Missing or changed bytes fail the build.
+The `rustup-init` binaries carry no detached signature for 1.28.2, so `pin.json`
+records a **scoped, dated, per-architecture hash-only exception** with exact
+URLs/digests, upstream `.sha256` and installation-document evidence, reviewer and
+a reassessment condition; it is not a claim that the bootstrap publisher is
+authenticated. Signed archives are verified, not excused. Decision and rejected
+alternatives: [ADR 0007](adr/0007-rust-example-toolchain-pins.md).
+
+Only `script/dev/upgrade-rust-toolchain.sh` (with
+`script/dev/rust-toolchain-update.py`) writes these files, on a maintainer host
+(it refuses `GITHUB_ACTIONS=true`). It authenticates the entire
+two-architecture closure without executing the foreign bootstrap and publishes
+the pins, evidence and the Dockerfile `ARG RUST_TOOLCHAIN` assertion as one
+transaction:
+
+```bash
+bash script/dev/upgrade-rust-toolchain.sh 1.98.1 --rustup 1.28.2 \
+  --key /absolute/reviewed/rust-key.gpg.ascii \
+  --review-bootstrap-exception "$(date -u +%F)" --reviewer gregwebs
+bash script/dev/upgrade-rust-toolchain.sh 1.98.1   # expected: unchanged
+bash script/dev/upgrade-rust-toolchain.sh --check  # offline
+```
+
+A changed bootstrap identity prints `hash-only bootstrap exception requires
+renewed review` and publishes nothing; the review date and reviewer come from a
+human. Never hand-edit a pin or renew the date to clear a failure. Status `3`
+means an undecided rollback: recover the retained directory before further
+commits.
+
+First use is bounded: the image exports `RUSTUP_AUTO_INSTALL=0` and persists
+`auto-install disable` and `auto-self-update disable`, so an ordinary `cargo`,
+`rustc`, `cargo clippy` or `cargo fmt` invocation that needs an absent toolchain,
+tool or target fails locally instead of downloading. The selected channel, its
+five host components and the musl standard library work with no Rust
+distribution access. A project `rust-toolchain.toml` that only declares extra
+components or targets may still build; a command that needs them fails.
+`RUSTUP_TOOLCHAIN` and `CARGO_HOME` are deliberately not exported, so project
+selection keeps working and cargo keeps its per-user `$HOME/.cargo` cache. An
+explicit guest `rustup install/add/update` is outside the guarantee, as are
+project dependencies.
+
+Machine-checked here: the committed closure (file set, digests, checksum lines,
+key identity, manifest signature, manifest-derived selection, ARG equality), the
+exact installer/verifier RUN shapes and mounts, `--network=none` on the verifier,
+the absence of a runtime `CARGO_HOME`/`RUSTUP_TOOLCHAIN`, banned live-bootstrap
+or mutable-channel tokens, and the Verus smoke shape — by
+`script/test/example-layers.sh` (81 cases). Hermetic behaviour:
+`python3 script/test/rust-toolchain-pins.py` and
+`python3 script/test/rust-toolchain-maintenance.py`. Native evidence:
+`bash script/test/rust-example.sh --platform linux/arm64|linux/amd64` on a
+native daemon. Equality with agent-vm's current selections is still not
+machine-checked (see below).
 
 ### Landing order
 

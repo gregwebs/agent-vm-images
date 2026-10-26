@@ -12,7 +12,7 @@ LAYERS=examples/layers
 EXAMPLES='chrome-devtools go-dev rust-dev wirenboard-cpp'
 # Known space-free paths, explicitly moved from agent-vm's ci-contracts.sh:
 # deletion/rename must fail rather than silently leave lint coverage.
-GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp.sh go-dev/install-go.sh go-dev/install-golangci-lint.sh go-dev/install-gopls.sh go-dev/verify-toolchain.sh rust-dev/install-rust.sh rust-dev/install-verus.sh rust-dev/verify-toolchain.sh'
+GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp.sh go-dev/install-go.sh go-dev/install-golangci-lint.sh go-dev/install-gopls.sh go-dev/verify-toolchain.sh rust-dev/install-rust.sh rust-dev/install-verus.sh rust-dev/rust_toolchain.py rust-dev/verify-toolchain.sh'
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -169,6 +169,86 @@ check() {
     file="$LAYERS/rust-dev/install-verus.sh"
     [ -f "$file" ] || fail 'guarded script missing: rust-dev/install-verus.sh'
     checksum_token "$file" || fail 'rust-dev: install-verus.sh lacks non-comment sha256sum token'
+    # --- rust-dev: reviewed toolchain closure (#102) -------------------------
+    # The committed data directory is the reviewed input set; the helper is the
+    # only program that verifies and installs it. Presence is checked before the
+    # helper is invoked so a missing file reports itself instead of a shell error.
+    rustdir=$LAYERS/rust-dev
+    helper=$rustdir/rust_toolchain.py
+    datadir=$rustdir/rust-toolchain
+    [ -f "$helper" ] || fail 'guarded script missing: rust-dev/rust_toolchain.py'
+    [ -d "$datadir" ] || fail 'rust-dev: missing Rust input directory'
+    rust_arg=$(sed -nE 's/^ARG RUST_TOOLCHAIN=(.*)$/\1/p' "$rustdir/Dockerfile")
+    [ -n "$rust_arg" ] || fail 'rust-dev pins: ARG RUST_TOOLCHAIN'
+    selected=$(PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/$helper" check "$ROOT/$datadir" \
+        --expect-channel "$rust_arg" 2>&1) || fail "rust-dev pins: $selected"
+    [ "$selected" = "$rust_arg" ] || fail "rust-dev pins: channel disagreement"
+    instructions=$(logical_instructions "$rustdir/Dockerfile" rust-dev) || exit 1
+    # Normalized for comparison: `logical_instructions` keeps a continuation's
+# spacing, so runs of blanks are collapsed before the exact shape comparison.
+normalize_instruction() { printf '%s' "$1" | tr -s ' \t' ' ' | sed -e 's/^ //' -e 's/ $//'; }
+reviewed_installer='RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro --mount=type=bind,source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro --mount=type=bind,source=rust-toolchain,target=/tmp/rust-toolchain,ro bash /tmp/install-rust.sh'
+reviewed_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro --mount=type=bind,source=rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro --mount=type=bind,source=rust-toolchain,target=/run/rust-verify/rust-toolchain,ro RUST_TOOLCHAIN=$RUST_TOOLCHAIN VERUS_DIR=/opt/verus PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/rust-verify/verify-toolchain.sh'
+installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || true)
+    [ "$installer_runs" -eq 1 ] || fail 'rust-dev: installer RUN must appear exactly once'
+    installer_line=$(printf '%s\n' "$instructions" | grep -F 'install-rust.sh')
+    for token in 'source=install-rust.sh' 'source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro' \
+        'source=rust-toolchain,target=/tmp/rust-toolchain,ro'; do
+        case "$installer_line" in
+            *"$token"*) ;;
+            *) fail "rust-dev: installer RUN lacks the reviewed runtime bind: $token" ;;
+        esac
+    done
+    # Exact shape, not a substring: a disabled, wrapped or extended command
+    # (`: # ...`, `|| true`, an extra argv) is not the reviewed install.
+    [ "$(normalize_instruction "$installer_line")" = "$reviewed_installer" ] ||
+        fail "rust-dev: installer RUN must be exactly: $reviewed_installer (got: $(normalize_instruction "$installer_line"))"
+    verifier_runs=$(printf '%s\n' "$instructions" | grep -cF 'verify-toolchain.sh' || true)
+    [ "$verifier_runs" -eq 1 ] || fail 'rust-dev: verifier RUN must appear exactly once'
+    verifier_line=$(printf '%s\n' "$instructions" | grep -F 'verify-toolchain.sh')
+    case "$verifier_line" in
+        *--network=none*) ;;
+        *) fail 'rust-dev: verifier must run with --network=none' ;;
+    esac
+    for token in 'verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro' \
+        'rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro' \
+        'rust-toolchain,target=/run/rust-verify/rust-toolchain,ro' \
+        'RUST_TOOLCHAIN=$RUST_TOOLCHAIN' 'VERUS_DIR=/opt/verus' 'PYTHONDONTWRITEBYTECODE=1'; do
+        case "$verifier_line" in
+            *"$token"*) ;;
+            *) fail "rust-dev: verifier RUN lacks the reviewed delivery: $token" ;;
+        esac
+    done
+    [ "$(normalize_instruction "$verifier_line")" = "$reviewed_verifier" ] ||
+        fail "rust-dev: verifier RUN must be exactly: $reviewed_verifier (got: $(normalize_instruction "$verifier_line"))"
+    grep -qxF 'ENV RUSTUP_AUTO_INSTALL=0' "$rustdir/Dockerfile" ||
+        fail 'rust-dev: missing the no-implicit-install contract (ENV RUSTUP_AUTO_INSTALL=0)'
+    grep -qxF 'ENV RUSTUP_HOME=/opt/rustup' "$rustdir/Dockerfile" ||
+        fail 'rust-dev: RUSTUP_HOME ENV'
+    grep -qxE 'ENV PATH=/opt/cargo/bin:/opt/verus/verus-x86-linux:\$\{PATH\}' "$rustdir/Dockerfile" ||
+        fail 'rust-dev: PATH must stay additive'
+    if grep -qE '^ENV ([A-Za-z_]+=)*CARGO_HOME=' "$rustdir/Dockerfile"; then
+        fail 'rust-dev: CARGO_HOME must not be exported at runtime'
+    fi
+    if grep -qE '^ENV ([A-Za-z_]+=)*RUSTUP_TOOLCHAIN=' "$rustdir/Dockerfile"; then
+        fail 'rust-dev: RUSTUP_TOOLCHAIN must not be forced'
+    fi
+    for file in "$rustdir/Dockerfile" "$rustdir/install-rust.sh"; do
+        if grep -nE 'sh\.rustup\.rs|channel-rust-(stable|beta|nightly)|rustup[[:space:]]+target[[:space:]]+add|(^|[^[:alnum:]_])(curl|wget)[[:space:]]' "$file"; then
+            fail "rust-dev: live bootstrap, mutable channel or first-use fetch in ${file##*/}"
+        fi
+        if grep -nE 'upgrade-rust-toolchain|rust-toolchain-update' "$file"; then
+            fail "rust-dev: maintenance writer must not run in an ordinary build: ${file##*/}"
+        fi
+    done
+    verifier=$rustdir/verify-toolchain.sh
+    for token in 'if [ "$arch" = amd64 ]; then' '--crate-type=lib' \
+        'verification results:: [1-9][0-9]* verified, 0 errors' 'verus! {'; do
+        grep -qF -- "$token" "$verifier" || fail "rust-dev: Verus smoke lacks: $token"
+    done
+    if grep -nE '\|\|[[:space:]]*(true|:)' "$verifier"; then
+        fail 'rust-dev: Verus smoke must not swallow failures'
+    fi
     for arg in GO_AMD64_SHA256 GO_ARM64_SHA256 GOLANGCI_LINT_AMD64_SHA256 GOLANGCI_LINT_ARM64_SHA256; do
         grep -qE "^ARG $arg=[0-9a-f]{64}$" "$LAYERS/go-dev/Dockerfile" || fail "go-dev: digest ARG shape: $arg"
     done
@@ -192,9 +272,18 @@ check() {
             case " $GUARDED " in *" $rel "*) ;; *) fail "unguarded example script: $rel" ;; esac
         fi
     done < <(find "$LAYERS" -type f -print0)
+    # Lint by interpreter: the Python helper's single `check` invocation above is
+    # its parser, so there is no bash -n, no ShellCheck and no second `check`
+    # masquerading as a syntax lint; contracts-python.py adds independent AST
+    # coverage for every repository Python file.
     for rel in $GUARDED; do
-        "$BASH" -n "$LAYERS/$rel" || fail "syntax: $rel"
-        shellcheck "$LAYERS/$rel" || fail "shellcheck: $rel"
+        case "$(head -n 1 "$LAYERS/$rel")" in
+            '#!'*python*) ;;
+            *)
+                "$BASH" -n "$LAYERS/$rel" || fail "syntax: $rel"
+                shellcheck "$LAYERS/$rel" || fail "shellcheck: $rel"
+                ;;
+        esac
     done
     echo 'example layers passed'
 }
@@ -213,7 +302,7 @@ self_test() {
     SCRATCH=$(mktemp -d)
     trap 'rm -rf "$SCRATCH"' EXIT
     local n tree chrome go rust wrapper expected rc telemetry file pnpmdir bundle lock
-    for n in $(seq 1 50); do
+    for n in $(seq 1 79); do
         tree="$SCRATCH/case-$n"
         mkdir -p "$tree/examples" "$tree/images/standard"
         cp -R "$ROOT/$LAYERS" "$tree/examples/"
@@ -226,6 +315,9 @@ self_test() {
         lock="$pnpmdir/pnpm-lock.yaml"
         go="$tree/$LAYERS/go-dev/Dockerfile"
         rust="$tree/$LAYERS/rust-dev/install-verus.sh"
+        rusttool="$tree/$LAYERS/rust-dev/rust-toolchain"
+        rustdocker="$tree/$LAYERS/rust-dev/Dockerfile"
+        rustverify="$tree/$LAYERS/rust-dev/verify-toolchain.sh"
         expected=''
         case "$n" in
             1) ;;
@@ -351,6 +443,107 @@ self_test() {
             # 50 proves repin itself is byte-faithful, so 39-41/46/48/49 fail on
             # content rather than on a broken pin file.
             50) repin "$tree" ;;
+            # 51-79: the reviewed Rust toolchain closure and its recipe (#102).
+            # Cases 55-60 mutate pin selection data while leaving the original
+            # signed evidence intact, so the semantic rule must reject them.
+            51) rm "$rusttool/pin.json"; expected='missing input: pin.json' ;;
+            52) printf ' ' >> "$rusttool/channel.toml"; expected='bytes differ from the committed digest' ;;
+            53) rm "$rusttool/channel.toml.asc"; expected='missing input: channel.toml.asc' ;;
+            54) printf ' ' >> "$rusttool/rust-release-key.asc"; expected='bytes differ' ;;
+            55)
+                jq 'del(.platforms["linux/arm64"])' "$rusttool/pin.json" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$rusttool/pin.json"
+                expected='platforms must be exactly linux/amd64 and linux/arm64' ;;
+            56)
+                jq '.platforms["linux/arm64"].host = "x86_64-unknown-linux-gnu"' "$rusttool/pin.json" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$rusttool/pin.json"
+                expected='host/musl triples do not match the architecture' ;;
+            57)
+                jq '(.platforms["linux/amd64"].archives) |= map(select(.target | endswith("-musl") | not))' \
+                    "$rusttool/pin.json" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$rusttool/pin.json"
+                expected='selected closure is incomplete' ;;
+            58)
+                jq '.platforms["linux/amd64"].archives += [(.platforms["linux/amd64"].archives[0] | .package = "rust-docs")]' \
+                    "$rusttool/pin.json" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$rusttool/pin.json"
+                expected='unexpected selected archive' ;;
+            59)
+                jq '.platforms["linux/arm64"].archives[0].sha256 = ("0" * 64)' "$rusttool/pin.json" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$rusttool/pin.json"
+                expected='differs from the pin' ;;
+            60)
+                jq '.platforms["linux/amd64"].archives[0].url |= sub("static\\.rust-lang\\.org"; "static.rust-lang.org.evil.test")' \
+                    "$rusttool/pin.json" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$rusttool/pin.json"
+                expected='not a canonical rust-lang.org HTTPS URL' ;;
+            61) rm "$rusttool/evidence/amd64-cargo.asc"; expected='missing input: evidence/amd64-cargo.asc' ;;
+            62)
+                jq '.bootstrap_exception.method = "assumed-signed"' "$rusttool/pin.json" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$rusttool/pin.json"
+                expected='hash-only exception' ;;
+            63)
+                rewrite "$rustdocker" 's|^ARG RUST_TOOLCHAIN=.*|ARG RUST_TOOLCHAIN=1.0.0|'
+                expected='asserted channel' ;;
+            64)
+                rewrite "$rustdocker" '/source=rust_toolchain.py,target=\/tmp\/rust_toolchain.py,ro/d'
+                expected='installer RUN lacks the reviewed runtime bind: source=rust_toolchain.py' ;;
+            65)
+                rewrite "$rustdocker" '/source=rust-toolchain,target=\/tmp\/rust-toolchain,ro/d'
+                expected='installer RUN lacks the reviewed runtime bind: source=rust-toolchain' ;;
+            66)
+                rewrite "$rustdocker" 's|bash /tmp/install-rust.sh|bash /tmp/install-rust.sh \|\| echo skipped|'
+                expected='installer RUN must be exactly' ;;
+            67)
+                echo 'RUN curl -sSf https://sh.rustup.rs | sh' >> "$rustdocker"
+                expected='live bootstrap' ;;
+            68)
+                rewrite "$rustdocker" '/^ENV RUSTUP_AUTO_INSTALL=0/d'
+                expected='no-implicit-install contract' ;;
+            69)
+                echo 'ENV CARGO_HOME=/opt/cargo' >> "$rustdocker"
+                expected='CARGO_HOME must not be exported' ;;
+            70)
+                echo 'ENV RUSTUP_TOOLCHAIN=1.98.1' >> "$rustdocker"
+                expected='RUSTUP_TOOLCHAIN must not be forced' ;;
+            71)
+                rewrite "$rustdocker" 's|RUN --network=none|RUN|'
+                expected='verifier must run with --network=none' ;;
+            72) printf 'unexpected' > "$rusttool/.extra"; expected='unreviewed input: .extra' ;;
+            73)
+                rm "$rusttool/channel.toml"
+                ln -s channel.toml.asc "$rusttool/channel.toml"
+                expected='symlink channel.toml' ;;
+            74)
+                mv "$rusttool/evidence" "$SCRATCH/evidence-away"
+                ln -s "$SCRATCH/evidence-away" "$rusttool/evidence"
+                expected='symlink evidence' ;;
+            75) rm "$tree/$LAYERS/rust-dev/rust_toolchain.py"
+                expected='guarded script missing: rust-dev/rust_toolchain.py' ;;
+            76)
+                awk 'BEGIN { skip = 0 }
+                     /^if \[ "\$arch" = amd64 \]; then$/ { skip = 1 }
+                     skip && /^fi$/ { skip = 0; next }
+                     !skip { print }' "$rustverify" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$rustverify"
+                expected='Verus smoke lacks: if [ "$arch" = amd64 ]; then' ;;
+            77)
+                rewrite "$rustverify" 's|"\$verus" --crate-type=lib smoke.rs|"$verus" --version|'
+                expected='Verus smoke lacks: --crate-type=lib' ;;
+            78)
+                awk '/verification results:: \[1-9\]/ { print $0 " || true"; next } { print }' \
+                    "$rustverify" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$rustverify"
+                expected='must not swallow failures' ;;
+            79) : ;;
+            # 80-81: a skipped install and a swallowed verifier failure. Both
+            # keep every mount and token, so only the exact shape can catch them.
+            80)
+                rewrite "$rustdocker" 's|bash /tmp/install-rust.sh|: # bash /tmp/install-rust.sh|'
+                expected='installer RUN must be exactly' ;;
+            81)
+                rewrite "$rustdocker" 's|/bin/bash /run/rust-verify/verify-toolchain.sh|/bin/bash /run/rust-verify/verify-toolchain.sh \|\| true|'
+                expected='verifier RUN must be exactly' ;;
         esac
         rc=0
         EXAMPLE_LAYERS_REPORT_BASH=1 "$BASH" "$CHECKER" --root "$tree" > "$SCRATCH/out" 2>&1 || rc=$?
@@ -365,7 +558,7 @@ self_test() {
         fi
         echo "case $n passed: ${expected:-pass}"
     done
-    echo 'example layers self-test passed (50 cases)'
+    echo 'example layers self-test passed (81 cases)'
 }
 case "${1:-}" in
     '') [ "$#" -eq 0 ] || usage ;;
