@@ -1239,9 +1239,12 @@ first_use missing-tool '!' 0 'cp -R /work/. /tmp/p && cd /tmp/p && cargo miri --
 PHASE=canary
 canary_leg() { # LABEL IDENTITY PERSISTED EXPECT_STATUS EXPECT_REQUESTS SETUP COMMAND
     local label=$1 identity=$2 persisted=$3 expected=$4 requests=$5 setup=$6 command=$7
+    # Artifact uploads reject ':' in names (NTFS-compatible paths), so the uid:gid
+    # identity is spelled with '-' in file names only; Docker still gets the pair.
+    local id=${identity//:/-}
     local status=0 before=0 after=0 observed=0 verdict log
     before=$(grep -c '^request' "$LOG_DIR/canary-server.log" 2>/dev/null || true)
-    log=$LOG_DIR/canary-$label-$identity.log
+    log=$LOG_DIR/canary-$label-$id.log
     run_bounded "canary-$label-$identity" "$RUN_SECONDS" "$log" \
         "$DOCKER" run --rm --network "$NETWORK_NAME" --label "$LABEL" -u "$identity" \
         -e HOME=/tmp/home -e RUSTUP_DIST_SERVER=http://canary:8765 \
@@ -1254,7 +1257,7 @@ canary_leg() { # LABEL IDENTITY PERSISTED EXPECT_STATUS EXPECT_REQUESTS SETUP CO
         "$LOG_DIR/canary-server.log" "$DOCKER" logs "$CANARY_NAME" || true
     after=$(grep -c '^request' "$LOG_DIR/canary-server.log" 2>/dev/null || true)
     observed=$((after - before))
-    cp "$LOG_DIR/canary-server.log" "$LOG_DIR/canary-requests-$label-$identity.log" || true
+    cp "$LOG_DIR/canary-server.log" "$LOG_DIR/canary-requests-$label-$id.log" || true
     record "canary-$label-$identity status=$status dist-requests=$observed"
     verdict=$(canary_verdict "$expected" "$status")
     case "$verdict" in
