@@ -1,0 +1,218 @@
+{
+  "schema": 1,
+  "channel": "1.98.1",
+  "release_date": "2026-09-03",
+  "profile": "minimal",
+  "rustup_version": "1.28.2",
+  "trust": {
+    "key": {
+      "path": "rust-release-key.asc",
+      "sha256": "e54b09a439647e006b4831eec9785cbaaf3e07ab371c3a6ee6a68e1bdb9fbc6b"
+    },
+    "primary_fingerprint": "108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE",
+    "signing_fingerprints": [
+      "108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE"
+    ]
+  },
+  "manifest": {
+    "url": "https://static.rust-lang.org/dist/channel-rust-1.98.1.toml",
+    "path": "channel.toml",
+    "sha256": "a7c8774a5fd8441c997d94c029776cbc5eb111e9d72ab5d256fa69866644347e",
+    "checksum": {
+      "url": "https://static.rust-lang.org/dist/channel-rust-1.98.1.toml.sha256",
+      "path": "channel.toml.sha256",
+      "sha256": "48632299e2889ef236ef5411123148c86baef9816a662af28e98784771484260"
+    },
+    "signature": {
+      "url": "https://static.rust-lang.org/dist/channel-rust-1.98.1.toml.asc",
+      "path": "channel.toml.asc",
+      "sha256": "a9fed69b47daaaf29a6207af9df13aedb66d502ab0acc4ea557602edf87fd1aa"
+    }
+  },
+  "platforms": {
+    "linux/amd64": {
+      "host": "x86_64-unknown-linux-gnu",
+      "musl": "x86_64-unknown-linux-musl",
+      "bootstrap": {
+        "url": "https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init",
+        "sha256": "20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c",
+        "checksum": {
+          "path": "evidence/rustup-amd64.sha256",
+          "sha256": "fda213f7e5b0860abe98f2500ccef7cefd7a4c358833388a0a3d9fba43865fd8"
+        }
+      },
+      "archives": [
+        {
+          "package": "cargo",
+          "target": "x86_64-unknown-linux-gnu",
+          "url": "https://static.rust-lang.org/dist/2026-09-03/cargo-1.98.1-x86_64-unknown-linux-gnu.tar.xz",
+          "sha256": "ea1de9f9e23107d97ee2b41a72c552f34064a593da503789218387aee59f3ba4",
+          "member_prefix": "cargo-1.98.1-x86_64-unknown-linux-gnu/",
+          "signature": {
+            "path": "evidence/amd64-cargo.asc",
+            "sha256": "92da3ca0f0106888fc82db9bfd6f2722d26af412fdcf392e25b92f30aa21b9cb"
+          }
+        },
+        {
+          "package": "clippy-preview",
+          "target": "x86_64-unknown-linux-gnu",
+          "url": "https://static.rust-lang.org/dist/2026-09-03/clippy-1.98.1-x86_64-unknown-linux-gnu.tar.xz",
+          "sha256": "e167f333be24e1d5eea56ea563c7def0aa0bd613f5ce3445976c93b0288799d1",
+          "member_prefix": "clippy-1.98.1-x86_64-unknown-linux-gnu/",
+          "signature": {
+            "path": "evidence/amd64-clippy-preview.asc",
+            "sha256": "fccf3ee41f56caeea2dfdba63cea2b50ab1bd1dab3bf6f4a88f257f79dc3384a"
+          }
+        },
+        {
+          "package": "rust-std",
+          "target": "x86_64-unknown-linux-gnu",
+          "url": "https://static.rust-lang.org/dist/2026-09-03/rust-std-1.98.1-x86_64-unknown-linux-gnu.tar.xz",
+          "sha256": "fa3ff450172a16c026944030230c5069947af93c728d9179971d44e5e0cfb561",
+          "member_prefix": "rust-std-1.98.1-x86_64-unknown-linux-gnu/",
+          "signature": {
+            "path": "evidence/amd64-rust-std.asc",
+            "sha256": "b14b44a6967989d2ded80c81f567867b1188c1d23ba5db99a49eedbd31ab5263"
+          }
+        },
+        {
+          "package": "rust-std",
+          "target": "x86_64-unknown-linux-musl",
+          "url": "https://static.rust-lang.org/dist/2026-09-03/rust-std-1.98.1-x86_64-unknown-linux-musl.tar.xz",
+          "sha256": "bd9f35880de21dab0e387e84009c00001ae7836a4ba565cb16823f13f75f325f",
+          "member_prefix": "rust-std-1.98.1-x86_64-unknown-linux-musl/",
+          "signature": {
+            "path": "evidence/amd64-rust-std-musl.asc",
+            "sha256": "cb1144b461807e6ee10e8d187c5dec37990b4eae8369edf6d62b1eac77e03d6e"
+          }
+        },
+        {
+          "package": "rustc",
+          "target": "x86_64-unknown-linux-gnu",
+          "url": "https://static.rust-lang.org/dist/2026-09-03/rustc-1.98.1-x86_64-unknown-linux-gnu.tar.xz",
+          "sha256": "e974f036b28565f37c0f3bd92ddefa809bee16c04f9dcf07b9ed96e05aaaf7c4",
+          "member_prefix": "rustc-1.98.1-x86_64-unknown-linux-gnu/",
+          "signature": {
+            "path": "evidence/amd64-rustc.asc",
+            "sha256": "b8a3758f43a60ae37a7c608133cfcc5891f4881a3e6c0871266c592a20b88d7e"
+          }
+        },
+        {
+          "package": "rustfmt-preview",
+          "target": "x86_64-unknown-linux-gnu",
+          "url": "https://static.rust-lang.org/dist/2026-09-03/rustfmt-1.98.1-x86_64-unknown-linux-gnu.tar.xz",
+          "sha256": "b29a1addcbf2aa8f5785075605700e63cbe131b08c8334b50c09cfca8bbc51dc",
+          "member_prefix": "rustfmt-1.98.1-x86_64-unknown-linux-gnu/",
+          "signature": {
+            "path": "evidence/amd64-rustfmt-preview.asc",
+            "sha256": "3bca1d5613e3fd11b2825224bff86cffaeb7aa2c5d91e9b624ebd600792d7d55"
+          }
+        }
+      ]
+    },
+    "linux/arm64": {
+      "host": "aarch64-unknown-linux-gnu",
+      "musl": "aarch64-unknown-linux-musl",
+      "bootstrap": {
+        "url": "https://static.rust-lang.org/rustup/archive/1.28.2/aarch64-unknown-linux-gnu/rustup-init",
+        "sha256": "e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c",
+        "checksum": {
+          "path": "evidence/rustup-arm64.sha256",
+          "sha256": "7e58e77ef1f0e7f467a4b413be39ef38fddda81eca03f08f7afc1f4390708822"
+        }
+      },
+      "archives": [
+        {
+          "package": "cargo",
+          "target": "aarch64-unknown-linux-gnu",
+          "url": "https://static.rust-lang.org/dist/2026-09-03/cargo-1.98.1-aarch64-unknown-linux-gnu.tar.xz",
+          "sha256": "c09425a7f300af148c0bdfded0e7d5f1fe7c075b2b9674e8935afa769297b2f6",
+          "member_prefix": "cargo-1.98.1-aarch64-unknown-linux-gnu/",
+          "signature": {
+            "path": "evidence/arm64-cargo.asc",
+            "sha256": "b2c0162e00fabf4205e7af0c938cecdf5faa368b2d11fefaa4eb2afc10021c0d"
+          }
+        },
+        {
+          "package": "clippy-preview",
+          "target": "aarch64-unknown-linux-gnu",
+          "url": "https://static.rust-lang.org/dist/2026-09-03/clippy-1.98.1-aarch64-unknown-linux-gnu.tar.xz",
+          "sha256": "396e17c0a669399823d0e59073686a4e5f50b2d41f062f1d3afc9210f9d3553d",
+          "member_prefix": "clippy-1.98.1-aarch64-unknown-linux-gnu/",
+          "signature": {
+            "path": "evidence/arm64-clippy-preview.asc",
+            "sha256": "ceb02a9f79a99f4b6c40216522d8d09da9982b8872ea86b13f5f54600d9566b7"
+          }
+        },
+        {
+          "package": "rust-std",
+          "target": "aarch64-unknown-linux-gnu",
+          "url": "https://static.rust-lang.org/dist/2026-09-03/rust-std-1.98.1-aarch64-unknown-linux-gnu.tar.xz",
+          "sha256": "9bf796a6ec5b004813ebd0b650775a7c6a4f3aae97ad362ae294798dca4f3b23",
+          "member_prefix": "rust-std-1.98.1-aarch64-unknown-linux-gnu/",
+          "signature": {
+            "path": "evidence/arm64-rust-std.asc",
+            "sha256": "833324538738d4d9c0b76e7ff672b73fba20eeb74b4f5d045c795b3c5e43169e"
+          }
+        },
+        {
+          "package": "rust-std",
+          "target": "aarch64-unknown-linux-musl",
+          "url": "https://static.rust-lang.org/dist/2026-09-03/rust-std-1.98.1-aarch64-unknown-linux-musl.tar.xz",
+          "sha256": "7e0ad2e67817f224b7a6331e48d6397303fc050edaccf81784ed786ffddc884a",
+          "member_prefix": "rust-std-1.98.1-aarch64-unknown-linux-musl/",
+          "signature": {
+            "path": "evidence/arm64-rust-std-musl.asc",
+            "sha256": "460e408bbc9a8093931a9afbe10641cbb2ab5dc30ef29a8c1d2d5adcedb6bee4"
+          }
+        },
+        {
+          "package": "rustc",
+          "target": "aarch64-unknown-linux-gnu",
+          "url": "https://static.rust-lang.org/dist/2026-09-03/rustc-1.98.1-aarch64-unknown-linux-gnu.tar.xz",
+          "sha256": "89fb83041993b48816514815606f53a5264729b8b449671a6b291e6f0ae74f40",
+          "member_prefix": "rustc-1.98.1-aarch64-unknown-linux-gnu/",
+          "signature": {
+            "path": "evidence/arm64-rustc.asc",
+            "sha256": "b069dd1feb2871e44302fbc784ea9863c1df8778b8d5c251f236fc896b6ba4dd"
+          }
+        },
+        {
+          "package": "rustfmt-preview",
+          "target": "aarch64-unknown-linux-gnu",
+          "url": "https://static.rust-lang.org/dist/2026-09-03/rustfmt-1.98.1-aarch64-unknown-linux-gnu.tar.xz",
+          "sha256": "7d4c136278b61096d46ef23019c29acb7ee5a2a1412cbfee5050316110c6fd8c",
+          "member_prefix": "rustfmt-1.98.1-aarch64-unknown-linux-gnu/",
+          "signature": {
+            "path": "evidence/arm64-rustfmt-preview.asc",
+            "sha256": "e7192b82495412690482d404563670cd3e72b2fc2b6c1c5708012f7931456a46"
+          }
+        }
+      ]
+    }
+  },
+  "bootstrap_exception": {
+    "method": "reviewed-hash-only",
+    "reviewed_on": "2026-10-25",
+    "reviewer": "gregwebs",
+    "scope": {
+      "linux/amd64": {
+        "url": "https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init",
+        "sha256": "20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c"
+      },
+      "linux/arm64": {
+        "url": "https://static.rust-lang.org/rustup/archive/1.28.2/aarch64-unknown-linux-gnu/rustup-init",
+        "sha256": "e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c"
+      }
+    },
+    "reason": "rustup publishes versioned per-target rustup-init binaries with a .sha256 sidecar but no detached OpenPGP signature, attestation or release object for 1.28.2 (the .asc endpoints return 404 and the GitHub tag has no release). The reviewed exception binds each architecture to the exact versioned URL and SHA-256 in this record, cross-checked against the upstream .sha256 sidecar. It is hash-only: it does not authenticate the bootstrap publisher, and pinning does not establish that the release is safe.",
+    "evidence": [
+      "https://rust-lang.github.io/rustup/installation/other.html",
+      "https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init",
+      "https://static.rust-lang.org/rustup/archive/1.28.2/x86_64-unknown-linux-gnu/rustup-init.sha256",
+      "https://static.rust-lang.org/rustup/archive/1.28.2/aarch64-unknown-linux-gnu/rustup-init",
+      "https://static.rust-lang.org/rustup/archive/1.28.2/aarch64-unknown-linux-gnu/rustup-init.sha256"
+    ],
+    "reassess_when": "On each rustup-init content or identity change, or on publication of a supported upstream signing, attestation or release-provenance scheme; renew the review explicitly rather than extending this record."
+  }
+}

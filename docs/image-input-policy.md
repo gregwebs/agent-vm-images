@@ -194,6 +194,65 @@ The Sigstore trusted root is fetched through Sigstore's TUF channel at verify
 time. It is live trust material rather than a pinned input, so a build without
 network fails closed instead of skipping the check.
 
+## The Rust example's toolchain closure
+
+`examples/layers/rust-dev` is a *checked-in example*, so its Rust inputs are in
+scope: the example commits a reviewed finite closure and rustup installs only
+from it. The record is
+[`rust-toolchain/pin.json`](../examples/layers/rust-dev/rust-toolchain/pin.json)
+and the decision is [ADR 0007](adr/0007-rust-example-toolchain-pins.md).
+
+What the closure contains, for `linux/amd64` and `linux/arm64`: the exact
+`rustup-init` (1.28.2) SHA-256 per host with its original upstream `.sha256`
+sidecar; the original signed `channel-rust-<version>.toml` with its `.sha256` and
+detached `.asc`, plus Rust's release key; and the SHA-256 and detached OpenPGP
+signature of each selected archive — `rustc`, `cargo`, `rust-std`,
+`clippy-preview`, `rustfmt-preview` for the GNU host and `rust-std` for the
+matching musl target.
+
+What an ordinary build proves: every committed evidence digest matches; the
+manifest's `.sha256` line and detached signature verify against the committed key
+and primary fingerprint; the manifest's release date, version, profile, renames
+and each selected `xz_url`/`xz_hash` agree with the pin; the selection is exactly
+what rustup 1.28.2 derives for this host — the minimal profile's entries looked
+up in the host's *merged* component table (rustup appends `extensions` to
+`components` with `is_extension = true` and searches the result), keeping each
+found row's own host or `*` target, plus the renamed explicit clippy/rustfmt
+components and the explicitly requested musl standard library, deduplicated by
+package and target — and it must equal the committed six (a changed profile,
+rename, removed/retargeted component or extension, an added host extension, a
+target-independent selection such as a coherent wildcard `rust-mingw`, or added
+required host component stops for review); the exact key set of every pin object and of each
+selected manifest entry is fixed, so unknown or renamed fields stop for review;
+the selected entry advertises a full xz pair, **no** zstd fields and no gzip
+half-pair
+(rustup 1.28.2 prefers zstd, so a zstd pair would bypass the pinned hash); the
+bootstrap's ELF machine matches the host; each archive's detached signature
+verifies before its members are inspected; the decompressed stream is counted so
+a small archive cannot expand past its bound through padding or GNU/PAX extended
+headers; every member is canonical, inside the single expected prefix, has a
+directory (never a file or link) as every ancestor, is free of duplicates,
+devices, fifos and setuid/setgid on any member kind, and the top-level entry is
+counted like any other member; the rust-installer version-3 metadata names
+exactly the expected component, uses only canonical `file:`/`dir:` directives,
+and covers every payload leaf; the expected
+executables are ELF binaries for the selected architecture, and the rust-std
+archive carries the selected target's standard library. Only then does the
+committed `rustup-init` execute, against an invocation-private `file://` layout
+holding the original manifest bytes and only the verified archives. There is no
+fallback origin, no re-resolution and no checksum refresh.
+
+The exception: `rustup-init` publishes a `.sha256` sidecar but no detached
+signature, attestation or release object for 1.28.2, so its use is recorded as a
+**scoped, dated, per-architecture hash-only exception** in `pin.json` — exact
+versioned URL and digest per host, the upstream `.sha256` and installation-doc
+evidence, the reviewer, and a reassessment condition. It is not a claim that the
+bootstrap publisher is authenticated, and a nearby unsigned checksum is only a
+cross-check. The signed toolchain archives are verified and therefore need no
+exception. Changes to a hash-only exception need human review: the writer prints
+`hash-only bootstrap exception requires renewed review`, shows the old and new
+identity, and publishes nothing until a reviewer re-dates it.
+
 ## Repository base identity: a committed input manifest
 
 The external pins above bound *parents*. A local base is a source input to the
@@ -331,6 +390,11 @@ instead of an upstream signature:
   now-stale `reviewed_on` in place so a human has to bump it deliberately.
 - **Stop condition:** if a supported verifiable signing scheme is published for
   either image, refresh stops until a verifier and a policy update exist.
+
+The Rust example's `rustup-init` bootstrap is a third instance, scoped to that
+example: its record lives in the example's `pin.json`
+([details above](#the-rust-examples-toolchain-closure)) and it is re-reviewed on
+every bootstrap identity change or newly published signing/attestation scheme.
 
 The released standard image is a different case: it must authenticate. Its pin
 carries GitHub attestation provenance with repository `gregwebs/agent-vm-images`,

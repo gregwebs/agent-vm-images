@@ -1,0 +1,4 @@
+[toolchain]
+channel = "@CHANNEL@"
+components = ["clippy", "rustfmt"]
+targets = ["@MUSL@"]

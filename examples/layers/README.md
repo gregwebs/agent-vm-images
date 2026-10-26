@@ -60,7 +60,7 @@ directly. These Debian-based examples are not portable to every minimal boot ima
 | Example | Adds |
 |---|---|
 | [`wirenboard-cpp`](wirenboard-cpp/) | WB C/C++ build-essentials (debhelper, clang-format/clang-tidy, libcurl/libgtest/libmodbus/libsystemd-dev, cmake/ninja, ...) plus the armhf/arm64 cross toolchains, qemu-user-static, and the sbuild/schroot/debootstrap path. |
-| [`rust-dev`](rust-dev/) | The Rust toolchain [agent-vm](https://github.com/gregwebs/agent-vm) pins (via its `rust-toolchain.toml`, with clippy and rustfmt), the host musl target, the native build libraries agent-vm's `ci.yml` installs, shellcheck, and the pinned Verus release — enough to build, test, lint and verify agent-vm's Rust code in the guest. |
+| [`rust-dev`](rust-dev/) | The Rust toolchain [agent-vm](https://github.com/gregwebs/agent-vm) pins (via its `rust-toolchain.toml`, with clippy and rustfmt), the host musl target, the native build libraries agent-vm's `ci.yml` installs, shellcheck, and the pinned Verus release — enough to build, test, lint and verify agent-vm's Rust code in the guest. The toolchain is installed from a reviewed pin set, not from the live installer. |
 | [`go-dev`](go-dev/) | The pinned Go toolchain (go, gofmt, go vet) plus the two tools a Go project's editor and CI loop expect beyond it, `golangci-lint` and the `gopls` language server — enough to build, test, lint and navigate a Go code base in the guest. |
 | [`chrome-devtools`](chrome-devtools/) | Chromium, Chrome DevTools MCP wrapper, scoped NSS CA trust, and the Chrome capability marker. |
 
@@ -102,12 +102,99 @@ CARGO_TARGET_DIR=target/verus cargo verus verify --locked -p agent-vm
 ```
 
 The toolchain lives under `RUSTUP_HOME=/opt/rustup` and the shims under
-`/opt/cargo/bin`; both are read-only and shared by every guest uid. `cargo`'s
-registry and build cache still land in the guest's own writable
-`$HOME/.cargo`, so what the layer shares is only the toolchain. Because
-`RUSTUP_HOME` is read-only, `rustup component add` and toolchain installs are
-not available in the guest — the layer pre-provisions exactly the pinned
-toolchain instead.
+`/opt/cargo/bin`; both are `root:root` `0755` and shared by every guest uid, so a
+non-root guest cannot write to them. `cargo`'s registry and build cache still
+land in the guest's own writable `$HOME/.cargo`, so what the layer shares is only
+the toolchain. A guest that runs as root still owns those directories, and an
+explicit `rustup component add`, `rustup toolchain install` or `rustup update`
+by such a guest is a user-triggered install: the pin policy does not cover it and
+the layer does not prevent it when the guest has network access. What is
+prevented is the implicit kind — automatic installation is disabled, so an
+ordinary `cargo`, `rustc`, `cargo clippy` or `cargo fmt` invocation installs
+nothing and fails locally instead (see [First use](#first-use)). The layer
+pre-provisions exactly the pinned toolchain.
+
+### Reviewed toolchain closure (#102)
+
+Nothing in this layer resolves a channel or trusts the server's word for the
+bytes. [`rust-toolchain/`](rust-dev/rust-toolchain/) commits, for both
+`linux/amd64` and `linux/arm64`:
+
+- the exact `rustup-init` (1.28.2) SHA-256 per host, with its original upstream
+  `.sha256` sidecar as evidence;
+- the original signed `channel-rust-<version>.toml` with its `.sha256` and
+  detached `.asc`, plus Rust's release key;
+- the SHA-256 and detached OpenPGP signature of the six selected archives:
+  `rustc`, `cargo`, `rust-std`, `clippy-preview`, `rustfmt-preview` for the GNU
+  host and `rust-std` for the matching musl target.
+
+`rust_toolchain.py` verifies every committed digest, the manifest signature, the
+upstream checksums, the archive signatures, each archive's ELF architecture and
+rust-installer metadata, and only then lets rustup install from an
+invocation-private `file://` layout built from the original manifest bytes. The
+reasoning and the rejected alternatives are in
+[ADR 0007](../../docs/adr/0007-rust-example-toolchain-pins.md).
+
+`rustup-init` has no detached signature or attestation for 1.28.2, so its use is
+a **scoped, dated, per-architecture hash-only exception** recorded in `pin.json`
+(reviewer, UTC review date, exact URLs/digests, evidence URLs, reassessment
+condition). It is not a claim that the bootstrap publisher is authenticated.
+
+Updates are maintainer work on a host with network access, never a build step:
+
+```sh
+reviewed_on=$(date -u +%F)   # approval is dated when the review happens
+bash script/dev/upgrade-rust-toolchain.sh 1.98.1 --rustup 1.28.2 \
+  --key /absolute/reviewed/rust-key.gpg.ascii \
+  --review-bootstrap-exception "$reviewed_on" --reviewer gregwebs
+bash script/dev/upgrade-rust-toolchain.sh 1.98.1   # expected: unchanged
+bash script/dev/upgrade-rust-toolchain.sh --check  # offline verification
+```
+
+The writer downloads and authenticates the whole two-architecture closure
+without executing the foreign bootstrap and publishes the pins, the evidence and
+the Dockerfile `ARG RUST_TOOLCHAIN` assertion as one transaction. A changed
+bootstrap identity prints `hash-only bootstrap exception requires renewed
+review` and publishes nothing until a human re-dates the exception. Status `3`
+means an undecided rollback: recover the retained directory before further
+commits.
+
+`ARG RUST_TOOLCHAIN` is an exact-equal compatibility assertion, not a selector
+for unreviewed bytes. A build that fails to fetch a committed URL fails; it does
+not fall back.
+
+### First use
+
+The image exports `RUSTUP_AUTO_INSTALL=0` and persists rustup's
+`auto-install disable` and `auto-self-update disable`, so an ordinary `cargo`,
+`rustc`, `cargo clippy` or `cargo fmt` invocation that needs an absent toolchain,
+tool or target fails locally instead of downloading. The selected channel, the
+five host components and the musl standard library work with no Rust
+distribution access. A project `rust-toolchain.toml` that only *declares* extra
+components or targets may still build — rustup ignores those lists when
+automatic installation is disabled — but a command that needs the absent item
+fails. `RUSTUP_TOOLCHAIN` and `CARGO_HOME` are deliberately not exported: project
+selection keeps working and cargo keeps its per-user cache. A guest that
+explicitly runs `rustup install/add/update` is outside this guarantee.
+
+### Native evidence
+
+`bash script/test/rust-example.sh --platform linux/arm64|linux/amd64` on a
+native daemon builds this recipe at the committed default parent, re-runs the
+verifier with `--network none`, and exercises the toolchain as root and as numeric
+uids with an empty writable `HOME`, a project `rust-toolchain.toml` and negative
+first-use legs. Add `--no-cache` for acceptance evidence: a cached
+toolchain-install stage proves nothing about the installer, so every run records
+`build-toolchain-install cached=0|1` and a cached stage is called out in its log. Its first-use policy legs run on an `--internal` canary network
+with writable clones of the shared homes, so a leg observes the policy rather than
+the read-only permissions, and each runs as root as well as a numeric uid.
+`linux/amd64` additionally proves Verus with an independent proof fixture and
+shows that a wrong Verus digest fails the build before extraction; `linux/arm64`
+shows the same digest stays a clean no-op with no fetch. Every command is bounded
+by `host-watchdog.py`, the suite re-executes itself under a 45-minute supervisor,
+cleanup has its own deadline and reports its own status, and
+`--self-test` (which needs no daemon) proves those controls. Permanent example CI
+stays with [#33](https://github.com/gregwebs/agent-vm-images/issues/33).
 
 ### Apple Silicon (no Verus asset)
 
@@ -121,15 +208,16 @@ layer works on both architectures.
 
 agent-vm owns the Rust channel and the Verus release/digest; this Dockerfile
 mirrors them. Bump order and check coverage live in
-[Example image ownership](../../docs/image-source-ownership.md#example-images-exampleslayers).
-`script/test/example-layers.sh` guards checksum tokens and ARG shapes statically;
-native amd64 builds exercise Verus verification.
+[Example image ownership](../../docs/image-source-ownership.md#rust-and-verus-pins).
+`script/test/example-layers.sh` guards the committed closure, the recipe shape,
+ARG anchors and the Verus smoke shape statically; native amd64 builds exercise
+Verus verification.
 
 The layer's build steps are committed as standalone scripts beside the
-Dockerfile — `install-rust.sh`, `install-verus.sh` and `verify-toolchain.sh`
-— and bind-mounted in at build time, so each can be read, reviewed and run on
-its own. They are guarded (`bash -n` and shellcheck) by `script/test/example-layers.sh`,
-which `script/test/contracts.sh` runs.
+Dockerfile — `install-rust.sh`, `install-verus.sh`, `verify-toolchain.sh` and
+the build-only `rust_toolchain.py` — and bind-mounted in at build time, so each
+can be read, reviewed and run on its own. They are guarded by
+`script/test/example-layers.sh`, which `script/test/contracts.sh` runs.
 
 ## Go development
 

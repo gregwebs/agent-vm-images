@@ -34,6 +34,9 @@ curl -fSL --retry 3 -o "$archive" \
 echo "${VERUS_SHA256}  ${archive}" | sha256sum -c -
 
 mkdir -p "$VERUS_DIR"
+# A named step before extraction, so a build log shows whether the archive was
+# ever unpacked. `unzip -q` itself prints nothing on success.
+echo "==> install-verus: extracting $asset"
 unzip -q "$archive" -d "$VERUS_DIR"
 
 # World-readable for the arbitrary-uid guest.

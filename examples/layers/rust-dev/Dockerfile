@@ -51,18 +51,28 @@ ARG CARGO_HOME=/opt/cargo
 #     (libcap-ng, dbus) the microsandbox SDK links against;
 #   - musl-tools: the *-unknown-linux-musl target the guest agentd needs
 #     when building the vendored msb (agent-vm itself does not need it);
-#   - shellcheck: agent-vm's script/test/ci-contracts.sh lints its scripts.
+#   - shellcheck: agent-vm's script/test/ci-contracts.sh lints its scripts;
+#   - python3 + gnupg + ca-certificates: the reviewed pin verifier needs a real
+#     gpg (OpenPGP verification of the manifest and of every selected archive)
+#     and authenticated HTTPS to fetch them. The released parent may predate
+#     these, so this layer installs them explicitly from official Debian apt.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         build-essential pkg-config \
         libcap-ng-dev libdbus-1-dev \
         musl-tools \
         shellcheck \
+        python3 gnupg ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# Rust toolchain: pinned channel with clippy/rustfmt and the host musl target,
-# installed world-readable under /opt for the arbitrary-uid guest.
+# Rust toolchain: the reviewed closure in rust-toolchain/ (exact bootstrap,
+# signed manifest and every selected archive hash for this host) is installed by
+# rust_toolchain.py, which verifies all of it before anything executes. The
+# helper and the data are mounted read-only for this one step and are not part of
+# the image; the installed /opt toolchain is.
 RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro \
+    --mount=type=bind,source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro \
+    --mount=type=bind,source=rust-toolchain,target=/tmp/rust-toolchain,ro \
     bash /tmp/install-rust.sh
 
 # Verus, the SMT-backed verifier for the verus! contracts (ADR-0018). Pinned
@@ -75,10 +85,21 @@ RUN --mount=type=bind,source=install-verus.sh,target=/tmp/install-verus.sh,ro \
 # PATH stays additive: the base's entries are preserved via
 # ${PATH}, and the Verus directory is harmless on a host that skipped it.
 ENV RUSTUP_HOME=/opt/rustup
+# A project's rust-toolchain file must never make a guest command fetch a
+# toolchain: with automatic installation disabled an absent channel fails
+# locally. There is deliberately no RUSTUP_TOOLCHAIN and no CARGO_HOME here, so
+# project selection still works and cargo keeps a per-user $HOME/.cargo cache.
+ENV RUSTUP_AUTO_INSTALL=0
 ENV PATH=/opt/cargo/bin:/opt/verus/verus-x86-linux:${PATH}
 
-# Post-install sanity: a present-but-broken binary fails the build here instead
-# of surfacing as command-not-found in the guest, and the amd64 Verus check
-# verifies a real contract rather than only `--version`.
-RUN --mount=type=bind,source=verify-toolchain.sh,target=/tmp/verify-toolchain.sh,ro \
-    bash /tmp/verify-toolchain.sh
+# Post-install sanity with no network at all: a present-but-broken binary, a
+# missing component/target or a stale layer fails the build here instead of
+# surfacing as command-not-found in the guest, and the amd64 Verus check verifies
+# a real contract rather than only `--version`. The verifier bundle is mounted
+# read-only for this step and nothing is copied into the image.
+RUN --network=none \
+    --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro \
+    --mount=type=bind,source=rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro \
+    --mount=type=bind,source=rust-toolchain,target=/run/rust-verify/rust-toolchain,ro \
+    RUST_TOOLCHAIN=$RUST_TOOLCHAIN VERUS_DIR=/opt/verus PYTHONDONTWRITEBYTECODE=1 \
+    /bin/bash /run/rust-verify/verify-toolchain.sh

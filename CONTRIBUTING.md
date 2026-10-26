@@ -30,6 +30,13 @@ version bump, Rust application build, submodule or launcher packaging is needed.
   and [the ADR](docs/adr/0005-repository-base-identity.md).
   Official Debian apt packages may float with normal apt authentication;
   optional plugins stay with [#101](https://github.com/gregwebs/agent-vm-images/issues/101).
+  The `rust-dev` example installs Rust from a
+  [reviewed closure](docs/image-input-policy.md#the-rust-examples-toolchain-closure):
+  exact `rustup-init` per architecture, the signed channel manifest and the hash
+  and detached signature of every selected archive, verified before anything
+  executes. Its `rustup-init` hash-only exception is dated and scoped in
+  `examples/layers/rust-dev/rust-toolchain/pin.json` and is only renewed by a
+  reviewer ([ADR 0007](docs/adr/0007-rust-example-toolchain-pins.md)).
   Node and the GitHub CLI are
   [pinned release artifacts](docs/image-input-policy.md#pinned-third-party-release-artifacts):
   exact upstream archives whose per-architecture SHA-256, evidence files and
@@ -80,6 +87,47 @@ bash script/test/artifact-pins.sh
 python3 script/test/pin-artifact-maintenance.py   # the writer's own fault cases
 bash images/build.sh base    # then: bash script/test/node-toolchain.sh agent-vm-base:local --platform linux/arm64
 ```
+
+## Rust example toolchain maintenance
+
+Only `script/dev/upgrade-rust-toolchain.sh` writes
+`examples/layers/rust-dev/rust-toolchain/` and the example's
+`ARG RUST_TOOLCHAIN` assertion, on a maintainer host (it refuses
+`GITHUB_ACTIONS=true`; `--check` stays usable offline):
+
+```bash
+bash script/dev/upgrade-rust-toolchain.sh 1.98.1 --rustup 1.28.2 \
+  --key /absolute/reviewed/rust-key.gpg.ascii \
+  --review-bootstrap-exception "$(date -u +%F)" --reviewer gregwebs
+bash script/dev/upgrade-rust-toolchain.sh 1.98.1    # expected: unchanged
+bash script/dev/upgrade-rust-toolchain.sh --check   # offline verification
+python3 script/test/rust-toolchain-pins.py
+python3 script/test/rust-toolchain-maintenance.py
+bash script/test/example-layers.sh --self-test       # 81 cases
+bash script/test/rust-example.sh --self-test          # harness controls, no daemon
+```
+
+`--rustup`, `--key` and the exception review are first-adoption arguments; later
+bumps retain the committed rustup version, key and exception. The run downloads
+and authenticates the entire two-architecture closure (both bootstraps, both
+manifests' six archives each, all signatures) without executing the foreign
+bootstrap and publishes the pin, evidence and Dockerfile assertion as one
+transaction. An incomplete download, refused endpoint or bad signature leaves the
+committed files byte-identical. A changed bootstrap identity prints
+`hash-only bootstrap exception requires renewed review`: review the old/new
+identity, then pass the review date and reviewer explicitly. Never hand-edit a pin
+or renew the date to clear a failure. Status `3` means an undecided rollback:
+recover the retained directory before further edits, builds or commits.
+
+Builds and guests never run the writer. The image exports
+`RUSTUP_AUTO_INSTALL=0` and disables rustup's automatic installation and
+self-update, so an ordinary `cargo`/`rustc`/`clippy`/`fmt` invocation that needs
+an absent toolchain, tool or target fails locally instead of downloading one; a
+project `rust-toolchain.toml` that only *declares* extra items may still build.
+Native evidence for both architectures comes from
+`bash script/test/rust-example.sh --platform linux/arm64|linux/amd64` on a
+native daemon; permanent example CI belongs to
+[#33](https://github.com/gregwebs/agent-vm-images/issues/33).
 
 ## Parent-pin maintenance
 
@@ -304,6 +352,26 @@ Rust/rustfmt/clippy **1.98.1** for the independent test-only Cargo package.
 The fixture tests trace `commit`'s maintenance child, which git 2.30 introduced.
 `#!/bin/sh` scripts are syntax-checked with `dash -n` (macOS ships `/bin/dash`);
 without dash the gate falls back to `sh -n` with a note, and CI requires dash.
+The Rust fixture suites (`rust-toolchain-pins.py`, `rust-toolchain-maintenance.py`)
+need a real `gpg`, and they run every native child inside an OS boundary instead
+of trusting the Python audit hook. The boundary is the same on both platforms for
+the network: off-host traffic is denied and only loopback is usable. Executable
+allowlisting is macOS-only: `sandbox-exec` checks every `exec` against the
+declared paths, so a copy of an allowed binary does not start. Linux needs
+`bubblewrap` (`apt-get install bubblewrap`) and a kernel with Landlock
+(`CONFIG_SECURITY_LANDLOCK`, 5.13+). Ubuntu 24.04 also restricts unprivileged
+user namespaces; on a disposable runner that needs
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (the contracts
+job sets it) or bubblewrap cannot configure its network namespace. The network
+namespace and the filesystem view
+are the OS layer's guarantee, and Landlock's `EXECUTE` rules refuse a *direct*
+`exec` outside the list — but a listed ELF loader can start another program
+without a kernel `exec` of that file, so this is not an executable allowlist. On
+Linux the in-process audit hook in `guards.py` (installed in every fixture child
+before the modules under test are imported) is the authority for which programs
+run. The kernel-side gap is follow-up work, not a property the suite claims. On a
+host with neither sandbox tool, the suites exit nonzero before running anything
+under test.
 On macOS:
 
 ```bash
