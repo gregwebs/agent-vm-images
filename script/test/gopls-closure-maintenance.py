@@ -17,6 +17,7 @@ calls; losing that prerequisite exits 3 before any case runs.
 from __future__ import annotations
 
 import argparse
+import enum
 import errno
 import hashlib
 from dataclasses import dataclass
@@ -56,6 +57,10 @@ FAKE_PYTHON = 'python3'
 STAGER = 'script/dev/gopls-closure-update.py'
 WRITER = 'script/dev/upgrade-gopls.sh'
 DATA_RELATIVE = 'examples/layers/go-dev/gopls-closure'
+# The probe module the settings classifier builds. A module, not a bare file, so
+# the compiler records a `go` directive's DefaultGODEBUG exactly as it does for the
+# closure.
+SETTINGS_PROBE_MODULE = 'agent-vm.invalid/gopls-settings-probe'
 # The writer targets Bash 3.2, so the shipped macOS shell is the right one to drive
 # it -- and it is a path the exec boundary can name literally.
 BASH = '/bin/bash'
@@ -86,8 +91,9 @@ class AlternateCompiler:
 def second_go_root(pinned: str) -> AlternateCompiler:
     """A second *real* local Go toolchain, validated, if this host has one.
 
-    No fake compiler is invented for the carry control: the point of the case is
-    that a genuinely different compiler produces genuinely different build settings.
+    No fake compiler is invented for the carry control, and a different version is
+    not assumed to produce different build settings: that is measured before the
+    case decides what to expect.
     """
     candidate = shutil.which('go')
     if candidate is None:
@@ -171,6 +177,84 @@ def builds_stdlib_program(root: Path) -> bool:
                          environment=environment) is not None
     finally:
         remove_tree(directory)
+
+
+class SettingsVerdict(enum.Enum):
+    """What a compiler's Linux build settings say about the reviewed map.
+
+    The writer refuses on the *settings map*, never on a version string, so a second
+    compiler has exactly three honest readings. Only ``DIFFERENT`` can demonstrate a
+    refusal; ``REVIEWED`` means the tripwire cannot tell that compiler from the
+    reviewed one and no case may expect anything from it.
+    """
+
+    REVIEWED = 'reviewed'
+    DIFFERENT = 'different'
+    UNPROBED = 'unprobed'
+
+
+def measured_settings(go_root: Path) -> dict[str, dict[str, str]] | None:
+    """The build settings one compiler records for every image target, or None.
+
+    Measured, not assumed from a version: whether a compiler's settings *are* the
+    reviewed ones is a fact about that toolchain, and version ordering is not a
+    proxy (a patch bump may keep ``DefaultGODEBUG`` identical while a minor bump
+    cannot). The probe is a stdlib-only module so it needs no module cache; the
+    build runs in the product's own child environment, over the product's own
+    architecture set, so the recorded keys are the ones a real build would show --
+    including ``DefaultGODEBUG``, which follows the module's ``go`` line rather than
+    the compiler alone.
+    """
+    model = fixture_module.model
+    directory = Path(tempfile.mkdtemp(prefix='settings-probe-'))
+    try:
+        paths = model.BuildPaths(directory / 'build')
+        paths.prepare()
+        module = directory / 'module'
+        module.mkdir()
+        (module / 'go.mod').write_text(
+            f'module {SETTINGS_PROBE_MODULE}\n\ngo {fixture_module.ROOT_GO_LANGUAGE}\n')
+        (module / 'main.go').write_text('package main\n\nfunc main() {}\n')
+        measured: dict[str, dict[str, str]] = {}
+        for arch in model.Architecture:
+            target = model.Target(go_root=go_root, bin_dir=directory / 'bin',
+                                  share_dir=directory / 'share', arch=arch)
+            env = model.GoEnvironment.offline().child_env(target, paths, {})
+            binary = directory / f'probe-{arch.value}'
+            built = model.run_go(model.GoCommand.BUILD,
+                                 ('-mod=readonly', '-trimpath', '-buildvcs=false',
+                                  '-o', str(binary), '.'), env, module)
+            if built.returncode != 0:
+                return None
+            reported = model.run_go(model.GoCommand.BUILD_INFO, (str(binary),), env, module)
+            if reported.returncode != 0:
+                return None
+            measured[arch.value] = _settings_of(reported.stdout)
+        return measured
+    except (OSError, subprocess.TimeoutExpired, TypeError, ValueError, KeyError):
+        return None
+    finally:
+        remove_tree(directory)
+
+
+def _settings_of(raw: str) -> dict[str, str]:
+    """The key/value pairs of `go version -m -json`'s ``Settings``.
+
+    Deliberately not ``model.parse_build_info``: that parser is the product's, and
+    it refuses a ``main`` module that is not a reviewed selection. What the
+    classifier needs is the map it would compare, and nothing else.
+    """
+    document = json.loads(raw)
+    return {item['Key']: item['Value'] for item in document['Settings']}
+
+
+def settings_verdict(measured: dict[str, dict[str, str]] | None) -> SettingsVerdict:
+    """Whether a measured map is the reviewed one the writer compares against."""
+    if measured is None:
+        return SettingsVerdict.UNPROBED
+    model = fixture_module.model
+    reviewed = {arch.value: model.expected_settings(arch) for arch in model.Architecture}
+    return SettingsVerdict.REVIEWED if measured == reviewed else SettingsVerdict.DIFFERENT
 
 
 def boundary_readable(go_root: Path, alternate: Path | None) -> list[str]:
@@ -1477,17 +1561,40 @@ def main() -> int:
         # --- Go-only bump -----------------------------------------------------
         # The carry predicate itself is asserted here; an integration case is not
         # available, and that is a property of the design rather than a gap: the
-        # build-info settings tripwire is version-specific on purpose, so a
-        # different compiler produces different settings and needs a deliberate
-        # code/ADR change before any writer run can accept it.
+        # build-info settings tripwire is keyed on the reviewed map, so a compiler
+        # whose settings differ needs a deliberate code/ADR change before any writer
+        # run can accept it. Whether the case below can prove that is measured first.
         print('Go-only bump')
         carried = updater_carried(fixture_root, launcher_dir, root)
         check('a Go-only bump carries the review (unit-level carry predicate)',
               carried is True, f'({carried})')
         print('  note: the carry predicate is asserted here; there is no *positive* writer '
-              'integration case, because a compiler bump changes the reviewed build '
-              'settings, which needs a deliberate code change (ADR 0008). The case below '
-              'proves that is what blocks it.')
+              'integration case, because a compiler whose reviewed build settings differ '
+              'needs a deliberate code change (ADR 0008). The case below proves that is '
+              'what blocks it, when the second compiler actually has different settings.')
+
+        print('settings classifier')
+        model = fixture_module.model
+        reviewed = {arch.value: model.expected_settings(arch) for arch in model.Architecture}
+        check('the classifier reads the reviewed map as no possible refusal',
+              settings_verdict(reviewed) is SettingsVerdict.REVIEWED,
+              json.dumps(reviewed))
+        # `DefaultGODEBUG` is the key a Go minor line changes: go1.26.5 records
+        # none and go1.27.x records the reviewed one. Setting it to anything else is
+        # the whole difference the writer refuses on, so a classifier that called
+        # this equal would silently turn a refusal case into a pass.
+        altered = {arch: dict(values) for arch, values in reviewed.items()}
+        altered[model.Architecture.AMD64.value]['DefaultGODEBUG'] = 'unreviewed=1'
+        check('the classifier reads one changed setting as a refusal expectation',
+              settings_verdict(altered) is SettingsVerdict.DIFFERENT, json.dumps(altered))
+        check('the classifier decides nothing from an unprobed compiler',
+              settings_verdict(None) is SettingsVerdict.UNPROBED)
+        # The probe itself is on trial here: the reviewed map was measured from the
+        # pinned compiler, so a probe that cannot reproduce it would misfile every
+        # second compiler, and its "different" verdict would mean nothing.
+        pinned_verdict = settings_verdict(measured_settings(go_root))
+        check('the probe reproduces the reviewed settings for the pinned compiler',
+              pinned_verdict is SettingsVerdict.REVIEWED, f'({pinned_verdict.value})')
 
         print('second compiler')
         if alternate_root is None:
@@ -1499,24 +1606,35 @@ def main() -> int:
                   'exercised with a different compiler')
         else:
             alternate_version = alternate['version']
-            second = tree(root / 'repo-second-go')
-            shutil.copytree(data, second / data_relative)
-            (second / dockerfile_relative).write_text(
-                f'ARG GO_VERSION={alternate_version}\nFROM fixture\n'
-                'ARG GOPLS_VERSION=v0.0.1\n')
-            before = snapshot(second / data_relative)
-            result = run_writer(fixture_root, second, launcher_dir, ['v0.0.1'],
-                                {'FIXTURE_GO_ROOT': str(alternate_root)})
-            output = result.stdout + result.stderr
-            check(f'a second real compiler (go{alternate_version}) is refused by the '
-                  'reviewed build settings',
-                  result.returncode == 1 and 'build settings differ' in output,
-                  output[-600:])
-            check('the second-compiler refusal changed no committed byte',
-                  snapshot(second / data_relative) == before)
-            check('the refusal names the settings, not a generic failure',
-                  'build settings differ from the reviewed Linux target settings' in output,
-                  output[-400:])
+            # Measured before the expectation is chosen, and before any writer run:
+            # the case is about the tripwire refusing *these settings*, and a
+            # compiler that produces the reviewed map is not refusable at all.
+            verdict = settings_verdict(measured_settings(alternate_root))
+            if verdict is SettingsVerdict.REVIEWED:
+                print(f'  NOT RUN: go{alternate_version} produces the reviewed build '
+                      'settings, so the settings tripwire cannot refuse it')
+            elif verdict is SettingsVerdict.UNPROBED:
+                print(f'  NOT RUN: go{alternate_version} at {alternate_root} did not report '
+                      'its build settings, so the refusal expectation is undecided')
+            else:
+                second = tree(root / 'repo-second-go')
+                shutil.copytree(data, second / data_relative)
+                (second / dockerfile_relative).write_text(
+                    f'ARG GO_VERSION={alternate_version}\nFROM fixture\n'
+                    'ARG GOPLS_VERSION=v0.0.1\n')
+                before = snapshot(second / data_relative)
+                result = run_writer(fixture_root, second, launcher_dir, ['v0.0.1'],
+                                    {'FIXTURE_GO_ROOT': str(alternate_root)})
+                output = result.stdout + result.stderr
+                check(f'a second real compiler (go{alternate_version}) is refused by the '
+                      'reviewed build settings',
+                      result.returncode == 1 and 'build settings differ' in output,
+                      output[-600:])
+                check('the second-compiler refusal changed no committed byte',
+                      snapshot(second / data_relative) == before)
+                check('the refusal names the settings, not a generic failure',
+                      'build settings differ from the reviewed Linux target settings' in output,
+                      output[-400:])
     finally:
         fixture_root.proxy.close()
         for path in retained_proposals() - proposals_before:

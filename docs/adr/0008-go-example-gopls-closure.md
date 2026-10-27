@@ -207,17 +207,25 @@ not claim.
   build. There is no fallback origin and no mirror: availability depends on
   `proxy.golang.org`.
 - A Go version bump forces a writer re-run: `pin.json.go` and the Dockerfile's
-  `ARG GO_VERSION` are checked for equality, and the build helper's reviewed
-  Linux build-settings map is version-specific. **Recorded deviation:** the plan's
+  `ARG GO_VERSION` are checked for equality, so the version itself is never
+  implicit. Whether a bump also needs a *code* change follows from the reviewed
+  Linux build-settings map, which is keyed on settings, not on a version: a
+  compiler whose recorded settings differ from the map (for example go1.26.5,
+  which records no `DefaultGODEBUG`) is refused before anything is published and
+  needs a deliberate change here and in the map; a compiler whose settings equal
+  the map (for example go1.27.0 against the reviewed go1.27.3) is
+  indistinguishable to the tripwire, so no writer run is refused on that ground
+  and the map does not certify the version. **Recorded deviation:** the plan's
   sentence that a Go-only bump carries the review is therefore not satisfied as
-  written — a compiler bump changes the reviewed settings allowlist, so it
-  requires a deliberate code change and a renewed review before any writer run
-  can accept it. The carry predicate itself still exists and is exercised case by
-  case: `_carried` in `script/dev/gopls-closure-update.py` is driven by
-  `test_carry_matrix` in `script/test/gopls-closure-pins.py` and by the
-  maintenance suite's Go-only-bump case, and the maintenance suite measures the
-  negative with a second real compiler (go1.26.5), which the settings tripwire
-  refuses.
+  written — a bump requires a deliberate code change and a renewed review *when
+  the reviewed settings differ*, not merely because the version moved. The carry
+  predicate itself still exists and is exercised case by case: `_carried` in
+  `script/dev/gopls-closure-update.py` is driven by `test_carry_matrix` in
+  `script/test/gopls-closure-pins.py` and by the maintenance suite's Go-only-bump
+  case. The maintenance suite measures the refusal with a second real compiler
+  whose settings differ (go1.26.5) and records `NOT RUN` for one whose settings
+  match (go1.27.0 on a hosted runner), because a compiler the tripwire cannot
+  distinguish is not a control for the tripwire.
 - What a build proves: the committed bytes are the reviewed ones, the compiler and
   target are the pinned ones, and the binary's own build info matches the
   selection. What it does not prove: that the release is safe, that the publisher

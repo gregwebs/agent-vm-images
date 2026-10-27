@@ -35,6 +35,11 @@ import proxy as proxy_module  # noqa: E402
 from executables import go_executables  # noqa: E402,F401 - re-exported for the suites
 
 PINNED_GO = '1.27.3'
+# The language version every synthetic module declares. It is not decoration: a
+# main module's ``go`` line decides the ``DefaultGODEBUG`` the compiler records, so
+# a suite that probes build settings has to carry the same directive rather than a
+# copy of the number. It matches the committed closure's own ``go`` line.
+ROOT_GO_LANGUAGE = '1.26.0'
 ROOT = 'golang.org/x/tools/gopls'
 DEP = 'example.test/dep'
 LEAF = 'example.test/leaf'
@@ -74,7 +79,7 @@ def module_zip(path: str, version: str, files: dict[str, bytes]) -> bytes:
 
 def go_mod(path: str, requires: dict[str, str] | None = None, *,
            extra: str = '') -> bytes:
-    lines = [f'module {path}', '', 'go 1.26.0']
+    lines = [f'module {path}', '', f'go {ROOT_GO_LANGUAGE}']
     if requires:
         lines.extend(['', 'require ('])
         for required in sorted(requires):
