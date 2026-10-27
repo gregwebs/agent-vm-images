@@ -18,6 +18,12 @@
 # install-go.sh, install-golangci-lint.sh, install-gopls.sh and
 # verify-toolchain.sh. This file only wires the pins and locations into them.
 #
+# Two further paths are build-only inputs, mounted read-only for the steps that
+# need them and never copied into the image: `gopls_closure.py` (the only
+# program that checks or installs the gopls closure) and `gopls-closure/` (the
+# reviewed module selection, its sums, its licences and the record that binds
+# them). See docs/adr/0008-go-example-gopls-closure.md.
+#
 # The `ARG BASE_IMAGE`/`FROM ${BASE_IMAGE}` pair lets `--build-arg BASE_IMAGE=…`
 # retarget the build, and every `ENV` keeps `PATH` additive
 # (`PATH=<new>:${PATH}`) so the base's directories are never dropped.
@@ -32,18 +38,29 @@ FROM ${BASE_IMAGE}
 # surfaces deep into a test run as "-race requires cgo; enable cgo by setting
 # CGO_ENABLED=1". rust-dev installs the same package for its native build
 # dependencies.
+#
+# python3 runs the reviewed gopls closure helper below. It comes from the
+# official Debian apt repository like the rest of this layer's distro packages
+# (the only inputs allowed to float), because the released parent is not
+# assumed to carry it; rust-dev installs it the same way.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential \
+ && apt-get install -y --no-install-recommends build-essential python3 \
  && rm -rf /var/lib/apt/lists/*
 
 # Pins. The lint version mirrors images/recipe-contract/golangci-lint.version
 # (guarded by image-sources); the standalone example context cannot read that
-# repository file during a build. The pin and its verification stay together: install-go.sh and
-# install-golangci-lint.sh each check their prebuilt tarball against the digest
-# declared here, so a bumped version left beside a stale digest fails the build
-# instead of shipping a different tool. gopls has no tarball to digest;
-# install-gopls.sh pins its module version and the go command verifies it
-# against the checksum database. Bump a version and its digests together.
+# repository file during a build. The pin and its verification stay together:
+# install-go.sh and install-golangci-lint.sh each check their prebuilt tarball
+# against the digest declared here, so a bumped version left beside a stale
+# digest fails the build instead of shipping a different tool.
+#
+# gopls has no tarball and no live `go install`: it is compiled from the
+# reviewed module closure committed under gopls-closure/, which records the
+# selected modules, both checksum kinds for each and the record that binds them
+# (gopls-closure/pin.json). GOPLS_VERSION stays here as the exact assertion the
+# closure must match, written only by script/dev/upgrade-gopls.sh -- a version
+# bump without a regenerated closure fails the build. The build accepts only
+# committed sums; it never resolves a newer version or refreshes a checksum.
 ARG GO_VERSION=1.27.3
 ARG GO_AMD64_SHA256=65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40
 ARG GO_ARM64_SHA256=a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49
@@ -65,7 +82,15 @@ RUN --mount=type=bind,source=install-go.sh,target=/tmp/install-go.sh,ro \
 RUN --mount=type=bind,source=install-golangci-lint.sh,target=/tmp/install-golangci-lint.sh,ro \
     bash /tmp/install-golangci-lint.sh
 
+# gopls is built from the reviewed closure by gopls_closure.py in an environment
+# it constructs from scratch (no inherited GOFLAGS/GOPROXY/GONOSUMDB/GOENV), with
+# GOTOOLCHAIN=local, CGO_ENABLED=0 and GOOS/GOARCH forced to this image's Linux
+# target. The helper proves the result from the binary's own build info and only
+# then publishes gopls and the third-party licence file. The three inputs are
+# mounted read-only for this step and are not part of the image.
 RUN --mount=type=bind,source=install-gopls.sh,target=/tmp/install-gopls.sh,ro \
+    --mount=type=bind,source=gopls_closure.py,target=/tmp/gopls_closure.py,ro \
+    --mount=type=bind,source=gopls-closure,target=/tmp/gopls-closure,ro \
     bash /tmp/install-gopls.sh
 
 # PATH stays additive: the base's entries are preserved via
@@ -75,12 +100,21 @@ RUN --mount=type=bind,source=install-gopls.sh,target=/tmp/install-gopls.sh,ro \
 # defeats the pin and fails confusingly under the guest's network allow list.
 # The error for an out-of-range go.mod names both versions, so the fix (bump
 # GO_VERSION here and rebuild the image) is discoverable. See the README.
+# No other GO* policy is exported: a project's own `go get`/module download is
+# a user action outside the build guarantee, so the guest keeps Go's defaults
+# for everything except the toolchain switch.
 ENV PATH=${GO_PREFIX}/bin:${GO_TOOLS_BIN}:${PATH}
 ENV GOTOOLCHAIN=local
 
-# Post-install sanity: every tool is invoked directly, and the Go, lint and
-# language-server checks analyse a real module built from scratch, so a
-# present-but-broken binary fails the build here instead of surfacing as
-# command-not-found in the guest.
-RUN --mount=type=bind,source=verify-toolchain.sh,target=/tmp/verify-toolchain.sh,ro \
-    bash /tmp/verify-toolchain.sh
+# Post-install sanity with no network at all: every tool is invoked directly,
+# and the Go, lint and language-server checks analyse a real module built from
+# scratch, so a present-but-broken binary fails the build here instead of
+# surfacing as command-not-found in the guest. The first thing it does is check
+# the *installed* gopls against the committed closure (build info, module/sum
+# identity, licence bytes) with the proxy off. The verifier bundle is mounted
+# read-only for this step and nothing is copied into the image.
+RUN --network=none \
+    --mount=type=bind,source=verify-toolchain.sh,target=/run/go-verify/verify-toolchain.sh,ro \
+    --mount=type=bind,source=gopls_closure.py,target=/run/go-verify/gopls_closure.py,ro \
+    --mount=type=bind,source=gopls-closure,target=/run/go-verify/gopls-closure,ro \
+    PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/go-verify/verify-toolchain.sh

@@ -28,6 +28,13 @@ version bump, Rust application build, submodule or launcher packaging is needed.
   build only verifies the committed bytes. See
   [image input policy](docs/image-input-policy.md#repository-base-identity-a-committed-input-manifest)
   and [the ADR](docs/adr/0005-repository-base-identity.md).
+  The `go-dev` example builds gopls from a
+  [reviewed module closure](docs/image-input-policy.md#the-go-examples-gopls-closure):
+  a wrapper module, both checksum kinds for every selected module, the reviewed
+  notice files and a dated `pin.json` determination, verified before one
+  `-mod=readonly` build whose binary must report exactly that selection. Its
+  writer is the only way to move the graph or the sums
+  ([ADR 0008](docs/adr/0008-go-example-gopls-closure.md)).
   Official Debian apt packages may float with normal apt authentication;
   optional plugins stay with [#101](https://github.com/gregwebs/agent-vm-images/issues/101).
   The `rust-dev` example installs Rust from a
@@ -126,6 +133,61 @@ an absent toolchain, tool or target fails locally instead of downloading one; a
 project `rust-toolchain.toml` that only *declares* extra items may still build.
 Native evidence for both architectures comes from
 `bash script/test/rust-example.sh --platform linux/arm64|linux/amd64` on a
+native daemon; permanent example CI belongs to
+[#33](https://github.com/gregwebs/agent-vm-images/issues/33).
+
+## Go example gopls maintenance
+
+Only `script/dev/upgrade-gopls.sh` writes
+`examples/layers/go-dev/gopls-closure/` and the example's
+`ARG GOPLS_VERSION` assertion, on a maintainer host (it refuses
+`GITHUB_ACTIONS=true`; `--check` stays usable offline):
+
+```bash
+bash script/dev/upgrade-gopls.sh v0.23.0 \
+  --review-determination YYYY-MM-DD --reviewer NAME   # the day a human reviewed it
+bash script/dev/upgrade-gopls.sh v0.23.0    # expected: unchanged
+bash script/dev/upgrade-gopls.sh --check    # offline verification
+python3 script/test/gopls-closure-pins.py --go-root /abs/native/go1.27.3
+python3 script/test/gopls-closure-maintenance.py --go-root /abs/native/go1.27.3
+bash script/test/example-layers.sh --self-test       # 103 cases
+bash script/test/go-example.sh --self-test           # harness controls, no daemon
+```
+
+Prerequisites: host `go` >= 1.24, `python3` >= 3.11 and network access; the
+writer re-runs the staging with the layer's pinned Go (`GOTOOLCHAIN=go<GO_VERSION>`,
+asserted), so `--go` is never a free choice. The run regenerates the module graph
+and sums through the checksum database, cross-builds both Linux targets from the
+staged files with `GOPROXY=off`, and publishes the five closure files plus the
+Dockerfile assertion as one transaction. A changed root, sum set, notice layout,
+signature inventory or policy prints `module-channel determination requires renewed
+review`: review the printed proposal (the refusal also retains it outside the
+checkout, and `--proposal DIR` binds a later approval to exactly those bytes), then
+pass the date of that review and the reviewer explicitly. Never hand-edit a pin or
+renew the date to clear a failure. Status `3` means an undecided rollback: recover
+the retained directory before further edits, builds or commits.
+
+A Go bump is not cosmetic: `pin.json.go` is checked against `ARG GO_VERSION`, and
+the helper's reviewed Linux build-settings allowlist is version-specific, so a new
+compiler needs a deliberate code/ADR change and a renewed review. The
+carry predicate for an unchanged scope still exists and is unit-tested; it cannot
+be used to adopt a new compiler automatically.
+
+Builds and guests never run the writer. `CGO_ENABLED=0` applies to gopls only (the
+guest keeps `build-essential` for cgo and `-race`), and `GOTOOLCHAIN=local` bounds
+first use: a project asking for a newer toolchain fails locally instead of
+downloading one. A guest's own `go get`/`go install`/dependency resolution is
+outside the guarantee.
+
+**Scope note.** AC3 is delivered closure-scoped: retained-archive authentication
+(the Go `.asc`, golangci-lint attestations) and a per-module VCS signer/zip-binding
+policy are https://github.com/gregwebs/agent-vm-images/issues/115. The
+image-source helper-inventory gate is broken today
+(https://github.com/gregwebs/agent-vm-images/issues/116), so a green `cargo test`
+does **not** certify this helper — do not cite it as coverage.
+
+Native evidence for both architectures comes from
+`bash script/test/go-example.sh --platform linux/arm64|linux/amd64 --no-cache` on a
 native daemon; permanent example CI belongs to
 [#33](https://github.com/gregwebs/agent-vm-images/issues/33).
 

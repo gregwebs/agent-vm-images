@@ -61,7 +61,7 @@ directly. These Debian-based examples are not portable to every minimal boot ima
 |---|---|
 | [`wirenboard-cpp`](wirenboard-cpp/) | WB C/C++ build-essentials (debhelper, clang-format/clang-tidy, libcurl/libgtest/libmodbus/libsystemd-dev, cmake/ninja, ...) plus the armhf/arm64 cross toolchains, qemu-user-static, and the sbuild/schroot/debootstrap path. |
 | [`rust-dev`](rust-dev/) | The Rust toolchain [agent-vm](https://github.com/gregwebs/agent-vm) pins (via its `rust-toolchain.toml`, with clippy and rustfmt), the host musl target, the native build libraries agent-vm's `ci.yml` installs, shellcheck, and the pinned Verus release — enough to build, test, lint and verify agent-vm's Rust code in the guest. The toolchain is installed from a reviewed pin set, not from the live installer. |
-| [`go-dev`](go-dev/) | The pinned Go toolchain (go, gofmt, go vet) plus the two tools a Go project's editor and CI loop expect beyond it, `golangci-lint` and the `gopls` language server — enough to build, test, lint and navigate a Go code base in the guest. |
+| [`go-dev`](go-dev/) | The pinned Go toolchain (go, gofmt, go vet) plus the two tools a Go project's editor and CI loop expect beyond it, `golangci-lint` and the `gopls` language server (built from a reviewed module closure, not `go install pkg@version`) — enough to build, test, lint and navigate a Go code base in the guest. |
 | [`chrome-devtools`](chrome-devtools/) | Chromium, Chrome DevTools MCP wrapper, scoped NSS CA trust, and the Chrome capability marker. |
 
 ## Rust development
@@ -232,9 +232,9 @@ installs, under the world-readable `/opt`:
   fails with "requires cgo";
 - the **pinned golangci-lint release** from its GitHub release tarball,
   likewise digest-verified;
-- the **pinned `gopls` language server**, compiled from its module at build
-  time (upstream ships no binary) with the go command verifying every module
-  against the signed `sum.golang.org` checksum database.
+- the **pinned `gopls` language server**, compiled at build time from a
+  committed, reviewed module closure with the pinned compiler (upstream ships
+  no binary) — see [Reviewed gopls closure](#reviewed-gopls-closure-103) below.
 
 Build it on top of the default boot image and select it:
 
@@ -271,21 +271,85 @@ message naming both versions. Bump `GO_VERSION` (and its two digests) in
 the layer's `Dockerfile` and rebuild the layer. To opt out for one command
 where the network permits it, run `GOTOOLCHAIN=auto go …`.
 
-Module and checksum downloads need no extra flags: the default network policy
-already reaches the public internet, which covers `proxy.golang.org` and
-`sum.golang.org`. (`--allow-host` is unrelated — despite the name it opens the
-*host's* loopback gateway for reaching a dev server, not a hostname allow
-list.) A project that must not depend on the network can `go mod vendor` and
-build with `-mod=vendor`.
+Module, toolchain and checksum downloads a *project* triggers are user actions:
+the build guarantee covers the image's own inputs, not a guest's `go get`,
+`go install` or dependency resolution. Those commands need no extra flags — the
+default network policy already reaches the public internet, which covers
+`proxy.golang.org` and `sum.golang.org`. (`--allow-host` is unrelated — despite
+the name it opens the *host's* loopback gateway for reaching a dev server, not a
+hostname allow list.) A project that must not depend on the network can
+`go mod vendor` and build with `-mod=vendor`.
+
+### Reviewed gopls closure (#103)
+
+`go install golang.org/x/tools/gopls@v0.23.0` used to let the `go` command pick
+gopls's module graph during the build and accept checksum-database answers that
+were never committed or reviewed here. The layer now commits the selection in
+[`go-dev/gopls-closure/`](go-dev/gopls-closure/):
+
+- a tiny wrapper module (`tool golang.org/x/tools/gopls`, every selected module
+  as an indirect requirement) and the full tidy `go.sum` — 23 modules, 34 zip
+  `h1` lines and 101 `/go.mod` lines for v0.23.0;
+- the root module's own upstream `go.mod` bytes, hash-bound by their committed
+  `/go.mod` line;
+- `THIRD_PARTY_LICENSES`: the reviewed notice files (38 for v0.23.0), framed with
+  per-file byte counts and digests;
+- `pin.json`: the record that binds all four by digest and records the reviewed
+  scope, the dated module-channel determination, the unauthenticated proxy
+  provenance and the partial VCS signature inventory.
+
+What a build proves: the committed bytes are the reviewed ones, the compiler is
+the pinned one, and the finished binary's own build info reports exactly the
+reviewed modules and sums — after which `gopls` and its licence file are
+published. The `go build` runs as `-mod=readonly` in an environment
+`gopls_closure.py` constructs (no inherited `GOFLAGS`/`GOPROXY`/`GONOSUMDB`,
+`GOTOOLCHAIN=local`, `CGO_ENABLED=0`, `GOOS=linux` and the image's `GOARCH`,
+private caches), so a new sum can only enter through a reviewed writer proposal.
+What it does not prove: that the release is safe, or that the publisher
+authorised the bytes. Module content is authenticated by `sum.golang.org` plus
+the committed sums; available VCS release signatures are inventoried as evidence
+and are not verified here (see
+[#115](https://github.com/gregwebs/agent-vm-images/issues/115)).
+
+Maintain it with the writer (maintainer host, never CI). The five closure files
+and the `ARG GOPLS_VERSION` assertion are published as one transaction:
+
+```bash
+bash script/dev/upgrade-gopls.sh v0.23.0 \
+  --review-determination YYYY-MM-DD --reviewer NAME   # date of a real human review
+bash script/dev/upgrade-gopls.sh --check             # offline verification
+```
+
+A changed graph, sum set, notice layout or policy refuses with
+`module-channel determination requires renewed review` and publishes nothing.
+Decision and rejected alternatives:
+[ADR 0008](../../docs/adr/0008-go-example-gopls-closure.md).
+
+### Native evidence
+
+`bash script/test/go-example.sh --platform linux/arm64|linux/amd64 --no-cache`
+builds this layer on a native daemon and records the evidence: the cold build
+with both retained archive `sha256sum -c` OK lines, the `--network=none`
+installed-state verifier, the Go loop as root and as uid 12345, a real LSP
+session (initialize, definition, hover, diagnostics, formatting, shutdown), the
+first-use canary legs and a hard content-replacement build negative. QEMU is not
+acceptance, and permanent example CI stays with
+[#33](https://github.com/gregwebs/agent-vm-images/issues/33).
 
 ### Keeping the pins in lockstep
 
-This is the *only* example here that pins a Go toolchain, so there is
-nothing to cross-check. The version and, for the two prebuilt downloads, the
-per-architecture digest are declared together in `Dockerfile`, and each
-installer verifies its tarball against that digest, so a bumped version left
-beside a stale digest fails the build. `gopls` is pinned by module version and
-verified against the signed checksum database.
+This is the *only* example here that pins a Go toolchain, so there is nothing to
+cross-check against another repository. The Go version and, for the two prebuilt
+downloads, the per-architecture digest are declared together in `Dockerfile`, and
+each installer verifies its tarball against that digest, so a bumped version left
+beside a stale digest fails the build.
+
+A **Go or gopls bump goes through the writer**: `ARG GO_VERSION` and
+`pin.json.go` are checked for equality, and gopls's selection, sums and notices
+are regenerated by `script/dev/upgrade-gopls.sh`. Editing a version or a sum by
+hand fails the static gate and the build. Because the reviewed Linux
+build-settings allowlist is version-specific, a Go bump also needs a deliberate
+helper/ADR change and a renewed review — it is not a cosmetic edit.
 
 ## Chrome DevTools
 

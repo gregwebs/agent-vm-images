@@ -92,6 +92,12 @@ if [ "$guard_only" = false ]; then
     # hermetic; the real updater and the native installer are never run here.
     python3 script/test/rust-toolchain-pins.py
     python3 script/test/rust-toolchain-maintenance.py
+    # The Go example's gopls closure (#103): the real-go pin/install table and the
+    # maintenance writer's faults. Native Go runs only inside the OS sandbox, and
+    # --go-root is the already selected go1.27.3 root, so nothing downloads a
+    # compiler; both suites refuse any other toolchain.
+    python3 script/test/gopls-closure-pins.py --go-root "$selected_goroot"
+    python3 script/test/gopls-closure-maintenance.py --go-root "$selected_goroot"
     for suite in agent-versions apt-sources claude-installer codex-installer copilot-installer copilot-verify \
         opencode-installer opencode-pnpm-prepare-lock opencode-pnpm-install opencode-pnpm-upgrade \
         opencode-plugins-verify run-pnpm dsh-prepare-lock dsh-verify pi-install pi-prepare-lock pi-verify \
@@ -124,6 +130,10 @@ if [ "$guard_only" = false ]; then
     # run, parent argument on every build) need no daemon, so they run here; its
     # native phases stay the evidence phase's work.
     bash script/test/rust-example.sh --self-test
+    # The Go example's native harness controls (unavailable/non-native daemon,
+    # interrupted run, inspected parent on every build, LSP client faults): no
+    # daemon, so they belong here; its native phases are the evidence run's work.
+    bash script/test/go-example.sh --self-test
     # Updater transaction and signal table (#41): the host-only writer's statuses.
     python3 script/test/chrome-mcp-upgrade.py
     # Parent-pin resolver/publisher table (#95): authenticated resolution,
