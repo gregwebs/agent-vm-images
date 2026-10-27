@@ -1125,35 +1125,20 @@ FUNCTION
 # the dirty count says how many tracked files differ -- not which bytes were
 # built. So the log also records a digest per build input and one over the set.
 input_digests() { # ROOT EXAMPLE -- print "<sha256>  <path>" per input, then the set
-    python3 - "$1" "$2" <<'PY'
-import hashlib
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1])
-layer = root / sys.argv[2]
-# Exactly the inputs the Dockerfile bind-mounts for the gopls steps: the recipe,
-# the two adapters, the helper and the five committed closure files.
-paths = [layer / name for name in ('Dockerfile', 'install-gopls.sh',
-                                   'verify-toolchain.sh', 'gopls_closure.py')]
-paths += sorted(path for path in (layer / 'gopls-closure').iterdir() if path.is_file())
-lines = [f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(root)}'
-         for path in paths]
-for line in lines:
-    print('input', line)
-print('inputs-set', hashlib.sha256(('\n'.join(lines) + '\n').encode()).hexdigest())
-PY
+    python3 "$ROOT/$FIXTURES/input_digests.py" "$1" "$2"
 }
 
-# An independent hasher for the digest control: the harness itself hashes in
-# Python, so the control must not use the same code twice.
+# An independent hasher for the digest control: the harness hashes with the
+# sibling input_digests.py, so the control must not reuse that code. A host with
+# neither tool is a prerequisite failure, never a silent fallback.
 sha256_file() { # FILE
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "$1" | cut -d' ' -f1
     elif command -v shasum >/dev/null 2>&1; then
         shasum -a 256 "$1" | cut -d' ' -f1
     else
-        python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$1"
+        echo 'sha256_file: neither sha256sum nor shasum is available' >&2
+        return 1
     fi
 }
 
