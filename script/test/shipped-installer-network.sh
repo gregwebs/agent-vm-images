@@ -13,12 +13,19 @@
 #
 # Usage: script/test/shipped-installer-network.sh BASE_IMAGE \
 #            [--overrides] [--observe] [--tool TOOL] [--platform PLATFORM]
+#        script/test/shipped-installer-network.sh --self-test
+#        script/test/shipped-installer-network.sh --emit-config TOOL [--platform P]
 #
 #   --overrides   also run the committed exact alternate selection per tool
 #   --observe     capture mode: log every URL and forward it (builds the
 #                 allowlist; not an acceptance run)
 #   --tool TOOL   only codex|opencode|claude|opencode-plugins (repeatable)
 #   --platform P  Docker platform (default: the host's)
+#   --self-test   hermetic: replay the request-log and `-`-placeholder stream
+#                 assertions against correct and defective streams. No Docker, no
+#                 network; it runs in the fast aggregate.
+#   --emit-config print the allowlist config this tool+platform would be handed,
+#                 so the hermetic addon table replays production data.
 #
 # Tier: real Docker + real network. It downloads real release assets, so it is
 # a bounded PR/manual native CI audit, never part of the hermetic aggregate.
@@ -33,6 +40,289 @@ REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
 FIXTURES="$REPO_ROOT/script/test/fixtures/installer-egress"
 SELECTIONS="$FIXTURES/selections.tsv"
 
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+# Initialized here because `--self-test` and `--emit-config` run before the main
+# argument parsing below, and both reach functions that read it under `set -u`.
+overrides=false
+
+# --- stream assertions (hermetic) --------------------------------------------
+#
+# These three checks are the reviewers' "extracted production functions": each is
+# a small assertion about a request/selection STREAM, and each was wrong in a way
+# only running it against a CORRECT stream reveals. They are defined here, above
+# every Docker and recipe-contract prerequisite, and exercised by `--self-test`,
+# so the fast aggregate catches a regression in them without a native run.
+
+selection_for() { # $1 = tool, $2 = column (2=default, 3=alternate)
+    awk -F '\t' -v t="$1" -v c="$2" '$1 == t { print $c }' "$SELECTIONS"
+}
+
+selection_versions() { # $1 = tool -> newline-separated versions to run
+    # stdout is exclusively version records, so a caller can assert its exact
+    # contents; the "no alternate" explanation goes to stderr.
+    local alternate
+    printf '%s\n' "$(selection_for "$1" 2)"
+    if $overrides; then
+        alternate="$(selection_for "$1" 3)"
+        case "$alternate" in
+            "" | "-")
+                echo "  $1 has one committed payload selection; no alternate" >&2
+                ;;
+            *)
+                printf '%s\n' "$alternate"
+                ;;
+        esac
+    fi
+    return 0
+}
+
+# The proxy's log line is `ALLOW https://host/path`: the addon logs the redacted
+# URL, scheme included. Matching the host alone refused every correct run.
+CODEX_PAYLOAD_ALLOW='^ALLOW https://github\.com/openai/codex/releases/download/'
+
+assert_codex_request_log() { # $1 version, $2 marker, [$3 log file]
+    local version=$1 marker=$2 log_file=${3:-$TMP/logs/egress.log} log
+    log="$(tail -n "+$(( marker + 1 ))" "$log_file" 2>/dev/null || true)"
+    printf '%s\n' "$log" | grep -q "$CODEX_PAYLOAD_ALLOW" ||
+        fail "codex $version: no payload request was allowed"
+    if printf '%s\n' "$log" | grep -q 'api\.github\.com'; then
+        fail "codex $version: the release metadata API was contacted"
+    fi
+    if printf '%s\n' "$log" | grep -q 'codex-package_SHA256SUMS'; then
+        fail "codex $version: the checksum manifest was downloaded at build time"
+    fi
+    if printf '%s\n' "$log" | grep -qi 'sigstore'; then
+        fail "codex $version: a Sigstore bundle was downloaded at build time"
+    fi
+    echo "    request log: payload fetch only (no metadata, checksums or bundles)"
+}
+
+# Exactly one version record, and never the `-` placeholder row. Comparing the
+# WHOLE string is the point: `case "$out" in *-*)` matched every canonical
+# `rust-v0.159.3` tag and so failed every correct Codex run.
+require_codex_version_line() { # $1 = the stdout of `selection_versions codex`
+    local out=$1
+    case "$out" in
+        -) fail "selection_versions emitted the '-' placeholder: $out" ;;
+    esac
+    [ "$(printf '%s\n' "$out" | grep -c .)" = 1 ] ||
+        fail "selection_versions codex must emit exactly one version, got '$out'"
+}
+
+check_codex_overrides_stream() {
+    local err out
+    err="$(mktemp "${TMPDIR:-/tmp}/codex-overrides.XXXXXX")" ||
+        fail "cannot create the --overrides stderr capture"
+    out="$(overrides=true; selection_versions codex 2>"$err")"
+    [ "$out" = "$(selection_for codex 2)" ] ||
+        fail "selection_versions codex --overrides printed '$(printf '%s' "$out" | tr '\n' ' ')' on stdout"
+    require_codex_version_line "$out"
+    grep -q 'codex has one committed payload selection; no alternate' "$err" ||
+        fail "selection_versions codex --overrides must explain the missing alternate on stderr"
+    rm -f "$err"
+    echo "  codex: --overrides stdout is exactly the committed default; explanation is on stderr"
+}
+
+stream_expect_ok() { # $1 label, rest: the command that must accept
+    local label=$1 out
+    shift
+    if out="$("$@" 2>&1)"; then
+        echo "  ok: $label"
+    else
+        echo "FAIL: self-test $label: a correct stream was rejected: $out" >&2
+        return 1
+    fi
+}
+
+stream_expect_fail() { # $1 label, $2 fragment, rest: the command that must refuse
+    local label=$1 fragment=$2 out
+    shift 2
+    if out="$("$@" 2>&1)"; then
+        echo "FAIL: self-test $label: a defective stream was accepted" >&2
+        return 1
+    fi
+    case "$out" in
+        *"$fragment"*) echo "  ok: $label" ;;
+        *) echo "FAIL: self-test $label: expected '$fragment' in: $out" >&2; return 1 ;;
+    esac
+}
+
+run_stream_self_test() {
+    local dir status=0
+    dir="$(mktemp -d "${TMPDIR:-/tmp}/installer-egress-selftest.XXXXXX")"
+    local log="$dir/egress.log"
+    local release
+    release="$(selection_for codex 2)"
+    [ -n "$release" ] || { echo 'FAIL: no codex selection' >&2; return 1; }
+    {
+        printf 'ALLOW https://github.com/openai/codex/releases/download/%s/codex-package-x86_64-unknown-linux-musl.tar.gz\n' "$release"
+        printf 'LEARN https://release-assets.githubusercontent.com/x/y.tar.gz?<redacted>\n'
+        printf 'ALLOW-LEARNED https://release-assets.githubusercontent.com/x/y.tar.gz?<redacted>\n'
+    } >"$log"
+    stream_expect_ok 'request log: payload allow + learned CDN redirect' \
+        assert_codex_request_log "$release" 0 "$log" || status=1
+
+    for defect in metadata checksums sigstore; do
+        cp "$log" "$dir/defect.log"
+        case "$defect" in
+            metadata) printf 'ALLOW https://api.github.com/repos/openai/codex/releases/latest\n' >>"$dir/defect.log" ;;
+            checksums) printf 'ALLOW https://github.com/openai/codex/releases/download/%s/codex-package_SHA256SUMS\n' "$release" >>"$dir/defect.log" ;;
+            sigstore) printf 'ALLOW https://github.com/openai/codex/releases/download/%s/x.tar.gz.sigstore\n' "$release" >>"$dir/defect.log" ;;
+        esac
+        stream_expect_fail "request log rejects $defect" 'FAIL:' \
+            assert_codex_request_log "$release" 0 "$dir/defect.log" || status=1
+    done
+    : >"$dir/empty.log"
+    stream_expect_fail 'request log rejects no payload request' \
+        'no payload request was allowed' \
+        assert_codex_request_log "$release" 0 "$dir/empty.log" || status=1
+    # The marker scopes the check to this selection: earlier lines are not evidence.
+    stream_expect_fail 'request log honours the marker' \
+        'no payload request was allowed' \
+        assert_codex_request_log "$release" 99 "$log" || status=1
+
+    stream_expect_ok 'a canonical rust-v release is exactly one version line' \
+        require_codex_version_line "$release" || status=1
+    stream_expect_fail 'the - placeholder is refused as a whole line' 'placeholder' \
+        require_codex_version_line - || status=1
+    stream_expect_fail 'a release plus a placeholder line is refused' \
+        'exactly one version' require_codex_version_line "$release-
+-" || status=1
+
+    stream_expect_ok 'the committed table explains its single codex selection' \
+        check_codex_overrides_stream || status=1
+    rm -rf "$dir"
+    [ "$status" -eq 0 ] || return 1
+    echo '  the strict-egress stream assertions accept correct input and refuse each defect'
+    return 0
+}
+
+# Escape a version for use INSIDE an ERE before it is interpolated into a
+# jq-built allowlist path (review F4): an unescaped `.` made the exact selection
+# `2.1.286` also match `/2/1/286/...` (and `2a1b286`).
+escape_re() { # $1 raw -> ERE-safe literal
+    printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g'
+}
+
+# Build the addon config for one tool+version. GitHub release downloads redirect
+# to a signed CDN URL, which the addon learns from the allowed response.
+write_config() { # $1 = tool, $2 = version, $3 = out file
+    local tool="$1" version="$2" out="$3" numeric
+    case "$tool" in
+        codex)
+            # Exactly one network endpoint: the committed release's package for
+            # the architecture under test. Release metadata, the checksum
+            # manifest and the Sigstore bundles are pin-time inputs, so they are
+            # not in the build's allowlist at all -- their absence is asserted
+            # from the request log, not merely left to default-deny.
+            numeric="$(escape_re "${version#rust-v}")"
+            jq -n --arg v "$numeric" --arg arch "$arch" '{
+                https_only: true,
+                # Only an already-allowed HTTPS response may hand over a target,
+                # and only on these two GitHub asset hosts: an allowed response
+                # pointing at HTTP, credentials, another port or another origin
+                # is refused by the addon, not learned.
+                learn_hosts: ["release-assets.githubusercontent.com",
+                              "objects.githubusercontent.com"],
+                allow: [
+                    {host: "github.com", method: "GET",
+                     path: ("^/openai/codex/releases/download/rust-v" + $v
+                            + "/codex-package-" + $arch + "-unknown-linux-musl\\.tar\\.gz$")}
+                ],
+                deny: ["/latest", "releases/latest", "releases/tags/latest",
+                       "channel", "/install\\.sh$", "releases/download/latest",
+                       "codex-package_SHA256SUMS", "\\.sigstore"]
+            }' >"$out"
+            ;;
+        opencode-plugins)
+            node "$REPO_ROOT/images/tools/opencode/plugins/check-lock.mjs" "$REPO_ROOT/images/tools/opencode/plugins" >/dev/null
+            python3 "$FIXTURES/opencode-plugins.py" "$REPO_ROOT/images/tools/opencode/plugins/package.json" >"$out"
+            ;;
+        opencode)
+            numeric="$(escape_re "${version#v}")"
+            local oc_target
+            case "$arch" in
+                aarch64) oc_target="linux-arm64" ;;
+                x86_64) oc_target="linux-x64 linux-x64-baseline" ;;
+            esac
+            jq -n --arg v "$numeric" --arg t "$oc_target" '{
+                allow: ($t | split(" ") | map(. as $target | {host: "registry.npmjs.org",
+                         path: ("^/@opencode/cli-" + $target + "/-/cli-" + $target + "-" + $v + "\\.tgz$")})),
+                deny: ["/latest", "opencode\\.ai/(v2/)?install", "@opencode-ai", "channel"]
+            }' >"$out"
+            ;;
+        claude)
+            numeric="$(escape_re "$version")"
+            local cl_arch cl_platform
+            case "$arch" in
+                aarch64) cl_arch="arm64" ;;
+                x86_64) cl_arch="x64" ;;
+            esac
+            cl_platform="linux-$cl_arch"
+            jq -n --arg v "$numeric" --arg p "$cl_platform" '{
+                allow: [
+                    {host: "downloads.claude.ai",
+                     path: ("^/claude-code-releases/" + $v + "/manifest\\.json$")},
+                    {host: "downloads.claude.ai",
+                     path: ("^/claude-code-releases/" + $v + "/manifest\\.json\\.raw-sig\\.json$")},
+                    {host: "downloads.claude.ai",
+                     path: ("^/claude-code-releases/" + $v + "/manifest\\.zst\\.json$")},
+                    {host: "downloads.claude.ai",
+                     path: ("^/claude-code-releases/" + $v + "/" + $p + "/claude(\\.zst)?$")}
+                ],
+                deny: ["/latest", "claude-code-releases/latest", "claude\\.ai/install\\.sh",
+                       "channel", "/api/event_logging/", "/api/claude_code/"]
+            }' >"$out"
+            ;;
+        *) fail "unknown tool: $tool" ;;
+    esac
+}
+
+# The allowlist config is production data, so the hermetic addon table asks the
+# gate for it instead of keeping a second copy: `--emit-config codex` prints
+# exactly what the proxy would be handed.
+if [ "${1:-}" = --emit-config ]; then
+    shift
+    [ "$#" -ge 1 ] || { echo '--emit-config needs a tool' >&2; exit 2; }
+    emit_tool="$1"
+    shift
+    emit_platform=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --platform)
+                [ "$#" -ge 2 ] || { echo '--platform needs a value' >&2; exit 2; }
+                emit_platform="$2"
+                shift
+                ;;
+            *) echo "unknown argument: $1" >&2; exit 2 ;;
+        esac
+        shift
+    done
+    case "${emit_platform:-$(uname -m)}" in
+        linux/arm64 | arm64 | aarch64) arch=aarch64 ;;
+        linux/amd64 | amd64 | x86_64) arch=x86_64 ;;
+        *) echo "unsupported platform: ${emit_platform}" >&2; exit 2 ;;
+    esac
+    case "$emit_tool" in
+        codex | opencode | claude) ;;
+        *) echo "unknown tool: $emit_tool" >&2; exit 2 ;;
+    esac
+    write_config "$emit_tool" "$(selection_for "$emit_tool" 2)" /dev/stdout
+    exit 0
+fi
+
+if [ "${1:-}" = --self-test ]; then
+    shift
+    [ "$#" -eq 0 ] || { echo '--self-test takes no other argument' >&2; exit 2; }
+    run_stream_self_test || { echo 'shipped-installer-network --self-test: FAILED' >&2; exit 1; }
+    echo 'shipped-installer-network --self-test: OK'
+    exit 0
+fi
+
 # Whole-gate watchdog (plan task 5). macOS has no guaranteed `timeout`, so the
 # first invocation re-execs the ENTIRE gate under the shared Python3
 # process-group watchdog. On timeout the whole group is signalled; the inner run
@@ -46,6 +336,7 @@ fi
 
 if [ "$#" -lt 1 ]; then
     echo "usage: $0 BASE_IMAGE [--overrides] [--observe] [--tool TOOL] [--platform PLATFORM]" >&2
+    echo "       $0 --self-test | $0 --emit-config TOOL [--platform PLATFORM]" >&2
     exit 2
 fi
 BASE_IMAGE="$1"
@@ -105,11 +396,6 @@ for required in docker jq python3; do
     command -v "$required" >/dev/null 2>&1 || { echo "$required is required" >&2; exit 1; }
 done
 
-fail() {
-    echo "FAIL: $*" >&2
-    exit 1
-}
-
 # run_with_watchdog SECONDS CMD... -> the command's own status, or 124 on
 # timeout (the whole process group is signalled so no container is orphaned).
 run_with_watchdog() {
@@ -159,9 +445,12 @@ capture_evidence() { # $1 = label, $2 = marker line count in $TMP/logs/egress.lo
             rc=1
         }
     fi
+    # Label-scoped: the denial and the substitution segments are different
+    # streams, and a shared file name published the substitution's ALLOW lines
+    # under the denial control's name.
     if [ -f "$TMP/mutation.log" ]; then
-        cp "$TMP/mutation.log" "$EVIDENCE_DIR/mutation.log" 2>/dev/null || {
-            echo "FAIL: cannot write evidence $EVIDENCE_DIR/mutation.log" >&2
+        cp "$TMP/mutation.log" "$EVIDENCE_DIR/$label-mutation.log" 2>/dev/null || {
+            echo "FAIL: cannot write evidence $EVIDENCE_DIR/$label-mutation.log" >&2
             rc=1
         }
     fi
@@ -189,17 +478,6 @@ trap cleanup EXIT INT TERM
 docker network create --internal "$NET_INTERNAL" >/dev/null
 docker network create "$NET_EXTERNAL" >/dev/null
 
-# `--forward` of the selection table. `codex|default|alternate`.
-selection_for() { # $1 = tool, $2 = column (2=default, 3=alternate)
-    awk -F '\t' -v t="$1" -v c="$2" '$1 == t { print $c }' "$SELECTIONS"
-}
-
-selection_versions() { # $1 = tool -> newline-separated versions to run
-    printf '%s\n' "$(selection_for "$1" 2)"
-    $overrides && printf '%s\n' "$(selection_for "$1" 3)"
-    return 0
-}
-
 # The selections.tsv default column must equal the committed Dockerfile ARG
 # default. Otherwise a developer bump could leave this gate validating an old
 # native binary while the shipped recipe ships a newer one.
@@ -217,82 +495,14 @@ assert_selection_defaults_match_dockerfiles() {
         [ "$tsv_default" = "$arg_default" ] ||
             fail "selections.tsv default for $tool is '$tsv_default' but the Dockerfile default is '$arg_default'"
     done
-    echo "  selections.tsv defaults match the committed Dockerfile ARGs"
+    local pin_release
+    pin_release="$(python3 "$FIXTURES/codex-pin-release.py" \
+        "$REPO_ROOT/images/tools/codex/pin.json")"
+    [ "$pin_release" = "$(selection_for codex 2)" ] ||
+        fail "the committed codex pin is '$pin_release' but selections.tsv says '$(selection_for codex 2)'"
+    echo "  selections.tsv defaults match the committed Dockerfile ARGs and the codex pin"
 }
 assert_selection_defaults_match_dockerfiles
-
-# Escape a version for use INSIDE an ERE before it is interpolated into a
-# jq-built allowlist path (review F4): an unescaped `.` made the exact selection
-# `2.1.286` also match `/2/1/286/...` (and `2a1b286`).
-escape_re() { # $1 raw -> ERE-safe literal
-    printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g'
-}
-
-# Build the addon config for one tool+version. GitHub release downloads redirect
-# to a signed CDN URL, which the addon learns from the allowed response.
-write_config() { # $1 = tool, $2 = version, $3 = out file
-    local tool="$1" version="$2" out="$3" numeric
-    case "$tool" in
-        codex)
-            numeric="$(escape_re "${version#rust-v}")"
-            jq -n --arg v "$numeric" --arg arch "$arch" '{
-                allow: [
-                    {host: "api.github.com",
-                     path: ("^/repos/openai/codex/releases/tags/rust-v" + $v + "$")},
-                    {host: "github.com",
-                     path: ("^/openai/codex/releases/download/rust-v" + $v
-                            + "/codex-package-" + $arch + "-unknown-linux-musl\\.tar\\.gz$")},
-                    {host: "github.com",
-                     path: ("^/openai/codex/releases/download/rust-v" + $v
-                            + "/codex-package_SHA256SUMS$")}
-                ],
-                deny: ["/latest", "releases/latest", "releases/tags/latest",
-                       "channel", "/install\\.sh$", "releases/download/latest"]
-            }' >"$out"
-            ;;
-        opencode-plugins)
-            node "$REPO_ROOT/images/tools/opencode/plugins/check-lock.mjs" "$REPO_ROOT/images/tools/opencode/plugins" >/dev/null
-            python3 "$FIXTURES/opencode-plugins.py" "$REPO_ROOT/images/tools/opencode/plugins/package.json" >"$out"
-            ;;
-        opencode)
-            numeric="$(escape_re "${version#v}")"
-            local oc_target
-            case "$arch" in
-                aarch64) oc_target="linux-arm64" ;;
-                x86_64) oc_target="linux-x64 linux-x64-baseline" ;;
-            esac
-            jq -n --arg v "$numeric" --arg t "$oc_target" '{
-                allow: ($t | split(" ") | map(. as $target | {host: "registry.npmjs.org",
-                         path: ("^/@opencode/cli-" + $target + "/-/cli-" + $target + "-" + $v + "\\.tgz$")})),
-                deny: ["/latest", "opencode\\.ai/(v2/)?install", "@opencode-ai", "channel"]
-            }' >"$out"
-            ;;
-        claude)
-            numeric="$(escape_re "$version")"
-            local cl_arch cl_platform
-            case "$arch" in
-                aarch64) cl_arch="arm64" ;;
-                x86_64) cl_arch="x64" ;;
-            esac
-            cl_platform="linux-$cl_arch"
-            jq -n --arg v "$numeric" --arg p "$cl_platform" '{
-                allow: [
-                    {host: "downloads.claude.ai",
-                     path: ("^/claude-code-releases/" + $v + "/manifest\\.json$")},
-                    {host: "downloads.claude.ai",
-                     path: ("^/claude-code-releases/" + $v + "/manifest\\.json\\.raw-sig\\.json$")},
-                    {host: "downloads.claude.ai",
-                     path: ("^/claude-code-releases/" + $v + "/manifest\\.zst\\.json$")},
-                    {host: "downloads.claude.ai",
-                     path: ("^/claude-code-releases/" + $v + "/" + $p + "/claude(\\.zst)?$")}
-                ],
-                deny: ["/latest", "claude-code-releases/latest", "claude\\.ai/install\\.sh",
-                       "channel", "/api/event_logging/", "/api/claude_code/"]
-            }' >"$out"
-            ;;
-        *) fail "unknown tool: $tool" ;;
-    esac
-}
 
 # Allowlist exactness (review F4): the committed config must allow ONLY the
 # exact selected version path, never an adjacent version, a path-separator
@@ -344,17 +554,35 @@ run_allowlist_negatives() { # $1 tool, $2 version
             printf '%s\t0\tPOST\n' 'https://registry.npmjs.org/zod' >>"$cases"
             ;;
         codex)
+            # One payload positive, and an explicit negative for every endpoint
+            # this build must never reach: the tag API, the latest API, the
+            # checksum manifest, the Sigstore bundles, the other architecture, an
+            # adjacent version, a separator mutation, an extra suffix, another
+            # repository, a query, plain HTTP and a non-default port.
             numeric="${version#rust-v}"
             sep="${numeric//./\/}"
             adjacent="${numeric%.*}.$(( ${numeric##*.} + 1 ))"
-            local asset="codex-package-$arch-unknown-linux-musl.tar.gz"
-            printf '%s\t1\n' "https://api.github.com/repos/openai/codex/releases/tags/rust-v$numeric" >>"$cases"
-            printf '%s\t1\n' "https://github.com/openai/codex/releases/download/rust-v$numeric/$asset" >>"$cases"
-            printf '%s\t1\n' "https://github.com/openai/codex/releases/download/rust-v$numeric/codex-package_SHA256SUMS" >>"$cases"
-            printf '%s\t0\n' "https://api.github.com/repos/openai/codex/releases/tags/rust-v$sep" >>"$cases"
-            printf '%s\t0\n' "https://api.github.com/repos/openai/codex/releases/tags/rust-v$adjacent" >>"$cases"
-            printf '%s\t0\n' "https://github.com/openai/codex/releases/download/rust-v$sep/$asset" >>"$cases"
-            printf '%s\t0\n' "https://api.github.com/repos/openai/codex/releases/tags/rust-v$numeric?sig=REVIEW-SIGNED-SECRET&token=REVIEW-TOKEN" >>"$cases" ;;
+            local asset="codex-package-$arch-unknown-linux-musl.tar.gz" other="$arch"
+            if [ "$arch" = aarch64 ]; then other=x86_64; else other=aarch64; fi
+            local other_asset="codex-package-$other-unknown-linux-musl.tar.gz"
+            local release_url="https://github.com/openai/codex/releases/download/rust-v$numeric"
+            printf '%s\t1\n' "$release_url/$asset" >>"$cases"
+            printf '%s\t0\n' \
+                "https://api.github.com/repos/openai/codex/releases/tags/rust-v$numeric" \
+                "https://api.github.com/repos/openai/codex/releases/latest" \
+                "$release_url/codex-package_SHA256SUMS" \
+                "$release_url/$asset.sigstore" \
+                "$release_url/$other_asset" \
+                "https://github.com/openai/codex/releases/download/rust-v$adjacent/$asset" \
+                "https://github.com/openai/codex/releases/download/rust-v$sep/$asset" \
+                "$release_url/$asset/extra" >>"$cases"
+            printf '%s\t0\n' \
+                "$release_url/codexx-$asset" \
+                "https://github.com/openai/codexx/releases/download/rust-v$numeric/$asset" \
+                "$release_url/$asset?sig=REVIEW-SIGNED-SECRET&token=REVIEW-TOKEN" >>"$cases"
+            printf '%s\t0\n' "http://github.com/openai/codex/releases/download/rust-v$numeric/$asset" \
+                "https://github.com:444/openai/codex/releases/download/rust-v$numeric/$asset" >>"$cases"
+            printf '%s\t0\tPOST\n' "$release_url/$asset" >>"$cases" ;;
         opencode)
             numeric="${version#v}"
             sep="${numeric//./\/}"
@@ -504,6 +732,13 @@ run_one_combined() { # $1 = tool, $2 = version
     var="$(version_var_for "$tool")"
     local extra_env=()
     [ "$tool" = opencode ] && extra_env+=(-e "AGENT_VM_OPENCODE_LINK=/usr/local/bin/opencode")
+    if [ "$tool" = codex ]; then
+        # The committed pin and its loader travel with the hook. The container
+        # gets no expected hash, URL or trust policy through the environment.
+        extra_env+=(-v "$REPO_ROOT/images/tools/codex:/codex-source:ro")
+        extra_env+=(-e "AGENT_VM_CODEX_SOURCE_DIR=/codex-source")
+        extra_env+=(-e "TMPDIR=/tmp")
+    fi
 
     write_config "$tool" "$version" "$cfg"
     marker="$(mark_log)"
@@ -557,6 +792,9 @@ $(report_script "$tool")" >"$out" 2>&1
         *"$expect"*) echo "    report ok: $report" ;;
         *) fail "$tool report '$report' does not contain '$expect'" ;;
     esac
+    if [ "$tool" = codex ]; then
+        assert_codex_request_log "$version" "$marker"
+    fi
 }
 
 # The proxy must forward claude's native `install` traffic too; observe mode is
@@ -566,22 +804,34 @@ $(report_script "$tool")" >"$out" 2>&1
 # DENIED, not merely that the installed version happened to match. This rewrites
 # the vendored codex metadata URL to `/releases/latest` and requires the run to
 # fail with a logged denial.
-run_denial_mutation() {
-    local mutdir="$TMP/mutated-codex" out="$TMP/mutation.out" marker status
-    mkdir -p "$mutdir"
-    sed 's#releases/tags/rust-v%s#releases/latest#' \
-        "$REPO_ROOT/images/tools/codex/vendor/install.sh" >"$mutdir/install.sh"
+# The mutant container reports what it published from an EXIT trap, so the
+# sentinels survive the hook's own `set -e` exit. Without them "the mutation
+# produced no report" was a claim about a script that never printed one.
+mutant_script() { # $1 = tool
+    cat <<'SENTINELS'
+trap 'echo "--- MUTANT SENTINELS ---"
+      test -x /opt/agent/.local/bin/codex && echo "SENTINEL codex-command: present" || echo "SENTINEL codex-command: absent"
+      test -e /opt/agent/.codex/packages/standalone && echo "SENTINEL package-root: present" || echo "SENTINEL package-root: absent"
+      ls -A /opt/agent/.codex/packages/standalone 2>/dev/null | sed "s/^/SENTINEL root-entry: /"
+      ls -A /opt/agent/.codex/packages/standalone/releases 2>/dev/null | sed "s/^/SENTINEL release: /"
+      cat /tmp/status/* 2>/dev/null | sed "s/^/SENTINEL status: /"' EXIT
+SENTINELS
+    inner_script "$1"
+}
+
+mutant_run() { # $1 label, $2 vendor dir -> container status in $MUTATION_STATUS
+    local label=$1 vendor=$2 out="$TMP/mutation.out" status=0
     write_config codex "$(selection_for codex 2)" "$TMP/config.json"
     start_proxy "$TMP/config.json"
     marker="$(mark_log)"
-    CURRENT_LABEL="mutation"
+    CURRENT_LABEL="$label"
     CURRENT_MARKER="$marker"
-    echo "--- mutation: codex metadata URL forced to /releases/latest"
     set +e
     run_with_watchdog "$NETWORK_CONTAINER_WATCHDOG_SECONDS" \
         docker run --rm --name "$RUN_ID-mut-$RANDOM" --platform "$platform" --network "$NET_INTERNAL" \
         -v "$TMP/certs/mitmproxy-ca-cert.pem:/mitm/ca.pem:ro" \
-        -v "$mutdir:/vendor:ro" \
+        -v "$vendor:/vendor:ro" \
+        -v "$REPO_ROOT/images/tools/codex:/codex-source:ro" \
         -v "$CONTRACT:/contract:ro" \
         -v "$REPO_ROOT/images/tools/codex/install-codex.sh:/hook:ro" \
         -e "HTTP_PROXY=http://$PROXY:8080" -e "HTTPS_PROXY=http://$PROXY:8080" \
@@ -589,19 +839,105 @@ run_denial_mutation() {
         -e "ALL_PROXY=http://$PROXY:8080" -e "NO_PROXY=" \
         -e "AGENT_VM_CONTRACT_DIR=/contract" \
         -e "AGENT_VM_VENDOR_DIR=/vendor" \
+        -e "AGENT_VM_CODEX_SOURCE_DIR=/codex-source" \
         -e "AGENT_VM_TRANSPORT_RECEIPT=/tmp/receipt" \
         -e "AGENT_VM_INSTALL_STATUS_DIR=/tmp/status" \
         -e "AGENT_VM_VERSION_CODEX=$(selection_for codex 2)" \
+        -e "TMPDIR=/tmp/codex-mutant" \
         "$BASE_IMAGE" \
-        sh -c "$(inner_script codex)" >"$out" 2>&1
+        sh -c "mkdir -p \"\$TMPDIR\"
+$(mutant_script codex)" >"$out" 2>&1
     status=$?
     set -e
     since_marker "$marker" >"$TMP/mutation.log"
+    MUTATION_STATUS=$status
+    # Publish this mutation's own segment immediately, so the denial control's
+    # DENY stream survives the next mutation overwriting $TMP/mutation.log.
+    mkdir -p "$EVIDENCE_DIR" 2>/dev/null &&
+        cp "$TMP/mutation.log" "$EVIDENCE_DIR/$label-mutation.log" 2>/dev/null ||
+        echo "FAIL: cannot write evidence $EVIDENCE_DIR/$label-mutation.log" >&2
+}
+
+# Mutation 1: a build that reached `latest` is DENIED, not merely a build whose
+# installed version happened to match. The injection is a checked single-site
+# edit of a scratch vendor copy and an ACTUAL request through the trusted
+# downloader -- not a fake denial log, and not a pin edited to say `latest`
+# (which would test the loader, not egress).
+run_denial_mutation() {
+    local mutdir="$TMP/mutated-codex"
+    python3 "$REPO_ROOT/script/test/vendored-installers-mutate-vendor.py" \
+        "$REPO_ROOT/images/tools/codex/vendor/install.sh" \
+        "$mutdir/install.sh" latest-request
+    echo "--- mutation: codex injected /releases/latest request"
+    mutant_run mutation "$mutdir"
     sed 's/^/    /' "$TMP/mutation.log"
-    [ "$status" -ne 0 ] || fail "the /releases/latest mutation unexpectedly succeeded"
+    [ "$MUTATION_STATUS" -ne 0 ] || fail "the /releases/latest mutation unexpectedly succeeded"
     grep -q '^DENY ' "$TMP/mutation.log" \
         || fail "the /releases/latest mutation was not denied and logged"
-    echo "    mutation denied and logged as required"
+    grep -q 'releases/latest' "$TMP/mutation.log" \
+        || fail "the mutation never requested a latest URL"
+    [ "$(grep -c 'releases/latest' "$TMP/mutation.log")" -ge 1 ] ||
+        fail "the mutation's latest request is missing from the log"
+    grep -q '^SENTINEL codex-command: absent$' "$TMP/mutation.out" ||
+        fail "the denied mutation still published a command: $(grep '^SENTINEL ' "$TMP/mutation.out" | tr '\n' ' ')"
+    # The uploaded evidence, not just the scrollback, must carry the denial.
+    grep -q '^DENY .*releases/latest' "$EVIDENCE_DIR/mutation-mutation.log" 2>/dev/null ||
+        fail "the denial evidence $EVIDENCE_DIR/mutation-mutation.log does not contain the denied latest request"
+    echo "    mutation denied and logged, nothing installed"
+}
+
+# Mutation 2: the payload the build downloaded is replaced with wrong bytes
+# INSIDE the downloader -- after the one allowed download and before that
+# helper's own digest check -- with the pin and its evidence untouched. This is
+# real-network evidence that the COMMITTED digest, not the transport and not the
+# server, is what authorizes the archive. The injection site is checked by the
+# mutator: injecting after the call site would be refused by the later Python
+# preflight instead, which is a different oracle and the wrong side of the hash.
+run_substitution_mutation() {
+    local mutdir="$TMP/substituted-codex" payload_allows learned_allows
+    python3 "$REPO_ROOT/script/test/vendored-installers-mutate-vendor.py" \
+        "$REPO_ROOT/images/tools/codex/vendor/install.sh" \
+        "$mutdir/install.sh" substitute-before-digest
+    echo "--- mutation: post-download payload substitution"
+    mutant_run substitution "$mutdir"
+    sed 's/^/    /' "$TMP/mutation.log"
+    [ "$MUTATION_STATUS" -ne 0 ] ||
+        fail "the post-download substitution unexpectedly succeeded"
+    grep -q 'checksum did not match expected digest' "$TMP/mutation.out" \
+        || fail "the substitution was not refused by the committed digest: $(tail -5 "$TMP/mutation.out")"
+    # Exactly one payload request and one learned CDN target: the run did not
+    # retry, and it did not reach a second URL.
+    payload_allows="$(grep -c "$CODEX_PAYLOAD_ALLOW" "$TMP/mutation.log" || true)"
+    [ "$payload_allows" = 1 ] ||
+        fail "the substitution made $payload_allows payload requests, expected exactly 1: $(cat "$TMP/mutation.log")"
+    learned_allows="$(grep -c '^LEARN https://release-assets.githubusercontent.com/' "$TMP/mutation.log" || true)"
+    [ "$learned_allows" = 1 ] ||
+        fail "the substitution followed $learned_allows redirect targets, expected exactly 1: $(cat "$TMP/mutation.log")"
+    if grep -q '^DENY ' "$TMP/mutation.log"; then
+        fail "the substitution tried a denied URL: $(cat "$TMP/mutation.log")"
+    fi
+    # The sentinels are the extraction/native oracle: nothing was installed.
+    grep -q '^SENTINEL codex-command: absent$' "$TMP/mutation.out" ||
+        fail "the substitution published a command: $(grep '^SENTINEL ' "$TMP/mutation.out" | tr '\n' ' ')"
+    # The installer's own `acquire_install_lock` does `mkdir -p $STANDALONE_ROOT`
+    # and `cleanup_stale_install_artifacts` creates `releases/`, both BEFORE the
+    # download, so a digest refusal always leaves that root behind; requiring it
+    # absent made this gate fail every time it actually ran. "Nothing was
+    # installed" is the exact leftover state: the installer lock file and an
+    # EMPTY releases/ directory, no release, no `current` link (a root entry) and
+    # no command. A change that leaves anything else here must be re-reviewed.
+    if grep -q '^SENTINEL release: ' "$TMP/mutation.out"; then
+        fail "the substitution left a release directory: $(grep '^SENTINEL ' "$TMP/mutation.out" | tr '\n' ' ')"
+    fi
+    if [ "$(grep -c '^SENTINEL root-entry: ' "$TMP/mutation.out" || true)" != 2 ]; then
+        fail "the substitution left an unexpected standalone-root entry set: $(grep '^SENTINEL ' "$TMP/mutation.out" | tr '\n' ' ')"
+    fi
+    grep -q '^SENTINEL root-entry: install\.lock$' "$TMP/mutation.out" ||
+        fail "the substitution's leftover root is not the installer lock: $(grep '^SENTINEL ' "$TMP/mutation.out" | tr '\n' ' ')"
+    if grep -q '^SENTINEL status: installed' "$TMP/mutation.out"; then
+        fail "the substitution recorded an installed status"
+    fi
+    echo "    substitution refused by the committed digest; one payload request, one redirect, nothing installed"
 }
 
 run_plugin_profile() {
@@ -656,7 +992,21 @@ for tool in "${tools[@]}"; do
 done
 
 stop_proxy
-[ "$observe" = true ] || run_denial_mutation
+# The table/stream assertions are Codex-specific and independent of --tool: they
+# read the committed selection table, not the container. The two mutations run a
+# Codex container, so they are scoped to a run that selected the Codex tool.
+tool_selected() { # $1 = tool
+    local selected
+    for selected in "${tools[@]}"; do
+        [ "$selected" = "$1" ] && return 0
+    done
+    return 1
+}
+[ "$observe" = true ] || check_codex_overrides_stream
+if [ "$observe" = false ] && tool_selected codex; then
+    run_denial_mutation
+    run_substitution_mutation
+fi
 # Publish the run-scoped, already-redacted evidence into the CI evidence
 # directory (target/ci-logs before scratch cleanup), one log per selection plus
 # the mutation. A reported evidence directory with no file is a failure.

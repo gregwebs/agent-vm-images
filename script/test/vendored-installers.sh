@@ -58,6 +58,10 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 
 REAL_TIMEOUT="$(command -v timeout || true)"
 [ -n "$REAL_TIMEOUT" ] || fail "timeout is required (macOS: brew install coreutils)"
+REAL_TAR="$(command -v tar || true)"
+[ -n "$REAL_TAR" ] || fail "tar is required"
+PYTHON=$(command -v python3 || true)
+[ -n "$PYTHON" ] || fail "python3 is required"
 
 CASE=""
 CODEX_TARGET=""
@@ -98,6 +102,14 @@ mkdir -p "$SHARED"
 # returned for every request to drive the classified 75 path.
 cat >"$SHARED/curl" <<'SH'
 #!/bin/sh
+# The request stream (`FAKE_CURL_LOG`) records every attempted URL exactly once,
+# in order, whatever the outcome. Denials go to their own stream
+# (`FAKE_CURL_DENY_LOG`) so an assertion on the ordered URL list can never be
+# satisfied or defeated by a diagnostic line.
+#
+# Routing is by basename (the historical shape) or, for codex, by the ENTIRE
+# canonical URL (`FAKE_CURL_ROUTE_MODE=full-url`), which requires exact string
+# equality and has no basename fallback.
 out=""
 url=""
 while [ "$#" -gt 0 ]; do
@@ -108,22 +120,29 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ -n "${FAKE_CURL_LOG:-}" ] && printf '%s\n' "$url" >>"$FAKE_CURL_LOG"
+deny() {
+    [ -n "${FAKE_CURL_DENY_LOG:-}" ] && printf 'DENIED %s\n' "$url" >>"$FAKE_CURL_DENY_LOG"
+    exit 22
+}
 # Any moving channel is an HTTP error. The vendored installers must select an
 # exact version; a `latest`/dist-tag request is never an acceptable build step.
 case "$url" in
-    *latest* | */dist-tags/*)
-        [ -n "${FAKE_CURL_LOG:-}" ] && printf 'DENIED %s\n' "$url" >>"$FAKE_CURL_LOG"
-        exit 22
-        ;;
+    *latest* | */dist-tags/*) deny ;;
 esac
 if [ -n "${FAKE_CURL_TRANSPORT_CODE:-}" ]; then
     exit "$FAKE_CURL_TRANSPORT_CODE"
 fi
-base="${url##*/}"
-file="$(awk -F '\t' -v b="$base" '$1 == b { print $2; exit }' "${FAKE_CURL_ROUTES:-/dev/null}")"
+case "${FAKE_CURL_ROUTE_MODE:-basename}" in
+    full-url) key="$url" ;;
+    basename) key="${url##*/}" ;;
+    *)
+        echo "fake curl: unknown routing mode ${FAKE_CURL_ROUTE_MODE}" >&2
+        exit 90
+        ;;
+esac
+file="$(awk -F '\t' -v b="$key" '$1 == b { print $2; exit }' "${FAKE_CURL_ROUTES:-/dev/null}")"
 if [ -z "$file" ] || [ ! -f "$file" ]; then
-    [ -n "${FAKE_CURL_LOG:-}" ] && printf 'DENIED %s\n' "$url" >>"$FAKE_CURL_LOG"
-    exit 22
+    deny
 fi
 cp "$file" "$out"
 SH
@@ -175,9 +194,19 @@ fi
 exec "$REAL_TIMEOUT" "$bound" "$@"
 SH
 
-chmod 0755 "$SHARED/curl" "$SHARED/sha256sum" "$SHARED/timeout"
+# Fake tar: records only extraction (the step a pin/hash/preflight refusal must
+# never reach) and otherwise defers to the real one.
+cat >"$SHARED/tar" <<'SH'
+#!/bin/sh
+case "${1:-}" in
+    -x* | --extract*) [ -n "${FAKE_TAR_LOG:-}" ] && printf 'EXTRACT %s\n' "$*" >>"$FAKE_TAR_LOG" ;;
+esac
+exec "$REAL_TAR" "$@"
+SH
 
-route() { # $1 basename, $2 fixture file
+chmod 0755 "$SHARED/curl" "$SHARED/sha256sum" "$SHARED/timeout" "$SHARED/tar"
+
+route() { # $1 route key (basename or full URL), $2 fixture file
     printf '%s\t%s\n' "$1" "$2" >>"$CASE/routes"
 }
 
@@ -186,14 +215,21 @@ new_case() { # $1 name, $2 uname arch
     rm -rf "$CASE"
     mkdir -p "$CASE/bin" "$CASE/prefix" "$CASE/status" "$CASE/assets" "$CASE/link"
     chmod 0755 "$CASE" "$CASE/bin" "$CASE/prefix" "$CASE/status" "$CASE/assets" "$CASE/link"
-    cp "$SHARED/curl" "$SHARED/sha256sum" "$SHARED/timeout" "$CASE/bin/"
+    cp "$SHARED/curl" "$SHARED/sha256sum" "$SHARED/timeout" "$SHARED/tar" "$CASE/bin/"
+    mkdir -p "$CASE/tmp" "$CASE/pybin"
+    chmod 0755 "$CASE/tmp" "$CASE/pybin"
+    # Only python3, so the fixture PATH cannot pick up the host's own tools.
+    ln -sf "$PYTHON" "$CASE/pybin/python3"
     # shellcheck disable=SC2016  # the generated uname script must keep ${1:-} literal
     printf '#!/bin/sh\ncase "${1:-}" in\n  -s) echo Linux ;;\n  -m) echo %s ;;\n  *) echo Linux ;;\nesac\n' \
         "$2" >"$CASE/bin/uname"
     chmod 0755 "$CASE/bin/uname"
     : >"$CASE/curl.log"
+    : >"$CASE/deny.log"
     : >"$CASE/routes"
     : >"$CASE/timeout.log"
+    : >"$CASE/tar.log"
+    : >"$CASE/native.log"
 }
 
 # --- fixture native commands -------------------------------------------------
@@ -373,16 +409,24 @@ make_claude_case() { # $1 name, $2 arch, $3 version, $4 native exit, $5 hang, $6
 # vendored installer. The fake curl/sha256sum/uname/timeout live in $CASE/bin.
 run_codex() { # $1 slot, $2 vendor dir
     local -a e=(
-        "PATH=$CASE/bin:/usr/bin:/bin"
+        "PATH=$CASE/bin:$CASE/pybin:/usr/bin:/bin"
         "HOME=$CASE"
+        "TMPDIR=$CASE/tmp"
         "AGENT_VM_CONTRACT_DIR=$CONTRACT"
         "AGENT_VM_VENDOR_DIR=$2"
+        "AGENT_VM_CODEX_SOURCE_DIR=$CASE/source"
         "AGENT_VM_CODEX_PREFIX=$CASE/prefix"
         "AGENT_VM_INSTALL_STATUS_DIR=$CASE/status"
         "AGENT_VM_VERSION_CODEX=$1"
         "FAKE_CURL_LOG=$CASE/curl.log"
+        "FAKE_CURL_DENY_LOG=$CASE/deny.log"
         "FAKE_CURL_ROUTES=$CASE/routes"
+        "FAKE_CURL_ROUTE_MODE=full-url"
         "FAKE_TIMEOUT_LOG=$CASE/timeout.log"
+        "FAKE_TAR_LOG=$CASE/tar.log"
+        "REAL_TAR=$REAL_TAR"
+        "FIXTURE_NATIVE_LOG=$CASE/native.log"
+        "FIXTURE_PID_LOG=$CASE/hang.pids"
         "REAL_TIMEOUT=$REAL_TIMEOUT"
         "FAKE_TIMEOUT_CAP=$FAKE_TIMEOUT_CAP_SECONDS"
     )
@@ -407,7 +451,10 @@ run_opencode() { # $1 slot, $2 vendor dir
         "AGENT_VM_INSTALL_STATUS_DIR=$CASE/status"
         "AGENT_VM_VERSION_OPENCODE=$1"
         "FAKE_CURL_LOG=$CASE/curl.log"
+        "FAKE_CURL_DENY_LOG=$CASE/deny.log"
         "FAKE_CURL_ROUTES=$CASE/routes"
+        "FAKE_TAR_LOG=$CASE/tar.log"
+        "REAL_TAR=$REAL_TAR"
     )
     if [ -n "$CURL_TRANSPORT_CODE" ]; then e+=("FAKE_CURL_TRANSPORT_CODE=$CURL_TRANSPORT_CODE"); fi
     if [ -n "$SOFT" ]; then e+=("AGENT_INSTALL_SOFT_FAIL=$SOFT"); fi
@@ -428,8 +475,11 @@ run_claude() { # $1 slot, $2 vendor dir
         "AGENT_VM_INSTALL_STATUS_DIR=$CASE/status"
         "AGENT_VM_VERSION_CLAUDE=$1"
         "FAKE_CURL_LOG=$CASE/curl.log"
+        "FAKE_CURL_DENY_LOG=$CASE/deny.log"
         "FAKE_CURL_ROUTES=$CASE/routes"
         "FAKE_TIMEOUT_LOG=$CASE/timeout.log"
+        "FAKE_TAR_LOG=$CASE/tar.log"
+        "REAL_TAR=$REAL_TAR"
         "REAL_TIMEOUT=$REAL_TIMEOUT"
         "FAKE_TIMEOUT_CAP=$FAKE_TIMEOUT_CAP_SECONDS"
     )
@@ -447,10 +497,15 @@ status_of() { # $1 tool
 
 expect_ok() { [ "$RUN_RC" -eq 0 ] || fail "$1: expected success, got rc=$RUN_RC: $RUN_OUT"; }
 expect_hard() { [ "$RUN_RC" -ne 0 ] || fail "$1: expected a hard failure, got success: $RUN_OUT"; }
-expect_no_denied() { ! grep -q '^DENIED ' "$CASE/curl.log" || fail "$1: a request was denied: $(cat "$CASE/curl.log")"; }
+expect_no_denied() {
+    [ ! -s "$CASE/deny.log" ] ||
+        fail "$1: a request was denied: $(cat "$CASE/deny.log")"
+}
 expect_denied() {
-    grep -q '^DENIED ' "$CASE/curl.log" || fail "$1: no denied URL was logged: $(cat "$CASE/curl.log")"
-    grep -q 'latest' "$CASE/curl.log" || fail "$1: the mutation never requested a latest URL"
+    [ -s "$CASE/deny.log" ] ||
+        fail "$1: no denied URL was logged: $(cat "$CASE/curl.log")"
+    grep -q 'latest' "$CASE/deny.log" ||
+        fail "$1: the mutation never requested a latest URL: $(cat "$CASE/deny.log")"
 }
 
 mutate_vendor() { # $1 src dir, $2 out dir, $3 sed expr
@@ -463,142 +518,288 @@ mutate_vendor() { # $1 src dir, $2 out dir, $3 sed expr
 # =============================================================================
 # codex
 # =============================================================================
+# The vendored installer no longer resolves a release: the committed pin is the
+# only selection authority, so every Codex assertion below is an exact ordered
+# request stream whose URLs are written in this file (never taken from production
+# code), plus an operation log proving whether extraction and native execution
+# happened at all.
 echo "== codex (real vendored install.sh) =="
+
+codex_urls() { # $1 uname arch, $2 release -> CODEX_TARGET API_URL PAYLOAD_URL ...
+    local v="${2#rust-v}"
+    case "$1" in
+        x86_64) CODEX_TARGET="x86_64-unknown-linux-musl" ;;
+        aarch64) CODEX_TARGET="aarch64-unknown-linux-musl" ;;
+        *) fail "unknown arch $1" ;;
+    esac
+    API_URL="https://api.github.com/repos/openai/codex/releases/tags/rust-v$v"
+    PAYLOAD_URL="https://github.com/openai/codex/releases/download/rust-v$v/codex-package-$CODEX_TARGET.tar.gz"
+    BUNDLE_URL="$PAYLOAD_URL.sigstore"
+    SUMS_URL="https://github.com/openai/codex/releases/download/rust-v$v/codex-package_SHA256SUMS"
+}
+
+codex_native_body() { # $1 out, $2 version, $3 exit, $4 hang
+    local body
+    body="$(cat <<'SH'
+printf 'codex-cli @VERSION@\n'
+if [ -n "${FIXTURE_NATIVE_LOG:-}" ]; then echo "NATIVE $$" >>"$FIXTURE_NATIVE_LOG"; fi
+if [ -n "${FIXTURE_PID_LOG:-}" ]; then printf '%s %s\n' "$$" "${FAKE_TIMEOUT_BOUND:-}" >>"$FIXTURE_PID_LOG"; fi
+@HANG@exit @EXIT@
+SH
+)"
+    body="${body//@VERSION@/$2}"
+    body="${body//@EXIT@/$3}"
+    if [ "$4" = 1 ]; then
+        body="${body//@HANG@/exec sleep $FIXTURE_HANG_SECONDS$'\n'}"
+    else
+        body="${body//@HANG@/}"
+    fi
+    printf '%s\n' "$body" >"$1"
+}
+
+codex_fixture() { # $1 out dir, $2 release, $3 target, $4 native body, rest: extra
+    local out=$1 release=$2 target=$3 body=$4
+    shift 4
+    python3 "$REPO_ROOT/script/test/codex-pins.py" --write-installer-fixture "$out" \
+        --release "$release" --target "$target" --native-script "$body" "$@" >/dev/null
+}
+
+new_codex_case() { # $1 name, $2 uname arch, $3 release, $4 native exit, $5 hang
+    new_case "$1" "$2"
+    codex_urls "$2" "$3"
+    codex_native_body "$CASE/native-body.sh" "${3#rust-v}" "$4" "$5"
+    codex_fixture "$CASE/fx" "$3" "$CODEX_TARGET" "$CASE/native-body.sh"
+    cp -R "$CASE/fx/source" "$CASE/source"
+    route "$PAYLOAD_URL" "$CASE/fx/archive.tgz"
+}
+
+expect_stream() { # $1 label, rest: the exact attempted URLs, in order
+    local label=$1
+    shift
+    local want="$CASE/want.log"
+    : >"$want"
+    local url
+    for url in "$@"; do
+        printf '%s\n' "$url" >>"$want"
+    done
+    cmp -s "$want" "$CASE/curl.log" ||
+        fail "$label: request stream mismatch
+  want: $(tr '\n' ' ' <"$want")
+  got:  $(tr '\n' ' ' <"$CASE/curl.log" 2>/dev/null)"
+}
+
+expect_no_extraction() {
+    [ ! -s "$CASE/tar.log" ] || fail "$1: the archive was extracted: $(cat "$CASE/tar.log")"
+}
+
+expect_no_native() {
+    [ ! -s "$CASE/native.log" ] ||
+        fail "$1: the native entrypoint ran: $(cat "$CASE/native.log")"
+}
+
 for arch in x86_64 aarch64; do
     V=0.159.3
 
-    make_codex_case "codex-$arch-ok" "$arch" "$V" 0 0 0
+    # --- clean install ------------------------------------------------------
+    new_codex_case "codex-$arch-ok" "$arch" "rust-v$V" 0 0
     run_codex "rust-v$V" "$CODEX_VENDOR"
     expect_ok "codex $arch clean install"
-    expect_no_denied "codex $arch clean install"
+    expect_stream "codex $arch clean install" "$PAYLOAD_URL"
+    [ "$(grep -c '^EXTRACT ' "$CASE/tar.log" || true)" = 1 ] ||
+        fail "codex $arch: expected exactly one extraction: $(cat "$CASE/tar.log")"
+    [ "$(grep -c '^NATIVE ' "$CASE/native.log" || true)" -ge 1 ] ||
+        fail "codex $arch: the native entrypoint never ran"
     "$CASE/prefix/.local/bin/codex" --version >"$CASE/out" 2>&1 ||
         fail "codex $arch: published command failed"
-    [ "$(cat "$CASE/out")" = "codex-cli $V" ] ||
-        fail "codex $arch: report '$(cat "$CASE/out")' != 'codex-cli $V'"
+    [ "$(sed -n '1p' "$CASE/out")" = "codex-cli $V" ] ||
+        fail "codex $arch: report '$(sed -n '1p' "$CASE/out")' != 'codex-cli $V'"
     [ "$(status_of codex)" = pending ] || fail "codex $arch: status is $(status_of codex)"
-    note "codex $arch: clean install published codex-cli $V (target $CODEX_TARGET)"
+    note "codex $arch: download -> hash -> preflight -> tar -> report ($CODEX_TARGET)"
 
-    # Checksum corruption BEFORE publication, under every nonempty soft input
-    # (including the literal "0"), for invalid bytes AND a valid-but-mismatched
-    # archive. The old suite ran this only with SOFT empty, so a mutation that
-    # softened a checksum mismatch under soft input survived the whole suite.
-    for soft in "" 1 0; do
-        for mode in 1 2; do
-            kind=invalid-bytes
-            [ "$mode" = 2 ] && kind=valid-digest-mismatch
-            make_codex_case "codex-$arch-checksum-$kind-soft-${soft:-none}" "$arch" "$V" 0 0 "$mode"
+    # --- a constructed environment proves no orphaned environment needs -----
+    # `run_codex` is already `env -i` with only the required variables, so this
+    # is the clean-environment control: the vendored installer keeps `set -u` on
+    # and must complete with no inherited `checksum_*` variable at all.
+    new_codex_case "codex-$arch-clean-environment" "$arch" "rust-v$V" 0 0
+    run_codex "rust-v$V" "$CODEX_VENDOR"
+    expect_ok "codex $arch clean-environment install"
+    expect_stream "codex $arch clean-environment install" "$PAYLOAD_URL"
+    [ "$(grep -c '^NATIVE ' "$CASE/native.log" || true)" -ge 1 ] ||
+        fail "codex $arch clean environment: the native entrypoint never ran"
+    note "codex $arch: a constructed environment with no checksum_* inherits status 0"
+
+    # --- identity failures happen BEFORE tar and before the native ----------
+    for kind in corrupt valid-hash-mismatch wrong-version wrong-target; do
+        new_codex_case "codex-$arch-$kind-before-tar" "$arch" "rust-v$V" 0 0
+        : >"$CASE/routes"
+        case "$kind" in
+            corrupt)
+                printf 'this is not the archive\n' >"$CASE/fx/corrupt.tgz"
+                printf '%s\t%s\n' "$PAYLOAD_URL" "$CASE/fx/corrupt.tgz" >>"$CASE/routes"
+                diagnostic='checksum did not match expected digest'
+                ;;
+            valid-hash-mismatch)
+                # A VALID package whose bytes are not the pinned ones: a jointly
+                # rewritten upstream, with its own corroborating metadata and
+                # checksums served at their exact URLs. The build must never ask.
+                codex_native_body "$CASE/other-body.sh" "$V" 0 0
+                # A genuinely different but still valid package.
+                printf '# rewritten upstream bytes\n' >>"$CASE/other-body.sh"
+                codex_fixture "$CASE/fx-other" "rust-v$V" "$CODEX_TARGET" \
+                    "$CASE/other-body.sh"
+                route "$PAYLOAD_URL" "$CASE/fx-other/archive.tgz"
+                route "$API_URL" "$CASE/fx-other/source/evidence/release.json"
+                route "$SUMS_URL" "$CASE/fx-other/source/evidence/codex-package_SHA256SUMS"
+                route "$BUNDLE_URL" \
+                    "$CASE/fx-other/source/evidence/codex-package-$CODEX_TARGET.tar.gz.sigstore"
+                diagnostic='checksum did not match expected digest'
+                ;;
+            wrong-version)
+                # The pin hashes THIS archive, so the committed digest agrees and
+                # only the package metadata can refuse: a synthetic archive that
+                # lies about its own version.
+                codex_native_body "$CASE/native-body.sh" "$V" 0 0
+                codex_fixture "$CASE/fx" "rust-v$V" "$CODEX_TARGET" \
+                    "$CASE/native-body.sh" --package-version 0.159.4
+                rm -rf "$CASE/source"
+                cp -R "$CASE/fx/source" "$CASE/source"
+                route "$PAYLOAD_URL" "$CASE/fx/archive.tgz"
+                diagnostic='version is not the pinned'
+                ;;
+            wrong-target)
+                codex_native_body "$CASE/native-body.sh" "$V" 0 0
+                if [ "$arch" = x86_64 ]; then other=aarch64-unknown-linux-musl
+                else other=x86_64-unknown-linux-musl; fi
+                codex_fixture "$CASE/fx" "rust-v$V" "$CODEX_TARGET" \
+                    "$CASE/native-body.sh" --package-target "$other"
+                rm -rf "$CASE/source"
+                cp -R "$CASE/fx/source" "$CASE/source"
+                route "$PAYLOAD_URL" "$CASE/fx/archive.tgz"
+                diagnostic='target is not'
+                ;;
+        esac
+        for soft in "" 1 0; do
+            # A fresh prefix and fresh logs per run: the installer refuses a
+            # pre-existing standalone root, so a failed run is not repeatable in
+            # the same prefix by design.
+            rm -rf "$CASE/prefix"
+            mkdir -p "$CASE/prefix"
+            chmod 0755 "$CASE/prefix"
+            : >"$CASE/curl.log"
+            : >"$CASE/tar.log"
+            : >"$CASE/native.log"
             SOFT="$soft"
             run_codex "rust-v$V" "$CODEX_VENDOR"
-            expect_hard "codex $arch $kind checksum (soft='$soft')"
-            case "$(status_of codex)" in
-                absent-transport*) fail "codex $arch $kind (soft='$soft'): checksum softened to $(status_of codex)" ;;
-            esac
+            expect_hard "codex $arch $kind (soft='$soft')"
+            expect_stream "codex $arch $kind (soft='$soft')" "$PAYLOAD_URL"
+            expect_no_extraction "codex $arch $kind (soft='$soft')"
+            expect_no_native "codex $arch $kind (soft='$soft')"
             [ ! -e "$CASE/prefix/.local/bin/codex" ] ||
-                fail "codex $arch $kind (soft='$soft'): a checksum mismatch must not publish the command"
-            printf '%s' "$RUN_OUT" | grep -q 'checksum did not match' ||
-                fail "codex $arch $kind (soft='$soft'): expected a checksum diagnostic, got: $RUN_OUT"
+                fail "codex $arch $kind (soft='$soft'): a command was published"
+            case "$(status_of codex)" in
+                absent-transport*)
+                    fail "codex $arch $kind (soft='$soft'): softened to $(status_of codex)" ;;
+            esac
+            printf '%s' "$RUN_OUT" | grep -q "$diagnostic" ||
+                fail "codex $arch $kind (soft='$soft'): expected '$diagnostic', got: $RUN_OUT"
             SOFT=""
         done
+        note "codex $arch: $kind is HARD before tar/native under empty/1/0 soft input"
     done
-    note "codex $arch: checksum corruption (invalid bytes + digest mismatch) is HARD under empty/1/0 soft input"
 
-    for soft in "" 1 0; do
-        make_codex_case "codex-$arch-malformed-soft-${soft:-none}" "$arch" "$V" 0 0 0
-        printf '{ not valid release metadata\n' >"$CASE/assets/meta.json"
-        SOFT="$soft"
-        run_codex "rust-v$V" "$CODEX_VENDOR"
-        expect_hard "codex $arch malformed metadata (soft='$soft')"
-        case "$(status_of codex)" in
-            absent-transport*) fail "codex $arch malformed (soft='$soft'): metadata failure softened to $(status_of codex)" ;;
-        esac
-        [ ! -e "$CASE/prefix/.local/bin/codex" ] ||
-            fail "codex $arch malformed (soft='$soft'): malformed metadata must not publish the command"
-        SOFT=""
-    done
-    note "codex $arch: malformed metadata is HARD under empty/1/0 soft input"
+    # --- missing asset: one attempt, no alternate, no fallback --------------
+    new_codex_case "codex-$arch-missing-asset" "$arch" "rust-v$V" 0 0
+    : >"$CASE/routes"
+    run_codex "rust-v$V" "$CODEX_VENDOR"
+    expect_hard "codex $arch missing asset"
+    expect_stream "codex $arch missing asset" "$PAYLOAD_URL"
+    expect_no_extraction "codex $arch missing asset"
+    expect_no_native "codex $arch missing asset"
+    [ -s "$CASE/deny.log" ] || fail "codex $arch missing asset: no denial was recorded"
+    note "codex $arch: a missing payload is one attempted URL and no fallback"
 
-    # C1: the inherited hand-written scanner accepted missing commas, trailing
-    # garbage, a duplicate tag_name and contradictory per-asset digests. Each of
-    # these must now be a HARD metadata failure before any value is used.
-    for variant in missing-comma trailing-garbage duplicate-tag duplicate-digest; do
-        make_codex_case "codex-$arch-meta-$variant" "$arch" "$V" 0 0 0
-        python3 "$REPO_ROOT/script/test/vendored-installers-mutate-metadata.py" "$CASE/assets/meta.json" "$variant"
-        SOFT=1
-        run_codex "rust-v$V" "$CODEX_VENDOR"
-        expect_hard "codex $arch metadata $variant"
-        case "$(status_of codex)" in
-            absent-transport*) fail "codex $arch metadata $variant: softened to $(status_of codex)" ;;
-        esac
-        [ ! -e "$CASE/prefix/.local/bin/codex" ] ||
-            fail "codex $arch metadata $variant: a bad metadata document must not publish the command"
-        SOFT=""
-    done
-    note "codex $arch: missing-comma/trailing-garbage/duplicate-tag/duplicate-digest metadata is HARD"
-
-    make_codex_case "codex-$arch-latest" "$arch" "$V" 0 0 0
-    mutate_vendor "$CODEX_VENDOR" "$CASE/mutant" 's#releases/tags/rust-v%s#releases/latest#'
-    run_codex "rust-v$V" "$CASE/mutant"
-    expect_hard "codex $arch latest mutation"
-    expect_denied "codex $arch latest mutation"
-    note "codex $arch: a reintroduced /latest request is denied and fails"
-
-    make_codex_case "codex-$arch-transport-soft" "$arch" "$V" 0 0 0
+    # --- transport classification -------------------------------------------
+    new_codex_case "codex-$arch-transport-soft" "$arch" "rust-v$V" 0 0
     CURL_TRANSPORT_CODE=7
     SOFT=1
     run_codex "rust-v$V" "$CODEX_VENDOR"
     expect_ok "codex $arch transport-soft"
+    expect_stream "codex $arch transport-soft" "$PAYLOAD_URL"
     [ "$(status_of codex)" = "absent-transport 7" ] ||
         fail "codex $arch: softened transport must record absence, got $(status_of codex)"
     [ ! -e "$CASE/prefix/.local/bin/codex" ] ||
         fail "codex $arch: a softened transport failure must not leave a command"
-    note "codex $arch: transport 7 propagates as a receipt and softens to an absence record"
     CURL_TRANSPORT_CODE=""
     SOFT=""
+    note "codex $arch: transport 7 propagates as a receipt and softens to an absence record"
 
-    make_codex_case "codex-$arch-transport-hard" "$arch" "$V" 0 0 0
+    new_codex_case "codex-$arch-transport-hard" "$arch" "rust-v$V" 0 0
     CURL_TRANSPORT_CODE=7
     run_codex "rust-v$V" "$CODEX_VENDOR"
     expect_hard "codex $arch transport without soft"
+    expect_stream "codex $arch transport without soft" "$PAYLOAD_URL"
     [ "$(status_of codex)" != "absent-transport 7" ] ||
         fail "codex $arch: a transport failure without soft input must not record absence"
     CURL_TRANSPORT_CODE=""
     note "codex $arch: the same transport failure is hard without soft input"
 
-    make_codex_case "codex-$arch-native-nonzero" "$arch" "$V" 1 0 0
+    # --- a pre-existing standalone root is never probed ---------------------
+    new_codex_case "codex-$arch-preexisting-release" "$arch" "rust-v$V" 0 0
+    mkdir -p "$CASE/prefix/.codex/packages/standalone"
+    run_codex "rust-v$V" "$CODEX_VENDOR"
+    expect_hard "codex $arch pre-existing standalone root"
+    expect_stream "codex $arch pre-existing standalone root"
+    expect_no_native "codex $arch pre-existing standalone root"
+    printf '%s' "$RUN_OUT" | grep -q 'Fresh pinned Codex installation required' ||
+        fail "codex $arch: expected a fresh-install diagnostic, got: $RUN_OUT"
+    note "codex $arch: an existing standalone root is refused before any probe or fetch"
+
+    # --- native failures ----------------------------------------------------
+    new_codex_case "codex-$arch-native-nonzero" "$arch" "rust-v$V" 1 0
     SOFT=1
     run_codex "rust-v$V" "$CODEX_VENDOR"
     expect_hard "codex $arch native nonzero under soft input"
+    expect_stream "codex $arch native nonzero under soft input" "$PAYLOAD_URL"
     [ "$(status_of codex)" != installed ] || fail "codex $arch: native nonzero recorded installed"
     SOFT=""
     note "codex $arch: a native that exits nonzero is hard even with soft input"
 
-    make_codex_case "codex-$arch-native-75" "$arch" "$V" 75 0 0
+    new_codex_case "codex-$arch-native-75" "$arch" "rust-v$V" 75 0
     SOFT=1
     run_codex "rust-v$V" "$CODEX_VENDOR"
     expect_hard "codex $arch native 75 under soft input"
+    expect_stream "codex $arch native 75 under soft input" "$PAYLOAD_URL"
     case "$(status_of codex)" in
         absent-transport*)
             fail "codex $arch: a native exit 75 was misclassified as transport ($(status_of codex))" ;;
     esac
-    note "codex $arch: a native exit 75 (and a native that writes the receipt) stays hard"
+    note "codex $arch: a native exit 75 stays hard (the native never sees the receipt env)"
     SOFT=""
 
+    # --- hung native --------------------------------------------------------
     echo "  (codex $arch hang)"
-    make_codex_case "codex-$arch-hang" "$arch" "$V" 0 1 0
+    new_codex_case "codex-$arch-hang" "$arch" "rust-v$V" 0 1
     SOFT=1
     local_env=(
-        "PATH=$CASE/bin:/usr/bin:/bin"
+        "PATH=$CASE/bin:$CASE/pybin:/usr/bin:/bin"
         "HOME=$CASE"
+        "TMPDIR=$CASE/tmp"
         "AGENT_VM_CONTRACT_DIR=$CONTRACT"
         "AGENT_VM_VENDOR_DIR=$CODEX_VENDOR"
+        "AGENT_VM_CODEX_SOURCE_DIR=$CASE/source"
         "AGENT_VM_CODEX_PREFIX=$CASE/prefix"
         "AGENT_VM_INSTALL_STATUS_DIR=$CASE/status"
         "AGENT_VM_VERSION_CODEX=rust-v$V"
         "AGENT_INSTALL_SOFT_FAIL=1"
         "FIXTURE_PID_LOG=$CASE/hang.pids"
+        "FIXTURE_NATIVE_LOG=$CASE/native.log"
         "FAKE_CURL_LOG=$CASE/curl.log"
+        "FAKE_CURL_DENY_LOG=$CASE/deny.log"
         "FAKE_CURL_ROUTES=$CASE/routes"
+        "FAKE_CURL_ROUTE_MODE=full-url"
         "FAKE_TIMEOUT_LOG=$CASE/timeout.log"
+        "FAKE_TAR_LOG=$CASE/tar.log"
+        "REAL_TAR=$REAL_TAR"
         "REAL_TIMEOUT=$REAL_TIMEOUT"
         "FAKE_TIMEOUT_CAP=$FAKE_TIMEOUT_CAP_SECONDS"
     )
@@ -607,15 +808,7 @@ for arch in x86_64 aarch64; do
         sh "$RUN_INSTALL" codex "$CASE/status/codex" sh "$REPO_ROOT/images/tools/codex/install-codex.sh" 2>&1)"
     RUN_RC=$?
     set -e
-    # Probes the installer routed through its own 60 s bound. The same count
-    # bounds how many probes the path may make (checked after the rc branch).
     probes="$(grep -c '^60$' "$CASE/timeout.log" || true)"
-    # Whichever bound fired must have reaped this case's hung natives; a
-    # survivor would leak a FIXTURE_HANG_SECONDS sleeper per run. Each native
-    # invocation records "<pid> <marker>" in hang.pids: the marker is the bound
-    # the fake timeout was asked for, empty for a native the installer called
-    # directly. Only a PID still running this fixture's sleeper is ours to kill;
-    # a reused PID belongs to an unrelated process.
     [ -s "$CASE/hang.pids" ] || fail "codex $arch: the hung native never started: $RUN_OUT"
     survivors=""
     unmarked=0
@@ -628,17 +821,7 @@ for arch in x86_64 aarch64; do
         kill -9 $survivors 2>/dev/null || true
         fail "codex $arch: hung native(s)$survivors survived the bound"
     fi
-    # C3: the production installer must bound its own native --version probe and
-    # fail hard BEFORE the external watchdog fires (rc 124 means the watchdog
-    # fired instead).
     if [ "$RUN_RC" -eq 124 ]; then
-        # Only the bounded path sets the marker on the native it execs, so an
-        # unmarked invocation is proof the installer ran it without a bound --
-        # independently of how many entries timeout.log holds. Then 124 is the
-        # regression #37 detects, not a slow host. Only when the installer
-        # routed at least one probe through its 60 s bound AND every recorded
-        # native was bounded is 124 the slow-host race (no native escaped the
-        # cap; the watchdog beat the caps).
         if [ "$probes" -ge 1 ] && [ "$unmarked" -eq 0 ]; then
             fail "codex $arch: the ${HANG_WATCHDOG[2]}s watchdog fired after $probes probes were routed through the ${FAKE_TIMEOUT_CAP_SECONDS}s cap; host too slow or fixture defect: $RUN_OUT"
         fi
@@ -653,6 +836,85 @@ for arch in x86_64 aarch64; do
     note "codex $arch: the installer bounds its native probe (timeout 60) and fails hard before the watchdog"
     SOFT=""
 done
+
+# --- routing has no basename fallback ---------------------------------------
+# A canonical URL must be the ONLY thing a route matches. The same archive is
+# reachable under its basename, so a basename-fallback router would happily serve
+# a wrong repository, a wrong version or a mirror.
+echo "  (codex full-URL routing)"
+new_case "codex-full-url-routing" x86_64
+V=0.159.3
+codex_urls x86_64 "rust-v$V"
+codex_native_body "$CASE/native-body.sh" "$V" 0 0
+codex_fixture "$CASE/fx" "rust-v$V" "$CODEX_TARGET" "$CASE/native-body.sh"
+printf '%s\t%s\n' "codex-package-$CODEX_TARGET.tar.gz" "$CASE/fx/archive.tgz" >>"$CASE/routes"
+route "$PAYLOAD_URL" "$CASE/fx/archive.tgz"
+fake_curl() { # $1 url, $2 out
+    env -i "PATH=/usr/bin:/bin" "FAKE_CURL_ROUTES=$CASE/routes" \
+        "FAKE_CURL_ROUTE_MODE=full-url" "FAKE_CURL_LOG=$CASE/curl.log" \
+        "FAKE_CURL_DENY_LOG=$CASE/deny.log" sh "$CASE/bin/curl" -fsSL -o "$2" "$1"
+}
+: >"$CASE/curl.log"
+: >"$CASE/deny.log"
+fake_curl "$PAYLOAD_URL" "$CASE/got.tgz" ||
+    fail "codex full-url routing: the canonical URL must be routable"
+cmp -s "$CASE/got.tgz" "$CASE/fx/archive.tgz" ||
+    fail "codex full-url routing: the canonical route served the wrong bytes"
+for wrong in \
+    "https://github.com/openai/codexx/releases/download/rust-v$V/codex-package-$CODEX_TARGET.tar.gz" \
+    "https://github.com/openai/codex/releases/download/rust-v0.159.2/codex-package-$CODEX_TARGET.tar.gz" \
+    "https://mirror.example/openai/codex/releases/download/rust-v$V/codex-package-$CODEX_TARGET.tar.gz" \
+    "$PAYLOAD_URL?token=REVIEW-TOKEN"; do
+    rm -f "$CASE/wrong.tgz"
+    if fake_curl "$wrong" "$CASE/wrong.tgz"; then
+        fail "codex full-url routing: '$wrong' was routed by basename"
+    fi
+    [ ! -s "$CASE/wrong.tgz" ] || fail "codex full-url routing: '$wrong' produced bytes"
+done
+[ "$(grep -c '^DENIED ' "$CASE/deny.log" || true)" = 4 ] ||
+    fail "codex full-url routing: expected four denials: $(cat "$CASE/deny.log")"
+note "codex: wrong repo / adjacent version / mirror / query are all denied"
+
+# --- an attempted latest request is denied and logged -----------------------
+echo "  (codex latest mutant)"
+new_codex_case "codex-latest-mutant" x86_64 "rust-v$V" 0 0
+python3 "$REPO_ROOT/script/test/vendored-installers-mutate-vendor.py" \
+    "$CODEX_VENDOR/install.sh" "$CASE/mutant/install.sh" latest-request
+! cmp -s "$CODEX_VENDOR/install.sh" "$CASE/mutant/install.sh" ||
+    fail "codex latest mutant: the mutation changed no bytes"
+run_codex "rust-v$V" "$CASE/mutant"
+expect_hard "codex latest mutant"
+expect_stream "codex latest mutant" \
+    "https://api.github.com/repos/openai/codex/releases/latest"
+grep -q 'releases/latest' "$CASE/deny.log" ||
+    fail "codex latest mutant: the latest request was not denied: $(cat "$CASE/deny.log")"
+expect_no_extraction "codex latest mutant"
+expect_no_native "codex latest mutant"
+note "codex: an injected /releases/latest request is a real attempt, denied and fatal"
+
+# --- the payload is substituted between the download and its digest check ----
+# The same control the native strict-egress gate runs, exercised hermetically:
+# the mutation lands INSIDE download_file_with_fallback, on the download side of
+# verify_archive_digest, so the refusal is the shell checksum diagnostic and the
+# archive never reaches tar or the native. A mutation made after the call site
+# would instead be caught by the later Python preflight, which is a different
+# oracle and the wrong side of the hash.
+echo "  (codex substitution mutant)"
+new_codex_case "codex-substitution-mutant" x86_64 "rust-v$V" 0 0
+python3 "$REPO_ROOT/script/test/vendored-installers-mutate-vendor.py" \
+    "$CODEX_VENDOR/install.sh" "$CASE/mutant/install.sh" substitute-before-digest
+! cmp -s "$CODEX_VENDOR/install.sh" "$CASE/mutant/install.sh" ||
+    fail "codex substitution mutant: the mutation changed no bytes"
+run_codex "rust-v$V" "$CASE/mutant"
+expect_hard "codex substitution mutant"
+expect_stream "codex substitution mutant" "$PAYLOAD_URL"
+printf '%s' "$RUN_OUT" | grep -q 'checksum did not match expected digest' ||
+    fail "codex substitution mutant: the committed digest did not refuse it: $RUN_OUT"
+expect_no_extraction "codex substitution mutant"
+expect_no_native "codex substitution mutant"
+[ ! -e "$CASE/prefix/.local/bin/codex" ] ||
+    fail "codex substitution mutant: a command was published"
+note "codex: a post-download substitution is refused by the committed digest, before tar"
 
 # =============================================================================
 # opencode

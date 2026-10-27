@@ -35,9 +35,10 @@ was selected and reviewed, so that a wrong or changed input fails loudly instead
 of being adopted. Ordinary builds only verify the committed pins: no latest
 lookup, graph regeneration, checksum refresh, silent fallback or image-owned
 first-use download. Only the explicit maintenance paths below - a
-[parent refresh](#maintenance-refreshing-a-parent) and a
-[release-artifact refresh](#maintenance-refreshing-a-pinned-release-artifact) -
-may resolve and re-place a pin, and they write a reviewed proposal for a human to
+[parent refresh](#maintenance-refreshing-a-parent), a
+[release-artifact refresh](#maintenance-refreshing-a-pinned-release-artifact) and
+a [Codex payload closure refresh](#codex-standalone-payloads) - may resolve and
+re-place a pin, and they write a reviewed proposal for a human to
 commit; they never auto-adopt or auto-merge, and they refuse to run in CI. Installs that a user or their project triggers are outside this guarantee.
 
 A wrong parent identity, wrong source, or digest mismatch fails. There is no
@@ -193,6 +194,76 @@ fails the build.
 The Sigstore trusted root is fetched through Sigstore's TUF channel at verify
 time. It is live trust material rather than a pinned input, so a build without
 network fails closed instead of skipping the check.
+
+## Codex standalone payloads
+
+Codex is a **committed payload closure**, not a release-artifact pin in the Node
+and GitHub CLI sense. The decision and its rejected alternatives are in
+[ADR 0009](adr/0009-codex-payload-pins.md); this section is the canonical policy.
+
+| Selected | Committed identity | Authentication |
+|---|---|---|
+| `rust-v0.159.3` (`org.agent-vm.version.codex`, `ARG AGENT_VERSION_CODEX`) | `images/tools/codex/pin.json`: exact `linux/amd64` and `linux/arm64` package URLs plus SHA-256, the original exact-tag API metadata, the original `codex-package_SHA256SUMS`, and both original `.sigstore` bundles | pin-time `cosign verify-blob` (v2.4.1) under the exact workflow identity and OIDC issuer, with default certificate-chain, SCT and Rekor verification |
+
+**Build ordering.** The hook derives the pin directory from the owning source
+directory, runs the real offline `check` for the exact slot, and only then runs
+the vendored installer. The vendor asks `select` for the four-field selection (no
+`eval`), downloads exactly one URL once, re-hashes it against the committed
+digest, runs `preflight` (bounded member policy, package metadata, ELF machine)
+and only then extracts, links and reports. A pre-existing
+`packages/standalone` root is refused before any probe, because an already
+installed same-version executable could otherwise satisfy the version report and
+skip the content check entirely.
+
+**Single-URL egress.** A Codex build reaches exactly one endpoint: the committed
+release's package for the architecture under test, on `github.com`, HTTPS/443,
+`GET`, no query, plus the signed CDN redirect GitHub issues for it.
+`script/test/shipped-installer-network.sh` allows nothing else, and a successful
+run asserts from the request log that the tag API, the checksum manifest and any
+Sigstore endpoint were never contacted.
+
+The redirect target is learned only from the response to an already-allowed
+request, and only its signed query is exempt from the shape rules: HTTPS, port
+443, no credentials and a host in the config's `learn_hosts`
+(`release-assets.githubusercontent.com`, `objects.githubusercontent.com`) are
+still required, and deny patterns still apply to it. An allowed response that
+points anywhere else is refused and logged rather than being parked in the
+allowlist.
+
+**No arbitrary versions.** An exact version that the pin does not select is a
+refusal. There is no alternate Codex selection in
+`script/test/fixtures/installer-egress/selections.tsv` (its alternate column is
+`-`), and the maintenance tool never edits that file: a real bump requires a human
+to update the fixture default after reviewing the proposal.
+
+**Signature limits.** Ordinary builds prove committed bytes, not cryptographic
+verification; they never contact Sigstore. Pin-time verification is the only
+cryptographic step, it needs a maintainer host with `cosign v2.4.1` and network
+access to Sigstore's production TUF root, and it fails closed. Cryptographic
+verification is deliberately not implemented in Python and cosign is not an image
+input. No hash-only exception is used.
+
+**Maintenance.** Only `script/dev/pin-codex.py` writes the pin, its four evidence
+files and the Codex ARG, and only through the shared Python publication
+transaction (which it reuses from `script/dev/pin-artifact.py`). Typical commands:
+
+```bash
+python3 script/dev/pin-codex.py --check
+python3 script/dev/pin-codex.py --version rust-v0.159.3 --cosign /absolute/path/to/cosign
+bash script/build/agent-versions.sh --check
+bash script/build/agent-versions.sh --write --cosign /absolute/path/to/cosign
+```
+
+`--check` is offline: it re-hashes the committed evidence, validates the policy
+and the single ARG/label, needs no payload archive and no cosign, and says it is
+not a signature check. The write path additionally resolves both payloads, both
+bundles and the original metadata, verifies both with the real verifier, preflights
+both archives and publishes the six files as one transaction. A same-release
+payload, manifest or security-projection change is refused rather than re-pinned.
+Statuses are the shared ones: `0` published or unchanged, `1` failed with the
+sources unchanged or fully restored, `2` usage, `3` undecided/incomplete recovery
+with every retained directory printed, `128+N` after a signal whose rollback
+succeeded.
 
 ## The Rust example's toolchain closure
 
@@ -479,7 +550,9 @@ fallback for it.
 ## Maintenance: refreshing a pinned release artifact
 
 Only `script/dev/pin-artifact.py` writes `images/artifacts/*.json`, their evidence
-files and the `org.agent-vm.version.<name>` labels, on a maintainer host:
+files and the `org.agent-vm.version.<name>` labels, on a maintainer host. Codex is
+*not* one of those artifacts: its closure has its own writer and policy
+([Codex standalone payloads](#codex-standalone-payloads)).
 
 ```bash
 python3 script/dev/pin-artifact.py --artifact node --version 22.23.5

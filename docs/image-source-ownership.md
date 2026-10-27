@@ -130,6 +130,12 @@ READMEs may be adapted to their new owner):
 - `images/tools/pi/bridge/prepare-lock.sh`
 - `images/tools/codex/install-codex.sh`
 - `images/tools/codex/verify-codex.sh`
+- `images/tools/codex/pin.json`
+- `images/tools/codex/codex_pin.py`
+- `images/tools/codex/evidence/release.json`
+- `images/tools/codex/evidence/codex-package_SHA256SUMS`
+- `images/tools/codex/evidence/codex-package-x86_64-unknown-linux-musl.tar.gz.sigstore`
+- `images/tools/codex/evidence/codex-package-aarch64-unknown-linux-musl.tar.gz.sigstore`
 - `images/tools/opencode/install-opencode.sh`
 - `images/tools/opencode/verify-opencode.sh`
 - `images/tools/claude/install-claude.sh`

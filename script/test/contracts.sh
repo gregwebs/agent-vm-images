@@ -87,6 +87,17 @@ if [ "$guard_only" = false ]; then
     # here because this file is the list of what runs.
     bash script/test/artifact-pins.sh
     python3 script/test/pin-artifact-maintenance.py
+    # The committed Codex payload closure (#97): the offline pin/evidence schema,
+    # the archive/preflight budgets and the owner writer's staging rules. Real
+    # cosign and the two native architecture rows are the evidence phase's work,
+    # never this aggregate.
+    python3 script/test/codex-pins.py
+    # The restricted-egress gate's stream assertions and its addon policy are the
+    # parts a native run cannot check cheaply: the allow-list log shape, the `-`
+    # placeholder row, and whether a learned redirect target keeps the HTTPS/port/
+    # credential rules. Both replay the production functions/config offline.
+    bash script/test/shipped-installer-network.sh --self-test
+    python3 script/test/installer-egress-addon.py
     # The Rust example's pinned toolchain closure (#102): the offline pin/install
     # table and the maintenance writer's staging/publication faults. Both are
     # hermetic; the real updater and the native installer are never run here.
@@ -153,12 +164,11 @@ fi
 embedded_manifest=$(mktemp "${TMPDIR:-/tmp}/embedded-python.XXXXXX") ||
     { echo 'FAIL: cannot create the shell-source manifest for the embedded-Python gate' >&2; exit 1; }
 trap 'rm -f "$embedded_manifest"' EXIT
-# The pinned Codex vendor snapshot is a verbatim upstream-derived installer:
-# vendor/README.md requires snapshot + reviewed patch byte equality, so its inline
-# Python changes only through the reviewed vendor update procedure. `target` is
-# generated build scratch, not a maintained-source allowance.
+# `target` is generated build scratch, not a maintained-source allowance. The
+# Codex vendor snapshot used to carry an inline metadata parser; the committed pin
+# replaced it, so there is no longer an exemption for it here.
 if ! find images script examples -type f -name '*.sh' \
-    ! -path '*/target/*' ! -path 'images/tools/codex/vendor/install.sh' \
+    ! -path '*/target/*' \
     -print0 >"$embedded_manifest"; then
     echo 'FAIL: cannot enumerate shell sources for the embedded-Python gate' >&2
     exit 1

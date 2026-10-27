@@ -339,8 +339,17 @@ class Publisher:
     restore fails so nothing is guessed afterwards.
     """
 
-    def __init__(self) -> None:
-        self.work = Path(tempfile.mkdtemp(prefix='pin-artifact.', dir=os.environ.get('TMPDIR')))
+    def __init__(self, root: Path = ROOT) -> None:
+        # `root` is the repository the destinations are relative to. It is a
+        # parameter, not the module constant, because the Codex owner writer
+        # publishes its own six-file closure through this same transaction; the
+        # default keeps every Node/gh call site unchanged.
+        self.root = Path(root)
+        # Absolute at creation, before any publication or recovery failure: a
+        # retained work directory is printed during recovery, and a relative path
+        # resolved from a different cwd would point nowhere.
+        self.work = Path(os.path.abspath(
+            tempfile.mkdtemp(prefix='pin-artifact.', dir=os.environ.get('TMPDIR'))))
         self.backup = self.work / 'backup'
         self.backup.mkdir()
         self.staged = self.work / 'staged'
@@ -348,9 +357,29 @@ class Publisher:
         self.destinations: list[Path] = []
         self.existed: list[bool] = []
         self.phase = 'staging'
+        # Pre-rendered recovery lines. The signal handler ends the process with
+        # `os._exit(3)`, which skips every buffer flush and every line the caller
+        # would print after `publish` returns; these are built here, at setup, and
+        # written with `os.write`, which is what a handler may safely do.
+        self.work_line = (f'pin-artifact: recovery material retained at {self.work}\n'
+                          .encode())
+        self.owner_line = b''
+        self.owner_note = ''
         # Destinations publication may have written: set *before* each copy, so
         # the file being written is included in a rollback.
         self.touched = 0
+
+    def report_owner(self, owner: str | None) -> None:
+        """Record the caller's own scratch directory in the signal-safe form.
+
+        The publisher cannot discover it: for the Codex owner writer it is the
+        owner's work or stage directory, which only the caller knows, and the
+        handler that exits the process runs before the caller can say anything.
+        """
+        if not owner:
+            return
+        self.owner_note = f'pin-artifact: owner scratch retained at {owner}'
+        self.owner_line = (self.owner_note + '\n').encode()
 
     def stage(self, relative: str, raw: bytes) -> None:
         path = self.staged / relative
@@ -378,7 +407,7 @@ class Publisher:
     def publish(self) -> None:
         self.phase = 'publication'
         for index, destination in enumerate(self.destinations):
-            staged = self.staged / destination.relative_to(ROOT)
+            staged = self.staged / destination.relative_to(self.root)
             destination.parent.mkdir(parents=True, exist_ok=True)
             self.touched = index + 1
             shutil.copyfile(staged, destination)
@@ -403,7 +432,7 @@ class Publisher:
                 destination.unlink()
 
     def recovery_record(self, error: str) -> None:
-        record = [{'destination': str(destination.relative_to(ROOT)),
+        record = [{'destination': str(destination.relative_to(self.root)),
                    'existed': self.existed[index] if index < len(self.existed) else None,
                    'backup': str(self.backup / str(index))
                    if index < len(self.existed) and self.existed[index] else None}
@@ -412,21 +441,37 @@ class Publisher:
             json.dumps({'error': error, 'phase': self.phase, 'destinations': record},
                        indent=2) + '\n')
 
+    def record_recovery_best_effort(self, error: str) -> None:
+        """Write the recovery record without letting its failure escape.
 
-def symlinked(destination: Path) -> Path | None:
+        A rollback that failed and then cannot even describe itself is still a
+        status-3 outcome: the retained `backup/` directory is the way back, and
+        `recovery.json` is a convenience. Catching only `OSError` would let a
+        serialization or encoding failure replace the status with a traceback and
+        status 1, so *every* exception is caught here and reported instead.
+        """
+        try:
+            self.recovery_record(error)
+        except Exception as record_error:  # noqa: BLE001 - the contract is "never escape"
+            print(f'pin-artifact: could not write the recovery record in {self.work} '
+                  f'({record_error}); the backups listed below are still authoritative',
+                  file=sys.stderr)
+
+
+def symlinked(destination: Path, root: Path = ROOT) -> Path | None:
     """A destination reached through a symlink is a redirection, not a layout.
 
     Rejecting only a symlinked *leaf* let the publisher change files through a
-    symlinked parent directory, so the leaf and every ancestor between ROOT and
-    it are checked with `lstat` semantics.
+    symlinked parent directory, so the leaf and every ancestor between the root
+    and it are checked with `lstat` semantics.
     """
     if destination.is_symlink():
         return destination
     try:
-        relative = destination.relative_to(ROOT)
+        relative = destination.relative_to(root)
     except ValueError:
-        return ROOT
-    current = ROOT
+        return root
+    current = root
     for part in relative.parts[:-1]:
         current = current / part
         if current.is_symlink():
@@ -436,11 +481,20 @@ def symlinked(destination: Path) -> Path | None:
     return None
 
 
-def publish(staged: dict[str, bytes]) -> int:
-    publisher = Publisher()
-    destinations = [ROOT / relative for relative in staged]
+def publish(staged: dict[str, bytes], *, root: Path = ROOT,
+            owner: str | None = None) -> int:
+    """Publish `staged` as one transaction; report the caller's own scratch too.
+
+    `owner` is the caller's scratch directory (absolute), if it has one. It is
+    reported together with this transaction's work directory *from the signal
+    handler as well*, because that handler leaves through `os._exit(3)`: a caller
+    that only printed its own path after `publish` returned would never say it.
+    """
+    publisher = Publisher(root)
+    publisher.report_owner(owner)
+    destinations = [root / relative for relative in staged]
     refused = sorted({str(found) for found in
-                      (symlinked(destination) for destination in destinations)
+                      (symlinked(destination, root) for destination in destinations)
                       if found is not None})
     if refused:
         print(f'pin-artifact: refusing a path reached through a symlink: {refused}',
@@ -450,19 +504,25 @@ def publish(staged: dict[str, bytes]) -> int:
     publisher.destinations = destinations
 
     def interrupted(signum, _frame):
+        # Async-signal-safe only: no print, no logging, no allocation of note. The
+        # two paths that make recovery possible were rendered before the handlers
+        # were installed.
         if publisher.phase == 'publication' and publisher.touched:
             try:
                 publisher.restore()
             except OSError as error:
-                publisher.recovery_record(str(error))
-                print(f'pin-artifact: interrupted and restore incomplete; recovery material '
-                      f'retained at {publisher.work}', file=sys.stderr)
+                publisher.record_recovery_best_effort(str(error))
+                os.write(2, b'pin-artifact: interrupted and restore incomplete\n')
+                os.write(2, publisher.owner_line)
+                os.write(2, publisher.work_line)
+                os.write(2, b'STOP: recover both directories above before further '
+                            b'edits/builds/commits\n')
                 os._exit(3)
-            print('pin-artifact: interrupted; sources restored', file=sys.stderr)
+            os.write(2, b'pin-artifact: interrupted; sources restored\n')
         else:
             shutil.rmtree(publisher.work, ignore_errors=True)
-            print(f'pin-artifact: interrupted during {publisher.phase}; sources unchanged',
-                  file=sys.stderr)
+            os.write(2, b'pin-artifact: interrupted before publication; sources '
+                        b'unchanged\n')
         os._exit(128 + signum)
 
     for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
@@ -482,11 +542,14 @@ def publish(staged: dict[str, bytes]) -> int:
         try:
             publisher.restore()
         except OSError as restore_error:
-            publisher.recovery_record(str(restore_error))
+            publisher.record_recovery_best_effort(str(restore_error))
             print(f'pin-artifact: restore incomplete ({restore_error}); recovery material '
                   f'retained at {publisher.work}', file=sys.stderr)
-            print(f'STOP: recover {publisher.work} before further edits/builds/commits',
-                  file=sys.stderr)
+            if publisher.owner_note:
+                print(publisher.owner_note, file=sys.stderr)
+            print(f'STOP: recover {publisher.work}'
+                  + (f' together with {owner}' if owner else '')
+                  + ' before further edits/builds/commits', file=sys.stderr)
             return 3
         shutil.rmtree(publisher.work, ignore_errors=True)
         return 1
@@ -559,7 +622,7 @@ def refresh(name: str, version: str, key: Path | None) -> int:
         for relative in sorted(staged):
             if committed.get(relative) != staged[relative]:
                 print(f'pin-artifact: would publish {relative}', file=sys.stderr)
-        status = publish(staged)
+        status = publish(staged, root=ROOT)
         if status == 0:
             print(f'pin-artifact: published {name} {version}: '
                   + ', '.join(sorted(staged)))

@@ -21,7 +21,7 @@ Node 22, base-owned pnpm, fetch/diagnostic facilities, explicit optional trust a
 
 | Label suffix | Docker ARG | Committed selection / spelling |
 |---|---|---|
-| codex | AGENT_VERSION_CODEX | rust-v0.159.3 / rust-vSEMVER |
+| codex | AGENT_VERSION_CODEX | rust-v0.159.3 / rust-vPINSELECTED (see [Codex payload closure](codex/vendor/README.md)) |
 | opencode | AGENT_VERSION_OPENCODE | v2.0.29 / v2.SEMVER |
 | claude | AGENT_VERSION_CLAUDE | 2.1.286 / SEMVER |
 | copilot | AGENT_VERSION_COPILOT | 1.0.90 / SEMVER |
@@ -103,8 +103,12 @@ Vendored snapshot + patch + runnable copy keep installer edits reviewable:
 upstream assets still arrive over the network. Vendor manifests detect
 corruption, not independent signing or upstream replacement of an exact-version
 asset. OpenCode has no independent archive
-checksum; its trust is TLS plus exact registry tarball URL. These are explicit trust limits, not
-an assertion of fully reproducible OS or supply chain.
+checksum; its trust is TLS plus exact registry tarball URL. Codex is the exception:
+its two payloads are bound by a committed content pin, so an exact version that
+the pin does not select is refused — see the
+[Codex payload policy](../../docs/image-input-policy.md#codex-standalone-payloads)
+and [ADR 0009](../../docs/adr/0009-codex-payload-pins.md). These are explicit trust
+limits, not an assertion of fully reproducible OS or supply chain.
 
 ### dsh and pnpm
 

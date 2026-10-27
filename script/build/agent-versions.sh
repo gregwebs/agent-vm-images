@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Developer write tool: resolve each single-slot installer block's current
-# upstream release and stage the reviewed exact default in its Dockerfile.
+# upstream release, stage the reviewed exact default in its Dockerfile, and — for
+# codex only — stage and publish the committed payload closure beside it.
 #
-# Usage: script/build/agent-versions.sh --write [--repo-root DIR]
+# Usage: script/build/agent-versions.sh --write [--cosign /abs/cosign] [--repo-root DIR]
+#        script/build/agent-versions.sh --check [--repo-root DIR]
 #        script/build/agent-versions.sh --help
 #
 # This is an EXPLICIT developer step, never a build or CI step. Ordinary builds
@@ -18,10 +20,18 @@
 # dsh and pi are lock-backed layers with EMPTY version ARGs; their pins (and
 # generated LABEL fallbacks) are bumped by images/tools/{dsh,pi}/upgrade-*.sh.
 #
+# Codex is not just a four-ARG edit: an exact tag names a release, not bytes, so
+# `script/dev/pin-codex.py` resolves both maintained Linux payloads, verifies
+# their Sigstore bundles with the reviewed cosign, preflights both archives and
+# stages the pin, its four evidence files and the Codex ARG as ONE transaction.
+# That transaction is published through the shared Python publisher, so the
+# Dockerfile and the closure cannot land independently. `--check` validates the
+# committed Codex closure offline and touches nothing.
+#
 # GitHub API calls are authenticated with $GH_TOKEN when set; the token never
-# appears in diagnostics. Rejected before any network call under GITHUB_ACTIONS,
-# so an accidental workflow reintegration fails instead of silently restoring a
-# build-time latest resolution.
+# appears in diagnostics. Write mode is rejected before any network call under
+# GITHUB_ACTIONS, so an accidental workflow reintegration fails instead of
+# silently restoring a build-time latest resolution.
 
 set -euo pipefail
 
@@ -31,18 +41,27 @@ case "${BASH_SOURCE[0]}" in
 esac
 # shellcheck source=/dev/null
 . "$script_dir_path/npm-pin.sh"
-# shellcheck source=/dev/null
-. "$script_dir_path/transactional-publish.sh"
 
 usage() {
     cat <<'EOF'
-Usage: script/build/agent-versions.sh --write [--repo-root DIR]
+Usage: script/build/agent-versions.sh --write [--cosign /abs/cosign] [--repo-root DIR]
+       script/build/agent-versions.sh --check [--repo-root DIR]
        script/build/agent-versions.sh --help
 
-Resolve the current upstream release of each single-slot installer block and
-stage the reviewed exact default in the owning Dockerfile. This is a developer
-write tool: it performs no commit, build, or push, and it refuses to run under
-GitHub Actions.
+--write   resolve the current upstream release of each single-slot installer
+          block and stage the reviewed exact default in the owning Dockerfile.
+          For codex this additionally resolves, authenticates and preflights both
+          maintained Linux payloads and publishes the pin, its evidence and the
+          Codex ARG as one transaction. Developer write tool: no commit, build or
+          push, and it refuses to run under GitHub Actions.
+--check   validate the committed Codex payload closure offline (pin schema,
+          evidence hashes, both bundles' structure, package policy and the
+          single ARG/label). No network, no payload archive, no cosign, no
+          writes. It does NOT re-verify signatures and does not cover the other
+          tools' ARG defaults.
+
+--cosign  the reviewed cosign (v2.4.1) used to verify both legacy .sigstore
+          bundles. Required for --write; never downloaded or substituted.
 EOF
 }
 
@@ -53,10 +72,20 @@ fail() {
 
 repo_root=
 write=false
+check=false
+cosign=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --write)
             write=true
+            ;;
+        --check)
+            check=true
+            ;;
+        --cosign)
+            [ "$#" -ge 2 ] || fail "--cosign requires an absolute path"
+            cosign="$2"
+            shift
             ;;
         --repo-root)
             [ "$#" -ge 2 ] || fail "--repo-root requires a directory"
@@ -76,13 +105,15 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
-if [ "$write" != true ]; then
+if [ "$write" = true ] && [ "$check" = true ]; then
+    fail "--write and --check are exclusive"
+fi
+if [ "$write" != true ] && [ "$check" != true ]; then
     usage >&2
     exit 2
 fi
-
-if [ "${GITHUB_ACTIONS:-}" = true ]; then
-    fail "refusing to run under GitHub Actions: version bumps are an explicit developer step"
+if [ "$check" = true ] && [ -n "$cosign" ]; then
+    fail "--cosign belongs to --write; --check is offline"
 fi
 
 if [ -z "$repo_root" ]; then
@@ -91,9 +122,41 @@ fi
 [ -d "$repo_root" ] || fail "--repo-root is not a directory: $repo_root"
 repo_root="$(cd "$repo_root" && pwd -P)"
 
+codex_writer="$repo_root/script/dev/pin-codex.py"
+[ -f "$codex_writer" ] || fail "missing $codex_writer"
+
+if [ "$check" = true ]; then
+    echo 'Codex scope only: committed pin, evidence, bundles and the single ARG/label.'
+    exec python3 "$codex_writer" --check --repo-root "$repo_root"
+fi
+
+if [ "${GITHUB_ACTIONS:-}" = true ]; then
+    fail "refusing to run under GitHub Actions: version bumps are an explicit developer step"
+fi
+
 # Fail before a lookup so an HTTP-200-but-garbage response reports a per-tool
-# message instead of this chokepoint.
-require_tools curl jq npm
+# message instead of this chokepoint. `python3` and the reviewed cosign are
+# write-mode prerequisites: nothing here resolves an upstream release until both
+# are present, and pin-codex re-checks cosign's exact version before it fetches.
+require_tools curl jq npm python3
+if [ -n "$cosign" ]; then
+    case "$cosign" in
+        /*) ;;
+        *) fail "--cosign must be an absolute path: $cosign" ;;
+    esac
+    [ -x "$cosign" ] || fail "--cosign is not an executable file: $cosign"
+else
+    cosign="$(command -v cosign || true)"
+    [ -n "$cosign" ] || fail "the reviewed cosign (v2.4.1) is required: install it or pass --cosign /absolute/path"
+fi
+# The exact-version check is the writer's own, run BEFORE any lookup: an
+# incompatible verifier must stop the run without resolving a single upstream
+# tag (a lookup that then fails to verify leaves a half-finished bump story).
+probe_status=0
+python3 "$codex_writer" --probe-cosign "$cosign" --repo-root "$repo_root" \
+    || probe_status=$?
+[ "$probe_status" -eq 0 ] || exit "$probe_status"
+cosign_args=("--cosign" "$cosign")
 
 github_latest_tag() {
     local repo=$1 auth=()
@@ -204,46 +267,73 @@ tool_arg() { # $1 = tool -> ARG name
 file="$repo_root/images/standard/Dockerfile"
 [ -f "$file" ] || fail "missing Dockerfile: $file"
 work=$(mktemp -d)
+# Absolute before anything can be retained: the recovery report is only usable if
+# it names a directory that still resolves from wherever the reader is.
+work="$(cd "$work" && pwd -P)"
 keep_recovery=false
 trap 'if [ "$keep_recovery" = false ]; then rm -rf "$work"; fi' EXIT
-cp -p "$file" "$work/Dockerfile"
-changed=false
 old_values=()
-stage_one() {
-    local tool=$1 value=$2 arg count current
+changed=false
+stage_one() { # $1 tool, $2 value, $3 (optional) previous value to report
+    local tool=$1 value=$2 previous=${3:-} arg count current
     arg=$(tool_arg "$tool")
     count=$(grep -c "^ARG ${arg}=" "$work/Dockerfile" || true)
     [ "$count" -eq 1 ] || fail "expected exactly one 'ARG ${arg}=' in images/standard/Dockerfile, found ${count}"
     current=$(sed -n "s/^ARG ${arg}=//p" "$work/Dockerfile")
-    old_values+=("$tool ${current} -> ${value}")
+    [ -n "$previous" ] || previous=$current
+    old_values+=("$tool ${previous} -> ${value}")
     if [ "$current" != "$value" ]; then
         sed "s|^ARG ${arg}=.*\$|ARG ${arg}=${value}|" "$work/Dockerfile" >"$work/next"
         cp "$work/next" "$work/Dockerfile"
         changed=true
     fi
 }
-stage_one codex "$codex"
+
+# The committed codex default, before staging rewrites the scratch copy: the
+# report must name what the repository actually held.
+codex_committed="$(sed -n 's/^ARG AGENT_VERSION_CODEX=//p' "$file")"
+
+# Stage the codex closure FIRST: it writes its own complete Dockerfile proposal
+# (the six-file set) into the owner's scratch, and the four single-slot ARG edits
+# below then apply to that same scratch file. Nothing is published until all of
+# them are staged.
+codex_status=0
+python3 "$codex_writer" --version "$codex" --stage-dir "$work" --repo-root "$repo_root" \
+    "${cosign_args[@]}" || codex_status=$?
+if [ "$codex_status" -ne 0 ]; then
+    if [ "$codex_status" -eq 3 ]; then
+        keep_recovery=true
+        echo "error: codex staging is undecided; owner scratch retained at $work" >&2
+    fi
+    exit "$codex_status"
+fi
+
+stage_one codex "$codex" "$codex_committed"
 stage_one opencode "$opencode"
 stage_one claude "$claude"
 stage_one copilot "$copilot"
-if [ "$changed" = false ]; then
-    echo 'All single-slot defaults are already current:'
-    printf '  %s\n' "${old_values[@]}"
-    exit 0
-fi
-if publish_transactional "$work/publish-backup" "$work/Dockerfile" "$file"; then
-    status=0
-else
-    status=$?
-fi
-if [ "$status" -ne 0 ]; then
-    if [ "$status" -eq 3 ]; then
+
+# ONE publication for the Dockerfile and the whole codex closure. The Python
+# publisher is the shared transaction; there is no second shell publish and no
+# nested transaction. The owner scratch is named on stderr BEFORE the publisher
+# starts: a signal-driven rollback exits from inside it with os._exit(3), so a
+# report printed after the call would never be reached.
+echo "pin-codex: owner scratch: $work (retained if the publication is undecided)" >&2
+publish_status=0
+python3 "$codex_writer" --publish-stage "$work" --repo-root "$repo_root" \
+    || publish_status=$?
+if [ "$publish_status" -ne 0 ]; then
+    if [ "$publish_status" -eq 3 ]; then
         keep_recovery=true
-        echo "error: recovery material retained at $work" >&2
+        echo "error: recovery material retained; owner scratch retained at $work" >&2
     fi
-    exit "$status"
+    exit "$publish_status"
 fi
+
 echo 'Staged version bumps:'
 printf '  %s\n' "${old_values[@]}"
-echo 'Changed files: images/standard/Dockerfile'
+echo 'Changed files: images/standard/Dockerfile, images/tools/codex/pin.json and images/tools/codex/evidence/'
+if [ "$changed" = false ]; then
+    echo 'The four single-slot ARG defaults were already current; the codex closure was still verified.'
+fi
 echo "Next: review 'git diff', run the installer tests / standard-image audit, then commit."

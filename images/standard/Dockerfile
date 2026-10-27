@@ -127,10 +127,12 @@ LABEL org.agent-vm.version.codex="${AGENT_VERSION_CODEX}"
 ENV PATH=/opt/agent/.local/bin:${PATH}
 
 RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
+    --mount=type=bind,source=tools/codex,target=/tmp/codex-source,ro \
     --mount=type=bind,source=tools/codex/install-codex.sh,target=/tmp/install-codex.sh,ro \
     --mount=type=bind,source=tools/codex/vendor,target=/opt/agent-vm/recipe-vendor,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
+    AGENT_VM_CODEX_SOURCE_DIR=/tmp/codex-source \
     AGENT_VM_VENDOR_DIR=/opt/agent-vm/recipe-vendor \
     AGENT_VM_VERSION_CODEX="${AGENT_VERSION_CODEX}" \
     AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
