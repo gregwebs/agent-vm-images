@@ -12,7 +12,12 @@ LAYERS=examples/layers
 EXAMPLES='chrome-devtools go-dev rust-dev wirenboard-cpp'
 # Known space-free paths, explicitly moved from agent-vm's ci-contracts.sh:
 # deletion/rename must fail rather than silently leave lint coverage.
-GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp.sh go-dev/install-go.sh go-dev/install-golangci-lint.sh go-dev/install-gopls.sh go-dev/verify-toolchain.sh rust-dev/install-rust.sh rust-dev/install-verus.sh rust-dev/rust_toolchain.py rust-dev/verify-toolchain.sh'
+GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp.sh go-dev/gopls_closure.py go-dev/install-go.sh go-dev/install-golangci-lint.sh go-dev/install-gopls.sh go-dev/verify-toolchain.sh rust-dev/install-rust.sh rust-dev/install-verus.sh rust-dev/rust_toolchain.py rust-dev/verify-toolchain.sh'
+# The self-test table's case count. The case labels are checked against it as a
+# complete 1..N sequence before any case runs, so a duplicated, skipped or
+# appended label fails instead of silently not running (81 labels were defined
+# while the loop stopped at 79).
+SELF_TEST_CASES=103
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -257,6 +262,80 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         [ -f "$file" ] || fail "guarded script missing: $rel"
         checksum_token "$file" || fail "go-dev: ${rel##*/} lacks non-comment sha256sum token"
     done
+    # --- go-dev: the reviewed gopls closure (#103) ---------------------------
+    # The committed data directory is the reviewed module selection (graph, sums,
+    # notices and the record binding them); gopls_closure.py is the only program
+    # that verifies or installs it. Presence is reported by the same message the
+    # GUARDED sweep below uses, so a deletion fails on the file, not on a shell
+    # error from the invocation that needs it.
+    godir=$LAYERS/go-dev
+    helper=$godir/gopls_closure.py
+    datadir=$godir/gopls-closure
+    [ -f "$helper" ] || fail 'guarded script missing: go-dev/gopls_closure.py'
+    [ -f "$godir/install-gopls.sh" ] || fail 'guarded script missing: go-dev/install-gopls.sh'
+    [ -f "$godir/verify-toolchain.sh" ] || fail 'guarded script missing: go-dev/verify-toolchain.sh'
+    [ -d "$datadir" ] || fail 'go-dev: missing the gopls closure input directory'
+    gopls_arg=$(sed -nE 's/^ARG GOPLS_VERSION=(.*)$/\1/p' "$godir/Dockerfile")
+    go_arg=$(sed -nE 's/^ARG GO_VERSION=(.*)$/\1/p' "$godir/Dockerfile")
+    [ "$(printf '%s\n' "$gopls_arg" | grep -c .)" -eq 1 ] || fail 'go-dev pins: ARG GOPLS_VERSION'
+    [ "$(printf '%s\n' "$go_arg" | grep -c .)" -eq 1 ] || fail 'go-dev pins: ARG GO_VERSION'
+    # The committed closure is checked offline here, and both Dockerfile pins are
+    # assertions on it: a version bumped without a regenerated closure fails.
+    selected=$(PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/$helper" check "$ROOT/$datadir" \
+        --expect-gopls "$gopls_arg" --expect-go "$go_arg" 2>&1) || fail "go-dev pins: $selected"
+    [ "$selected" = "$gopls_arg" ] || fail 'go-dev pins: the closure and ARG GOPLS_VERSION disagree'
+    instructions=$(logical_instructions "$godir/Dockerfile" go-dev) || exit 1
+    reviewed_gopls_installer='RUN --mount=type=bind,source=install-gopls.sh,target=/tmp/install-gopls.sh,ro --mount=type=bind,source=gopls_closure.py,target=/tmp/gopls_closure.py,ro --mount=type=bind,source=gopls-closure,target=/tmp/gopls-closure,ro bash /tmp/install-gopls.sh'
+    reviewed_go_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/go-verify/verify-toolchain.sh,ro --mount=type=bind,source=gopls_closure.py,target=/run/go-verify/gopls_closure.py,ro --mount=type=bind,source=gopls-closure,target=/run/go-verify/gopls-closure,ro PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/go-verify/verify-toolchain.sh'
+    gopls_installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-gopls.sh' || true)
+    [ "$gopls_installer_runs" -eq 1 ] || fail 'go-dev: the gopls installer RUN must appear exactly once'
+    gopls_installer_line=$(printf '%s\n' "$instructions" | grep -F 'install-gopls.sh')
+    for token in 'source=install-gopls.sh,target=/tmp/install-gopls.sh,ro' \
+        'source=gopls_closure.py,target=/tmp/gopls_closure.py,ro' \
+        'source=gopls-closure,target=/tmp/gopls-closure,ro'; do
+        case "$gopls_installer_line" in
+            *"$token"*) ;;
+            *) fail "go-dev: installer RUN lacks the reviewed runtime bind: $token" ;;
+        esac
+    done
+    # Exact shape, not a substring: a disabled or extended command (`: # ...`,
+    # `|| true`, an extra argv) is not the reviewed install.
+    [ "$(normalize_instruction "$gopls_installer_line")" = "$reviewed_gopls_installer" ] ||
+        fail "go-dev: installer RUN must be exactly: $reviewed_gopls_installer (got: $(normalize_instruction "$gopls_installer_line"))"
+    gopls_verifier_runs=$(printf '%s\n' "$instructions" | grep -cF 'verify-toolchain.sh' || true)
+    [ "$gopls_verifier_runs" -eq 1 ] || fail 'go-dev: the verifier RUN must appear exactly once'
+    gopls_verifier_line=$(printf '%s\n' "$instructions" | grep -F 'verify-toolchain.sh')
+    case "$gopls_verifier_line" in
+        *--network=none*) ;;
+        *) fail 'go-dev: verifier must run with --network=none' ;;
+    esac
+    for token in 'verify-toolchain.sh,target=/run/go-verify/verify-toolchain.sh,ro' \
+        'gopls_closure.py,target=/run/go-verify/gopls_closure.py,ro' \
+        'gopls-closure,target=/run/go-verify/gopls-closure,ro' 'PYTHONDONTWRITEBYTECODE=1'; do
+        case "$gopls_verifier_line" in
+            *"$token"*) ;;
+            *) fail "go-dev: verifier RUN lacks the reviewed delivery: $token" ;;
+        esac
+    done
+    [ "$(normalize_instruction "$gopls_verifier_line")" = "$reviewed_go_verifier" ] ||
+        fail "go-dev: verifier RUN must be exactly: $reviewed_go_verifier (got: $(normalize_instruction "$gopls_verifier_line"))"
+    [ "$(grep -cxF 'ENV GOTOOLCHAIN=local' "$godir/Dockerfile")" -eq 1 ] ||
+        fail 'go-dev: GOTOOLCHAIN=local must be exported exactly once'
+    if grep -qE '^ENV .*(GOFLAGS|GOPROXY|GOSUMDB|GONOSUMDB|GOPRIVATE|GONOPROXY|GOINSECURE|GOTOOLCHAIN=(auto|go|path))' "$godir/Dockerfile"; then
+        fail 'go-dev: no GO* policy may be exported besides GOTOOLCHAIN=local (GOTOOLCHAIN)'
+    fi
+    # No ordinary build may resolve a version, regenerate the graph or reach a
+    # checksum-database fallback; comments are documentation, so only code lines
+    # are matched. The maintenance writer is host-only.
+    for file in "$godir/Dockerfile" "$godir/install-gopls.sh" "$godir/verify-toolchain.sh"; do
+        if grep -vE '^[[:space:]]*#' "$file" |
+            grep -qE 'go[[:space:]]+(install|get)([[:space:]]|$)|go[[:space:]]+mod[[:space:]]+(tidy|download|vendor|edit)|@latest|gopls@|-mod=mod|GONOSUMDB|GOSUMDB=off|GOINSECURE|,direct|GOPROXY=direct|GOTOOLCHAIN=auto'; then
+            fail "go-dev: unpinned go install, graph regeneration or checksum bypass in ${file##*/}"
+        fi
+        if grep -vE '^[[:space:]]*#' "$file" | grep -qE 'upgrade-gopls|gopls-closure-update'; then
+            fail "go-dev: maintenance writer must not run in an ordinary build: ${file##*/}"
+        fi
+    done
     for file in images/Dockerfile images/standard/Dockerfile; do
         [ -f "$file" ] || fail "recipe text missing: $file"
         if grep -qiE 'chromium|google-chrome|agent-vm-chrome-mcp|agent-vm-capabilities' "$file"; then
@@ -298,11 +377,100 @@ repin() {
     ( cd "$1/$LAYERS/chrome-devtools/chrome-devtools-mcp" &&
         sha256sum package.json pnpm-lock.yaml pnpm-workspace.yaml > pnpm-inputs.sha256 )
 }
+# Re-pin the copied gopls closure for a *test-only* tree: recompute `files` for
+# the four evidence files and follow the two scope digests. `modules[].h1` is
+# deliberately left alone -- the mutations that change it are testing exactly the
+# pin/go.sum disagreement that an automatic repair would hide -- and so are the
+# reviewer/date, which no test may invent.
+repin_gopls() { # TREE
+    local dir=$1/$LAYERS/go-dev/gopls-closure digests=$SCRATCH/gopls-digests
+    ( cd "$dir" && sha256sum go.mod go.sum gopls.go.mod THIRD_PARTY_LICENSES ) > "$digests"
+    jq --rawfile digests "$digests" '
+        ($digests | split("\n") | map(select(length > 0))
+            | map({key: (split("  ")[1]), value: (split("  ")[0])}) | from_entries) as $files
+        | .files = $files
+        | .authentication.scope["go.mod"] = $files["go.mod"]
+        | .authentication.scope["go.sum"] = $files["go.sum"]
+    ' "$dir/pin.json" > "$SCRATCH/rewrite"
+    cat "$SCRATCH/rewrite" > "$dir/pin.json"
+}
+# The case labels are an explicit source-format contract, not a Bash parse: one
+# decimal label per line inside the marked table body, forming the complete
+# sequence 1..COUNT with no duplicates. The sort is numeric and does not dedupe,
+# so a repeated label cannot hide behind its first occurrence.
+check_self_test_table() { # FILE COUNT SCRATCH
+    local file=$1 count=$2 scratch=$3 duplicates
+    mkdir -p "$scratch"
+    awk '/^[[:space:]]*# SELF_TEST_TABLE_BEGIN$/ { inside=1; next }
+         /^[[:space:]]*# SELF_TEST_TABLE_END$/ { inside=0 }
+         inside && /^[[:space:]]*[0-9]+[)]/ {
+             label=$0; sub(/^[[:space:]]*/, "", label); sub(/[)].*$/, "", label); print label
+         }' "$file" | LC_ALL=C sort -n > "$scratch/actual-labels"
+    seq 1 "$count" > "$scratch/expected-labels"
+    duplicates=$(uniq -d "$scratch/actual-labels")
+    [ -z "$duplicates" ] || fail 'self-test case labels contain duplicates'
+    cmp -s "$scratch/expected-labels" "$scratch/actual-labels" ||
+        fail 'self-test case labels must equal 1..SELF_TEST_CASES'
+}
+# The label guard is only worth its runtime while it still fails: three scratch
+# copies of this file are mutated and must be refused from the label check alone,
+# before any case body runs. The appended label keeps the declared bound, so only
+# the sequence comparison can catch it.
+self_test_label_controls() { # SCRATCH
+    local scratch=$1 extra=$((SELF_TEST_CASES + 1)) copy out rc
+    local sequence='self-test case labels must equal 1..SELF_TEST_CASES'
+
+    copy=$scratch/label-appended.sh
+    awk -v extra="$extra" '!placed && /^[[:space:]]*# SELF_TEST_TABLE_END$/ {
+            printf "            %s) : ;;\n", extra; placed = 1
+        } { print }' "$CHECKER" > "$copy"
+    [ "$(grep -cE '^[[:space:]]*[0-9]+[)]' "$copy")" -eq "$extra" ] ||
+        fail 'self-test: the appended-label control did not apply'
+    out=$scratch/label-appended.log
+    rc=0
+    bash "$copy" --self-test > "$out" 2>&1 || rc=$?
+    [ "$rc" -eq 1 ] || fail 'self-test: an appended case label must be refused'
+    grep -qF "$sequence" "$out" ||
+        fail 'self-test: the appended-case refusal is not the sequence check'
+    if grep -q '^case ' "$out"; then
+        fail 'self-test: the label guard must refuse before any case runs'
+    fi
+    echo 'self-test: ok   an appended case label is refused before any case runs'
+
+    copy=$scratch/label-duplicate.sh
+    awk '!placed && /^[[:space:]]*# SELF_TEST_TABLE_END$/ {
+            print "            5) : ;;"; placed = 1
+        } { print }' "$CHECKER" > "$copy"
+    [ "$(grep -cE '^[[:space:]]*[0-9]+[)]' "$copy")" -eq "$extra" ] ||
+        fail 'self-test: the duplicate-label control did not apply'
+    out=$scratch/label-duplicate.log
+    rc=0
+    bash "$copy" --self-test > "$out" 2>&1 || rc=$?
+    [ "$rc" -eq 1 ] || fail 'self-test: a duplicated case label must be refused'
+    grep -qF 'self-test case labels contain duplicates' "$out" ||
+        fail 'self-test: the duplicate-case refusal is not the duplicate check'
+    echo 'self-test: ok   a duplicated case label is refused'
+
+    copy=$scratch/label-missing.sh
+    awk '$0 !~ /^[[:space:]]*50[)]/' "$CHECKER" > "$copy"
+    [ "$(grep -cE '^[[:space:]]*[0-9]+[)]' "$copy")" -eq "$((SELF_TEST_CASES - 1))" ] ||
+        fail 'self-test: the missing-label control did not apply'
+    out=$scratch/label-missing.log
+    rc=0
+    bash "$copy" --self-test > "$out" 2>&1 || rc=$?
+    [ "$rc" -eq 1 ] || fail 'self-test: a missing case label must be refused'
+    grep -qF "$sequence" "$out" ||
+        fail 'self-test: the missing-case refusal is not the sequence check'
+    echo 'self-test: ok   a missing middle case label is refused'
+}
 self_test() {
     SCRATCH=$(mktemp -d)
     trap 'rm -rf "$SCRATCH"' EXIT
     local n tree chrome go rust wrapper expected rc telemetry file pnpmdir bundle lock
-    for n in $(seq 1 79); do
+    local godir godocker goplsdir goplshelper rusttool rustdocker rustverify
+    check_self_test_table "$CHECKER" "$SELF_TEST_CASES" "$SCRATCH"
+    self_test_label_controls "$SCRATCH"
+    for n in $(seq 1 "$SELF_TEST_CASES"); do
         tree="$SCRATCH/case-$n"
         mkdir -p "$tree/examples" "$tree/images/standard"
         cp -R "$ROOT/$LAYERS" "$tree/examples/"
@@ -318,7 +486,12 @@ self_test() {
         rusttool="$tree/$LAYERS/rust-dev/rust-toolchain"
         rustdocker="$tree/$LAYERS/rust-dev/Dockerfile"
         rustverify="$tree/$LAYERS/rust-dev/verify-toolchain.sh"
+        godir="$tree/$LAYERS/go-dev"
+        godocker="$godir/Dockerfile"
+        goplsdir="$godir/gopls-closure"
+        goplshelper="$godir/gopls_closure.py"
         expected=''
+        # SELF_TEST_TABLE_BEGIN
         case "$n" in
             1) ;;
             2) echo '# after marker' >> "$chrome"; expected='Chrome marker must be written last' ;;
@@ -544,6 +717,94 @@ self_test() {
             81)
                 rewrite "$rustdocker" 's|/bin/bash /run/rust-verify/verify-toolchain.sh|/bin/bash /run/rust-verify/verify-toolchain.sh \|\| true|'
                 expected='verifier RUN must be exactly' ;;
+            # 82-103: the reviewed gopls closure and its recipe (#103). Cases
+            # 83-91 and 94-98 mutate one thing in a copied tree and then re-pin,
+            # so the rule under test is the one that fires rather than a stale
+            # digest; the exceptions (83, 89, 92-93, 97-98) deliberately test a
+            # digest, an assert or a recipe shape instead. 103 proves repin_gopls
+            # itself is byte-faithful, so the re-pinned cases fail on content.
+            82) rm "$goplsdir/pin.json"; expected='missing input: pin.json' ;;
+            83) printf ' ' >> "$goplsdir/go.sum"
+                expected='go.sum: bytes differ from the committed digest' ;;
+            84)
+                awk '$0 !~ /^golang\.org\/x\/tools\/gopls v0\.23\.0 h1:/' "$goplsdir/go.sum" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$goplsdir/go.sum"
+                repin_gopls "$tree"
+                expected='go.sum lacks h1 for golang.org/x/tools/gopls@v0.23.0' ;;
+            85)
+                printf '\nreplace github.com/fatih/camelcase => github.com/fatih/camelcase v1.0.0\n' \
+                    >> "$goplsdir/go.mod"
+                repin_gopls "$tree"
+                expected='directive not allowed: replace' ;;
+            86)
+                awk '!placed && $0 ~ /^\tgithub\.com\/fsnotify\/fsnotify v1\.9\.0 / {
+                        sub(/v1\.9\.0/, "v1.10.0"); placed = 1
+                    } { print }' "$goplsdir/go.mod" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$goplsdir/go.mod"
+                repin_gopls "$tree"
+                expected="differs from the root module's requirement" ;;
+            87)
+                printf 'toolchain go1.99.0\n' >> "$goplsdir/go.mod"
+                repin_gopls "$tree"
+                expected='directive not allowed: toolchain' ;;
+            88)
+                rewrite "$goplsdir/go.mod" 's|^go 1\.26\.0$|go 1.99.0|'
+                repin_gopls "$tree"
+                expected='go directive' ;;
+            89)
+                jq '(.modules[] | select(.path == "github.com/fatih/camelcase") | .h1)
+                        = (.modules[] | select(.path == "github.com/BurntSushi/toml") | .h1)' \
+                    "$goplsdir/pin.json" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$goplsdir/pin.json"
+                expected='h1 differs from go.sum' ;;
+            90)
+                printf ' ' >> "$goplsdir/gopls.go.mod"
+                repin_gopls "$tree"
+                expected='root go.mod evidence' ;;
+            91)
+                # The sections are length-framed, so the last one is dropped by
+                # truncating at its header's byte offset rather than by lines.
+                line=$(grep -n '^=== ' "$goplsdir/THIRD_PARTY_LICENSES" | tail -n 1 | cut -d: -f1)
+                [ -n "$line" ] || fail 'self-test: case 91 could not find a license section'
+                offset=$(head -n "$((line - 1))" "$goplsdir/THIRD_PARTY_LICENSES" | wc -c | tr -d ' ')
+                head -c "$offset" "$goplsdir/THIRD_PARTY_LICENSES" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$goplsdir/THIRD_PARTY_LICENSES"
+                repin_gopls "$tree"
+                expected='license evidence' ;;
+            92)
+                rewrite "$godocker" 's|^ARG GOPLS_VERSION=.*|ARG GOPLS_VERSION=v0.0.0|'
+                expected='asserted gopls version' ;;
+            93)
+                rewrite "$godocker" 's|^ARG GO_VERSION=.*|ARG GO_VERSION=1.27.4|'
+                expected='pin generated with go' ;;
+            94)
+                rewrite "$godocker" '/source=gopls_closure.py,target=\/tmp\/gopls_closure.py,ro/d'
+                expected='installer RUN lacks the reviewed runtime bind: source=gopls_closure.py' ;;
+            95)
+                rewrite "$godocker" 's|bash /tmp/install-gopls.sh|bash /tmp/install-gopls.sh \|\| true|'
+                expected='installer RUN must be exactly' ;;
+            96)
+                rewrite "$godocker" 's|RUN --network=none|RUN|'
+                expected='verifier must run with --network=none' ;;
+            97)
+                echo 'RUN go install golang.org/x/tools/gopls@latest' >> "$godocker"
+                expected='unpinned go install, graph regeneration or checksum bypass in Dockerfile' ;;
+            98)
+                echo 'ENV GOTOOLCHAIN=auto' >> "$godocker"
+                expected='GOTOOLCHAIN' ;;
+            99) printf 'unexpected' > "$goplsdir/.extra"; expected='unreviewed input: .extra' ;;
+            100)
+                rm "$goplsdir/go.sum"
+                ln -s go.mod "$goplsdir/go.sum"
+                expected='symlink go.sum' ;;
+            101) rm "$goplshelper"; expected='guarded script missing: go-dev/gopls_closure.py' ;;
+            102)
+                jq '.authentication.method = "assumed-signed"' "$goplsdir/pin.json" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$goplsdir/pin.json"
+                expected='module-channel determination' ;;
+            103) repin_gopls "$tree" ;;
+            # SELF_TEST_TABLE_END
+            *) fail "case $n: not in the case table" ;;
         esac
         rc=0
         EXAMPLE_LAYERS_REPORT_BASH=1 "$BASH" "$CHECKER" --root "$tree" > "$SCRATCH/out" 2>&1 || rc=$?
@@ -558,7 +819,7 @@ self_test() {
         fi
         echo "case $n passed: ${expected:-pass}"
     done
-    echo 'example layers self-test passed (81 cases)'
+    echo "example layers self-test passed ($SELF_TEST_CASES cases)"
 }
 case "${1:-}" in
     '') [ "$#" -eq 0 ] || usage ;;

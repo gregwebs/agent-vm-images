@@ -214,8 +214,9 @@ name agent-vm records.
 
 | Files | Disposition |
 |---|---|
-| `chrome-devtools/{Dockerfile,agent-vm-chrome-mcp}`, `go-dev/{install-go,install-golangci-lint,install-gopls,verify-toolchain}.sh`, `rust-dev/{install-verus,verify-toolchain}.sh` | byte-identical |
-| `{go-dev,rust-dev,wirenboard-cpp}/Dockerfile`, `rust-dev/install-rust.sh` | comments only: launcher file references qualified as agent-vm's; the rust-dev pin comment states the policy below |
+| `chrome-devtools/{Dockerfile,agent-vm-chrome-mcp}`, `go-dev/{install-go,install-golangci-lint}.sh`, `rust-dev/{install-verus,verify-toolchain}.sh` | byte-identical |
+| `go-dev/{install-gopls,verify-toolchain}.sh`, `go-dev/Dockerfile` | rewritten by [#103](https://github.com/gregwebs/agent-vm-images/issues/103): gopls is built from a committed module closure instead of `go install pkg@version` (see [Go: reviewed gopls closure](#go-reviewed-gopls-closure-103)); the two archive installers stay byte-identical |
+| `{rust-dev,wirenboard-cpp}/Dockerfile`, `rust-dev/install-rust.sh` | comments only: launcher file references qualified as agent-vm's; the rust-dev pin comment states the policy below |
 | `README.md` | launcher links made absolute; build-from-checkout section; check ownership and pin policy point here |
 
 | Check (agent-vm, before) | Owner after |
@@ -347,12 +348,84 @@ key identity, manifest signature, manifest-derived selection, ARG equality), the
 exact installer/verifier RUN shapes and mounts, `--network=none` on the verifier,
 the absence of a runtime `CARGO_HOME`/`RUSTUP_TOOLCHAIN`, banned live-bootstrap
 or mutable-channel tokens, and the Verus smoke shape — by
-`script/test/example-layers.sh` (81 cases). Hermetic behaviour:
+`script/test/example-layers.sh` (103 cases). Hermetic behaviour:
 `python3 script/test/rust-toolchain-pins.py` and
 `python3 script/test/rust-toolchain-maintenance.py`. Native evidence:
 `bash script/test/rust-example.sh --platform linux/arm64|linux/amd64` on a
 native daemon. Equality with agent-vm's current selections is still not
 machine-checked (see below).
+
+#### Go: reviewed gopls closure (#103)
+
+`examples/layers/go-dev/gopls-closure/` is the reviewed input set for the Go
+layer's language server, and the example owns it:
+
+- `go.mod`: the canonical wrapper module (`tool golang.org/x/tools/gopls`, every
+  selected module as an indirect requirement);
+- `go.sum`: the full tidy checksum set (both `h1:` and `/go.mod` lines);
+- `gopls.go.mod`: the root module's upstream `go.mod` bytes, hash-bound by its
+  committed `/go.mod` line;
+- `THIRD_PARTY_LICENSES`: the reviewed notice files, length-framed with per-file
+  digests;
+- `pin.json`: the record binding all four by digest, plus the reviewed scope
+  (root, `go.mod`, `go.sum`), the dated module-channel determination, the
+  unauthenticated proxy provenance and the partial VCS signature inventory.
+
+`examples/layers/go-dev/gopls_closure.py` is the only program that verifies or
+installs this. Ordinary builds run one `go build -mod=readonly` in an environment
+the helper constructs (no inherited `GOFLAGS`/`GOPROXY`/`GONOSUMDB`/`GOENV`,
+`GOTOOLCHAIN=local`, proxy without `,direct`, explicit sumdb key, private caches,
+`CGO_ENABLED=0`, `GOOS=linux` and the image's `GOARCH`), then require the
+binary's own build info to report the pinned compiler and exactly the reviewed
+modules and sums before publishing anything. `GoCommand` is closed to four
+members, so a graph or checksum refresh is not expressible at build time.
+Decision and rejected alternatives: [ADR 0008](adr/0008-go-example-gopls-closure.md).
+
+Only `script/dev/upgrade-gopls.sh` (with `script/dev/gopls-closure-update.py`)
+writes these files, on a maintainer host (it refuses `GITHUB_ACTIONS=true`). It
+stages the whole two-architecture closure with the layer's pinned Go, verifies
+every new sum through the checksum database, cross-builds both Linux targets from
+the staged files with `GOPROXY=off`, and publishes the five closure files plus
+the Dockerfile `ARG GOPLS_VERSION` assertion as one transaction:
+
+```bash
+bash script/dev/upgrade-gopls.sh v0.23.0 \
+  --review-determination "$(date -u +%F)" --reviewer gregwebs
+bash script/dev/upgrade-gopls.sh v0.23.0   # expected: unchanged
+bash script/dev/upgrade-gopls.sh --check   # offline
+```
+
+A changed root, sum set, notice layout, signature inventory or policy prints
+`module-channel determination requires renewed review` and publishes nothing; the
+review date and reviewer come from a human who reviewed that exact proposal (the
+refusal retains the proposed bytes, and `--proposal DIR` binds a later approval
+to them). Status `3` means an undecided rollback: recover the retained directory
+before further commits.
+
+First use is bounded by `GOTOOLCHAIN=local`: a project asking for a newer
+toolchain fails locally instead of downloading one. A guest's own `go get`,
+`go install` or module download is outside the guarantee, as are project
+dependencies.
+
+Machine-checked here: the committed closure (file set, digests, canonical
+`go.mod`, both checksum kinds, root evidence, notice sections, review scope,
+all four ARG-derived assertions), the exact installer/verifier RUN shapes and
+mounts, `--network=none` on the verifier, exactly one `ENV GOTOOLCHAIN=local`, the
+absence of any other `GO*` policy ENV, and banned unpinned-install /
+graph-regeneration / checksum-bypass tokens — by `script/test/example-layers.sh`
+(103 cases). Hermetic behaviour on a pinned native Go:
+`python3 script/test/gopls-closure-pins.py --go-root PATH` and
+`python3 script/test/gopls-closure-maintenance.py --go-root PATH`. Native
+evidence: `bash script/test/go-example.sh --platform linux/arm64|linux/amd64
+--no-cache` on a native daemon, including a real LSP session and a hard
+content-replacement negative.
+
+The image-source helper scan does **not** cover the new helper today: its
+inventory is empty because of
+[#116](https://github.com/gregwebs/agent-vm-images/issues/116), so a green
+`cargo test` is not helper coverage. Retained-archive authentication and the
+per-module signer policy remain
+[#115](https://github.com/gregwebs/agent-vm-images/issues/115)'s.
 
 ### Landing order
 

@@ -1,0 +1,114 @@
+# TEMPORARY: native amd64 + arm64 evidence for the go-dev example (#103).
+#
+# This file exists only for the pull request that pins the gopls closure. It is a
+# caller, not a home for logic: every phase lives in script/test/go-example.sh, so
+# the hosted rows and a maintainer's local run execute the same code. Before that
+# PR merges this file is deleted in a workflow-only commit; permanent example CI
+# stays with #33. Do not grow it into example CI.
+#
+# The matrix is two native runners (no QEMU): ubuntu-24.04 is amd64 and
+# ubuntu-24.04-arm is arm64, and the harness refuses a daemon whose architecture
+# is not the requested one. Both rows build with --no-cache because a cached
+# gopls-install stage would prove nothing about the installer.
+name: Go example native (temporary, #103)
+on:
+  pull_request:
+    # Only the inputs this suite actually consumes. The reusable gate below still
+    # runs the full default suite, so a narrower filter here cannot hide a
+    # contract failure.
+    paths: ['examples/layers/go-dev/**', 'script/test/go-example.sh',
+            'script/test/fixtures/go-example/**', 'script/test/host-watchdog.py',
+            'script/test/fixtures/rust-toolchain/canary.py',
+            'script/ci/apt-install.sh', '.github/workflows/go-example-native.yml']
+# PR-only, like the #102 precedent: this caller is temporary evidence for one pull
+# request, not a home for a manual entry point.
+# Least privilege: the harness reads the checkout and writes only target/.
+permissions:
+  contents: read
+jobs:
+  contracts:
+    uses: ./.github/workflows/contracts.yml
+  native:
+    needs: contracts
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    # PROVISIONAL bounds, arrived at from the measured local arm64 run and kept as
+    # floors: 5 checkout + 20 prerequisites + 150 suite + 5 summary + 10 upload =
+    # 190, inside a 210-minute job. The harness's own suite watchdog is 7200 s and
+    # its supervisor grace 90 s, so 150 minutes bounds it with room for one
+    # escalation window. Raise with a measurement, never to let a slow run pass.
+    timeout-minutes: 210
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        timeout-minutes: 5
+        with:
+          persist-credentials: false
+      - name: Prerequisites
+        timeout-minutes: 20
+        # python3 and jq drive the harness and its pin assertions; coreutils gives
+        # it the GNU timeout/sha256sum the repository assumes.
+        run: bash script/ci/apt-install.sh python3 jq coreutils
+      - name: Go example suite
+        timeout-minutes: 150
+        env:
+          NATIVE_ARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p target/ci-logs
+          set -o pipefail
+          bash script/test/go-example.sh --platform "linux/$NATIVE_ARCH" --no-cache \
+            2>&1 | tee target/ci-logs/go-example.log
+      - name: Evidence summary
+        if: always()
+        timeout-minutes: 5
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          NATIVE_ARCH: ${{ matrix.arch }}
+          JOB_VERDICT: ${{ job.status }}
+        run: |
+          mkdir -p target/ci-logs
+          # The newest run directory is the one this step reports on; the harness
+          # names it deterministically, so a sorted glob is enough and no name
+          # can contain whitespace.
+          logs=$(find target/go-example -maxdepth 1 -type d -name 'go-example-*' 2>/dev/null | sort | tail -1)
+          {
+            echo "Source SHA: $SOURCE_SHA; native platform: linux/$NATIVE_ARCH; verdict: $JOB_VERDICT"
+            echo 'Failed, NOT-RUN or absent phases are NOT acceptance. QEMU is not acceptance.'
+            for f in harness.log durations.txt cleanup.txt; do
+              if [ -n "$logs" ] && [ -f "$logs/$f" ]; then cat "$logs/$f"; else echo "missing: $f"; fi
+            done
+            # The archive digests are the AC2 evidence for this architecture; a
+            # run that lost them is not a pass however the phases ended.
+            if [ -n "$logs" ] && [ -f "$logs/build.log" ]; then
+              grep -E 'linux-.+\.tar\.gz: OK' "$logs/build.log" || echo 'missing: archive sha256sum -c OK lines'
+            fi
+          } | tee target/ci-logs/summary.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Collect logs
+        if: always()
+        timeout-minutes: 5
+        run: |
+          mkdir -p target/ci-logs
+          # The newest run directory is the one this step reports on; the harness
+          # names it deterministically, so a sorted glob is enough and no name
+          # can contain whitespace.
+          logs=$(find target/go-example -maxdepth 1 -type d -name 'go-example-*' 2>/dev/null | sort | tail -1)
+          if [ -n "$logs" ]; then
+            cp -R "$logs" target/ci-logs/harness || true
+            # The mutant build context carries the review record, not secrets, but
+            # it is build input rather than evidence.
+            rm -rf target/ci-logs/harness/mutant target/ci-logs/harness/verifier-bundle
+          fi
+      - name: Upload evidence
+        if: always()
+        timeout-minutes: 10
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: go-example-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/ci-logs/
+          if-no-files-found: error

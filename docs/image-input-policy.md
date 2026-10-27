@@ -253,6 +253,68 @@ exception. Changes to a hash-only exception need human review: the writer prints
 `hash-only bootstrap exception requires renewed review`, shows the old and new
 identity, and publishes nothing until a reviewer re-dates it.
 
+## The Go example's gopls closure
+
+`examples/layers/go-dev` is a checked-in example, so its gopls input is in scope.
+The example no longer runs `go install golang.org/x/tools/gopls@VERSION`, which
+let the `go` command choose the module graph and accept sums it obtained during
+the build. It commits the whole selection instead: the record is
+[`gopls-closure/pin.json`](../examples/layers/go-dev/gopls-closure/pin.json) and
+the decision is [ADR 0008](adr/0008-go-example-gopls-closure.md).
+
+What is committed: a tiny wrapper Go module (`tool golang.org/x/tools/gopls` plus
+every selected module as an indirect requirement), the full tidy `go.sum` with
+both checksum kinds, the root module's own upstream `go.mod` bytes, a
+length-framed `THIRD_PARTY_LICENSES` transport of the reviewed notice files, and
+`pin.json` binding all four by digest together with the reviewed scope
+(root, `go.mod`, `go.sum`), the reviewer and date, the unauthenticated proxy
+provenance and the partial VCS signature inventory. For v0.23.0 that is 23
+modules, 34 zip `h1` lines, 101 `/go.mod` lines and 38 notice files.
+
+What an ordinary build proves (`gopls_closure.py`, driven by
+`install-gopls.sh`): the committed bytes match their digests; the wrapper is in
+its reviewed canonical form; `go.sum` carries both checksum kinds for every
+selected module; the root `go.mod` evidence matches its `h1`; every selected
+module is named by the root's own `go.mod` at the same version (the reviewed
+current-pin adoption restriction); the build runs with `-mod=readonly` in an
+environment the helper constructs — `GOTOOLCHAIN=local`, no inherited
+`GOFLAGS`/`GOPROXY`/`GONOSUMDB`/`GOENV`/`GOWORK`, private caches, `CGO_ENABLED=0`,
+`GOOS=linux` and the image's `GOARCH`; and the resulting binary's own build info
+reports the pinned compiler, the pinned target and exactly the reviewed modules
+with exactly their sums, after which the licence file is published from the same
+verified bytes. The `GoCommand` set is closed, so `go get`, `go install`,
+`go mod tidy|download|vendor` are not expressible in an ordinary build.
+
+What it does not prove: that the release is safe, that the publisher authorised
+its bytes, or that the transported notices are legally sufficient. It also does
+not cover a guest's own `go get`, `go install` or project module download — those
+are user/project actions outside the guarantee. `GOTOOLCHAIN=local` bounds the
+toolchain half of that: a module asking for a newer toolchain fails locally
+rather than downloading one.
+
+Determination: for this closure the reviewed authentication channel for module
+content is sum.golang.org under the explicit verifier key plus the committed
+`go.sum`; the log establishes consistency, not publisher approval. VCS release
+signatures available for three selected modules are inventoried but neither
+verified nor used as module authentication, and the trusted-identity / zip-binding
+policy is [still owned elsewhere](#work-still-owned-elsewhere). A change to the
+root, sums, notice layout, signature inventory or policy requires a renewed
+**dated, scoped module-channel determination**: the writer prints
+`module-channel determination requires renewed review` and publishes nothing.
+
+The four retained archive SHA-256 values (`GO_AMD64_SHA256`, `GO_ARM64_SHA256`,
+`GOLANGCI_LINT_AMD64_SHA256`, `GOLANGCI_LINT_ARM64_SHA256`) and both archive
+installers are unchanged by this closure; each native run records their
+`sha256sum -c` OK lines. Hash checks are not signature verification — see
+the follow-up below.
+
+Maintenance:
+
+```sh
+bash script/dev/upgrade-gopls.sh v0.23.0 --review-determination YYYY-MM-DD --reviewer NAME
+bash script/dev/upgrade-gopls.sh --check          # offline verification only
+```
+
 ## Repository base identity: a committed input manifest
 
 The external pins above bound *parents*. A local base is a source input to the
@@ -396,6 +458,17 @@ example: its record lives in the example's `pin.json`
 ([details above](#the-rust-examples-toolchain-closure)) and it is re-reviewed on
 every bootstrap identity change or newly published signing/attestation scheme.
 
+The Go example's closure is a different kind of record: it is a **dated, scoped
+module-channel determination**, not an absence-of-signatures exception. It states
+which channel authenticated the module content (sum.golang.org under the explicit
+verifier key plus the committed `go.sum`) and that the log proves consistency
+rather than publisher authorisation; the available VCS signatures of three
+selected modules are inventoried there as evidence, unverified and unused. It is
+renewed on a change of root, sums, notice layout, signing inventory, rationale or
+verifier key ([details above](#the-go-examples-gopls-closure)). A missing
+signature is therefore neither claimed nor excused here: the per-module signer
+policy is outstanding work, below.
+
 The released standard image is a different case: it must authenticate. Its pin
 carries GitHub attestation provenance with repository `gregwebs/agent-vm-images`,
 the composed signer workflow `.github/workflows/release-standard.yml`, source ref
@@ -498,6 +571,20 @@ change.
 
 ## Work still owned elsewhere
 
+- ["Verify retained archive signatures and per-module VCS identities"
+  #115](https://github.com/gregwebs/agent-vm-images/issues/115), a #94
+  sub-issue: the Go toolchain `.asc`, the golangci-lint release attestations and a
+  per-module VCS trusted-signer → module-zip binding policy. Under the owner's
+  [amendment on #103](https://github.com/gregwebs/agent-vm-images/issues/103#issuecomment-6422547991)
+  the gopls closure delivers AC3 closure-scoped only; the retained archive hashes
+  (AC2) do not cover or excuse that remaining work.
+- ["Repair the maintained-helper inventory in the image-source gate"
+  #116](https://github.com/gregwebs/agent-vm-images/issues/116): the
+gate's `maintained_helper_sources()` currently yields no entries, so a green
+`cargo test` does **not** exercise helper-marker scanning. Do not cite that gate
+as helper coverage, for the gopls closure helper or anything else, until #116
+lands; this change is assured by explicit recipe checks, the helper's own
+schema/environment tests, real-Go sandbox suites and manual security review.
 - [#101](https://github.com/gregwebs/agent-vm-images/issues/101) owns optional
   Claude plugin inputs.
 - The local edge is closed by the committed base-input manifest and the parent
