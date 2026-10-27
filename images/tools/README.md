@@ -27,7 +27,7 @@ Node 22, base-owned pnpm, fetch/diagnostic facilities, explicit optional trust a
 | copilot | AGENT_VERSION_COPILOT | 1.0.90 / SEMVER |
 | dsh | AGENT_VERSION_DSH | manifest 0.1.5-rc.2 / SEMVER |
 | pnpm (inherited base) | AGENT_VERSION_PNPM (compatibility only) | base pin.json 11.11.0 / SEMVER |
-| pi | AGENT_VERSION_PI | manifest 1.3.0 / SEMVER |
+| pi | AGENT_VERSION_PI | manifest 1.4.0 / SEMVER |
 | opencode-claude | AGENT_VERSION_OPENCODE_CLAUDE | plugin manifest 1.4.1 / SEMVER |
 | pi-claude-bridge | AGENT_VERSION_PI_CLAUDE_BRIDGE | bridge manifest 0.8.0 / SEMVER |
 
