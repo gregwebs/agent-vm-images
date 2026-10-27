@@ -78,7 +78,7 @@ RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro 
 ARG AGENT_VERSION_PI=
 ARG AGENT_VERSION_PI_CLAUDE_BRIDGE=
 
-LABEL org.agent-vm.version.pi="${AGENT_VERSION_PI:-1.3.0}" \
+LABEL org.agent-vm.version.pi="${AGENT_VERSION_PI:-1.4.0}" \
       org.agent-vm.version.pi-claude-bridge="${AGENT_VERSION_PI_CLAUDE_BRIDGE:-0.8.0}"
 
 COPY tools/pi/package.json tools/pi/package-lock.json /opt/agent-vm/pi/

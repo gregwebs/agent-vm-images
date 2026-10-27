@@ -1,7 +1,7 @@
 # Pi runtime payloads
 
 The [standard Dockerfile](../../standard/Dockerfile) installs the reviewed
-manifest/lock (`1.3.0`) and the separate bridge project (`0.8.0`), then copies
+manifest/lock (`1.4.0`) and the separate bridge project (`0.8.0`), then copies
 the wrapper, mandatory warning and Codex extensions, and seed hook. The
 [installer documentation](../README.md#pi-integrity) explains the hashed-lock
 contract, the shrinkwrap-era sibling checks and bridge flags.

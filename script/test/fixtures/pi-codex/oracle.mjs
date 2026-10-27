@@ -159,7 +159,7 @@ export default function (pi) {
   pi.on("session_start", async (_event, ctx) => {
     const cases = [];
     const add = (name, test) => cases.push({ name, test });
-    const model = ctx.modelRegistry.find("agent-vm-codex", "gpt-5.5");
+    const model = ctx.modelRegistry.find("agent-vm-codex", "gpt-6.1-sol");
     let hosts;
     try {
       assert.ok(model, "registered model missing");
@@ -321,7 +321,7 @@ export default function (pi) {
         }
       }
       add("replay-identity", () => replay(model, false));
-      add("replay-mutant-control", () => replay(ctx.modelRegistry.find("agent-vm-codex-oracle-mutant", "gpt-5.5"), true));
+      add("replay-mutant-control", () => replay(ctx.modelRegistry.find("agent-vm-codex-oracle-mutant", "gpt-6.1-sol"), true));
       for (const { name, test } of cases) {
         try { await test(); ctx.ui.notify(`AGENT-VM-CODEX-CASE PASS ${name}`, "warning"); }
         catch (error) { ctx.ui.notify(`AGENT-VM-CODEX-CASE FAIL ${name}: ${error.message}`, "warning"); }
