@@ -72,10 +72,10 @@ SYSTEM_SHELLS = ('/bin/bash', '/usr/bin/bash', '/bin/sh', '/usr/bin/sh', '/usr/b
 class AlternateCompiler:
     """A second real Go toolchain that proved it compiles, or why none did.
 
-    Naming a different version is not enough. A hosted runner's tool cache can hold a
-    ``go`` whose root has no stdlib; the writer then fails inside ``go get -tool`` on a
-    missing ``fmt``, so a case about the reviewed build settings never reaches them.
-    An unusable candidate is reported, never counted as a pass or a skip.
+    Naming a different version is not enough. A tool cache can hold a ``go`` whose
+    root is not a stdlib; the writer then fails inside ``go get -tool`` on a missing
+    ``fmt``, so a case about the reviewed build settings never reaches them. An
+    unusable candidate is reported, never counted as a pass or a skip.
     """
 
     root: Path | None = None
@@ -104,13 +104,26 @@ def second_go_root(pinned: str) -> AlternateCompiler:
         return AlternateCompiler(reason=f'go on PATH is the pinned go{pinned}')
     if not (root / 'bin' / 'go').is_file():
         return AlternateCompiler(reason=f'{root} has no bin/go')
-    stdlib = root / 'src' / 'fmt'
-    if not stdlib.is_dir():
-        return AlternateCompiler(reason=f'{root} has no stdlib ({stdlib} is absent)')
+    if not stdlib_sources(root):
+        return AlternateCompiler(reason=f'no stdlib source at {root / "src" / "fmt"}')
     if not builds_stdlib_program(root):
         return AlternateCompiler(
-            reason=f'go{version} at {root} cannot build a program that imports fmt')
+            reason=f'go{version} at {root} cannot build a program that imports fmt '
+                   'with a private cache')
     return AlternateCompiler(root=root, version=version)
+
+
+def stdlib_sources(root: Path) -> bool:
+    """Whether the root carries the stdlib *sources* ``fmt`` is compiled from.
+
+    A root can answer ``go env GOROOT`` and then have no package: GOROOT resolution
+    only looks for ``pkg/tool``, so a tool cache that kept the tools and dropped
+    ``src`` still identifies itself. The writer's ``go get -tool`` loads ``fmt`` from
+    these files, so their absence is the candidate's own defect and is named here
+    rather than surfacing as a failure of the case under test.
+    """
+    directory = root / 'src' / 'fmt'
+    return directory.is_dir() and any(directory.glob('*.go'))
 
 
 def toolchain_probe_environment(go: Path) -> dict:
@@ -133,24 +146,48 @@ def go_stdout(go: Path, arguments: list[str], *, cwd: Path | None = None,
 
 
 def builds_stdlib_program(root: Path) -> bool:
-    """Whether a stdlib-only program builds with that toolchain, offline.
+    """Whether a stdlib-only program builds with that toolchain, offline and cold.
 
-    A missing ``src/fmt`` is the visible half of an incomplete root; a build is the
-    half that also covers a root whose stdlib exists but cannot compile. The cache
-    lives in the probe's own scratch, so an unwritable ``HOME`` cannot be mistaken
-    for a broken toolchain.
+    ``src/fmt``'s presence is one half of an incomplete root; a build is the half
+    that also covers a root whose stdlib exists but cannot compile. Every directory
+    the build writes to is private to the probe -- a shared warm ``GOCACHE`` would
+    answer for a root the writer's fresh caches cannot use, and an unwritable
+    ``HOME`` would look like a broken toolchain. The tree is removed afterwards.
     """
     directory = Path(tempfile.mkdtemp(prefix='second-go-'))
     go = root / 'bin' / 'go'
     try:
         (directory / 'main.go').write_text(
             'package main\n\nimport "fmt"\n\nfunc main() { fmt.Println("ok") }\n')
+        private = {name: directory / name for name in ('home', 'cache', 'gopath')}
+        for path in private.values():
+            path.mkdir()
         environment = toolchain_probe_environment(go)
-        environment.update(GOCACHE=str(directory / 'cache'), GOTMPDIR=str(directory))
+        environment.update(HOME=str(private['home']), GOCACHE=str(private['cache']),
+                           GOPATH=str(private['gopath']),
+                           GOMODCACHE=str(private['gopath'] / 'pkg' / 'mod'),
+                           GOTMPDIR=str(directory))
         return go_stdout(go, ['build', '-o', os.devnull, 'main.go'], cwd=directory,
                          environment=environment) is not None
     finally:
         remove_tree(directory)
+
+
+def boundary_readable(go_root: Path, alternate: Path | None) -> list[str]:
+    """What the writer may read: the checkout, and every Go root it compiles with.
+
+    An alternate compiler contributes its executables to the inventory, and a Go
+    root is *not* its executables: ``go`` resolves GOROOT by finding ``pkg/tool``,
+    so a root bound as files alone answers ``go env GOROOT`` and then has no
+    ``src/fmt`` -- the loader says "package fmt is not in std" inside
+    ``go get -tool``, before the settings comparison this case exists to make. A
+    platform that enforces reads therefore has to be given the root itself; the
+    argument is whatever root the validation accepted, never a known location.
+    """
+    readable = [str(FIXTURES), str(REPOSITORY_ROOT), str(go_root)]
+    if alternate is not None:
+        readable.append(str(alternate))
+    return readable
 
 
 def full_inventory(go_root: Path, launcher_dir: Path,
@@ -833,7 +870,7 @@ def main() -> int:
         confinement.enter(
             sandbox, prove, executables=inventory,
             writable=[str(root), tempfile.gettempdir(), '/tmp', '/private/tmp'],
-            readable=[str(FIXTURES), str(REPOSITORY_ROOT), str(go_root)], root=root)
+            readable=boundary_readable(go_root, alternate_root), root=root)
     except confinement.Refusal as error:
         print(f'ISOLATION-UNAVAILABLE: {error}', file=sys.stderr)
         return 3
