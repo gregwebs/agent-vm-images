@@ -68,34 +68,89 @@ WRITER_TOOLS = ('bash', 'sh', 'cp', 'mv', 'rm', 'rmdir', 'mkdir', 'mktemp', 'cat
 SYSTEM_SHELLS = ('/bin/bash', '/usr/bin/bash', '/bin/sh', '/usr/bin/sh', '/usr/bin/env')
 
 
-def second_go_root(pinned: str) -> tuple[Path, str] | None:
-    """A second *real* local Go toolchain, if this host has one.
+@dataclass(frozen=True)
+class AlternateCompiler:
+    """A second real Go toolchain that proved it compiles, or why none did.
+
+    Naming a different version is not enough. A hosted runner's tool cache can hold a
+    ``go`` whose root has no stdlib; the writer then fails inside ``go get -tool`` on a
+    missing ``fmt``, so a case about the reviewed build settings never reaches them.
+    An unusable candidate is reported, never counted as a pass or a skip.
+    """
+
+    root: Path | None = None
+    version: str = ''
+    reason: str = ''
+
+
+def second_go_root(pinned: str) -> AlternateCompiler:
+    """A second *real* local Go toolchain, validated, if this host has one.
 
     No fake compiler is invented for the carry control: the point of the case is
     that a genuinely different compiler produces genuinely different build settings.
     """
     candidate = shutil.which('go')
     if candidate is None:
-        return None
-    real = Path(os.path.realpath(candidate))
-    env = {'PATH': f'{real.parent}:/usr/bin:/bin', 'HOME': os.environ.get('HOME', '/tmp'),
-           'GOENV': 'off', 'GOWORK': 'off'}
-    try:
-        proc = subprocess.run([str(real), 'env', 'GOROOT', 'GOVERSION'], capture_output=True,
-                              text=True, timeout=120, env=env)
-    except OSError:
-        return None
-    if proc.returncode != 0:
-        return None
-    lines = proc.stdout.split()
+        return AlternateCompiler(reason='go is not on PATH')
+    go = Path(os.path.realpath(candidate))
+    identity = go_stdout(go, ['env', 'GOROOT', 'GOVERSION'])
+    if identity is None:
+        return AlternateCompiler(reason=f'{go} cannot report its own GOROOT and version')
+    lines = identity.split()
     if len(lines) < 2:
+        return AlternateCompiler(reason=f'{go} reported neither its GOROOT nor its version')
+    root, version = Path(lines[0]), lines[1].removeprefix('go')
+    if version == pinned:
+        return AlternateCompiler(reason=f'go on PATH is the pinned go{pinned}')
+    if not (root / 'bin' / 'go').is_file():
+        return AlternateCompiler(reason=f'{root} has no bin/go')
+    stdlib = root / 'src' / 'fmt'
+    if not stdlib.is_dir():
+        return AlternateCompiler(reason=f'{root} has no stdlib ({stdlib} is absent)')
+    if not builds_stdlib_program(root):
+        return AlternateCompiler(
+            reason=f'go{version} at {root} cannot build a program that imports fmt')
+    return AlternateCompiler(root=root, version=version)
+
+
+def toolchain_probe_environment(go: Path) -> dict:
+    """The environment a toolchain probe runs in: local toolchain, no network."""
+    return {'PATH': f'{go.parent}:/usr/bin:/bin', 'HOME': os.environ.get('HOME', '/tmp'),
+            'TMPDIR': tempfile.gettempdir(), 'LANG': 'C', 'GOENV': 'off', 'GOWORK': 'off',
+            'GOTOOLCHAIN': 'local', 'GOPROXY': 'off'}
+
+
+def go_stdout(go: Path, arguments: list[str], *, cwd: Path | None = None,
+              environment: dict | None = None) -> str | None:
+    """A Go command's stdout when it succeeded, else None."""
+    try:
+        proc = subprocess.run([str(go), *arguments], capture_output=True, text=True,
+                              timeout=300, cwd=cwd,
+                              env=environment or toolchain_probe_environment(go))
+    except (OSError, subprocess.TimeoutExpired):
         return None
-    root, version = Path(lines[0]), lines[1]
-    if version.startswith('go'):
-        version = version[2:]
-    if version == pinned or not (root / 'bin' / 'go').is_file():
-        return None
-    return root, version
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def builds_stdlib_program(root: Path) -> bool:
+    """Whether a stdlib-only program builds with that toolchain, offline.
+
+    A missing ``src/fmt`` is the visible half of an incomplete root; a build is the
+    half that also covers a root whose stdlib exists but cannot compile. The cache
+    lives in the probe's own scratch, so an unwritable ``HOME`` cannot be mistaken
+    for a broken toolchain.
+    """
+    directory = Path(tempfile.mkdtemp(prefix='second-go-'))
+    go = root / 'bin' / 'go'
+    try:
+        (directory / 'main.go').write_text(
+            'package main\n\nimport "fmt"\n\nfunc main() { fmt.Println("ok") }\n')
+        environment = toolchain_probe_environment(go)
+        environment.update(GOCACHE=str(directory / 'cache'), GOTMPDIR=str(directory))
+        return go_stdout(go, ['build', '-o', os.devnull, 'main.go'], cwd=directory,
+                         environment=environment) is not None
+    finally:
+        remove_tree(directory)
 
 
 def full_inventory(go_root: Path, launcher_dir: Path,
@@ -144,6 +199,7 @@ SIGNAL_RESULT = 'signal-result'
 FORGED_MARKER_FILES = ('forged-marker.txt', 'supervisor-controls.txt')
 TMPDIR_GUARD_FILE = 'tmpdir-guard.txt'
 SECOND_PASS_FILE = 'second-pass-controls.txt'
+SECOND_GO_FILE = 'second-go.txt'
 
 
 @dataclass(frozen=True)
@@ -230,6 +286,14 @@ def supervise(go_root: Path) -> int:
     # Before any child exists: this is the witness a Linux second pass is judged
     # by, and a child started before it can only be refused.
     confinement.record_supervisor(root)
+    # Discovered here, before any child exists: the boundary is fixed at exec time, so
+    # a second compiler's own tools have to be allowlisted by the process that goes in,
+    # not discovered inside it. The verdict travels as a file because an unusable
+    # candidate has a reason to report, and every --inside entry reads it.
+    alternate = second_go_root(fixture_module.PINNED_GO)
+    (root / SECOND_GO_FILE).write_text(json.dumps(
+        {'root': '' if alternate.root is None else str(alternate.root),
+         'version': alternate.version, 'reason': alternate.reason}) + '\n')
 
     # Discriminating control, run where no boundary exists: a forged marker must
     # not buy confinement, so the --inside path (which is what the suite actually
@@ -266,14 +330,8 @@ def supervise(go_root: Path) -> int:
     # stand-in, so both the refusal and the second pass are proved on any host.
     (root / SECOND_PASS_FILE).write_text(json.dumps(second_pass_check(root)) + '\n')
 
-    alternate = second_go_root(fixture_module.PINNED_GO)
     child_environment = {key: value for key, value in os.environ.items()
                          if key not in ('FIXTURE_SANDBOXED', 'FIXTURE_EXEC_RESTRICTED')}
-    if alternate is not None:
-        # The boundary is fixed at exec time, so a second compiler's own tools have
-        # to be allowlisted by the process that goes in, not discovered inside.
-        child_environment['FIXTURE_ALT_GO_ROOT'] = str(alternate[0])
-        child_environment['FIXTURE_ALT_GO_VERSION'] = alternate[1]
     child = subprocess.Popen(
         [sys.executable, str(Path(__file__).resolve()), '--inside', '--go-root',
          str(go_root), '--root', str(root)],
@@ -617,6 +675,11 @@ def tmpdir_guard_check(root: Path) -> dict:
     The writer is host glue and this guard is a pure path check (never write
     scratch inside the checkout), so it needs no sandbox. Running it here also
     sidesteps the boundary's exec allowlist, which would refuse the shims.
+
+    ``GITHUB_ACTIONS`` is removed from the probe's environment even when this run
+    is hosted: the writer refuses CI before it reads TMPDIR, so a probe that
+    inherits the marker would only prove that refusal. The CI refusal keeps its
+    own case, which sets the marker explicitly.
     """
     guard_tree = tree(root / 'repo-tmpdir-guard')
     (guard_tree / 'tmp').mkdir()
@@ -626,8 +689,8 @@ def tmpdir_guard_check(root: Path) -> dict:
     shim_work = guard_tree / 'shim-work'
     shim_work.mkdir()
     write_tmpdir_shims(shim_dir)
-    env = dict(os.environ,
-               PATH=str(shim_dir) + ':' + os.environ.get('PATH', '/usr/bin:/bin'),
+    env = {key: value for key, value in os.environ.items() if key != 'GITHUB_ACTIONS'}
+    env.update(PATH=str(shim_dir) + ':' + os.environ.get('PATH', '/usr/bin:/bin'),
                TMPDIR=str(guard_tree / 'tmp'),
                FIXTURE_SHIM_LOG=str(shim_log),
                FIXTURE_SHIM_WORK=str(shim_work))
@@ -636,13 +699,14 @@ def tmpdir_guard_check(root: Path) -> dict:
                                 cwd=str(guard_tree), env=env,
                                 capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
-        return {'exit': None, 'refused': False, 'no_mktemp': False, 'no_stager': False,
-                'no_work': False, 'no_publish': False, 'detail': 'timeout'}
+        return {'exit': None, 'refused': False, 'reached_guard': False, 'no_mktemp': False,
+                'no_stager': False, 'no_work': False, 'no_publish': False, 'detail': 'timeout'}
     invocations = shim_log.read_text() if shim_log.exists() else ''
     return {
         'exit': result.returncode,
         'refused': result.returncode == 1
         and 'refusing to work inside the repository' in result.stderr,
+        'reached_guard': 'GitHub Actions' not in result.stderr,
         'no_mktemp': 'mktemp invoked' not in invocations,
         'no_stager': 'stager invoked' not in invocations,
         'no_work': not list(shim_work.iterdir()) and not list((guard_tree / 'tmp').iterdir()),
@@ -754,9 +818,9 @@ def main() -> int:
 
     import sandbox
 
-    alternate_root = os.environ.get('FIXTURE_ALT_GO_ROOT')
-    alternate = Path(alternate_root) if alternate_root else None
-    inventory = full_inventory(go_root, launcher_dir, alternate)
+    alternate = json.loads((root / SECOND_GO_FILE).read_text())
+    alternate_root = Path(alternate['root']) if alternate['root'] else None
+    inventory = full_inventory(go_root, launcher_dir, alternate_root)
     # Every attempt is kept: the last one is the proof the checks below report, and
     # the earlier ones only decide whether another entry is needed.
     proofs: list[Proof] = []
@@ -817,6 +881,8 @@ def main() -> int:
           json.dumps(second_pass['genuine']))
     check('a TMPDIR inside the repository is refused',
           tmpdir['refused'], tmpdir['detail'])
+    check('the TMPDIR probe observed the guard, not the CI refusal',
+          tmpdir['reached_guard'], tmpdir['detail'])
     check('the refused TMPDIR stopped before mktemp created a work directory',
           tmpdir['no_mktemp'], tmpdir['detail'])
     check('the refused TMPDIR never invoked the stager',
@@ -1387,12 +1453,15 @@ def main() -> int:
               'proves that is what blocks it.')
 
         print('second compiler')
-        alternate_version = os.environ.get('FIXTURE_ALT_GO_VERSION')
-        if alternate_version is None:
-            print('  NOT RUN: this host has no second real Go toolchain (a fake compiler '
-                  'would not prove anything), so the settings tripwire cannot be exercised '
-                  'with a different compiler')
+        if alternate_root is None:
+            # Named, not skipped: a control whose prerequisite is absent is not a
+            # pass, and a candidate the writer cannot build from is not a second
+            # compiler at all.
+            print('  NOT RUN: no usable second Go toolchain '
+                  f"({alternate['reason']}), so the settings tripwire cannot be "
+                  'exercised with a different compiler')
         else:
+            alternate_version = alternate['version']
             second = tree(root / 'repo-second-go')
             shutil.copytree(data, second / data_relative)
             (second / dockerfile_relative).write_text(
@@ -1400,7 +1469,7 @@ def main() -> int:
                 'ARG GOPLS_VERSION=v0.0.1\n')
             before = snapshot(second / data_relative)
             result = run_writer(fixture_root, second, launcher_dir, ['v0.0.1'],
-                                {'FIXTURE_GO_ROOT': os.environ['FIXTURE_ALT_GO_ROOT']})
+                                {'FIXTURE_GO_ROOT': str(alternate_root)})
             output = result.stdout + result.stderr
             check(f'a second real compiler (go{alternate_version}) is refused by the '
                   'reviewed build settings',
