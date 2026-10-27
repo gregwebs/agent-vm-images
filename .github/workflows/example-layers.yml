@@ -1,0 +1,208 @@
+name: Layer builds (native)
+on:
+  pull_request:
+    # A conservative superset of every example build input, so an unrelated PR
+    # starts no layer workflow at all. This envelope is not the selection policy:
+    # the `changes` job narrows a relevant event to the contexts that changed
+    # (script/ci/layer-changes.py, ADR 0010), and `examples/layers/*/**` is
+    # deliberately a wildcard so a new layer joins without a YAML edit. The layer
+    # root README is not a build input. Path filters cannot use YAML aliases.
+    paths:
+      - 'examples/layers/*/**'
+      - 'script/ci/layer-changes.py'
+      - 'script/test/layer-build.sh'
+      - 'script/test/host-watchdog.py'
+      - 'script/test/require-daemon-builder.sh'
+      - 'script/ci/apt-install.sh'
+      - 'script/test/contracts.sh'
+      - 'script/test/example-layers.sh'
+      - 'script/test/image-sources/**'
+      - 'images/parent-pins.json'
+      - 'script/test/chrome-example.sh'
+      - 'script/test/chrome-example-watchdog.sh'
+      - 'script/test/fixtures/chrome-example/**'
+      - 'script/build/chrome-mcp-provenance.sh'
+      - '.github/workflows/example-layers.yml'
+      - '.github/workflows/chrome-example.yml'
+      - '.github/workflows/contracts.yml'
+  push:
+    branches: [main]
+    # Same list as above, repeated because aliases are not allowed here.
+    paths:
+      - 'examples/layers/*/**'
+      - 'script/ci/layer-changes.py'
+      - 'script/test/layer-build.sh'
+      - 'script/test/host-watchdog.py'
+      - 'script/test/require-daemon-builder.sh'
+      - 'script/ci/apt-install.sh'
+      - 'script/test/contracts.sh'
+      - 'script/test/example-layers.sh'
+      - 'script/test/image-sources/**'
+      - 'images/parent-pins.json'
+      - 'script/test/chrome-example.sh'
+      - 'script/test/chrome-example-watchdog.sh'
+      - 'script/test/fixtures/chrome-example/**'
+      - 'script/build/chrome-mcp-provenance.sh'
+      - '.github/workflows/example-layers.yml'
+      - '.github/workflows/chrome-example.yml'
+      - '.github/workflows/contracts.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    # 5 checkout + 10 selector + 5 summary + 10 upload = 30 minutes inside 35, which
+    # also covers the selector's bounded missing-object fetch.
+    timeout-minutes: 35
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      has_layers: ${{ steps.select.outputs.has_layers }}
+    steps:
+      # Full history: the selector diffs the event's own endpoints, which may
+      # predate this checkout, and fetches at most one missing commit.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        timeout-minutes: 5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Select layer rows
+        id: select
+        timeout-minutes: 10
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PATH: ${{ github.event_path }}
+        run: |
+          mkdir -p target/ci-logs
+          python3 script/ci/layer-changes.py --event-name "$EVENT_NAME" --event-path "$EVENT_PATH" \
+            --output "$GITHUB_OUTPUT" --evidence-dir target/ci-logs/layer-selection
+      - name: Evidence summary
+        if: always()
+        timeout-minutes: 5
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          JOB_VERDICT: ${{ job.status }}
+        run: |
+          mkdir -p target/ci-logs
+          {
+            echo "Source SHA: $SOURCE_SHA; selection verdict: $JOB_VERDICT"
+            echo 'Failed, NOT-RUN or absent selection evidence is NOT acceptance.'
+            if [ -f target/ci-logs/layer-selection/summary.txt ]; then
+              cat target/ci-logs/layer-selection/summary.txt
+            else
+              echo 'missing: layer-selection/summary.txt'
+            fi
+          } | tee target/ci-logs/selection-summary.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload selection evidence
+        if: always()
+        timeout-minutes: 10
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: layer-selection-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/ci-logs/
+          if-no-files-found: error
+  contracts:
+    needs: changes
+    if: needs.changes.outputs.has_layers == 'true'
+    uses: ./.github/workflows/contracts.yml
+  native:
+    needs: [changes, contracts]
+    # always(): a skipped reusable-workflow call would otherwise skip this job
+    # before its own condition is read. No expensive native run happens before
+    # the contracts gate succeeds, and an empty selection expands no rows.
+    if: always() && needs.changes.outputs.has_layers == 'true' && needs.contracts.result == 'success'
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    # Row budgets: generic 5 checkout + 20 prerequisites + 80 cold build + 5 summary
+    # + 10 upload = 120 inside 130. Chrome adds its 60-minute suite and its 14-minute
+    # arm64 control: 194 inside 205. The cold build is bounded by the runner's own
+    # 4500-second supervisor with 90-second TERM grace (4500 + 180 < 4800), the suite
+    # by 3300 s with 110 s grace (3520 < 3600) and the control by 600 s with the same
+    # grace (820 < 840). These are floors: raise them to at least 1.5x the measured
+    # first green per-layer, per-architecture durations.
+    timeout-minutes: ${{ matrix.timeout }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        timeout-minutes: 5
+        with:
+          persist-credentials: false
+      - name: Prerequisites
+        timeout-minutes: 20
+        # jq parses the image inspections and python3 runs the shared watchdog;
+        # Chrome's provenance check additionally needs gh, which the runner image
+        # already provides. This is the previous Chrome workflow's list unchanged.
+        run: bash script/ci/apt-install.sh jq coreutils python3
+      - name: Cold build
+        timeout-minutes: 80
+        # The runner supervises itself (4500 s, 90 s grace) and keeps every phase
+        # log in its evidence directory; the transcript below is for the job log.
+        env:
+          LAYER: ${{ matrix.layer }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          mkdir -p target/ci-logs
+          set -o pipefail
+          bash script/test/layer-build.sh --layer "$LAYER" --platform "$PLATFORM" \
+            --evidence-dir target/ci-logs/layer-build 2>&1 | tee target/ci-logs/layer-build.log
+      - name: Chrome example suite
+        if: matrix.layer == 'chrome-devtools'
+        timeout-minutes: 60
+        env:
+          NATIVE_ARCH: ${{ matrix.arch }}
+          CHROME_EXAMPLE_WATCHDOG_GRACE_SECONDS: 110
+        run: |
+          mkdir -p target/ci-logs
+          set -o pipefail
+          python3 script/test/host-watchdog.py --grace-seconds 110 3300 bash script/test/chrome-example.sh \
+            --platform "linux/$NATIVE_ARCH" --evidence-dir target/ci-logs/chrome-example 2>&1 | tee target/ci-logs/chrome-example.log
+      - name: Interrupted-run watchdog control
+        if: matrix.layer == 'chrome-devtools' && matrix.arch == 'arm64'
+        timeout-minutes: 14
+        run: |
+          BASE_IMAGE=$(jq -er '.[0].Id' target/ci-logs/chrome-example/parent-inspect.log)
+          export BASE_IMAGE
+          set -o pipefail
+          # PROVISIONAL: the three per-case watchdogs (60 s each plus 110 s grace) worst-case ~510 s,
+          # so 600 s bounds them; 600 s plus two 110 s escalation windows (820 s) stays under this 840 s step.
+          EVIDENCE_DIR=target/ci-logs/chrome-watchdog python3 script/test/host-watchdog.py --grace-seconds 110 600 \
+            bash script/test/chrome-example-watchdog.sh 2>&1 | tee target/ci-logs/chrome-watchdog.log
+      - name: Evidence summary
+        if: always()
+        timeout-minutes: 5
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          LAYER: ${{ matrix.layer }}
+          PLATFORM: ${{ matrix.platform }}
+          JOB_VERDICT: ${{ job.status }}
+        run: |
+          mkdir -p target/ci-logs
+          {
+            echo "Source SHA: $SOURCE_SHA; layer: $LAYER; platform: $PLATFORM; verdict: $JOB_VERDICT"
+            echo 'Failed, NOT-RUN or absent phases are NOT acceptance.'
+            for f in verdicts durations evidence; do
+              if [ -f "target/ci-logs/layer-build/$f.txt" ]; then
+                cat "target/ci-logs/layer-build/$f.txt"
+              else
+                echo "missing: layer-build/$f.txt"
+              fi
+            done
+            if [ -f target/ci-logs/layer-build/cleanup.txt ]; then
+              cat target/ci-logs/layer-build/cleanup.txt
+            else
+              echo 'missing: layer-build/cleanup.txt'
+            fi
+            for f in evidence.txt verdicts.txt durations.txt; do
+              if [ -f "target/ci-logs/chrome-example/$f" ]; then cat "target/ci-logs/chrome-example/$f"; fi
+            done
+          } | tee target/ci-logs/summary.txt >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload evidence
+        if: always()
+        timeout-minutes: 10
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: layer-build-${{ matrix.layer }}-${{ matrix.arch }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/ci-logs/
+          if-no-files-found: error

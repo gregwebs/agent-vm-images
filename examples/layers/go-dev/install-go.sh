@@ -38,7 +38,11 @@ trap 'rm -rf "$work"' EXIT
 archive="$work/$asset"
 
 echo "==> install-go: go${GO_VERSION} into $GO_PREFIX"
-curl -fSL --retry 3 -o "$archive" "https://go.dev/dl/${asset}"
+# One variable for the log line and the transfer, so a withdrawn release names
+# the exact URL that failed.
+url="https://go.dev/dl/${asset}"
+echo "==> install-go: fetch $url"
+curl -fSL --retry 3 -o "$archive" "$url"
 echo "${checksum}  ${archive}" | sha256sum -c -
 
 # The archive's single top-level directory is named `go`, so extracting it

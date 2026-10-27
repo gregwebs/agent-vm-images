@@ -3915,16 +3915,35 @@ fn parent_documents() -> BTreeMap<String, String> {
     documents
 }
 
+/// The recipes this repository maintains today. The gate is not this number: a
+/// new recipe is accepted once it is registered in the parent inventory, so
+/// onboarding a layer does not edit a count here. What this list forbids is
+/// deleting a maintained recipe silently, even together with its inventory entry.
+const REQUIRED_RECIPES: [&str; 7] = [
+    "examples/base-extension/Dockerfile",
+    "examples/layers/chrome-devtools/Dockerfile",
+    "examples/layers/go-dev/Dockerfile",
+    "examples/layers/rust-dev/Dockerfile",
+    "examples/layers/wirenboard-cpp/Dockerfile",
+    "images/Dockerfile",
+    "images/standard/Dockerfile",
+];
+
+fn check_required_recipes(recipes: &BTreeMap<String, String>) -> Result<(), String> {
+    for required in REQUIRED_RECIPES {
+        if !recipes.contains_key(required) {
+            return Err(format!("missing maintained recipe: {required}"));
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn the_parent_inventory_pins_every_maintained_recipe() {
     let inventory = parse_parent_inventory(&read_text(PARENT_INVENTORY)).unwrap();
     let recipes = maintained_recipes();
-    assert_eq!(
-        recipes.len(),
-        7,
-        "seven maintained recipes: {:?}",
-        recipes.keys().collect::<Vec<_>>()
-    );
+    check_required_recipes(&recipes).unwrap();
+    // Exact set equality both ways, so an unregistered recipe fails too.
     check_recipe_parents(&inventory, &recipes).unwrap();
     let debian = match &inventory.pins[DEBIAN_PIN] {
         Pin::Official(pin) => pin,
@@ -4193,6 +4212,34 @@ fn parent_inventory_blocks_reject_edits() {
         edited.insert(path.to_owned(), changed);
         mutations.push((label, edited));
     }
+    // The positive control for the same equality: an eighth recipe that is
+    // registered in the inventory is accepted, so adding a layer is a reviewed
+    // registration rather than a number to change here.
+    let mut registered_inventory = inventory.clone();
+    let mut registered_recipes = recipes.clone();
+    let registered = "examples/layers/new-layer/Dockerfile".to_owned();
+    registered_recipes.insert(
+        registered.clone(),
+        format!("FROM {}\n", inventory.pins[DEBIAN_PIN].reference().text()),
+    );
+    registered_inventory.recipes.insert(
+        registered,
+        vec![ParentSpec {
+            stage: None,
+            binding: Binding::Pin(DEBIAN_PIN.to_owned()),
+        }],
+    );
+    assert!(
+        check_recipe_parents(&registered_inventory, &registered_recipes).is_ok(),
+        "a registered eighth recipe must be accepted"
+    );
+    let mut deleted = recipes.clone();
+    deleted.remove(REQUIRED_RECIPES[0]);
+    assert!(
+        check_required_recipes(&deleted).is_err(),
+        "deleting a required recipe must fail"
+    );
+
     for (label, mutate) in [("unlisted recipe", 0_u8), ("missing recipe", 1_u8)] {
         let mut edited = recipes.clone();
         if mutate == 0 {

@@ -132,4 +132,5 @@ cleanup and has `--self-test` controls that need no daemon. Real adoption of
 channel 1.98.1 /
 rustup 1.28.2 downloads and authenticates the full closure. Native evidence is
 `bash script/test/rust-example.sh --platform linux/arm64|linux/amd64` on a
-native daemon; permanent example CI stays with #33.
+native daemon; CI builds the layer cold on both native architectures
+([ADR 0010](0010-layer-build-ci.md)).

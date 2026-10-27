@@ -133,8 +133,9 @@ an absent toolchain, tool or target fails locally instead of downloading one; a
 project `rust-toolchain.toml` that only *declares* extra items may still build.
 Native evidence for both architectures comes from
 `bash script/test/rust-example.sh --platform linux/arm64|linux/amd64` on a
-native daemon; permanent example CI belongs to
-[#33](https://github.com/gregwebs/agent-vm-images/issues/33).
+native daemon. CI runs a cold build of the layer on both architectures (see
+[Example images](docs/image-source-ownership.md#example-images-exampleslayers)),
+not this suite.
 
 ## Go example gopls maintenance
 
@@ -188,8 +189,9 @@ does **not** certify this helper — do not cite it as coverage.
 
 Native evidence for both architectures comes from
 `bash script/test/go-example.sh --platform linux/arm64|linux/amd64 --no-cache` on a
-native daemon; permanent example CI belongs to
-[#33](https://github.com/gregwebs/agent-vm-images/issues/33).
+native daemon. CI runs a cold build of the layer on both architectures (see
+[Example images](docs/image-source-ownership.md#example-images-exampleslayers)),
+not this suite.
 
 ## Parent-pin maintenance
 
@@ -342,14 +344,19 @@ reviewed archive SHA-256 pins for both architectures. Installer defaults also
 require reviewed `script/test/fixtures/installer-egress/selections.tsv` updates
 and strict restricted-egress tests, never automatic allowlist broadening.
 
-Example images under `examples/layers/` are not part of the standard product.
-`contracts.sh` checks them statically. `chrome-devtools` is built and runtime-checked
-natively on amd64 and arm64 by `chrome-example.yml`; the interrupted-run path
-(cleanup after the workflow watchdog fires) is re-proved by
-`bash script/test/chrome-example-watchdog.sh` in the arm64 CI row after the suite,
-reusing its inspected parent image ID; the other examples remain manual until
-[#33](https://github.com/gregwebs/agent-vm-images/issues/33). Their pin policy and
-bump order are in [Example images](docs/image-source-ownership.md#example-images-exampleslayers).
+Example images under `examples/layers/` are not part of the standard product and
+publish nothing. `contracts.sh` checks them statically, and
+`example-layers.yml` builds every one of them cold on amd64 and arm64 when a
+change touches that context or a shared build input; an unrelated change starts
+no layer build. `script/ci/layer-changes.py` does the per-layer narrowing and
+`script/test/layer-build.sh` does the cold build, including the parent pull and
+the platform inspections ([ADR 0010](docs/adr/0010-layer-build-ci.md)).
+`chrome-devtools` additionally keeps its runtime suite, and the interrupted-run
+path (cleanup after the workflow watchdog fires) is re-proved by
+`bash script/test/chrome-example-watchdog.sh` in the arm64 row after the suite,
+reusing its inspected parent image ID. The Rust and Go suites stay manual
+maintenance evidence. Their pin policy and bump order are in
+[Example images](docs/image-source-ownership.md#example-images-exampleslayers).
 
 The Chrome harness reserves 90 seconds total for cleanup (5 seconds per client,
 plus escalation and evidence). Any supervising watchdog's TERM grace must exceed
@@ -587,12 +594,15 @@ bash script/test/parent-identity.sh agent-vm-base:local --platform linux/arm64
 ```
 
 CI uses read-only permissions, pinned actions and checkout without persisted
-credentials. `chrome-example.yml` has provisional bounds of 5 minutes checkout,
-20 prerequisites, 60 suite (3300-second watchdog plus 110-second TERM grace),
-13 arm64 watchdog control (600-second watchdog plus 110-second TERM grace),
-5 summary and 10 upload inside a 120-minute job (113 minutes of steps plus
-7 minutes margin); reset bounds to at least 1.5× first green per-architecture
-measurements, keeping these floors. `contracts.yml` is PR/push/manual and reusable via `workflow_call`;
+credentials. `example-layers.yml` has provisional bounds. Its `changes` job is
+5 minutes checkout + 10 selector + 5 summary + 10 upload inside a 35-minute job.
+Each native row is 5 checkout + 20 prerequisites + 80 cold build (the runner's own
+4500-second supervisor plus 90-second TERM grace) + 5 summary + 10 upload = 120
+inside 130; a Chrome row adds its 60-minute suite (3300-second watchdog plus
+110-second grace, 3520 < 3600) and the 14-minute arm64 watchdog control
+(600-second watchdog plus 110-second grace, 820 < 840), 194 inside 205. Reset
+bounds to at least 1.5× the first green per-layer, per-architecture measurements,
+keeping these floors. `contracts.yml` is PR/push/manual and reusable via `workflow_call`;
 expensive build/audit workflows invoke it as a local prerequisite job (`needs`).
 `build-local.yml` builds/audits one full product on native `ubuntu-24.04` amd64
 and `ubuntu-24.04-arm`. Every bounded step plus the evidence upload fits the job:

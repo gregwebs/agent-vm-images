@@ -145,6 +145,11 @@ if [ "$guard_only" = false ]; then
     # interrupted run, inspected parent on every build, LSP client faults): no
     # daemon, so they belong here; its native phases are the evidence run's work.
     bash script/test/go-example.sh --self-test
+    # Example-layer CI (#33): the event/diff selector against a scratch repository
+    # and the cold-build life cycle against a fake docker, including the three
+    # installers' URL diagnostics. Neither touches a daemon or the network.
+    python3 script/ci/layer-changes.py --self-test
+    bash script/test/layer-build.sh --self-test
     # Updater transaction and signal table (#41): the host-only writer's statuses.
     python3 script/test/chrome-mcp-upgrade.py
     # Parent-pin resolver/publisher table (#95): authenticated resolution,
@@ -269,5 +274,5 @@ for source in script/test/pnpm-lock-inputs.mjs \
     node --check "$source"
 done
 (cd script/test/image-sources && cargo test --locked && cargo fmt --check && cargo clippy --locked --all-targets -- -D warnings)
-actionlint .github/workflows/chrome-example.yml .github/workflows/contracts.yml .github/workflows/build-local.yml .github/workflows/installer-network.yml .github/workflows/release-standard.yml .github/workflows/release-rehearsal.yml .github/workflows/release-transports.yml .github/workflows/verify-release-boot.yml
+actionlint .github/workflows/example-layers.yml .github/workflows/contracts.yml .github/workflows/build-local.yml .github/workflows/installer-network.yml .github/workflows/release-standard.yml .github/workflows/release-rehearsal.yml .github/workflows/release-transports.yml .github/workflows/verify-release-boot.yml
 echo 'image contracts passed'

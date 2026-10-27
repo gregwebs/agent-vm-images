@@ -220,8 +220,9 @@ name agent-vm records.
 
 | Files | Disposition |
 |---|---|
-| `chrome-devtools/{Dockerfile,agent-vm-chrome-mcp}`, `go-dev/{install-go,install-golangci-lint}.sh`, `rust-dev/{install-verus,verify-toolchain}.sh` | byte-identical |
-| `go-dev/{install-gopls,verify-toolchain}.sh`, `go-dev/Dockerfile` | rewritten by [#103](https://github.com/gregwebs/agent-vm-images/issues/103): gopls is built from a committed module closure instead of `go install pkg@version` (see [Go: reviewed gopls closure](#go-reviewed-gopls-closure-103)); the two archive installers stay byte-identical |
+| `chrome-devtools/{Dockerfile,agent-vm-chrome-mcp}`, `rust-dev/verify-toolchain.sh` | byte-identical |
+| `go-dev/{install-go,install-golangci-lint}.sh`, `rust-dev/install-verus.sh` | copied byte-identical; since [#33](https://github.com/gregwebs/agent-vm-images/issues/33) each prints the exact fetch URL immediately before `curl` ([ADR 0010](adr/0010-layer-build-ci.md)), so a withdrawn release names the URL in the build log. Pins, digests, retries and extraction order are unchanged |
+| `go-dev/{install-gopls,verify-toolchain}.sh`, `go-dev/Dockerfile` | rewritten by [#103](https://github.com/gregwebs/agent-vm-images/issues/103): gopls is built from a committed module closure instead of `go install pkg@version` (see [Go: reviewed gopls closure](#go-reviewed-gopls-closure-103)) |
 | `{rust-dev,wirenboard-cpp}/Dockerfile`, `rust-dev/install-rust.sh` | comments only: launcher file references qualified as agent-vm's; the rust-dev pin comment states the policy below |
 | `README.md` | launcher links made absolute; build-from-checkout section; check ownership and pin policy point here |
 
@@ -229,7 +230,7 @@ name agent-vm records.
 |---|---|
 | `script/test/chrome-example-contract.sh` Dockerfile/wrapper content | here: `script/test/example-layers.sh` (literal paths) |
 | same script, marker/wrapper paths vs `crates/agent-vm/src/defaults.rs` | agent-vm (see below) |
-| `script/test/chrome-layer-runtime.sh` runtime checks | here: `script/test/chrome-example.sh` / `chrome-example.yml`; API-1 composition case retired (no layer-composition contract) |
+| `script/test/chrome-layer-runtime.sh` runtime checks | here: `script/test/chrome-example.sh` / `example-layers.yml`; API-1 composition case retired (no layer-composition contract) |
 | `script/test/ci-contracts.sh` `bash -n` + shellcheck of the wrapper and Go/Rust installers | here: `script/test/example-layers.sh`, default shellcheck severity |
 | `script/check-rust-toolchain.sh` rust-dev digest-verification requirement | here: `script/test/example-layers.sh` |
 | same script, rust-dev `ARG` values vs agent-vm pins | retired; policy below |
@@ -442,8 +443,10 @@ per-module signer policy remain
 3. When agent-vm adopts a standard release built from a commit containing
    `examples/layers/`, its submodule-based Chrome agreement read activates.
 
-Not covered by CI here yet: other example image builds
-([#33](https://github.com/gregwebs/agent-vm-images/issues/33)).
+Every example build is covered by CI: `example-layers.yml` builds each
+`examples/layers/` context cold on amd64 and arm64, path-filtered to that
+context's inputs ([ADR 0010](adr/0010-layer-build-ci.md)). CI still publishes no
+example image, and only `chrome-devtools` has runtime coverage.
 
 ## Maintained OpenCode 2 additions
 

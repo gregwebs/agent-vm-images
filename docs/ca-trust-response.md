@@ -19,8 +19,9 @@ actually depend on.
    tag carries pre-advisory stores; a clean check against it is not evidence.
 3. Check each store below offline (see [Verify offline](#verify-offline)).
 4. Bump only what a rebuild cannot fix — in practice an example-layer pin.
-   Example layers are not built by CI ([#33](https://github.com/gregwebs/agent-vm-images/issues/33)),
-   so build the affected layer by hand or the bump is unexercised.
+   Example layers are built cold in CI on a change to the layer
+   ([ADR 0010](adr/0010-layer-build-ci.md)), but only `chrome-devtools` has
+   runtime coverage there, so check the rebuilt layer's trust store by hand.
 5. Record what was checked and what stayed unchecked in the issue, and add any
    new gap to [Blind spots](#blind-spots) here.
 
@@ -103,9 +104,10 @@ failure is not evidence about a trust store.
 - **No gate asserts bundle contents.** Deliberately not added in #71: a
   build-time assertion would fail on unrelated distro churn and would still
   miss the next advisory's root. Nothing here fails when a store regresses.
-- **Example layers are not built by CI** ([#33](https://github.com/gregwebs/agent-vm-images/issues/33)).
-  `script/test/example-layers.sh` and `script/test/contracts.sh` check them
-  statically; a pin bump there is otherwise unexercised until someone builds.
+- **Cold example-layer builds do not certify trust stores.** `example-layers.yml`
+  now builds every layer on both native architectures, so a withdrawn pin or a
+  broken install fails there instead of at the next manual build. Nothing in
+  that build reads a CA bundle: store contents still need the check above.
 - **Standard certification checks tool identity, not trust stores.**
   `images/standard/verify-standard.sh` proves installation records, PATH
   identity, versions and upgrade paths. It never reads a CA bundle.

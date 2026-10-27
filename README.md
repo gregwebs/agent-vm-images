@@ -169,6 +169,10 @@ Ordinary user-owned Dockerfiles; each README is the canonical build guide.
   and `wirenboard-cpp`, each `FROM` the released, digest-pinned standard image with its
   own directory as build context (moved from agent-vm; see
   [example ownership](docs/image-source-ownership.md#example-images-exampleslayers)).
+  CI builds each one cold on both native architectures when a change touches it — see
+  [CI builds](examples/layers/README.md#ci-builds) and
+  [ADR 0010](docs/adr/0010-layer-build-ci.md); they are still examples, not published
+  products.
 
 ## Extend and contribute
 

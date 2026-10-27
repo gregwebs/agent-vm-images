@@ -55,6 +55,39 @@ Two conventions: expose environment through `ENV` (agent-vm reads the image's
 OCI `ENV`), and leave `ENTRYPOINT`/`CMD` inert — agentd execs the agent
 directly. These Debian-based examples are not portable to every minimal boot image.
 
+## CI builds
+
+[`.github/workflows/example-layers.yml`](../../.github/workflows/example-layers.yml)
+builds every context here on `linux/amd64` and `linux/arm64` when a change
+touches it. Its `paths` list is a conservative superset of the build inputs, so an
+unrelated change starts nothing;
+[`script/ci/layer-changes.py`](../../script/ci/layer-changes.py) then narrows the
+event to the contexts that changed — a layer's own directory selects that layer, a
+shared build input (the shared watchdog, the apt helper, the parent inventory, the
+workflow itself) selects all of them, and everything else selects none. A new
+directory here with a `Dockerfile` joins the matrix with no workflow edit, while a
+context that loses its recipe fails the selection instead of quietly disappearing.
+
+Every row is a cold build. `script/test/layer-build.sh` pulls the committed,
+digest-pinned released-standard parent on every run, refuses a daemon, host or
+parent platform other than the requested native one, then builds with
+`--no-cache`. A pin that upstream withdrew therefore fails a real fetch here with
+the URL in the log, instead of being masked by a warm cache. The built image's
+identity and platform are inspected afterwards, and only that run's own tag is
+removed. `chrome-devtools` additionally keeps its runtime suite and the arm64
+interrupted-run control.
+
+What CI does not do: it publishes nothing — no tags, no release contract, no
+provenance — and no layer's runtime suite runs except Chrome's. The deeper Rust
+and Go suites below stay manual maintenance evidence. Decision and rejected
+alternatives, including why both architectures build cold rather than from a
+cache: [ADR 0010](../../docs/adr/0010-layer-build-ci.md).
+
+Registering a new input is still reviewed work: a new third-party source is
+registered in `images/parent-pins.json.recipes` (the source-policy gate requires
+exact agreement with the discovered `Dockerfile`s), and a new script beside a
+recipe is added to `script/test/example-layers.sh`'s guarded list.
+
 ## Index
 
 | Example | Adds |
@@ -193,8 +226,9 @@ shows that a wrong Verus digest fails the build before extraction; `linux/arm64`
 shows the same digest stays a clean no-op with no fetch. Every command is bounded
 by `host-watchdog.py`, the suite re-executes itself under a 45-minute supervisor,
 cleanup has its own deadline and reports its own status, and
-`--self-test` (which needs no daemon) proves those controls. Permanent example CI
-stays with [#33](https://github.com/gregwebs/agent-vm-images/issues/33).
+`--self-test` (which needs no daemon) proves those controls. That suite is the
+deeper manual run and is not wired into CI; CI builds this layer cold on both
+architectures ([CI builds](#ci-builds)).
 
 ### Apple Silicon (no Verus asset)
 
@@ -333,8 +367,8 @@ with both retained archive `sha256sum -c` OK lines, the `--network=none`
 installed-state verifier, the Go loop as root and as uid 12345, a real LSP
 session (initialize, definition, hover, diagnostics, formatting, shutdown), the
 first-use canary legs and a hard content-replacement build negative. QEMU is not
-acceptance, and permanent example CI stays with
-[#33](https://github.com/gregwebs/agent-vm-images/issues/33).
+acceptance. This suite is not wired into CI; CI builds the layer cold on both
+architectures ([CI builds](#ci-builds)).
 
 ### Keeping the pins in lockstep
 
@@ -459,13 +493,15 @@ Run the current-recipe suite with a native Docker daemon and its daemon-backed
 bash script/test/chrome-example.sh
 ```
 
-The [Chrome example (native) workflow](../../.github/workflows/chrome-example.yml)
-builds and checks amd64 and arm64; both rows must be green before merge. The
-suite checks parent exclusions, account and sudo scope, wrapper identity, numeric
-UID, HOME overmount, NSS/CA import and headless Chromium. Evidence and phase
-verdicts go to `target/chrome-example/`. Image-content checks remain in
-`script/test/example-layers.sh`; launcher path agreement belongs to agent-vm
-(see
+The [Layer builds (native) workflow](../../.github/workflows/example-layers.yml)
+runs this suite on amd64 and arm64 after the row's cold build; both rows must be
+green before merge. The suite checks parent exclusions, account and sudo scope,
+wrapper identity, numeric UID, HOME overmount, NSS/CA import and headless
+Chromium. Run locally, evidence and phase verdicts go to `target/chrome-example/`.
+In CI they go to `target/ci-logs/chrome-example/`, the arm64 interrupted-run
+control's to `target/ci-logs/chrome-watchdog/`, and the cold build's own to
+`target/ci-logs/layer-build/`. Image-content checks remain in
+`script/test/example-layers.sh`; launcher path agreement belongs to agent-vm (see
 [Example image ownership](../../docs/image-source-ownership.md#example-images-exampleslayers)).
 
 Chromium's sandbox requires unprivileged user namespaces; Docker additionally
