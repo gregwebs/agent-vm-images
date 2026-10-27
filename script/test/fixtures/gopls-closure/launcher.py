@@ -25,12 +25,14 @@ FIXTURES = Path(os.environ.get('FIXTURE_FIXTURES', str(HERE)))
 TREE = Path(os.environ.get('FIXTURE_TREE', str(FIXTURES.parents[2])))
 
 
-def confined(sandbox, allowed: list[str]) -> bool:
+def refusal(sandbox, allowed: list[str]) -> str:
     """Prove the boundary from inside it: a copied allowed binary must not execute."""
     try:
-        return sandbox.exec_of_copy_denied(allowed) == 'denied'
+        if sandbox.exec_of_copy_denied(allowed) == 'denied':
+            return ''
+        return 'a copied allowed binary executed from writable scratch'
     except Exception:  # noqa: BLE001 - any failure is a missing proof
-        return False
+        return 'the copy probe failed'
 
 
 def main(argv: list[str]) -> int:
@@ -42,32 +44,22 @@ def main(argv: list[str]) -> int:
     # this suite imports unchanged.
     sys.path.insert(0, str(FIXTURES.parent / 'rust-toolchain'))
 
+    import confinement
     import sandbox
 
     from executables import go_executables
 
     allowed = go_executables(go_root)
-    if not confined(sandbox, allowed):
-        if os.environ.get(sandbox.SANDBOXED_ENV) == '1':
-            # A forged marker is not a boundary: refuse before
-            # reexec_into_sandbox can short-circuit on it and apply only the
-            # Linux direct-exec rule.
-            print('ISOLATION-UNAVAILABLE: the boundary could not be demonstrated '
-                  '(forged marker)', file=sys.stderr)
-            return 3
-        try:
-            sandbox.reexec_into_sandbox(
-                allowed,
-                writable=[str(TREE), tempfile.gettempdir(), '/tmp', '/private/tmp'],
-                readable=[str(FIXTURES), str(TREE), str(go_root)], loopback=True)
-        except sandbox.SandboxUnavailable as error:
-            print(f'ISOLATION-UNAVAILABLE: {error}', file=sys.stderr)
-            return 3
-    if not confined(sandbox, allowed):
-        # An inherited marker is not a boundary: without a demonstrated one this
-        # child refuses rather than resolving modules unconfined.
-        print('ISOLATION-UNAVAILABLE: the boundary could not be demonstrated',
-              file=sys.stderr)
+    scratch_root = os.environ.get('FIXTURE_SANDBOX_ROOT')
+    try:
+        confinement.enter(
+            sandbox, lambda: refusal(sandbox, allowed),
+            executables=allowed,
+            writable=[str(TREE), tempfile.gettempdir(), '/tmp', '/private/tmp'],
+            readable=[str(FIXTURES), str(TREE), str(go_root)],
+            root=Path(scratch_root) if scratch_root else None)
+    except confinement.Refusal as error:
+        print(f'ISOLATION-UNAVAILABLE: {error}', file=sys.stderr)
         return 3
     import guards
 

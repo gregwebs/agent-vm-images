@@ -41,6 +41,7 @@ sys.path.insert(0, str(FIXTURES))
 # directory also has a ``fixture`` module and this suite means its own.
 sys.path.append(str(FIXTURES.parent / 'rust-toolchain'))
 
+import confinement  # noqa: E402
 import fixture as fixture_module  # noqa: E402
 import proxy as proxy_module  # noqa: E402
 from executables import go_executables  # noqa: E402
@@ -106,7 +107,14 @@ def full_inventory(go_root: Path, launcher_dir: Path,
 
 
 def writer_inventory(go_root: Path, launcher_dir: Path) -> list[str]:
-    """The explicit executable inventory for the writer-inclusive boundary."""
+    """The explicit executable inventory for the writer-inclusive boundary.
+
+    Shells are named both as the literal this suite starts and as the file it
+    resolves to. On a merged-``/usr`` host (Ubuntu, and so CI) ``/bin/sh`` *is*
+    ``/usr/bin/sh``, so a realpath-only inventory loses every ``/bin`` name -- and
+    the boundary then has no shell to start at the path it is asked for, nor for a
+    ``#!/bin/sh`` script's shebang.
+    """
     allowed = set(go_executables(go_root))
     for name in WRITER_TOOLS:
         found = shutil.which(name)
@@ -114,6 +122,7 @@ def writer_inventory(go_root: Path, launcher_dir: Path) -> list[str]:
             allowed.add(os.path.realpath(found))
     for path in SYSTEM_SHELLS:
         if os.access(path, os.X_OK):
+            allowed.add(path)
             allowed.add(os.path.realpath(path))
     for path in sorted(launcher_dir.iterdir()):
         allowed.add(os.path.realpath(path))
@@ -134,6 +143,7 @@ SIGNAL_REQUEST = 'signal-request'
 SIGNAL_RESULT = 'signal-result'
 FORGED_MARKER_FILES = ('forged-marker.txt', 'supervisor-controls.txt')
 TMPDIR_GUARD_FILE = 'tmpdir-guard.txt'
+SECOND_PASS_FILE = 'second-pass-controls.txt'
 
 
 @dataclass(frozen=True)
@@ -210,13 +220,16 @@ def supervise(go_root: Path) -> int:
     """Run the sandboxed suite and do the one thing it cannot: deliver a signal.
 
     This process stays outside the boundary. It owns the suite child (a new session,
-    so the suite is that session's leader) and only ever sends SIGTERM to a pid in
-    *that* session -- never an arbitrary pid and never another signal. The request
-    channel carries no capability beyond "signal a process I started".
+    so the suite is that session's leader) and only ever sends SIGTERM to a pid in a
+    session it created -- never an arbitrary pid and never another signal. The
+    request channel carries no capability beyond "signal a process I started".
     """
     root = Path(tempfile.mkdtemp(prefix='gopls-closure-maintenance-')).resolve()
     launcher_dir = root / 'bin'
     write_launcher(launcher_dir)
+    # Before any child exists: this is the witness a Linux second pass is judged
+    # by, and a child started before it can only be refused.
+    confinement.record_supervisor(root)
 
     # Discriminating control, run where no boundary exists: a forged marker must
     # not buy confinement, so the --inside path (which is what the suite actually
@@ -249,6 +262,9 @@ def supervise(go_root: Path) -> int:
     # succeeding mktemp shim can actually execute -- the boundary's exec allowlist
     # would refuse it. The --inside pass reads this file and records the checks.
     (root / TMPDIR_GUARD_FILE).write_text(json.dumps(tmpdir_guard_check(root)) + '\n')
+    # Likewise daemon-free: the marker verdict is decided here against a boundary
+    # stand-in, so both the refusal and the second pass are proved on any host.
+    (root / SECOND_PASS_FILE).write_text(json.dumps(second_pass_check(root)) + '\n')
 
     alternate = second_go_root(fixture_module.PINNED_GO)
     child_environment = {key: value for key, value in os.environ.items()
@@ -278,27 +294,100 @@ def supervise(go_root: Path) -> int:
     return child.returncode
 
 
-def signal_in_session(session_pid: int, request: str) -> str:
-    """SIGTERM to a process in the session this supervisor created, or nothing."""
+def signal_in_session(child_pid: int, request: str) -> str:
+    """SIGTERM to a process in a session this supervisor created, or nothing.
+
+    Two things the caller's pid cannot say for itself are settled here. Inside the
+    Linux boundary the pid is namespace-local, so it is translated through
+    ``NSpid`` before anything else; and "a session I created" is the *leader*: the
+    child this supervisor started, or a descendant of it, because ``bwrap
+    --new-session`` makes one of its own on the way in. Both can only ever name a
+    process the supervisor already started.
+    """
     try:
-        pid = int(request.strip())
+        requested = int(request.strip())
     except ValueError:
         return 'refused: malformed request'
-    if pid == session_pid:
+    if requested == child_pid:
         return 'refused: the suite itself is not a writer'
-    try:
-        group = os.getpgid(pid)
-    except ProcessLookupError:
-        return 'refused: no such process'
-    except OSError as error:
-        return f'refused: {error}'
-    if group != session_pid:
-        return 'refused: pid is not in the supervised session'
+    pid = supervised_pid(requested, child_pid)
+    if pid is None:
+        return 'refused: pid is not in a session the supervisor created'
     try:
         os.kill(pid, signal.SIGTERM)
     except OSError as error:
         return f'refused: {error}'
     return 'sent'
+
+
+def supervised_pid(requested: int, child_pid: int) -> int | None:
+    """The pid out here that the request names, if a session this supervisor made
+    owns it."""
+    pid = translated_pid(requested)
+    if pid is None or pid == child_pid:
+        return None
+    try:
+        owner = os.getsid(pid)
+    except OSError:
+        return None
+    if owner == pid:
+        # Its own session, so nobody here created it.
+        return None
+    if owner != child_pid and not descends_from(owner, child_pid):
+        return None
+    return pid
+
+
+def translated_pid(requested: int) -> int | None:
+    """The pid in the supervisor's own namespace for a pid the child reported.
+
+    ``NSpid`` in this view lists one process's pids from the initial namespace
+    down, so a match on the last component is a match on the pid the child named.
+    The session a match is required to be in is what makes that unambiguous.
+    """
+    try:
+        os.getpgid(requested)
+        return requested
+    except OSError:
+        pass
+    if not os.path.isdir('/proc'):
+        return None
+    for status in Path('/proc').glob('[0-9]*/status'):
+        chain = nested_pids(status)
+        if chain and chain[-1] == requested:
+            return int(status.parent.name)
+    return None
+
+
+def nested_pids(status: Path) -> list[int] | None:
+    try:
+        text = status.read_text()
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith('NSpid:'):
+            try:
+                return [int(value) for value in line.split()[1:]]
+            except ValueError:
+                return None
+    return None
+
+
+def descends_from(pid: int, ancestor: int, depth: int = 64) -> bool:
+    """Whether ``pid`` is a descendant of ``ancestor``."""
+    for _ in range(depth):
+        try:
+            text = Path(f'/proc/{pid}/status').read_text()
+        except OSError:
+            return False
+        parent = next((int(line.split()[1]) for line in text.splitlines()
+                       if line.startswith('PPid:')), 0)
+        if parent == ancestor:
+            return True
+        if parent in (0, 1, pid):
+            return False
+        pid = parent
+    return False
 
 
 def send_signal(root: Path, pid: int) -> str:
@@ -462,6 +551,64 @@ def write_tmpdir_shims(directory: Path) -> None:
     (directory / 'python3').chmod(0o755)
 
 
+class _RecordingSandbox:
+    """A boundary stand-in that counts second passes instead of applying one."""
+
+    SANDBOXED_ENV = 'FIXTURE_SANDBOXED'
+
+    def __init__(self) -> None:
+        self.second_passes = 0
+
+    def reexec_into_sandbox(self, executables, *, writable, readable, loopback) -> None:
+        self.second_passes += 1
+
+
+def second_pass_check(root: Path) -> dict:
+    """Decide both marker verdicts against a stand-in, on any host.
+
+    The verdict is the one thing a Linux host and a macOS host reach differently,
+    so it is exercised here where the difference can be *made*: the recorded
+    identity is a scratch file's own inode, and the "namespace" the child reports
+    is either that same file (a marker forged outside the boundary) or a different
+    one (a genuine second pass). The stand-in applies the boundary on the second
+    pass, so the second case also shows the proof -- not the marker -- is the last
+    word.
+    """
+    scratch = root / 'second-pass'
+    scratch.mkdir()
+    reported = scratch / 'reported-namespace'
+    reported.write_text('')
+    cases = {'forged': confinement.identity(reported), 'genuine': 'other-namespace'}
+    results = {}
+    for label, recorded in cases.items():
+        case = scratch / label
+        case.mkdir()
+        (case / confinement.RECORDED_NETNS).write_text(f'{recorded}\n')
+        boundary = _RecordingSandbox()
+
+        def prove() -> str:
+            """The stand-in is a boundary exactly once it has applied itself."""
+            return '' if boundary.second_passes else 'the stand-in boundary is not applied'
+
+        marker = os.environ.get('FIXTURE_SANDBOXED')
+        os.environ['FIXTURE_SANDBOXED'] = '1'
+        try:
+            confinement.enter(
+                boundary, prove, executables=[], writable=[], readable=[], root=case,
+                witness=lambda path: confinement.second_pass_witnessed(
+                    path, platform='linux', netns=reported))
+            results[label] = {'entered': True, 'refusal': ''}
+        except confinement.Refusal as error:
+            results[label] = {'entered': False, 'refusal': str(error)}
+        finally:
+            if marker is None:
+                os.environ.pop('FIXTURE_SANDBOXED', None)
+            else:
+                os.environ['FIXTURE_SANDBOXED'] = marker
+        results[label]['second_passes'] = boundary.second_passes
+    return results
+
+
 def tmpdir_guard_check(root: Path) -> dict:
     """Run the writer *unconfined* with TMPDIR inside the checkout and a succeeding
     mktemp shim, so the guard -- not mktemp failing on a read-only root -- is what
@@ -519,9 +666,13 @@ def environment(fixture_root, tree_root: Path, launcher_dir: Path,
            'FIXTURE_PROXY_URL': fixture_root.proxy.url()}
     # The writer and its stager child inherit this suite's boundary; the launcher
     # must not try to build a second one (it cannot: the sandbox launcher itself is
-    # not exec-allowlisted inside the boundary).
+    # not exec-allowlisted inside the boundary). The scratch root travels with the
+    # marker because the launcher needs the supervisor's recorded namespace
+    # identity to judge the marker it inherits.
     if os.environ.get('FIXTURE_SANDBOXED') == '1':
         env['FIXTURE_SANDBOXED'] = '1'
+    if os.environ.get('FIXTURE_SANDBOX_ROOT'):
+        env['FIXTURE_SANDBOX_ROOT'] = os.environ['FIXTURE_SANDBOX_ROOT']
     env.update(extra or {})
     return env
 
@@ -597,36 +748,32 @@ def main() -> int:
               file=sys.stderr)
         return 2
     launcher_dir = root / 'bin'
+    # The launcher inherits this suite's boundary but not its arguments, and it
+    # needs the same recorded namespace identity to judge a marker of its own.
+    os.environ['FIXTURE_SANDBOX_ROOT'] = str(root)
 
     import sandbox
 
     alternate_root = os.environ.get('FIXTURE_ALT_GO_ROOT')
     alternate = Path(alternate_root) if alternate_root else None
     inventory = full_inventory(go_root, launcher_dir, alternate)
-    # The confinement proof runs before any marker-based short-circuit. A forged
-    # FIXTURE_SANDBOXED marker is not a boundary, so when the proof fails while the
-    # marker is set we refuse instead of letting reexec_into_sandbox trust it and
-    # (on Linux) apply only the direct-exec rule.
-    proof = confinement_proof(sandbox, inventory)
-    if not proof.proven:
-        if os.environ.get(sandbox.SANDBOXED_ENV) == '1':
-            print('ISOLATION-UNAVAILABLE: the boundary could not be demonstrated '
-                  f'(forged marker): {proof.detail}', file=sys.stderr)
-            return 3
-        try:
-            sandbox.reexec_into_sandbox(
-                inventory,
-                writable=[str(root), tempfile.gettempdir(), '/tmp', '/private/tmp'],
-                readable=[str(FIXTURES), str(REPOSITORY_ROOT), str(go_root)],
-                loopback=True)
-        except sandbox.SandboxUnavailable as error:
-            print(f'ISOLATION-UNAVAILABLE: {error}', file=sys.stderr)
-            return 3
-    proof = confinement_proof(sandbox, inventory)
-    if not proof.proven:
-        print('ISOLATION-UNAVAILABLE: the boundary could not be demonstrated: '
-              f'{proof.detail}', file=sys.stderr)
+    # Every attempt is kept: the last one is the proof the checks below report, and
+    # the earlier ones only decide whether another entry is needed.
+    proofs: list[Proof] = []
+
+    def prove() -> str:
+        proofs.append(confinement_proof(sandbox, inventory))
+        return '' if proofs[-1].proven else proofs[-1].detail
+
+    try:
+        confinement.enter(
+            sandbox, prove, executables=inventory,
+            writable=[str(root), tempfile.gettempdir(), '/tmp', '/private/tmp'],
+            readable=[str(FIXTURES), str(REPOSITORY_ROOT), str(go_root)], root=root)
+    except confinement.Refusal as error:
+        print(f'ISOLATION-UNAVAILABLE: {error}', file=sys.stderr)
         return 3
+    proof = proofs[-1]
     import guards
 
     guards.install(inventory)
@@ -658,6 +805,16 @@ def main() -> int:
           and 'forged marker' in '\n'.join(forged[1:]),
           ' / '.join(forged))
     tmpdir = json.loads((root / TMPDIR_GUARD_FILE).read_text())
+    second_pass = json.loads((root / SECOND_PASS_FILE).read_text())
+    check('a marker holding the supervisor network namespace is refused before a second pass',
+          not second_pass['forged']['entered']
+          and 'forged marker' in second_pass['forged']['refusal']
+          and second_pass['forged']['second_passes'] == 0,
+          json.dumps(second_pass['forged']))
+    check('a marker holding a different network namespace reaches the second pass',
+          second_pass['genuine']['entered']
+          and second_pass['genuine']['second_passes'] == 1,
+          json.dumps(second_pass['genuine']))
     check('a TMPDIR inside the repository is refused',
           tmpdir['refused'], tmpdir['detail'])
     check('the refused TMPDIR stopped before mktemp created a work directory',
