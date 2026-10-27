@@ -12,9 +12,16 @@ and logged, so a genuine "no hidden latest" claim can be checked by reading the
 request log, not merely by the final installed version.
 
 Config (mounted JSON, path in EGRESS_CONFIG):
-  {"allow": [{"host": H, "path": REGEX, "method": M?}], "deny": [REGEX]}
+  {"allow": [{"host": H, "path": REGEX, "method": M?}], "deny": [REGEX],
+   "https_only": true?, "learn_hosts": [HOST...]?}
 `EGRESS_MODE=observe` logs and forwards everything (capture mode); the default
 `strict` enforces the allowlist. Every decision is appended to EGRESS_LOG.
+
+A learned target is the signed CDN URL an already-allowed HTTPS response pointed
+at. Scheme, port and credentials are enforced for it exactly as for any other
+request -- only its query is exempt -- and `learn_hosts`, when present, names the
+hosts such a response may hand over. An unlearnable redirect target is refused
+and logged rather than parked in the allowlist.
 """
 
 import json
@@ -64,12 +71,36 @@ def _block(flow, reason, url):
     )
 
 
+def _shape_reason(parts):
+    """Why a request's URL shape is unacceptable, or None.
+
+    Scheme, port and credentials are checked for EVERY request, learned or not:
+    an allowed response carrying `Location: http://…` or `https://user:pw@…`
+    must not buy that target an exemption. Only the signed query is exempt, and
+    only for a URL this proxy was handed by an already-allowed HTTPS response.
+    """
+    if parts.scheme != "https":
+        return "https-required"
+    if parts.port not in (None, 443):
+        return "port-443-required"
+    if parts.username or parts.password:
+        return "no-credentials-required"
+    if parts.fragment:
+        return "no-fragment-required"
+    return None
+
+
 def request(flow):
     url = flow.request.pretty_url
+    parts = urlsplit(url)
+    learned = url in _learned
     if _CFG.get("https_only"):
-        parts = urlsplit(url)
-        if parts.scheme != "https" or parts.port not in (None, 443) or parts.query or parts.username or parts.password or parts.fragment:
-            _block(flow, "https-443-no-query-required", url)
+        reason = _shape_reason(parts)
+        if reason is not None:
+            _block(flow, reason, url)
+            return
+        if parts.query and not learned:
+            _block(flow, "no-query-required", url)
             return
     for pattern in DENY:
         if pattern.search(url):
@@ -90,10 +121,27 @@ def request(flow):
         _allowed_urls.add(url)
         _log("ALLOW %s" % _redact(url))
         return
-    if url in _learned:
+    if learned:
         _log("ALLOW-LEARNED %s" % _redact(url))
         return
     _block(flow, "unlisted", url)
+
+
+def _learnable(target):
+    """A redirect target may be learned only if it is safe to spend the budget on.
+
+    The origin is checked here as well as at request time: a learned target that
+    could never be requested is not recovery material, it is an unvalidated URL
+    sitting in the allowlist. `learn_hosts`, when configured, names the CDN hosts
+    an already-allowed response is allowed to hand over.
+    """
+    parts = urlsplit(target)
+    if _shape_reason(parts) is not None:
+        return False
+    hosts = _CFG.get("learn_hosts")
+    if hosts is not None and parts.hostname not in hosts:
+        return False
+    return True
 
 
 def response(flow):
@@ -111,5 +159,8 @@ def response(flow):
     location = flow.response.headers.get("location")
     if status in (301, 302, 303, 307, 308) and location:
         target = urljoin(url, location)
+        if not _learnable(target):
+            _block(flow, "redirect-target-refused", target)
+            return
         _learned.add(target)
         _log("LEARN %s" % _redact(target))

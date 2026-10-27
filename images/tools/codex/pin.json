@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "name": "codex",
+  "kind": "codex-standalone-package",
+  "release": "rust-v0.159.3",
+  "version": "0.159.3",
+  "package": {
+    "layout_version": 1,
+    "variant": "codex",
+    "entrypoint": "bin/codex"
+  },
+  "metadata": {
+    "url": "https://api.github.com/repos/openai/codex/releases/tags/rust-v0.159.3",
+    "path": "evidence/release.json",
+    "sha256": "507c852ebebb6cf8c6fe1f16be160f9d137b1e67477ffdd30e7e058a10f4089a"
+  },
+  "checksums": {
+    "url": "https://github.com/openai/codex/releases/download/rust-v0.159.3/codex-package_SHA256SUMS",
+    "path": "evidence/codex-package_SHA256SUMS",
+    "sha256": "ab7eb97abe3b6a6825b84d9d34af296645564e27a64bb4033ee5a8433ddc7245"
+  },
+  "platforms": {
+    "linux/amd64": {
+      "target": "x86_64-unknown-linux-musl",
+      "asset": "codex-package-x86_64-unknown-linux-musl.tar.gz",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.159.3/codex-package-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "3930f31ac5fca861ea3e444e2683f261190d96b63fba58e0a40a879174369cdf",
+      "bundle": {
+        "url": "https://github.com/openai/codex/releases/download/rust-v0.159.3/codex-package-x86_64-unknown-linux-musl.tar.gz.sigstore",
+        "path": "evidence/codex-package-x86_64-unknown-linux-musl.tar.gz.sigstore",
+        "sha256": "ea86bb1e961f22c5214ab1ed082da3d22bd043f7736082049d622c22de11710a"
+      }
+    },
+    "linux/arm64": {
+      "target": "aarch64-unknown-linux-musl",
+      "asset": "codex-package-aarch64-unknown-linux-musl.tar.gz",
+      "url": "https://github.com/openai/codex/releases/download/rust-v0.159.3/codex-package-aarch64-unknown-linux-musl.tar.gz",
+      "sha256": "20b7d673cf2b64b6c6208fa4fda06feb9dac0572da9987294b48cde1dab9d001",
+      "bundle": {
+        "url": "https://github.com/openai/codex/releases/download/rust-v0.159.3/codex-package-aarch64-unknown-linux-musl.tar.gz.sigstore",
+        "path": "evidence/codex-package-aarch64-unknown-linux-musl.tar.gz.sigstore",
+        "sha256": "c5d245edcd60715b1aa3ed710dcb7a053e02475a317e0701f25c935626179795"
+      }
+    }
+  },
+  "authentication": {
+    "method": "sigstore-blob-pin-time",
+    "verifier": {
+      "name": "cosign",
+      "version": "v2.4.1"
+    },
+    "trust_root": "sigstore-production-tuf",
+    "certificate_identity": "https://github.com/openai/codex/.github/workflows/rust-release.yml@refs/tags/rust-v0.159.3",
+    "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
+    "verified_on": "2026-10-27"
+  }
+}

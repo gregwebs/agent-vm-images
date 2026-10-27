@@ -261,6 +261,73 @@ sandbox reachability, not npm locations), Pi sibling hashes/full-tree checks and
 separate bridge peer-alias omission checks.
 Shared-file edits are sequential developer operations, not parallel maintenance.
 
+### Codex payload closure
+
+Codex is not just a fourth ARG. An exact tag names a release, not bytes, so
+`images/tools/codex/pin.json` commits both maintained Linux payloads with their
+exact URLs and SHA-256, the original release metadata, the original
+`codex-package_SHA256SUMS` and both original legacy `.sigstore` bundles. Read
+[ADR 0009](docs/adr/0009-codex-payload-pins.md) and the
+[policy](docs/image-input-policy.md#codex-standalone-payloads) before changing it;
+the operational facts are:
+
+```bash
+python3 script/dev/pin-codex.py --check     # offline: evidence hashes, policy, ARG/label
+python3 script/dev/pin-codex.py --version rust-v0.159.3 --cosign /abs/cosign
+bash script/build/agent-versions.sh --check # the same check through the bumper
+bash script/build/agent-versions.sh --write --cosign /abs/cosign
+```
+
+- `cosign` **v2.4.1** is a reviewed maintainer prerequisite, installed by your own
+  reviewed host-tool process. It is not an image input, the writer never downloads
+  or substitutes it, and it must report `v2.4.1` before any fetch. It needs network
+  access to Sigstore's production TUF root; the check fails closed without it.
+  `--probe-cosign /abs/cosign` is the offline, read-only form of that check, and the
+  bumper runs it before it resolves a single upstream tag.
+- Every write mode (`--version`, `--stage-dir`, `--publish-stage`) refuses
+  `GITHUB_ACTIONS=true` **before** it does anything; `--check` and `--probe-cosign`
+  are read-only and stay available there. `--stage-dir DIR` writes only into a
+  directory that is absent or empty, is never reached through a symlink, and is
+  owned by you with no group/other access (0700): a staging directory holding
+  anything is refused rather than emptied, so a mistaken argument cannot delete
+  unrelated files. The check and the writes are the same operation on the same
+  inode — the directory is opened `O_DIRECTORY|O_NOFOLLOW` and every file is
+  created through that descriptor with `O_CREAT|O_EXCL|O_NOFOLLOW` — so replacing
+  the checked directory with a symlink cannot redirect a write, and a swap is
+  reported instead of being followed. `--publish-stage` reads the proposal the
+  same way and prints the absolute directory it read.
+- One write run resolves the exact release, downloads both payloads and both
+  bundles, verifies both with the real verifier under the exact workflow identity
+  and issuer, preflights both archives, and publishes the pin, its four evidence
+  files and `ARG AGENT_VERSION_CODEX` in **one** transaction. A second architecture
+  or signature failure publishes nothing.
+- The same release is checked, not trusted: a changed payload, checksum manifest or
+  metadata security projection is refused with an upstream-rewrite diagnostic and
+  is never re-pinned automatically. A metadata download-count-only change is a
+  repeat, and the run prints `unchanged` with byte-identical output.
+- Rollback: `0` published or unchanged, `1` failed with sources unchanged or fully
+  restored, `2` usage, **`3` incomplete rollback**. On 3 the shared publisher's
+  retained directory *and* the owner scratch directory are printed absolutely;
+  both are preserved and must be recovered before further edits, builds or commits.
+  For a standalone `--version` run the owner scratch keeps the staged six-file
+  proposal; a signal-driven rollback reports both directories from the
+  publisher's own handler, because it leaves through `os._exit(3)`.
+  `script/test/agent-versions.sh` opens both printed directories and checks all
+  six staged files byte-for-byte, every numbered backup's bytes and mode, and the
+  `.complete` marker. A signal restores and exits `128+N`.
+- Every upstream request is bounded by one 300 s budget for the whole request —
+  connection, headers, redirects and body — enforced by an independent timer as
+  well as by per-read re-clamping, so a peer that drips bytes cannot hold a
+  maintainer run open.
+- After a real bump a human must update the Codex default in
+  `script/test/fixtures/installer-egress/selections.tsv` and review it. The tool
+  deliberately does not edit that file, and there is no alternate Codex selection
+  (the column is `-`): an arbitrary exact Codex version is not installable.
+- Native evidence is mandatory and is not replaced by fixtures:
+  `bash script/test/shipped-installer-network.sh agent-vm-base:local --platform linux/<arch> --tool codex`
+  plus the full strict run, and the standard-image audits, on native amd64 **and**
+  arm64, at the proposed commit.
+
 Local transactional replacement backs up every destination before publishing.
 A failed partial copy restores the failing destination too, in reverse order,
 including removal of originally absent paths. Status 1 means restored failure;

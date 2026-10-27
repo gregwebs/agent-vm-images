@@ -7702,3 +7702,827 @@ fn go_dev_mirrors_the_module_lint_pin() {
     let verification = read_text("examples/layers/go-dev/verify-toolchain.sh");
     assert!(verification.contains("golangci-lint has version ${GOLANGCI_LINT_VERSION} "));
 }
+
+// --- committed Codex payload closure (#97) -----------------------------------
+//
+// `images/tools/codex/pin.json` is the reviewed selection of one exact Codex
+// release: two Linux package payloads with exact URLs and SHA-256 digests, the
+// original release metadata, the original `codex-package_SHA256SUMS` and both
+// original legacy `.sigstore` bundles, plus the signer policy that was enforced
+// when the pin was made. The loader (`images/tools/codex/codex_pin.py`) is what
+// ordinary builds run; this gate re-derives the identity independently from the
+// pin instead of trusting the loader, and checks that the recipe is wired to a
+// read-only committed source rather than to anything live.
+//
+// What it cannot re-derive is a hash: no SHA-256 implementation lives in this
+// crate, so evidence bytes are bound by the Python loader and by the
+// `--write-fixture`/`--check` suites, not here.
+
+const CODEX_PIN: &str = "images/tools/codex/pin.json";
+const CODEX_HOOK: &str = "images/tools/codex/install-codex.sh";
+const CODEX_LOADER: &str = "images/tools/codex/codex_pin.py";
+const CODEX_SOURCE_MOUNT: &str = "--mount=type=bind,source=tools/codex,target=/tmp/codex-source,ro";
+const CODEX_SOURCE_ENV: &str = "AGENT_VM_CODEX_SOURCE_DIR=/tmp/codex-source";
+const CODEX_VENDOR_MOUNT: &str =
+    "--mount=type=bind,source=tools/codex/vendor,target=/opt/agent-vm/recipe-vendor,ro";
+const CODEX_HOOK_MOUNT: &str =
+    "--mount=type=bind,source=tools/codex/install-codex.sh,target=/tmp/install-codex.sh,ro";
+const CODEX_RUN_INSTALL: &str = "sh /tmp/recipe-contract/run-install.sh codex /opt/agent-vm/install-status/codex sh /tmp/install-codex.sh";
+const CODEX_VERIFIER_VERSION: &str = "v2.4.1";
+const CODEX_TRUST_ROOT: &str = "sigstore-production-tuf";
+const CODEX_ISSUER: &str = "https://token.actions.githubusercontent.com";
+const CODEX_WORKFLOW: &str = "https://github.com/openai/codex/.github/workflows/rust-release.yml";
+const CODEX_CHECKSUMS_ASSET: &str = "codex-package_SHA256SUMS";
+const CODEX_METADATA_PATH: &str = "evidence/release.json";
+const CODEX_CHECKSUMS_PATH: &str = "evidence/codex-package_SHA256SUMS";
+const CODEX_NAME: &str = "codex";
+const CODEX_KIND: &str = "codex-standalone-package";
+const CODEX_AUTHENTICATION_METHOD: &str = "sigstore-blob-pin-time";
+const CODEX_ENTRYPOINT: &str = "bin/codex";
+const CODEX_TARGETS: [(&str, &str); 2] = [
+    ("linux/amd64", "x86_64-unknown-linux-musl"),
+    ("linux/arm64", "aarch64-unknown-linux-musl"),
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CodexEvidence {
+    url: String,
+    path: String,
+    digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CodexPlatformPin {
+    target: String,
+    asset: String,
+    url: String,
+    digest: String,
+    bundle: CodexEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CodexAuthentication {
+    verifier_version: String,
+    trust_root: String,
+    identity: String,
+    issuer: String,
+    verified_on: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CodexPin {
+    release: String,
+    version: String,
+    metadata: CodexEvidence,
+    checksums: CodexEvidence,
+    platforms: BTreeMap<String, CodexPlatformPin>,
+    authentication: CodexAuthentication,
+}
+
+fn codex_hex(value: &Value, context: &str) -> Result<String, String> {
+    let raw = text(value, context)?;
+    if is_lower_hex(&raw, 64) {
+        Ok(raw)
+    } else {
+        Err(format!("{context}: 64 lower-case hex characters required"))
+    }
+}
+
+fn is_codex_version(value: &str) -> bool {
+    let (core, suffix) = match value.split_once('-') {
+        Some((core, suffix)) => (core, suffix),
+        None => (value, ""),
+    };
+    if !is_exact_version(core) {
+        return false;
+    }
+    if suffix.is_empty() {
+        return true;
+    }
+    let mut parts = suffix.split('.');
+    let channel = parts.next().unwrap_or_default();
+    let identifiers: Vec<&str> = parts.collect();
+    if identifiers.iter().any(|part| {
+        part.is_empty()
+            || !part.bytes().all(|byte| byte.is_ascii_digit())
+            || (*part != "0" && part.starts_with('0'))
+    }) {
+        return false;
+    }
+    match channel {
+        "alpha" if identifiers.len() <= 2 => true,
+        "beta" if identifiers.len() <= 1 => true,
+        _ => false,
+    }
+}
+
+fn codex_api_url(release: &str) -> String {
+    format!("https://api.github.com/repos/openai/codex/releases/tags/{release}")
+}
+
+fn codex_asset_url(release: &str, asset: &str) -> String {
+    format!("https://github.com/openai/codex/releases/download/{release}/{asset}")
+}
+
+fn codex_asset_name(target: &str) -> String {
+    format!("codex-package-{target}.tar.gz")
+}
+
+fn codex_bundle_name(target: &str) -> String {
+    format!("codex-package-{target}.tar.gz.sigstore")
+}
+
+fn parse_codex_evidence(
+    value: &Value,
+    url: String,
+    path: &str,
+    context: &str,
+) -> Result<CodexEvidence, String> {
+    let members = exact(value, &["url", "path", "sha256"], context)?;
+    let found_url = text(&members["url"], &format!("{context} url"))?;
+    if found_url != url {
+        return Err(format!("{context} url must be {url}, found {found_url}"));
+    }
+    let found_path = text(&members["path"], &format!("{context} path"))?;
+    if found_path != path {
+        return Err(format!("{context} path must be {path}, found {found_path}"));
+    }
+    Ok(CodexEvidence {
+        url: found_url,
+        path: found_path,
+        digest: codex_hex(&members["sha256"], &format!("{context} sha256"))?,
+    })
+}
+
+fn parse_codex_pin(source: &str) -> Result<CodexPin, String> {
+    let document = strict_json(source)?;
+    let members = exact(
+        &document,
+        &[
+            "schema",
+            "name",
+            "kind",
+            "release",
+            "version",
+            "package",
+            "metadata",
+            "checksums",
+            "platforms",
+            "authentication",
+        ],
+        "codex pin",
+    )?;
+    if members["schema"].as_u64() != Some(1) || members["schema"].as_i64() != Some(1) {
+        return Err("codex pin: schema must be the integer 1".into());
+    }
+    let name = text(&members["name"], "codex pin name")?;
+    if name != CODEX_NAME || members["name"].as_bool().is_some() {
+        return Err(format!("codex pin: name must be {CODEX_NAME}"));
+    }
+    let kind = text(&members["kind"], "codex pin kind")?;
+    if kind != CODEX_KIND {
+        return Err(format!("codex pin: kind must be {CODEX_KIND}"));
+    }
+    let release = text(&members["release"], "codex pin release")?;
+    if !release.starts_with("rust-v") {
+        return Err(format!(
+            "codex pin: release must be rust-v<version>, found {release}"
+        ));
+    }
+    let version = text(&members["version"], "codex pin version")?;
+    if !is_codex_version(&version) {
+        return Err(format!(
+            "codex pin: version is not an exact Codex version: {version}"
+        ));
+    }
+    if release != format!("rust-v{version}") {
+        return Err(format!(
+            "codex pin: release {release} does not spell version {version}"
+        ));
+    }
+    let package = exact(
+        &members["package"],
+        &["layout_version", "variant", "entrypoint"],
+        "codex package",
+    )?;
+    if package["layout_version"].as_i64() != Some(1) {
+        return Err("codex pin: package layout_version must be the integer 1".into());
+    }
+    let variant = text(&package["variant"], "codex package variant")?;
+    if variant != CODEX_NAME {
+        return Err(format!("codex pin: package variant must be {CODEX_NAME}"));
+    }
+    let entrypoint = text(&package["entrypoint"], "codex package entrypoint")?;
+    if entrypoint != CODEX_ENTRYPOINT {
+        return Err(format!(
+            "codex pin: package entrypoint must be {CODEX_ENTRYPOINT}"
+        ));
+    }
+    let metadata = parse_codex_evidence(
+        &members["metadata"],
+        codex_api_url(&release),
+        CODEX_METADATA_PATH,
+        "codex metadata",
+    )?;
+    let checksums = parse_codex_evidence(
+        &members["checksums"],
+        codex_asset_url(&release, CODEX_CHECKSUMS_ASSET),
+        CODEX_CHECKSUMS_PATH,
+        "codex checksums",
+    )?;
+    let platform_members = exact_platforms(
+        &members["platforms"],
+        &["target", "asset", "url", "sha256", "bundle"],
+        "codex platforms",
+    )?;
+    let mut platforms = BTreeMap::new();
+    for ((platform, target), entry) in CODEX_TARGETS.iter().zip(platform_members) {
+        let found_target = text(&entry["target"], &format!("codex {platform} target"))?;
+        if found_target != *target {
+            return Err(format!(
+                "codex {platform}: target must be {target}, found {found_target}"
+            ));
+        }
+        let asset = text(&entry["asset"], &format!("codex {platform} asset"))?;
+        if asset != codex_asset_name(target) {
+            return Err(format!(
+                "codex {platform}: asset must be {}, found {asset}",
+                codex_asset_name(target)
+            ));
+        }
+        let url = text(&entry["url"], &format!("codex {platform} url"))?;
+        if url != codex_asset_url(&release, &asset) {
+            return Err(format!(
+                "codex {platform}: url must be {}, found {url}",
+                codex_asset_url(&release, &asset)
+            ));
+        }
+        let bundle = parse_codex_evidence(
+            &entry["bundle"],
+            codex_asset_url(&release, &codex_bundle_name(target)),
+            &format!("evidence/{}", codex_bundle_name(target)),
+            &format!("codex {platform} bundle"),
+        )?;
+        platforms.insert(
+            (*platform).to_string(),
+            CodexPlatformPin {
+                target: found_target,
+                asset,
+                url,
+                digest: codex_hex(&entry["sha256"], &format!("codex {platform} sha256"))?,
+                bundle,
+            },
+        );
+    }
+    let authentication = exact(
+        &members["authentication"],
+        &[
+            "method",
+            "verifier",
+            "trust_root",
+            "certificate_identity",
+            "certificate_oidc_issuer",
+            "verified_on",
+        ],
+        "codex authentication",
+    )?;
+    if text(&authentication["method"], "codex authentication method")?
+        != CODEX_AUTHENTICATION_METHOD
+    {
+        return Err(format!(
+            "codex authentication method must be {CODEX_AUTHENTICATION_METHOD}"
+        ));
+    }
+    let verifier = exact(
+        &authentication["verifier"],
+        &["name", "version"],
+        "codex authentication verifier",
+    )?;
+    if text(&verifier["name"], "codex verifier name")? != "cosign" {
+        return Err("codex authentication verifier must be cosign".into());
+    }
+    let verifier_version = text(&verifier["version"], "codex verifier version")?;
+    if verifier_version != CODEX_VERIFIER_VERSION {
+        return Err(format!(
+            "codex verifier version must be {CODEX_VERIFIER_VERSION}, found {verifier_version}"
+        ));
+    }
+    let trust_root = text(&authentication["trust_root"], "codex trust_root")?;
+    if trust_root != CODEX_TRUST_ROOT {
+        return Err(format!(
+            "codex trust_root must be {CODEX_TRUST_ROOT}, found {trust_root}"
+        ));
+    }
+    let identity = text(
+        &authentication["certificate_identity"],
+        "codex certificate identity",
+    )?;
+    let expected_identity = format!("{CODEX_WORKFLOW}@refs/tags/{release}");
+    if identity != expected_identity {
+        return Err(format!(
+            "codex certificate identity must be {expected_identity}, found {identity}"
+        ));
+    }
+    let issuer = text(
+        &authentication["certificate_oidc_issuer"],
+        "codex certificate issuer",
+    )?;
+    if issuer != CODEX_ISSUER {
+        return Err(format!(
+            "codex OIDC issuer must be {CODEX_ISSUER}, found {issuer}"
+        ));
+    }
+    let verified_on = text(&authentication["verified_on"], "codex verified_on")?;
+    if !is_date(&verified_on) {
+        return Err(format!(
+            "codex verified_on must be YYYY-MM-DD, found {verified_on}"
+        ));
+    }
+    Ok(CodexPin {
+        release,
+        version,
+        metadata,
+        checksums,
+        platforms,
+        authentication: CodexAuthentication {
+            verifier_version,
+            trust_root,
+            identity,
+            issuer,
+            verified_on,
+        },
+    })
+}
+
+/// Replace `from` with `to` inside the codex RUN only, so a mutation cannot land
+/// in an unrelated recipe block and quietly prove nothing.
+fn mutate_codex_block(recipe: &str, from: &str, to: &str) -> String {
+    let block = codex_run_block(recipe).expect("the codex RUN is discoverable");
+    if !block.contains(from) {
+        panic!("the codex RUN does not contain {from:?}");
+    }
+    recipe.replacen(block, &block.replacen(from, to, 1), 1)
+}
+
+/// The one RUN that installs codex, found from its own hook mount.
+fn codex_run_block(recipe: &str) -> Result<&str, String> {
+    let position = recipe
+        .find(CODEX_HOOK_MOUNT)
+        .ok_or("the codex hook mount is missing")?;
+    let start = recipe[..position]
+        .rfind("RUN ")
+        .ok_or("the codex hook mount is not inside a RUN instruction")?;
+    let end = recipe[position..]
+        .find("\n\n")
+        .map(|offset| position + offset)
+        .unwrap_or(recipe.len());
+    Ok(&recipe[start..end])
+}
+
+fn check_codex_recipe(recipe: &str, pin: &CodexPin) -> Result<(), String> {
+    let argument = format!("ARG AGENT_VERSION_CODEX={}", pin.release);
+    let declarations: Vec<&str> = recipe
+        .lines()
+        .filter(|line| line.starts_with("ARG AGENT_VERSION_CODEX="))
+        .collect();
+    if declarations != vec![argument.as_str()] {
+        return Err(format!(
+            "the recipe must declare exactly `{argument}`, found {declarations:?}"
+        ));
+    }
+    let label = "LABEL org.agent-vm.version.codex=\"${AGENT_VERSION_CODEX}\"";
+    if recipe.matches(label).count() != 1 {
+        return Err(format!("the recipe must declare `{label}` exactly once"));
+    }
+    if recipe.matches(CODEX_SOURCE_MOUNT).count() != 1 {
+        return Err(format!(
+            "the codex source must be mounted read-only exactly once: {CODEX_SOURCE_MOUNT}"
+        ));
+    }
+    let block = codex_run_block(recipe)?;
+    for required in [
+        CODEX_SOURCE_MOUNT,
+        CODEX_SOURCE_ENV,
+        CODEX_VENDOR_MOUNT,
+        CODEX_HOOK_MOUNT,
+        CODEX_RUN_INSTALL,
+        "AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract",
+        "AGENT_VM_VERSION_CODEX=\"${AGENT_VERSION_CODEX}\"",
+        "AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status",
+        "AGENT_INSTALL_SOFT_FAIL= \\",
+    ] {
+        if !block.contains(required) {
+            return Err(format!("the codex RUN must contain `{required}`"));
+        }
+    }
+    for forbidden in [
+        "AGENT_VM_CODEX_DIGEST",
+        "AGENT_VM_CODEX_URL",
+        "AGENT_VM_CODEX_PIN",
+        "CODEX_PIN_DIR=",
+        "AGENT_VM_CODEX_EXPECTED",
+        "latest",
+    ] {
+        if block.contains(forbidden) {
+            return Err(format!(
+                "the codex RUN must not accept or reach `{forbidden}`: the pin is the only input"
+            ));
+        }
+    }
+    if !recipe.contains("sh /tmp/verify-codex.sh") {
+        return Err("the existing codex verifier must stay reachable".into());
+    }
+    // The source mount must never become writable.
+    if recipe.matches("target=/tmp/codex-source").count()
+        != recipe.matches(CODEX_SOURCE_MOUNT).count()
+    {
+        return Err("the codex source mount must be read-only".into());
+    }
+    Ok(())
+}
+
+/// Shell source with every comment removed, so a word in prose (for example the
+/// history of a removed `latest` branch) is not mistaken for an executable path.
+fn codex_code_lines(text: &str) -> String {
+    text.lines()
+        .map(strip_shell_comment)
+        .collect::<Vec<&str>>()
+        .join("\n")
+}
+
+fn check_codex_helper_sources(hook: &str, loader: &str) -> Result<(), String> {
+    let hook_code = codex_code_lines(hook);
+    for required in [
+        "AGENT_VM_CODEX_SOURCE_DIR",
+        "codex_pin.py",
+        "check --pin-dir",
+        "CODEX_PIN_DIR",
+        "CODEX_INSTALL_DIR",
+        "CODEX_INSTALL_DAEMON_ONLY=0",
+        "CODEX_NON_INTERACTIVE=1",
+        "unset CODEX_INSTALL_DEFER_SELECTION",
+    ] {
+        if !hook.contains(required) {
+            return Err(format!("install-codex.sh must contain `{required}`"));
+        }
+    }
+    let check_at = hook
+        .find("codex_pin.py\" check --pin-dir")
+        .ok_or("install-codex.sh must run the pin check")?;
+    let vendor_at = hook
+        .find("sh \"$VENDOR/install.sh\"")
+        .ok_or("install-codex.sh must run the vendored installer")?;
+    if check_at > vendor_at {
+        return Err("install-codex.sh must check the pin before invoking the vendor".into());
+    }
+    for forbidden in ["latest", "expected_digest=", "EXPECTED_HASH", "SHA256SUMS"] {
+        if hook_code.contains(forbidden) {
+            return Err(format!(
+                "install-codex.sh must not decide by `{forbidden}`: the pin is the only input"
+            ));
+        }
+    }
+    for required in [
+        "def load_pin(",
+        "def select(",
+        "def require_elf(",
+        "def preflight_archive(",
+        "MAX_DECODED_BYTES",
+        "MAX_EXTENDED_HEADER_BYTES",
+    ] {
+        if !loader.contains(required) {
+            return Err(format!("codex_pin.py must contain `{required}`"));
+        }
+    }
+    for forbidden in ["urllib", "requests", "socket", "subprocess", "verify-blob"] {
+        if loader.contains(forbidden) {
+            return Err(format!(
+                "codex_pin.py must stay offline and non-cryptographic: found `{forbidden}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn codex_pin_selects_both_reviewed_payloads() {
+    let pin = parse_codex_pin(&read_text(CODEX_PIN)).expect("the committed pin parses");
+    assert_eq!(pin.release, "rust-v0.159.3");
+    assert_eq!(pin.version, "0.159.3");
+    assert_eq!(
+        pin.platforms
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<&str>>(),
+        vec!["linux/amd64", "linux/arm64"]
+    );
+    for (platform, target) in CODEX_TARGETS {
+        let entry = &pin.platforms[platform];
+        assert_eq!(entry.target, target);
+        assert_eq!(entry.asset, format!("codex-package-{target}.tar.gz"));
+        assert_eq!(
+            entry.url,
+            format!(
+                "https://github.com/openai/codex/releases/download/rust-v0.159.3/{}",
+                entry.asset
+            )
+        );
+        assert!(is_lower_hex(&entry.digest, 64), "{platform}");
+        assert_eq!(
+            entry.bundle.path,
+            format!("evidence/codex-package-{target}.tar.gz.sigstore")
+        );
+        assert!(is_lower_hex(&entry.bundle.digest, 64), "{platform} bundle");
+    }
+    assert_eq!(pin.authentication.verifier_version, CODEX_VERIFIER_VERSION);
+    assert_eq!(
+        pin.authentication.identity,
+        format!("{CODEX_WORKFLOW}@refs/tags/rust-v0.159.3")
+    );
+    // Direct presence assertions: the generic helper inventory is a known
+    // separate defect (#116), so this does not lean on it.
+    for relative in [CODEX_PIN, CODEX_HOOK, CODEX_LOADER] {
+        let path = repo_path(relative);
+        assert!(path.is_file(), "{relative} must exist");
+        assert!(
+            !path.symlink_metadata().unwrap().file_type().is_symlink(),
+            "{relative} must be a regular file, not a symlink"
+        );
+    }
+    for evidence in [&pin.metadata, &pin.checksums]
+        .into_iter()
+        .chain(pin.platforms.values().map(|entry| &entry.bundle))
+    {
+        let path = repo_path(&format!("images/tools/codex/{}", evidence.path));
+        assert!(path.is_file(), "{} must exist", evidence.path);
+        assert!(
+            !path.symlink_metadata().unwrap().file_type().is_symlink(),
+            "{} must be a regular file, not a symlink",
+            evidence.path
+        );
+    }
+    let recipe = standard_dockerfile();
+    check_codex_recipe(&recipe, &pin).expect("the committed recipe is wired to the pin");
+    check_codex_helper_sources(&read_text(CODEX_HOOK), &read_text(CODEX_LOADER))
+        .expect("the hook and loader keep the pin authority");
+}
+
+#[test]
+fn codex_pin_mutations_are_refused() {
+    let source = read_text(CODEX_PIN);
+    let pin = parse_codex_pin(&source).expect("the committed pin parses");
+    let baseline: Value = serde_json::from_str(&source).expect("the pin is JSON");
+    type Mutation = Box<dyn Fn(&mut Value)>;
+    let mutations: Vec<(&str, Mutation)> = vec![
+        (
+            "schema as a string",
+            Box::new(|pin| pin["schema"] = Value::String("1".into())),
+        ),
+        (
+            "schema as a boolean",
+            Box::new(|pin| pin["schema"] = Value::Bool(true)),
+        ),
+        (
+            "unknown kind",
+            Box::new(|pin| pin["kind"] = Value::String("release-archive".into())),
+        ),
+        (
+            "unknown name",
+            Box::new(|pin| pin["name"] = Value::String("gh".into())),
+        ),
+        (
+            "release disagrees with version",
+            Box::new(|pin| pin["release"] = Value::String("rust-v0.159.4".into())),
+        ),
+        (
+            "floating version",
+            Box::new(|pin| pin["version"] = Value::String("0.159".into())),
+        ),
+        (
+            "leading-zero pre-release identifier",
+            Box::new(|pin| {
+                pin["release"] = Value::String("rust-v0.159.3-alpha.01".into());
+                pin["version"] = Value::String("0.159.3-alpha.01".into());
+            }),
+        ),
+        (
+            "missing platform",
+            Box::new(|pin| {
+                pin["platforms"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("linux/arm64");
+            }),
+        ),
+        (
+            "extra platform",
+            Box::new(|pin| {
+                pin["platforms"]["linux/armv7"] = pin["platforms"]["linux/arm64"].clone();
+            }),
+        ),
+        (
+            "wrong target for the platform",
+            Box::new(|pin| {
+                pin["platforms"]["linux/amd64"]["target"] =
+                    Value::String("aarch64-unknown-linux-musl".into());
+            }),
+        ),
+        (
+            "wrong asset for the target",
+            Box::new(|pin| {
+                pin["platforms"]["linux/amd64"]["asset"] =
+                    Value::String("codex-package-other.tar.gz".into());
+            }),
+        ),
+        (
+            "url with an extra path segment",
+            Box::new(|pin| {
+                let url = pin["platforms"]["linux/amd64"]["url"].as_str().unwrap();
+                pin["platforms"]["linux/amd64"]["url"] =
+                    Value::String(url.replace("/download/", "/download/extra/"));
+            }),
+        ),
+        (
+            "url on another repository",
+            Box::new(|pin| {
+                let url = pin["platforms"]["linux/amd64"]["url"].as_str().unwrap();
+                pin["platforms"]["linux/amd64"]["url"] =
+                    Value::String(url.replace("openai/codex", "openai/codexx"));
+            }),
+        ),
+        (
+            "metadata url carrying a query",
+            Box::new(|pin| {
+                let url = pin["metadata"]["url"].as_str().unwrap();
+                pin["metadata"]["url"] = Value::String(format!("{url}?x=1"));
+            }),
+        ),
+        (
+            "uppercase digest",
+            Box::new(|pin| {
+                let digest = pin["platforms"]["linux/amd64"]["sha256"].as_str().unwrap();
+                pin["platforms"]["linux/amd64"]["sha256"] = Value::String(digest.to_uppercase());
+            }),
+        ),
+        (
+            "bundle for the other architecture",
+            Box::new(|pin| {
+                let other = pin["platforms"]["linux/arm64"]["bundle"].clone();
+                pin["platforms"]["linux/amd64"]["bundle"] = other;
+            }),
+        ),
+        (
+            "signature method downgraded",
+            Box::new(|pin| {
+                pin["authentication"]["method"] = Value::String("hash-only".into());
+            }),
+        ),
+        (
+            "permissive verifier version",
+            Box::new(|pin| {
+                pin["authentication"]["verifier"]["version"] = Value::String("latest".into());
+            }),
+        ),
+        (
+            "identity regexp instead of an exact workflow",
+            Box::new(|pin| {
+                pin["authentication"]["certificate_identity"] = Value::String(".*".into());
+            }),
+        ),
+        (
+            "wrong issuer",
+            Box::new(|pin| {
+                pin["authentication"]["certificate_oidc_issuer"] =
+                    Value::String("https://accounts.google.com".into());
+            }),
+        ),
+        (
+            "untrusted root",
+            Box::new(|pin| {
+                pin["authentication"]["trust_root"] = Value::String("local".into());
+            }),
+        ),
+        (
+            "verified_on is not a date",
+            Box::new(|pin| {
+                pin["authentication"]["verified_on"] = Value::String("today".into());
+            }),
+        ),
+        (
+            "entrypoint changed",
+            Box::new(|pin| pin["package"]["entrypoint"] = Value::String("codex".into())),
+        ),
+        (
+            "layout version widened",
+            Box::new(|pin| pin["package"]["layout_version"] = Value::Number(2.into())),
+        ),
+        (
+            "unknown field",
+            Box::new(|pin| pin["install"] = Value::String("/usr/local".into())),
+        ),
+    ];
+    for (label, mutate) in mutations {
+        let mut mutated = baseline.clone();
+        mutate(&mut mutated);
+        let text = serde_json::to_string(&mutated).unwrap();
+        assert!(
+            parse_codex_pin(&text).is_err(),
+            "the gate accepted a pin with: {label}"
+        );
+    }
+    assert_eq!(parse_codex_pin(&source).unwrap(), pin);
+}
+
+#[test]
+fn codex_recipe_requires_readonly_pin_source() {
+    let pin = parse_codex_pin(&read_text(CODEX_PIN)).expect("the committed pin parses");
+    let recipe = standard_dockerfile();
+    check_codex_recipe(&recipe, &pin).unwrap();
+    let mutations = [
+        recipe.replace(CODEX_SOURCE_MOUNT, "--mount=type=bind,source=missing,ro"),
+        recipe.replace(CODEX_SOURCE_MOUNT, ""),
+        recipe.replace(
+            CODEX_SOURCE_MOUNT,
+            &CODEX_SOURCE_MOUNT.replace(",ro", ",rw"),
+        ),
+        recipe.replace(CODEX_SOURCE_ENV, "AGENT_VM_CODEX_SOURCE_DIR=/elsewhere"),
+        recipe.replace(CODEX_SOURCE_ENV, ""),
+        recipe.replace(
+            CODEX_SOURCE_ENV,
+            "AGENT_VM_CODEX_SOURCE_DIR=/tmp/codex-source\n    AGENT_VM_CODEX_DIGEST=0000",
+        ),
+        recipe.replace(CODEX_VENDOR_MOUNT, ""),
+        recipe.replace(CODEX_HOOK_MOUNT, ""),
+        mutate_codex_block(
+            &recipe,
+            "AGENT_INSTALL_SOFT_FAIL= ",
+            "AGENT_INSTALL_SOFT_FAIL=1 ",
+        ),
+        recipe.replace("sh /tmp/verify-codex.sh", "true"),
+        recipe.replace(CODEX_RUN_INSTALL, "true"),
+        recipe.replace(
+            "LABEL org.agent-vm.version.codex=\"${AGENT_VERSION_CODEX}\"",
+            "LABEL org.agent-vm.version.codex=\"rust-v0.159.3\"",
+        ),
+        recipe.replace(
+            "ARG AGENT_VERSION_CODEX=rust-v0.159.3",
+            "ARG AGENT_VERSION_CODEX=latest",
+        ),
+    ];
+    for (index, mutated) in mutations.into_iter().enumerate() {
+        assert_ne!(mutated, recipe, "recipe mutation {index} changed nothing");
+        assert!(
+            check_codex_recipe(&mutated, &pin).is_err(),
+            "the gate accepted codex recipe mutation {index}"
+        );
+    }
+}
+
+#[test]
+fn codex_recipe_mutations_are_refused() {
+    let hook = read_text(CODEX_HOOK);
+    let loader = read_text(CODEX_LOADER);
+    check_codex_helper_sources(&hook, &loader).unwrap();
+    let hook_mutations = [
+        hook.replace("codex_pin.py\" check --pin-dir", "true #"),
+        hook.replace("AGENT_VM_CODEX_SOURCE_DIR", "CODEX_OTHER_DIR"),
+        hook.replace("unset CODEX_INSTALL_DEFER_SELECTION", ":"),
+        hook.replace("CODEX_INSTALL_DAEMON_ONLY=0", "CODEX_INSTALL_DAEMON_ONLY=1"),
+        format!("{hook}\nprintf 'latest' >&2\n"),
+        format!("{hook}\nexpected_digest=0000\n"),
+    ];
+    for (index, mutated) in hook_mutations.into_iter().enumerate() {
+        assert_ne!(mutated, hook, "hook mutation {index} changed nothing");
+        assert!(
+            check_codex_helper_sources(&mutated, &loader).is_err(),
+            "the gate accepted hook mutation {index}"
+        );
+    }
+    // The pin check must precede the vendor call: swapping them is the defect.
+    let check = "python3 \"$pin_dir/codex_pin.py\" check --pin-dir \"$pin_dir\" --release \"$version\" || {";
+    let vendor = "sh \"$VENDOR/install.sh\" || rc=$?";
+    assert!(hook.contains(check) && hook.contains(vendor));
+    let reordered = hook
+        .replace(check, "@@CHECK@@")
+        .replace(vendor, check)
+        .replace("@@CHECK@@", vendor);
+    assert_ne!(reordered, hook);
+    assert!(
+        check_codex_helper_sources(&reordered, &loader).is_err(),
+        "the gate accepted a vendor call before the pin check"
+    );
+    let loader_mutations = [
+        loader.replace("def load_pin(", "def load_pin_disabled("),
+        format!("{loader}\nimport urllib.request\n"),
+        format!("{loader}\nimport subprocess\n"),
+        format!("{loader}\n# verify-blob\n"),
+        loader.replace("MAX_DECODED_BYTES", "DECODED_LIMIT"),
+    ];
+    for (index, mutated) in loader_mutations.into_iter().enumerate() {
+        assert_ne!(mutated, loader, "loader mutation {index} changed nothing");
+        assert!(
+            check_codex_helper_sources(&hook, &mutated).is_err(),
+            "the gate accepted loader mutation {index}"
+        );
+    }
+}

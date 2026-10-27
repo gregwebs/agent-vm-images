@@ -5,6 +5,10 @@
 # alternate (registry metadata, reviewed 2026-10-15). Update by running
 # `script/build/agent-versions.sh --write` / the lock bump tools, then the
 # tests, then commit -- never by a test fetching the current latest.
-codex	rust-v0.159.3	rust-v0.159.2
+#
+# codex has no alternate: its payloads are bound by a committed content pin, so an
+# arbitrary exact version is not installable and a second unshipped pin closure
+# would be a second truth. `-` means "one committed selection, no alternate".
+codex	rust-v0.159.3	-
 opencode	v2.0.29	v2.0.28
 claude	2.1.286	2.1.285

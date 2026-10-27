@@ -5,9 +5,12 @@
 #
 # No Docker, no network: the vendored installer is faked on a temp prefix and
 # the real run-install/report/check-tool-access helpers are used where they are
-# part of what is under test. This exercises the exact `rust-v` validation, the
-# classified transport softening (and every way it must NOT soften), and the
-# report/T5 gate.
+# part of what is under test. The hook's committed-pin gate runs the REAL loader
+# (`images/tools/codex/codex_pin.py`) against a synthetic closure written by
+# `script/test/codex-pins.py --write-fixture`, so an exact-but-unpinned release is
+# proved to be refused before the vendor is ever invoked. This exercises the
+# exact `rust-v` validation, the pin authority, the classified transport
+# softening (and every way it must NOT soften), and the report/T5 gate.
 set -euo pipefail
 
 REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
@@ -26,6 +29,17 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 PYTHON_DIR="$(dirname "$(command -v python3)")"
 TIMEOUT_DIR="$(dirname "$(command -v timeout)")"
 CASE=""
+
+# The hook derives the pin directory from the owning source directory. Every
+# case gets its own copy of a valid closure so a case can corrupt it in place.
+write_pin_dir() { # $1 dir, $2 release
+    mkdir -p "$1"
+    cp "$REPO_ROOT/images/tools/codex/codex_pin.py" "$1/codex_pin.py"
+    python3 "$REPO_ROOT/script/test/codex-pins.py" --write-fixture "$1" --release "$2" \
+        >/dev/null
+}
+SHARED_SOURCE="$TEST_ROOT/shared-source"
+write_pin_dir "$SHARED_SOURCE" rust-v0.159.3
 
 fail() {
     echo "FAIL: $*" >&2
@@ -52,11 +66,19 @@ new_case() {
     CASE="$TEST_ROOT/$1"
     mkdir -p "$CASE/vendor" "$CASE/prefix" "$CASE/status"
     chmod 0755 "$CASE" "$CASE/prefix" "$CASE/status"
+    cp -R "$SHARED_SOURCE" "$CASE/source"
 
     cat >"$CASE/vendor/install.sh" <<'SH'
 #!/bin/sh
 if [ -n "${FAKE_OPLOG:-}" ]; then
     printf 'VENDOR-INVOKED CODEX_RELEASE=%s\n' "${CODEX_RELEASE:-}" >>"$FAKE_OPLOG"
+    printf 'ENV CODEX_PIN_DIR=%s\n' "${CODEX_PIN_DIR:-}" >>"$FAKE_OPLOG"
+    printf 'ENV HOME=%s\n' "${HOME:-}" >>"$FAKE_OPLOG"
+    printf 'ENV CODEX_HOME=%s\n' "${CODEX_HOME:-}" >>"$FAKE_OPLOG"
+    printf 'ENV CODEX_INSTALL_DIR=%s\n' "${CODEX_INSTALL_DIR:-}" >>"$FAKE_OPLOG"
+    printf 'ENV CODEX_NON_INTERACTIVE=%s\n' "${CODEX_NON_INTERACTIVE:-}" >>"$FAKE_OPLOG"
+    printf 'ENV CODEX_INSTALL_DAEMON_ONLY=%s\n' "${CODEX_INSTALL_DAEMON_ONLY:-}" >>"$FAKE_OPLOG"
+    printf 'ENV AGENT_VM_TRANSPORT_RECEIPT=%s\n' "${AGENT_VM_TRANSPORT_RECEIPT-unset}" >>"$FAKE_OPLOG"
 fi
 if [ -n "${FAKE_SENTINEL:-}" ]; then printf 'ran\n' >>"$FAKE_SENTINEL"; fi
 if [ -n "${FAKE_RECEIPT:-}" ] && [ -n "${AGENT_VM_TRANSPORT_RECEIPT:-}" ]; then
@@ -75,8 +97,9 @@ run_install() {
     set +e
     RUN_OUTPUT="$(
         env -i \
-            "PATH=/usr/bin:/bin" \
+            "PATH=$PYTHON_DIR:/usr/bin:/bin" \
             "AGENT_VM_VENDOR_DIR=$CASE/vendor" \
+            "AGENT_VM_CODEX_SOURCE_DIR=$CASE/source" \
             "AGENT_VM_CODEX_PREFIX=$CASE/prefix" \
             "AGENT_VM_INSTALL_STATUS_DIR=$CASE/status" \
             "AGENT_VM_VERSION_CODEX=$slot" \
@@ -118,6 +141,8 @@ done
 for good in rust-v1.2.3-alpha rust-v1.2.3-alpha.1 rust-v1.2.3-alpha.1.2 \
     rust-v1.2.3-beta rust-v1.2.3-beta.2; do
     new_case "accept-$(printf '%s' "$good" | tr -c 'A-Za-z0-9' '_')"
+    rm -rf "$CASE/source"
+    write_pin_dir "$CASE/source" "$good"
     SOFT=
     run_install "$good"
     [[ $RUN_STATUS -eq 0 ]] || fail "canonical slot '$good' must be accepted: $RUN_OUTPUT"
@@ -128,6 +153,49 @@ new_case empty
 SOFT=
 run_install ""
 [[ $RUN_STATUS -ne 0 ]] || fail "an empty slot must be rejected"
+
+# The hook forwards the reviewed selections and the fixed install paths exactly.
+new_case source-dir-forwarded
+SOFT=
+run_install rust-v0.159.3
+[[ $RUN_STATUS -eq 0 ]] || fail "a pinned slot must install: $RUN_OUTPUT"
+want_oplog="$(printf 'VENDOR-INVOKED CODEX_RELEASE=rust-v0.159.3\nENV CODEX_PIN_DIR=%s\nENV HOME=%s\nENV CODEX_HOME=%s\nENV CODEX_INSTALL_DIR=%s\nENV CODEX_NON_INTERACTIVE=1\nENV CODEX_INSTALL_DAEMON_ONLY=0\nENV AGENT_VM_TRANSPORT_RECEIPT=%s' \
+    "$CASE/source" "$CASE/prefix" "$CASE/prefix/.codex" "$CASE/prefix/.local/bin" "$CASE/receipt")"
+[[ "$(cat "$CASE/oplog")" == "$want_oplog" ]] ||
+    fail "the hook must forward the pin directory and fixed install paths:
+$(cat "$CASE/oplog")"
+[[ ! -e "$CASE/status/codex" ]] || fail "the hook must not write installed itself"
+
+# An exact but UNREVIEWED version is a refusal, and the fake vendor proves the
+# refusal happened before it ran.
+new_case exact-unpinned-refused
+SOFT=
+run_install rust-v0.159.4
+[[ $RUN_STATUS -ne 0 ]] || fail "an exact but unpinned version must be refused"
+[[ ! -s "$CASE/oplog" ]] ||
+    fail "an unpinned version must not reach the vendor: $(cat "$CASE/oplog")"
+assert_contains "$RUN_OUTPUT" "does not cover 'rust-v0.159.4'"
+[[ ! -e "$CASE/status/codex" ]] || fail "a refusal must not record a status"
+
+# A valid release whose local evidence was corrupted is refused locally, with no
+# vendor invocation and no network to hide behind.
+new_case local-evidence-corrupt-no-fetch
+printf '{"assets": []}\n' >"$CASE/source/evidence/release.json"
+SOFT=
+run_install rust-v0.159.3
+[[ $RUN_STATUS -ne 0 ]] || fail "corrupt committed evidence must be refused"
+[[ ! -s "$CASE/oplog" ]] ||
+    fail "corrupt evidence must not reach the vendor: $(cat "$CASE/oplog")"
+assert_contains "$RUN_OUTPUT" "does not match the pin digest"
+
+# A hook deployed without the committed closure must refuse before the vendor.
+new_case pin-dir-missing
+rm -rf "$CASE/source"
+SOFT=
+run_install rust-v0.159.3
+[[ $RUN_STATUS -ne 0 ]] || fail "a missing pin directory must be refused"
+[[ ! -s "$CASE/oplog" ]] || fail "a missing pin must not reach the vendor"
+assert_contains "$RUN_OUTPUT" "no committed Codex pin"
 
 new_case transport-soft
 FAKE_EXIT=75
@@ -150,6 +218,17 @@ run_install rust-v0.159.3
 [[ $RUN_STATUS -ne 0 ]] || fail "a transport failure without soft-fail must be hard"
 [[ ! -e "$CASE/status/codex" ]] || fail "a hard failure must not leave an absence record"
 unset FAKE_EXIT FAKE_RECEIPT SOFT
+
+# Every pin-side refusal is hard under empty/1/0 soft input.
+for soft in "" 1 0; do
+    new_case "exact-unpinned-soft-${soft:-none}"
+    SOFT="$soft"
+    run_install rust-v0.159.4
+    [[ $RUN_STATUS -ne 0 ]] || fail "soft='$soft' must not soften an unpinned version"
+    [[ ! -s "$CASE/oplog" ]] || fail "soft='$soft' reached the vendor"
+    [[ ! -e "$CASE/status/codex" ]] || fail "soft='$soft' recorded a status"
+    SOFT=
+done
 
 new_case bare-75
 FAKE_EXIT=75

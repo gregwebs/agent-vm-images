@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -33,6 +35,7 @@ failures: list[str] = []
 
 DRIVER = '''#!/usr/bin/env python3
 """One fault, one run of the real maintenance module."""
+import errno
 import importlib.util
 import json
 import os
@@ -101,6 +104,22 @@ elif case == 'publication-incomplete-recovery':
     def refuse_restore(self):
         raise OSError('injected restore failure')
     module.Publisher.restore = refuse_restore
+elif case in ('recovery-record-enospc', 'signal-recovery-record-enospc'):
+    # A restore that fails AND a recovery record that cannot be written: the
+    # status-3 contract must survive both, and the printed absolute work
+    # directory is the only remaining way back.
+    if case == 'recovery-record-enospc':
+        shutil.copyfile = write_then_fail('gh.json')
+    else:
+        shutil.copyfile = write_then_fail('Dockerfile', kill=signal.SIGINT)
+
+    def refuse_restore(self):
+        raise OSError('injected restore failure')
+    module.Publisher.restore = refuse_restore
+
+    def enospc_record(self, error):
+        raise OSError(errno.ENOSPC, 'no space left on device')
+    module.Publisher.recovery_record = enospc_record
 elif case == 'second-architecture':
     real_fetch = module.fetch
 
@@ -170,7 +189,7 @@ if case in ('ci', 'inexact-version'):
 if case in ('second-architecture', 'refresh-publishes'):
     sys.exit(module.refresh('node', '9.9.9',
                             root / 'images/artifacts/node-release-key.asc'))
-sys.exit(module.publish(dict(staged)))
+sys.exit(module.publish(dict(staged), root=root))
 '''
 
 
@@ -286,6 +305,61 @@ def case_incomplete_recovery(work: Path, repo: Repo) -> None:
     for path in retained:
         shutil.rmtree(path, ignore_errors=True)
     report('an incomplete recovery exits 3 and retains the work directory')
+
+
+WORK_DIR_RE = re.compile(r'(/[^\s:;]+/pin-artifact\.[A-Za-z0-9_]+)')
+
+
+def case_recovery_record_failure(work: Path, repo: Repo, driver_case: str,
+                                 label: str) -> None:
+    """A failed restore whose recovery record cannot be written is still status 3.
+
+    Both entry points are driven in a fresh subprocess: the ordinary publication
+    exception handler, and a signal delivered mid-publication. The contract is
+    that an `OSError(ENOSPC)` in `recovery_record` never becomes an uncaught
+    traceback, never becomes status 1 and never becomes 128+N.
+    """
+    snapshots = {destination: (destination.read_bytes(), stat.S_IMODE(destination.stat().st_mode))
+                 for destination in repo.destinations()}
+    result = repo.driver(work, driver_case)
+    if result.returncode != 3:
+        fail(label, f'exits 3, got {result.returncode}: {result.stderr.strip()}')
+        return
+    if 'Traceback' in result.stderr:
+        fail(label, f'a record failure must not escape: {result.stderr.strip()}')
+        return
+    if 'no space left on device' not in result.stderr:
+        fail(label, f'the record-write error is reported: {result.stderr.strip()}')
+        return
+    matches = WORK_DIR_RE.findall(result.stderr)
+    if not matches:
+        fail(label, f'the absolute retained directory is printed: {result.stderr.strip()}')
+        return
+    retained = Path(matches[-1])
+    if not retained.is_absolute() or not retained.is_dir():
+        fail(label, f'the printed retained directory exists and is absolute: {retained}')
+        return
+    backup = retained / 'backup'
+    if not (backup / '.complete').is_file():
+        fail(label, f'the retained backup is marked complete: {sorted(p.name for p in backup.glob("*"))}')
+        return
+    # The numbered backups, not `recovery.json`, are the way back when the record
+    # could not be written; they must still hold the pre-publication bytes/modes.
+    for index, destination in enumerate(repo.destinations()):
+        kept = backup / str(index)
+        if not kept.is_file():
+            fail(label, f'backup {index} is retained')
+            return
+        wanted, wanted_mode = snapshots[destination]
+        if kept.read_bytes() != wanted or stat.S_IMODE(kept.stat().st_mode) != wanted_mode:
+            fail(label, f'backup {index} still matches the pre-publication snapshot')
+            return
+    changed = repo.unchanged()
+    if not changed:
+        fail(label, 'the injected failure actually left a destination damaged')
+        return
+    shutil.rmtree(retained, ignore_errors=True)
+    report(label)
 
 
 def case_symlinked_destination(work: Path, repo: Repo) -> None:
@@ -475,6 +549,16 @@ def case_refresh_publishes(work: Path, repo: Repo) -> None:
     report('a clean refresh publishes the pin, the label and the bundled npm')
 
 
+def case_recovery_record_ordinary(work: Path, repo: Repo) -> None:
+    case_recovery_record_failure(work, repo, 'recovery-record-enospc',
+                                 'a failed recovery record on the ordinary path still exits 3')
+
+
+def case_recovery_record_signal(work: Path, repo: Repo) -> None:
+    case_recovery_record_failure(work, repo, 'signal-recovery-record-enospc',
+                                 'a failed recovery record on the signal path still exits 3')
+
+
 def main() -> int:
     work = Path(tempfile.mkdtemp(prefix='pin-artifact-maintenance.')).resolve()
     try:
@@ -483,7 +567,8 @@ def main() -> int:
                      case_incomplete_recovery, case_symlinked_destination,
                      case_ci_and_version, case_check, case_gpg_isolation,
                      case_backup_failure, case_partial_backup_restore,
-                     case_new_destination_rollback):
+                     case_new_destination_rollback, case_recovery_record_ordinary,
+                     case_recovery_record_signal):
             case(work, Repo(work))
     finally:
         shutil.rmtree(work, ignore_errors=True)

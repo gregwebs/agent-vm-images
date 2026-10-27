@@ -14,6 +14,12 @@ DAEMON_ONLY="${CODEX_INSTALL_DAEMON_ONLY:-0}"
 # The classified download helper lives in the bind-mounted recipe contract.
 : "${AGENT_VM_CONTRACT_DIR:?the codex installer needs AGENT_VM_CONTRACT_DIR}"
 
+# The committed pin and its loader live in the bind-mounted codex source
+# directory. There is no default and no ambient override: a direct invocation of
+# this patched installer without the committed closure must fail before it
+# downloads anything, so the hook is not the only place the pin applies.
+: "${CODEX_PIN_DIR:?the codex installer needs CODEX_PIN_DIR (the committed pin directory)}"
+
 # Native subprocesses must never see the classified-transport receipt. A native
 # exit 75 -- or a native that happens to write the receipt path -- is a hard
 # failure, never a transport classification. Keep the path privately and hand it
@@ -91,10 +97,11 @@ parse_args() {
 Usage: install.sh [--release VERSION]
 
 Environment:
-  CODEX_RELEASE          Version to install; overridden by --release.
+  CODEX_RELEASE          Exact rust-v release to install; overridden by --release.
+                         It must be the release the committed pin selects.
+  CODEX_PIN_DIR          The committed pin directory (required). The selection,
+                         content identity and package preflight come from it.
   CODEX_NON_INTERACTIVE  Set to 1, true, or yes to skip prompts.
-  CODEX_INSTALLER_USE_RELEASES_OPENAI_COM
-                         Set to 0, false, or no to use GitHub Releases.
 EOF
         exit 0
         ;;
@@ -115,259 +122,54 @@ download_file() {
     sh "${AGENT_VM_CONTRACT_DIR}/download.sh" "$url" "$output"
 }
 
-download_text() {
-  url="$1"
-
-  # Download to a file and echo it, so a classified transport failure returns
-  # 75 (with the receipt) instead of being lost in a pipe. The caller must
-  # propagate that status immediately.
-  tmp="$(mktemp)"
-  AGENT_VM_TRANSPORT_RECEIPT="$AGENT_VM_RECEIPT_PATH" \
-    sh "${AGENT_VM_CONTRACT_DIR}/download.sh" "$url" "$tmp" || {
-    rc=$?
-    rm -f "$tmp"
-    return "$rc"
-  }
-  cat "$tmp"
-  rm -f "$tmp"
-}
-
 download_file_with_fallback() {
-  # Named for its call sites, but this build has no releases.openai.com
-  # fallback: there is exactly one exact GitHub asset. Any failure -- including
-  # a classified transport 75 -- propagates immediately, before any checksum or
-  # verification runs.
+  # Named for its call sites, but this build has neither a releases.openai.com
+  # fallback nor a manifest cross-check: the committed pin chose one exact
+  # GitHub asset and one digest. Any failure -- including a classified transport
+  # 75 -- propagates immediately, and the hash is checked on the one downloaded
+  # file with no refetch.
   url="$1"
   output="$2"
   expected_digest="$3"
-  required_manifest_asset="${4:-}"
 
   download_file "$url" "$output" || return $?
   verify_archive_digest "$output" "$expected_digest"
-  if [ -n "$required_manifest_asset" ]; then
-    package_archive_digest "$required_manifest_asset" "$output" >/dev/null
-  fi
-}
-
-parse_release_metadata() {
-  # Validate the release metadata as exactly one complete JSON document and
-  # reject duplicate or conflicting critical fields (tag_name and per-asset
-  # names/digests) before any value is used. This replaces a hand-written
-  # balance scanner that accepted missing commas, trailing garbage, a duplicate
-  # tag_name and conflicting/duplicate per-asset digest records. JSON decoding
-  # rejects missing commas and trailing garbage; object_pairs_hook rejects the
-  # duplicate keys a normal parse would silently collapse.
-  python3 -c '
-import json
-import sys
-
-def reject_duplicate_keys(pairs):
-    seen = {}
-    for key, value in pairs:
-        if key in seen:
-            raise ValueError("duplicate key %r" % (key,))
-        seen[key] = value
-    return seen
-
-try:
-    document = json.loads(sys.stdin.read(), object_pairs_hook=reject_duplicate_keys)
-except Exception as error:
-    sys.stderr.write("release metadata is not one complete JSON document: %s\n" % (error,))
-    sys.exit(1)
-
-if not isinstance(document, dict):
-    sys.stderr.write("release metadata is not a JSON object\n")
-    sys.exit(1)
-
-tag = document.get("tag_name")
-if not isinstance(tag, str) or not tag:
-    sys.stderr.write("release metadata has no tag_name\n")
-    sys.exit(1)
-sys.stdout.write("tag_name\t%s\n" % (tag,))
-
-assets = document.get("assets")
-if assets is None:
-    sys.exit(0)
-if not isinstance(assets, list):
-    sys.stderr.write("release metadata assets is not an array\n")
-    sys.exit(1)
-
-names = set()
-for entry in assets:
-    if not isinstance(entry, dict):
-        sys.stderr.write("release metadata asset is not an object\n")
-        sys.exit(1)
-    name = entry.get("name")
-    if not isinstance(name, str) or not name:
-        sys.stderr.write("release metadata asset has no name\n")
-        sys.exit(1)
-    if name in names:
-        sys.stderr.write("release metadata repeats asset %s\n" % (name,))
-        sys.exit(1)
-    names.add(name)
-    digest = entry.get("digest")
-    if digest is None:
-        continue
-    if not isinstance(digest, str):
-        sys.stderr.write("release metadata asset %s has a non-string digest\n" % (name,))
-        sys.exit(1)
-    if not digest:
-        continue
-    sys.stdout.write("asset\t%s\t%s\n" % (name, digest))
-'
-}
-
-release_url_for_asset() {
-  asset="$1"
-  resolved_version="$2"
-
-  printf 'https://github.com/openai/codex/releases/download/rust-v%s/%s\n' "$resolved_version" "$asset"
-}
-
-release_metadata_url() {
-  resolved_version="$1"
-
-  printf 'https://api.github.com/repos/openai/codex/releases/tags/rust-v%s\n' "$resolved_version"
-}
-
-parse_downloaded_release_metadata() {
-  requested_release="$1"
-  source_name="$2"
-  if ! release_metadata="$(printf '%s\n' "$release_json" | parse_release_metadata)"; then
-    echo "Could not parse $source_name release metadata for Codex $requested_release." >&2
-    return 1
-  fi
-}
-
-resolve_metadata_version() {
-  release_tag="$(printf '%s\n' "$release_metadata" | awk -F '\t' '$1 == "tag_name" { print $2; exit }')"
-  case "$release_tag" in
-    rust-v*) metadata_version="${release_tag#rust-v}" ;;
-    *) metadata_version="" ;;
-  esac
-  if [ -z "$metadata_version" ]; then
-    echo "Could not read a rust-v tag from the Codex release metadata." >&2
-    return 1
-  fi
-  validate_version "$metadata_version"
-}
-
-resolve_release_from_github() {
-  normalized_version="$1"
-  resolved_version="$normalized_version"
-  requested_release="$resolved_version"
-  metadata_url="$(release_metadata_url "$resolved_version")"
-
-  release_json="$(download_text "$metadata_url")" || {
-    rc=$?
-    [ "$rc" -eq 75 ] && exit 75
-    echo "Could not fetch GitHub release metadata for Codex $requested_release. GitHub API may be unavailable or rate limited." >&2
-    exit 1
-  }
-
-  parse_downloaded_release_metadata "$requested_release" "GitHub"
-  resolve_metadata_version
-  if [ "$metadata_version" != "$resolved_version" ]; then
-    echo "Release metadata version did not match requested Codex version $resolved_version." >&2
-    exit 1
-  fi
 }
 
 resolve_release() {
   normalized_version="$(normalize_version "$RELEASE")"
   validate_version "$normalized_version"
 
-  resolve_release_from_github "$normalized_version"
-  select_release_assets
-}
+  # The committed pin is the only selection authority. `select` re-hashes every
+  # committed evidence byte and refuses any release that is not the pinned one,
+  # so an exact-but-unreviewed tag fails here, before a single download. The
+  # record is four newline-delimited fields and is parsed positionally; no
+  # `eval` and no shell-source output.
+  record="$(python3 "$CODEX_PIN_DIR/codex_pin.py" select \
+    --pin-dir "$CODEX_PIN_DIR" \
+    --release "rust-v$normalized_version" \
+    --target "$vendor_target")" || return $?
 
-release_asset_digest_or_empty() {
-  asset="$1"
-
-  digest="$(printf '%s\n' "$release_metadata" | awk -F '\t' -v asset="$asset" '
-    $1 == "asset" && $2 == asset {
-      print $3
-      exit
-    }
-  ')"
-
-  case "$digest" in
-    sha256:????????????????????????????????????????????????????????????????)
-      digest="${digest#sha256:}"
-      case "$digest" in
-        *[!0-9a-fA-F]*) return 1 ;;
-      esac
-      printf '%s\n' "$digest"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-release_asset_exists() {
-  asset="$1"
-
-  release_asset_digest_or_empty "$asset" >/dev/null 2>&1
-}
-
-release_asset_digest() {
-  asset="$1"
-
-  digest="$(release_asset_digest_or_empty "$asset" || true)"
-  if [ -z "$digest" ]; then
-    echo "Could not find SHA-256 digest for release asset $asset." >&2
-    exit 1
-  fi
-
-  printf '%s\n' "$digest"
-}
-
-select_release_assets() {
-  package_asset="codex-package-$vendor_target.tar.gz"
-  checksum_asset="codex-package_SHA256SUMS"
-
-  if release_asset_exists "$package_asset" &&
-    release_asset_exists "$checksum_asset"; then
-    install_layout="package"
-    asset="$package_asset"
-  elif release_asset_exists "codex-npm-$npm_tag-$resolved_version.tgz"; then
-    install_layout="legacy-platform-npm"
-    asset="codex-npm-$npm_tag-$resolved_version.tgz"
-  else
-    echo "Could not find Codex package or platform npm release assets for Codex $resolved_version." >&2
+  field_count="$(printf '%s\n' "$record" | awk 'END { print NR }')"
+  if [ "$field_count" -ne 4 ]; then
+    echo "The committed Codex pin returned $field_count fields, expected 4." >&2
     return 1
   fi
-
-  download_url="$(release_url_for_asset "$asset" "$resolved_version")"
-  if [ "$install_layout" = "package" ]; then
-    checksum_url="$(release_url_for_asset "$checksum_asset" "$resolved_version")"
-  fi
-}
-
-package_archive_digest() {
-  asset="$1"
-  manifest_path="$2"
-
-  digest="$(awk -v asset="$asset" '
-    $2 == asset && length($1) == 64 && $1 !~ /[^0-9a-fA-F]/ {
-      print tolower($1)
-      found = 1
-      exit
-    }
-    END {
-      if (!found) {
-        exit 1
-      }
-    }
-  ' "$manifest_path" 2>/dev/null || true)"
-
-  if [ -z "$digest" ]; then
-    echo "Could not find SHA-256 digest for $asset in codex-package_SHA256SUMS." >&2
+  pin_version="$(printf '%s\n' "$record" | sed -n '1p')"
+  asset="$(printf '%s\n' "$record" | sed -n '2p')"
+  download_url="$(printf '%s\n' "$record" | sed -n '3p')"
+  expected_digest="$(printf '%s\n' "$record" | sed -n '4p')"
+  if [ -z "$pin_version" ] || [ -z "$asset" ] || [ -z "$download_url" ] ||
+    [ -z "$expected_digest" ]; then
+    echo "The committed Codex pin returned an empty selection field." >&2
     return 1
   fi
-
-  printf '%s\n' "$digest"
+  if [ "$pin_version" != "$normalized_version" ]; then
+    echo "The committed Codex pin selected $pin_version, not $normalized_version." >&2
+    return 1
+  fi
+  resolved_version="$pin_version"
+  install_layout="package"
 }
 
 file_sha256() {
@@ -804,6 +606,16 @@ handle_conflicting_install() {
 install_package_release() {
   release_dir="$1"
   archive_path="$2"
+
+  # Re-load the committed closure and re-hash the private download, then check
+  # the package metadata and the entrypoint's ELF machine, before the staging
+  # directory exists. Nothing below this line can run on unverified bytes.
+  python3 "$CODEX_PIN_DIR/codex_pin.py" preflight \
+    --pin-dir "$CODEX_PIN_DIR" \
+    --release "rust-v$resolved_version" \
+    --target "$vendor_target" \
+    --archive "$archive_path"
+
   stage_release="$RELEASES_DIR/.staging.$(basename "$release_dir").$$"
 
   mkdir -p "$RELEASES_DIR"
@@ -825,33 +637,6 @@ install_package_release() {
   mv "$stage_release" "$release_dir"
 }
 
-install_legacy_platform_npm_release() {
-  release_dir="$1"
-  archive_path="$2"
-  target="$3"
-  stage_release="$RELEASES_DIR/.staging.$(basename "$release_dir").$$"
-  extract_dir="$tmp_dir/extract"
-  vendor_root="$extract_dir/package/vendor/$target"
-
-  mkdir -p "$RELEASES_DIR"
-  rm -rf "$stage_release" "$extract_dir"
-  mkdir -p "$stage_release/codex-resources" "$extract_dir"
-  tar -xzf "$archive_path" -C "$extract_dir"
-
-  cp "$vendor_root/codex/codex" "$stage_release/codex"
-  cp "$vendor_root/path/rg" "$stage_release/codex-resources/rg"
-  chmod 0755 "$stage_release/codex" "$stage_release/codex-resources/rg"
-  if [ -f "$vendor_root/codex-resources/bwrap" ]; then
-    cp "$vendor_root/codex-resources/bwrap" "$stage_release/codex-resources/bwrap"
-    chmod 0755 "$stage_release/codex-resources/bwrap"
-  fi
-
-  if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
-    rm -rf "$release_dir"
-  fi
-  mv "$stage_release" "$release_dir"
-}
-
 release_dir_is_complete() {
   release_dir="$1"
   expected_version="$2"
@@ -862,29 +647,16 @@ release_dir_is_complete() {
     [ "$(basename "$release_dir")" = "$expected_version-$expected_target" ] ||
     return 1
 
-  case "$layout" in
-    package)
-      [ -f "$release_dir/codex-package.json" ] &&
-        [ -x "$release_dir/bin/codex" ] &&
-        [ -x "$release_dir/bin/codex-code-mode-host" ] &&
-        [ -x "$release_dir/codex" ] &&
-        [ -x "$release_dir/codex-path/rg" ] ||
-        return 1
-      ;;
-    legacy-platform-npm)
-      [ -x "$release_dir/codex" ] &&
-        [ -x "$release_dir/codex-resources/rg" ] ||
-        return 1
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  [ "$layout" = "package" ] || return 1
+  [ -f "$release_dir/codex-package.json" ] &&
+    [ -x "$release_dir/bin/codex" ] &&
+    [ -x "$release_dir/bin/codex-code-mode-host" ] &&
+    [ -x "$release_dir/codex" ] &&
+    [ -x "$release_dir/codex-path/rg" ] ||
+    return 1
 
-  case "$layout:$expected_target" in
-    package:*linux* | legacy-platform-npm:*linux*)
-      [ -x "$release_dir/codex-resources/bwrap" ] || return 1
-      ;;
+  case "$expected_target" in
+    *linux*) [ -x "$release_dir/codex-resources/bwrap" ] || return 1 ;;
   esac
 
   installed_version="$(version_from_binary "$release_dir/bin/codex" || version_from_binary "$release_dir/codex" || true)"
@@ -981,21 +753,17 @@ fi
 
 if [ "$os" = "darwin" ]; then
   if [ "$arch" = "aarch64" ]; then
-    npm_tag="darwin-arm64"
     vendor_target="aarch64-apple-darwin"
     platform_label="macOS (Apple Silicon)"
   else
-    npm_tag="darwin-x64"
     vendor_target="x86_64-apple-darwin"
     platform_label="macOS (Intel)"
   fi
 else
   if [ "$arch" = "aarch64" ]; then
-    npm_tag="linux-arm64"
     vendor_target="aarch64-unknown-linux-musl"
     platform_label="Linux (ARM64)"
   else
-    npm_tag="linux-x64"
     vendor_target="x86_64-unknown-linux-musl"
     platform_label="Linux (x64)"
   fi
@@ -1004,6 +772,15 @@ fi
 resolve_release
 release_name="$resolved_version-$vendor_target"
 release_dir="$RELEASES_DIR/$release_name"
+
+# A build installs into an empty prefix. An existing standalone root is refused
+# before any probe: an already-installed same-version executable could otherwise
+# satisfy the version report and skip the content download and hash entirely,
+# and probing unverified stale code is exactly what the pin exists to prevent.
+if [ -e "$STANDALONE_ROOT" ] || [ -L "$STANDALONE_ROOT" ]; then
+  echo "Fresh pinned Codex installation required: $STANDALONE_ROOT already exists." >&2
+  exit 1
+fi
 current_version="$(current_installed_version)"
 
 if [ -n "$current_version" ] && [ "$current_version" != "$resolved_version" ]; then
@@ -1100,24 +877,12 @@ if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target"
   fi
 
   archive_path="$tmp_dir/$asset"
-  checksum_path="$tmp_dir/$checksum_asset"
 
   step "Downloading Codex CLI"
-  if [ "$install_layout" = "package" ]; then
-    checksum_digest="$(release_asset_digest "$checksum_asset")"
-    download_file_with_fallback "$checksum_url" "$checksum_path" "$checksum_digest" "$asset"
-    expected_digest="$(package_archive_digest "$asset" "$checksum_path")"
-  else
-    expected_digest="$(release_asset_digest "$asset")"
-  fi
   download_file_with_fallback "$download_url" "$archive_path" "$expected_digest"
 
   step "Installing standalone package to $release_dir"
-  if [ "$install_layout" = "package" ]; then
-    install_package_release "$release_dir" "$archive_path"
-  else
-    install_legacy_platform_npm_release "$release_dir" "$archive_path" "$vendor_target"
-  fi
+  install_package_release "$release_dir" "$archive_path"
 fi
 if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout"; then
   echo "Installed Codex command did not report expected version $resolved_version." >&2

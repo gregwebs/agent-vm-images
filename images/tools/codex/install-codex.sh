@@ -1,12 +1,12 @@
 #!/bin/sh
-# Owning install hook for the codex layer: validate the exact `rust-v` slot, run
-# the pinned vendored installer, and (only) soften a positively classified
-# transport failure by removing the recipe's own partial artifacts and writing
-# an absence record. Bind-mounted, never COPYed, so it stays out of the shipped
-# image.
+# Owning install hook for the codex layer: validate the exact `rust-v` slot,
+# require the committed content pin for it, run the pinned vendored installer,
+# and (only) soften a positively classified transport failure by removing the
+# recipe's own partial artifacts and writing an absence record. Bind-mounted,
+# never COPYed, so it stays out of the shipped image.
 #
 # The vendored installer at $AGENT_VM_VENDOR_DIR/install.sh is OpenAI's published
-# installer for the rust-v0.159.3 release with the exact-selection,
+# installer for the rust-v0.159.3 release with the committed-selection,
 # classified-download and latest-branch-removal patches in
 # images/tools/codex/vendor/install.patch. Running it as a child (not through
 # run-install's own interpreter) is what lets this hook inspect the classified
@@ -20,6 +20,24 @@ prefix="${AGENT_VM_CODEX_PREFIX:-/opt/agent}"
 version="${AGENT_VM_VERSION_CODEX:?install-codex.sh needs AGENT_VM_VERSION_CODEX}"
 receipt="${AGENT_VM_TRANSPORT_RECEIPT:-}"
 status_dir="${AGENT_VM_INSTALL_STATUS_DIR:-/opt/agent-vm/install-status}"
+
+# The committed closure (pin.json, its evidence and codex_pin.py) lives in the
+# codex source directory. Production mounts it beside this hook; the explicit
+# seam is what keeps a hook-only mount from silently pinning nothing. There is no
+# ambient override for the pin contents, the expected hash, the URL or the trust
+# policy: the directory is the whole input.
+if [ -n "${AGENT_VM_CODEX_SOURCE_DIR:-}" ]; then
+    pin_dir="$AGENT_VM_CODEX_SOURCE_DIR"
+else
+    case "$0" in
+        */*) pin_dir="${0%/*}" ;;
+        *) pin_dir="." ;;
+    esac
+fi
+[ -r "$pin_dir/pin.json" ] && [ -r "$pin_dir/codex_pin.py" ] || {
+    echo "install-codex.sh: no committed Codex pin at $pin_dir" >&2
+    exit 1
+}
 
 # The codex contract accepts only the canonical `rust-v` spelling: no bare
 # version, no `v` alias, no dist-tag, range or URL. The vendored installer
@@ -49,11 +67,31 @@ fi
     exit 1
 }
 
+# Refuse an exact-but-unpinned version here, before the vendor runs at all. The
+# vendored installer repeats this through `select`; the hook does not rely on
+# that, because a reviewable refusal at the boundary is what keeps the pin
+# authority from depending on the installer's own control flow.
+python3 "$pin_dir/codex_pin.py" check --pin-dir "$pin_dir" --release "$version" || {
+    echo "install-codex.sh: the committed Codex pin does not cover '$version'" >&2
+    exit 1
+}
+
+# A build is a fresh, non-interactive install into an empty prefix. Clearing the
+# inherited selection/update guards keeps a stale ambient value from turning it
+# into a conditional updater that can exit before the content check.
+unset CODEX_INSTALL_DEFER_SELECTION CODEX_INSTALL_IF_LATEST CODEX_INSTALL_IF_CURRENT \
+    CODEX_UPDATE_FROM_RELEASE
+
 HOME=$prefix
 export HOME
+CODEX_PIN_DIR="$pin_dir"
 CODEX_RELEASE="$version"
 CODEX_NON_INTERACTIVE=1
-export CODEX_RELEASE CODEX_NON_INTERACTIVE
+CODEX_HOME="$prefix/.codex"
+CODEX_INSTALL_DIR="$prefix/.local/bin"
+CODEX_INSTALL_DAEMON_ONLY=0
+export CODEX_PIN_DIR CODEX_RELEASE CODEX_NON_INTERACTIVE CODEX_HOME CODEX_INSTALL_DIR \
+    CODEX_INSTALL_DAEMON_ONLY
 
 rc=0
 sh "$VENDOR/install.sh" || rc=$?
