@@ -282,4 +282,5 @@ evidence: `bash script/test/go-example.sh --platform linux/arm64|linux/amd64
 --no-cache` on a native daemon, whose phases are the build with the retained
 archive `sha256sum -c` lines, the offline verifier, the Go loop as root and as
 uid 12345, a real LSP session, the first-use canary legs and the hard
-content-replacement negative. Permanent example CI stays with #33.
+content-replacement negative. CI builds the layer cold on both native
+architectures ([ADR 0010](0010-layer-build-ci.md)).

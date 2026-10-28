@@ -37,8 +37,11 @@ trap 'rm -rf "$work"' EXIT
 archive="$work/$asset"
 
 echo "==> install-golangci-lint: ${GOLANGCI_LINT_VERSION} into $GO_TOOLS_BIN"
-curl -fSL --retry 3 -o "$archive" \
-    "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/${asset}"
+# One variable for the log line and the transfer, so a withdrawn release names
+# the exact URL that failed.
+url="https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/${asset}"
+echo "==> install-golangci-lint: fetch $url"
+curl -fSL --retry 3 -o "$archive" "$url"
 echo "${checksum}  ${archive}" | sha256sum -c -
 
 tar -xzf "$archive" -C "$work"

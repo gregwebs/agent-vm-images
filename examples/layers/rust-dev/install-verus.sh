@@ -29,8 +29,11 @@ archive="/tmp/${asset}"
 trap 'rm -f "$archive"' EXIT
 
 echo "==> install-verus: $VERUS_RELEASE into $VERUS_DIR"
-curl -fSL --retry 3 -o "$archive" \
-    "https://github.com/verus-lang/verus/releases/download/release/${VERUS_RELEASE}/${asset}"
+# One variable for the log line and the transfer, so a withdrawn release names
+# the exact URL that failed.
+url="https://github.com/verus-lang/verus/releases/download/release/${VERUS_RELEASE}/${asset}"
+echo "==> install-verus: fetch $url"
+curl -fSL --retry 3 -o "$archive" "$url"
 echo "${VERUS_SHA256}  ${archive}" | sha256sum -c -
 
 mkdir -p "$VERUS_DIR"

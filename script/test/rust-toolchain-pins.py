@@ -134,12 +134,14 @@ def check(name: str, condition: bool, detail: str = '') -> None:
     print(f'  FAIL {name} {detail}')
 
 
-def refuses(name: str, action, expected: str) -> None:
+def refuses(name: str, action, *expected: str) -> None:
+    """Require every expected substring in the refusal message."""
     try:
         action()
     except model.ToolchainError as error:
         message = str(error)
-        check(name, expected in message, f'(refused with "{message}")')
+        missing = [text for text in expected if text not in message]
+        check(name, not missing, f'(missing {missing} in refusal "{message}")')
         return
     except Exception:  # noqa: BLE001 - an unexpected exception is a failing case
         check(name, False, traceback.format_exc().splitlines()[-1])
@@ -468,9 +470,11 @@ def test_installer_mutants(fixture_root: driver.Fixture) -> None:
             "                         {'RUSTUP_HOME': str(work / 'early-rustup'),\n"
             "                          'CARGO_HOME': str(work / 'early-cargo')})\n")],
         'retry-after-mismatch': [(
-            "            refuse(f'{name}: downloaded bytes do not match the signed manifest hash')",
+            "            refuse(f'{name}: downloaded bytes at {archive.content.url.value} '\n"
+            "                   'do not match the signed manifest hash')",
             "            transport.fetch(archive.content.url, target_path, MAX_ARCHIVE_BYTES)\n"
-            "            refuse(f'{name}: downloaded bytes do not match the signed manifest hash')")],
+            "            refuse(f'{name}: downloaded bytes at {archive.content.url.value} '\n"
+            "                   'do not match the signed manifest hash')")],
     }
     expected_reason = {
         'early-bootstrap-process-call': 'executed the bootstrap',
@@ -580,14 +584,29 @@ def test_events(fixture_root: driver.Fixture) -> None:
         corrupted.fault(url, lambda raw: b'\x00' + raw[1:])
         events_file = Path(tempfile.mkdtemp(dir=fixture_root.root)) / 'events.log'
         corner = Path(tempfile.mkdtemp(dir=fixture_root.root))
+        # The refusal has to name the origin: an operator reading a withdrawn-pin
+        # failure needs the URL that stopped working, not only the file name.
         refuses(f'changed {package} {target.value} bytes are refused',
                 lambda: model.prepare(fixture_root.pinned, pin, model.Architecture.AMD64,
                                       corner, corrupted, fixture_root.verifier(corner),
                                       model.Events(events_file)),
-                'do not match the signed manifest hash')
+                'do not match the signed manifest hash', url)
         check(f'{package} {target.value}: no execution event',
               'execute' not in events_file.read_text(),
               f'({events_file.read_text() if events_file.exists() else "absent"})')
+
+    # The bootstrap is the first input a build fetches, so its digest refusal
+    # names the URL too: a withdrawn rustup-init must be visible in the log.
+    bootstrap_url = model.expected_bootstrap_url(model.Semver(fixture.RUSTUP_VERSION),
+                                                 model.Architecture.AMD64)
+    corrupted = driver.FixtureTransport(fixture_root.dist.files)
+    corrupted.fault(bootstrap_url, lambda raw: b'\x00' + raw[1:])
+    corner = Path(tempfile.mkdtemp(dir=fixture_root.root))
+    refuses('changed bootstrap bytes are refused',
+            lambda: model.prepare(fixture_root.pinned, pin, model.Architecture.AMD64, corner,
+                                  corrupted, fixture_root.verifier(corner),
+                                  model.Events(corner / 'events.log')),
+            'do not match the committed digest', bootstrap_url)
     del layout
 
 
@@ -629,7 +648,8 @@ def test_arch_confusion(fixture_root: driver.Fixture) -> None:
             lambda: model.prepare(fixture_root.pinned, pin, model.Architecture.AMD64,
                                   Path(tempfile.mkdtemp(dir=fixture_root.root)), swapped,
                                   fixture_root.verifier(work), model.Events(events_file)),
-            'do not match the signed manifest hash')
+            'do not match the signed manifest hash',
+            archive_url('cargo', amd64_host.value))
     check('no execution event after a payload refusal',
           'execute' not in events_file.read_text())
 

@@ -2067,7 +2067,9 @@ def prepare(directory: Path, pin: RustPin, arch: Architecture, work: Path,
     events.record(f'fetch {closure.bootstrap.url.value}')
     transport.fetch(closure.bootstrap.url, bootstrap, MAX_BOOTSTRAP_BYTES)
     if hash_file(bootstrap) != closure.bootstrap.digest.value:
-        refuse('bootstrap: downloaded bytes do not match the committed digest')
+        # The URL is the only actionable part of a withdrawn-pin failure.
+        refuse(f'bootstrap: downloaded bytes at {closure.bootstrap.url.value} '
+               'do not match the committed digest')
     events.record(f'hash-ok {closure.bootstrap.url.filename}')
     if elf_machine(bootstrap) != arch.elf_machine:
         refuse(f'bootstrap: ELF machine is not {arch.bootstrap_target}')
@@ -2079,7 +2081,8 @@ def prepare(directory: Path, pin: RustPin, arch: Architecture, work: Path,
         events.record(f'fetch {archive.content.url.value}')
         transport.fetch(archive.content.url, target_path, MAX_ARCHIVE_BYTES)
         if hash_file(target_path) != archive.content.digest.value:
-            refuse(f'{name}: downloaded bytes do not match the signed manifest hash')
+            refuse(f'{name}: downloaded bytes at {archive.content.url.value} '
+                   'do not match the signed manifest hash')
         events.record(f'hash-ok {name}')
         verifier.verify(target_path, directory / archive.signature.path.rel,
                         f'{name} signature')
