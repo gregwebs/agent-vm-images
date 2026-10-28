@@ -22,6 +22,34 @@ into project-owned Pi state without clobbering user configuration. Hooks are
 invoked by the caller, not Docker CMD. Registration probes are not authenticated
 session evidence.
 
+## Proposed authenticated defences (#52, inactive)
+
+Five build-only modules are committed here without being wired into the
+installation. Nothing below changes the current npm install, inputs or locks.
+
+| Module | Owns | Never owns |
+|---|---|---|
+| `import-shrinkwrap.mjs` | Authenticated archive data -> an npm-shaped project lock for `pnpm import`, plus the expectation-vs-import delta | Download, npm, YAML or duplicate-key parsing (`recipe-contract pnpm-json`), guessed hashes, an allowlist |
+| `archive.py` | Whole-archive preflight and bounded extraction, and the per-invocation rehash of a retained provider tarball | The head-of-line SRI check of a download, any network call |
+| `installed-graph.mjs` | Lock-derived instances, dependency and bin-link expectations, non-following inventories, the reviewed family shapes | Reading identity out of `.pnpm` entry names, parsing YAML, trusting an installed link |
+| `check-installed-bytes.mjs` | `PREFIX SIBLING EXTRACTED_PACKAGE`: archive-versus-installed bytes, modes and derived links for every reachable sibling | Download, a caller allowlist, deriving expectations from the observed tree |
+| `check-runtime.mjs` | genai, protobufjs and the chord-context esbuild/native probes from the real installed resolution context | Installing, a script fallback, a version-threshold shape guess |
+
+The independently reviewed expectations are the historical five-sibling table
+(`chord` -> `esbuild`, `pi-agent-core` -> `pi-ai`,`yaml`, `pi-ai` ->
+`anthropic-ai-sdk`, `pi-telemetry` -> none, `pi-tui` -> `marked`) and the modern
+six-sibling table (`pi-agent-core` -> `pi-ai`, `pi-ai` -> `anthropic-ai-sdk`,
+`pi-codemode` -> none, `pi-mcp` -> none, `pi-telemetry` -> none, `pi-tui` ->
+`marked`). They are test expectations only: the checkers derive their own maps
+from authenticated provider manifests.
+
+Operands and seams the activation commit must supply: `AGENT_VM_CONTRACT_DIR`
+(the composed `recipe-contract`), `AGENT_VM_PI_TARGET_PLATFORM`
+(`linux/amd64` or `linux/arm64`, never the host), the extraction parent layout
+`PARENT/<package>/<version>/` with `PARENT/evidence/<package>/<version>/<sha512hex>.tgz`,
+and read-only mounts of the Pi source directory. Suites:
+`node script/test/pi-shrinkwrap.mjs` and `node script/test/pi-installed-bytes.mjs`.
+
 Upgrade with `bash images/tools/pi/upgrade-pi.sh VERSION` and
 `bash images/tools/pi/bridge/upgrade-bridge.sh VERSION`;
 see [CONTRIBUTING](../../../CONTRIBUTING.md#selection-ownership-and-maintenance).

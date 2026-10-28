@@ -185,6 +185,41 @@ independent authentication of the entire npm install. All other non-root lock
 entries must carry integrity, the nested sibling set must be empty or exactly
 those five at the pin, and sibling pin/layout changes require review.
 
+#### Proposed authenticated defences (issue #52, inactive)
+
+The Pi migration to image-owned pnpm adds five build-only modules under
+`images/tools/pi/`. They are source-only in this commit: no Pi or bridge input,
+lock, installer, verifier, wrapper, upgrade helper or Docker block uses them yet,
+so today's npm installation is unchanged. The activation commit is separate.
+
+* `import-shrinkwrap.mjs` converts an authenticated Pi archive's own
+  `npm-shrinkwrap.json` into the npm-shaped project lock `pnpm import` consumes,
+  and compares what pnpm imported against that expectation. It rejects resolvers
+  the SRI proof cannot cover, refuses missing hashes outside the historically
+  hashless five siblings, and *reports* representation deltas instead of
+  allowlisting them. JSON syntax (including duplicate keys) stays with
+  `recipe-contract pnpm-json`; it parses no YAML and never contacts a registry.
+* `archive.py` owns bounded, authenticated extraction: whole-archive preflight for
+  the `package/` root only, normalised names, no traversal, duplicates, special
+  files or link escapes, size/count/depth budgets, no privilege modes, and the
+  archive's own executable bits. Shell still owns download and the head-of-line
+  SRI check; `evidence` rehashes a retained tarball against a locked SRI for the
+  byte checker.
+* `installed-graph.mjs` and `check-installed-bytes.mjs` derive the physical graph
+  from `recipe-contract pnpm-lock graph pi` plus the actual canonical package
+  directories, then compare each reachable sibling's installed tree with its
+  independently authenticated archive. Only a derived package-root
+  `node_modules/.bin` entry set and separately validated dependency links are
+  normalised, and only authenticated, locked declared bin targets are expected to
+  be 0755 after installation.
+* `check-runtime.mjs` re-proves the N6 packages from the real installed
+  resolution context: genai import, protobufjs encode/decode, the historical
+  `chord`-context TypeScript transform with its native optional package, and the
+  modern selection's explicit absence of chord/esbuild.
+
+These are reviewable now and unproven until the activation commit runs them
+against real cold installs.
+
 ### Pi wrapper and bridge
 
 The wrapper at `/usr/local/bin/pi` enforces `PI_SKIP_VERSION_CHECK`, passes

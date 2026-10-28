@@ -91,9 +91,15 @@ def apply_edit(graph, edit) -> None:
 
 def check_shape() -> None:
     entries = sorted(entry.name for entry in FIXTURE.iterdir())
-    check(entries == sorted(DATA + ["README.md", "expected-delta.json", "mutants.json", "result"]),
+    # `archive-manifest.json` is the selected archive's own package.json, added
+    # with the C3 converter so synthesis can be re-run from authenticated inputs.
+    check(entries == sorted(DATA + ["README.md", "archive-manifest.json",
+                                    "expected-delta.json", "mutants.json", "result"]),
           f"fixture carries unexpected entries: {entries}")
     check(not (FIXTURE / "pnpm-lock.yaml").exists(), "fixture must not commit a 0.87.0 pnpm lock")
+    archive_manifest = load(FIXTURE / "archive-manifest.json")
+    check(archive_manifest["name"] == "@earendil-works/pi-coding-agent", "archive manifest name")
+    check(archive_manifest["version"] == "0.87.0", "archive manifest version")
     shrinkwrap = load(FIXTURE / "authenticated-shrinkwrap.json")
     check(shrinkwrap["lockfileVersion"] == 3, "shrinkwrap must be lockfileVersion 3")
     packages = shrinkwrap["packages"]

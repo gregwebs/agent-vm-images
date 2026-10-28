@@ -120,6 +120,12 @@ READMEs may be adapted to their new owner):
 - `images/tools/pi/verify-pi.sh`
 - `images/tools/pi/prepare-lock.sh`
 - `images/tools/pi/pi.sh`
+- `images/tools/pi/import-shrinkwrap.mjs` — added in #52 C3, build-only and
+  inactive until the activation commit
+- `images/tools/pi/archive.py` — added in #52 C3, build-only
+- `images/tools/pi/installed-graph.mjs` — added in #52 C3, build-only
+- `images/tools/pi/check-installed-bytes.mjs` — added in #52 C3, build-only
+- `images/tools/pi/check-runtime.mjs` — added in #52 C3, build-only
 - `images/tools/pi/seed-claude-bridge-config.sh`
 - `images/tools/pi/README.md`
 - `images/tools/pi/package.json`

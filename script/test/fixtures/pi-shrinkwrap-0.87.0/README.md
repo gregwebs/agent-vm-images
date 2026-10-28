@@ -4,10 +4,14 @@ Data only. These record the executed feasibility gate (2026-10-28) that asked
 whether authenticated `pnpm import` preserves a selected Pi archive's upstream
 dependency shrinkwrap. `python3 script/test/pi-shrinkwrap-vectors.py` replays them
 offline; no network, package manager, npm installation, or committed 0.87.0
-`pnpm-lock.yaml` is involved.
+`pnpm-lock.yaml` is involved. `node script/test/pi-shrinkwrap.mjs` consumes the
+same evidence to prove the production converter reproduces
+`synthesized-package-lock.json` and that the delta validator reports the reviewed
+normalizations while rejecting the five curated mutants.
 
 | File | What it is |
 |---|---|
+| `archive-manifest.json` | The `package/package.json` from the same verified 0.87.0 tarball. `script/test/pi-shrinkwrap.mjs` (C3) feeds it, the shrinkwrap and the receipts to the production converter and requires the gate's synthesized lock back. |
 | `authenticated-shrinkwrap.json` | The published 0.87.0 tarball's `npm-shrinkwrap.json`, byte-for-byte after the archive SHA-512 was verified. Root and five sibling records carry no integrity. |
 | `resolutions.json` | Root plus the five legacy sibling archives (`chord`, `pi-agent-core`, `pi-ai`, `pi-telemetry`, `pi-tui`) with their exact registry integrity, URL and verified archive SHA-256. The gate resolved only these five missing SRI records; no arbitrary refill. |
 | `synthesized-package-lock.json` | The npm-shaped project lock the gate synthesized from that shrinkwrap for `pnpm import`: root depends only on the exact selected Pi, every nonroot package location is prefixed under the Pi package, existing SRI is preserved. Never committed as a production input. |

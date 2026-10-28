@@ -1541,6 +1541,14 @@ fn exact_image_install_hooks_exist() {
         "pi/verify-pi.sh",
         "pi/prepare-lock.sh",
         "pi/bridge/prepare-lock.sh",
+        // Build-only authenticated defences (#52 C3): the selected-archive
+        // converter and extractor, the installed-graph/byte proof and the runtime
+        // probe. They are mounted read-only, never COPYed into a runtime layer.
+        "pi/import-shrinkwrap.mjs",
+        "pi/archive.py",
+        "pi/installed-graph.mjs",
+        "pi/check-installed-bytes.mjs",
+        "pi/check-runtime.mjs",
     ];
     for relative in expected {
         let path = repo_path(&format!("images/tools/{relative}"));
@@ -1549,6 +1557,33 @@ fn exact_image_install_hooks_exist() {
             "{} must exist and be a regular file",
             path.display()
         );
+    }
+}
+
+/// The authenticated Pi defences are build-only. A COPY would put the archive
+/// parser and the byte comparator in the runtime layer, where an image author
+/// could not review them through the mount contract.
+#[test]
+fn pi_build_only_helpers_are_never_copied() {
+    let dockerfile = standard_dockerfile();
+    let build_only = [
+        "tools/pi/import-shrinkwrap.mjs",
+        "tools/pi/archive.py",
+        "tools/pi/installed-graph.mjs",
+        "tools/pi/check-installed-bytes.mjs",
+        "tools/pi/check-runtime.mjs",
+    ];
+    for line in dockerfile.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.to_ascii_uppercase().starts_with("COPY ") {
+            continue;
+        }
+        for helper in build_only {
+            assert!(
+                !trimmed.contains(helper),
+                "the build-only helper {helper} must be a read-only mount, not COPYed: {trimmed}"
+            );
+        }
     }
 }
 

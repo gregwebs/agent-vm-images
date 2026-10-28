@@ -127,6 +127,12 @@ if [ "$guard_only" = false ]; then
     # 0.87.0 identity/occurrence/SRI/edge/optional/peer comparison and its five
     # offline mutants. Data-only; no manager, network or committed 0.87 lock.
     python3 script/test/pi-shrinkwrap-vectors.py
+    # issue #52 C3 additive defences: the converter's synthesis/delta vectors over
+    # the Phase 0 evidence, and the installed-byte checker's real-layout mutant
+    # table. Both are hermetic; the checker consumes a fixture graph through the
+    # contract CLI seam and never a package manager.
+    node script/test/pi-shrinkwrap.mjs
+    node script/test/pi-installed-bytes.mjs
     bash script/test/standard-node-consumers.sh --self-test
     python3 script/test/standard-node-layout.py --self-test
     bash script/test/standard-node-policy.sh --self-test
