@@ -131,8 +131,12 @@ if [ "$guard_only" = false ]; then
     python3 script/test/standard-node-layout.py --self-test
     bash script/test/standard-node-policy.sh --self-test
     # The dsh filesystem module's authorization/publisher faults are not
-    # exercised by the shell suites, so its unit table is its own gate.
+    # exercised by the shell suites, so its unit table is its own gate. The
+    # shared module carries the same boundary for all three consumers: its table
+    # owns the consumer profiles, the bootstrap stage and the four-input
+    # transaction's absent-destination and mode behaviour.
     python3 script/test/dsh-project.py
+    python3 script/test/pnpm-project.py
     node script/test/pnpm-inputs.mjs
     python3 script/test/opencode-probe.py
     python3 script/test/opencode-audit-tests.py

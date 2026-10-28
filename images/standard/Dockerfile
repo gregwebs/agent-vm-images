@@ -49,6 +49,7 @@ LABEL org.agent-vm.version.dsh="${AGENT_VERSION_DSH:-0.1.5-rc.2}"
 COPY tools/dsh/package.json tools/dsh/pnpm-lock.yaml tools/dsh/pnpm-workspace.yaml tools/dsh/pnpm-inputs.sha256 /opt/agent-vm/dsh/
 RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/dsh,target=/tmp/dsh-source,ro \
+    --mount=type=bind,source=tools/pnpm-project.py,target=/tmp/pnpm-project.py,ro \
     --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
@@ -64,6 +65,7 @@ RUN test ! -e /usr/local/bin/dsh && test ! -L /usr/local/bin/dsh && \
 
 RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/dsh,target=/tmp/dsh-source,ro \
+    --mount=type=bind,source=tools/pnpm-project.py,target=/tmp/pnpm-project.py,ro \
     --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \

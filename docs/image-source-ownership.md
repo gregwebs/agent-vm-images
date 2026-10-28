@@ -486,9 +486,32 @@ dsh is now an image-owned pnpm project. Its owning sources are:
 
 - Reviewed inputs: `images/tools/dsh/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,pnpm-inputs.sha256}`.
 - Preparation, installation and verification: `images/tools/dsh/{prepare-lock.sh,install-dsh.sh,verify-dsh.sh}`.
-- Build-only helpers: `images/tools/dsh/{project.py,host-manager.py,check-runtime.mjs,probe-dsh.py}`.
-  `project.py` owns filesystem authorization and handled-failure four-file
-  publication and is not a lock parser; it authorizes the composed contract
+- Shared build-only boundary: `images/tools/pnpm-project.py` and
+  `images/tools/pnpm-host-manager.py`. The filesystem/manager/publication
+  implementation moved here when Pi and its bridge began sharing it, so one
+  security boundary serves all three consumers instead of three drifting copies.
+  A frozen consumer table (`dsh` `/opt/agent-vm/dsh`, `pi` `/opt/agent-vm/pi`,
+  `bridge` `/opt/agent-vm/pi-packages`) carries each production prefix, command,
+  scratch token and host-acquisition variable prefix; capabilities carry their
+  consumer, so scratch, cleanup, manager selection and publication derive policy
+  from the authorized object and never re-select it from an argument. The module
+  owns filesystem authorization and the handled-failure four-input publication
+  and is not a lock parser. `authorize_stage` is the separate bootstrap authority
+  for a first import: a private `0700` child of the consumer's scratch parent
+  (production) or of the invocation's authorized root (fixture), disjoint from
+  every production prefix, the contract directory, the reviewed pnpm sources, the
+  checkout, the base pin, the status destination and any caller-named source, and
+  it can only stage — never install, publish to the live prefix or write status.
+- dsh adapters: `images/tools/dsh/{project.py,host-manager.py}` load the shared
+  module through `sys.modules` (one instance, so capability types keep one
+  identity), re-export it unchanged and supply the dsh consumer. dsh's scripts,
+  `probe-dsh.py`, its imports and its Docker mounts keep naming the old paths; the
+  install and verify RUNs add one read-only mount of
+  `tools/pnpm-project.py` at `/tmp/pnpm-project.py`, which is where the adapter's
+  `../pnpm-project.py` resolves. The shared CLI requires
+  `--consumer dsh|pi|bridge`; the adapters reject the flag.
+- Other build-only dsh helpers: `images/tools/dsh/{check-runtime.mjs,probe-dsh.py}`.
+  The shared module authorizes the composed contract
   directory **before** anything in it is executed (the environment guard included)
   and accepts exactly these shapes: the production build mount
   `/tmp/recipe-contract` with a `/opt/agent-vm/dsh` prefix, a directory inside an
@@ -500,14 +523,19 @@ dsh is now an image-owned pnpm project. Its owning sources are:
   root it does not have). The graph reader, comparator, derivation and staging
   helpers are `recipe-contract` subcommands (`pnpm-lock`, `dsh-lock-update`,
   `dsh-cordis-overrides`, `dsh-upgrade-stage`) reaching
-  `images/recipe-contract/pnpmlock`; `host-manager.py` represents the authenticated
-  stock manager as argv for host maintenance (`project.py manager`). None of these
-  ship in the image.
+  `images/recipe-contract/pnpmlock`; `pnpm-host-manager.py` represents the
+  authenticated stock manager as argv for host maintenance (`pnpm-project.py
+  manager`), and production refuses its `{AGENT_VM_DSH,PI,BRIDGE}_PNPM_PACKAGE|_ARCHIVE|_NODE`
+  variables instead of accepting a host-selected manager. None of these ship in
+  the image.
 - Maintenance: `images/tools/dsh/upgrade-dsh.sh` (transactional four-input and
   central-Dockerfile publication, Cordis proposal/approval).
-- Tests: `script/test/{dsh-prepare-lock.sh,dsh-verify.sh,dsh-project.py,dsh-upgrade.py,upgrade-scripts.sh,standard-node-layout.py,standard-node-policy.sh,standard-node-policy.py,standard-node-policy-self-test.py,standard-node-consumers.sh,standard-node-consumers.py,standard-node-dsh.py}`,
+- Tests: `script/test/{dsh-prepare-lock.sh,dsh-verify.sh,dsh-project.py,pnpm-project.py,dsh-upgrade.py,upgrade-scripts.sh,standard-node-layout.py,standard-node-policy.sh,standard-node-policy.py,standard-node-policy-self-test.py,standard-node-consumers.sh,standard-node-consumers.py,standard-node-dsh.py}`,
   fixtures `script/test/fixtures/{dsh/*,standard-node-dsh.py,standard-node-policy.py}`
   and derivation/update lock fixtures under `script/test/fixtures/pnpm-lock/`.
+  `dsh-project.py` owns dsh's behaviour through the shared module and its adapter
+  parity; `pnpm-project.py` owns the consumer table, the bootstrap stage and the
+  transaction's absent-destination and mode behaviour.
 - Rules and evidence: [ADR 0003](adr/0003-dsh-graph-freeze.md) and the
   [migration ledger](standard-pnpm-migration.md).
 

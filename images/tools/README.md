@@ -121,6 +121,13 @@ hoist for sandbox resolution, four reviewed exact Cordis overrides and only the
 scripts disabled, with a disposable external store; `node_modules/.pnpm` is
 runtime payload.
 
+The filesystem/manager/publication boundary is not dsh-specific: it lives in
+`images/tools/pnpm-project.py` (with `images/tools/pnpm-host-manager.py` for host
+acquisition) because Pi and its bridge share it. `images/tools/dsh/project.py`
+and `dsh/host-manager.py` are adapters that load the shared module and supply the
+dsh consumer, so dsh's scripts, imports and mounts are unchanged; the dsh install
+and verify RUNs add one read-only mount of the shared file at `/tmp/pnpm-project.py`.
+
 The lock is functional, not only reproducibility. A floating dsh install can
 pull a newer `dsh-base` and nest `dsh-sandbox-local` under its node_modules,
 where the app's plugin loader cannot resolve it. The reviewed lock preserves the
