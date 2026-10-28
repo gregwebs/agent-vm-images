@@ -92,7 +92,12 @@ repinner remain independent and unchanged.
 **What moved.** The bounded parser, closed consumer policies, graph/identity/
 exact-peer rules, pins, the ADR 0003 comparator and the Cordis derivation are now
 `recipe-contract` subcommands: `pnpm-lock`, `pnpm-environment`, `pnpm-yaml`,
-`dsh-lock-update`, `dsh-cordis-overrides`, `dsh-upgrade-stage`. The code lives in
+`pnpm-json`, `dsh-lock-update`, `dsh-cordis-overrides`, `dsh-upgrade-stage`.
+Issue #52 adds two primitives under the same boundary: `pnpm-selection-update`
+(the generic spelling of the ADR 0003 comparator) and `pnpm-lock-candidate`,
+which captures an unpinned three-file preparation candidate through an inherited
+descriptor and yields a graph/report that ordinary pinned readers cannot consume.
+The code lives in
 `images/recipe-contract/{pnpmlock,pnpmenv,dshupgrade,internal/document}`.
 `pnpm-lock.mjs`, `check-pnpm-environment.mjs`, the three dsh Node adapters and the
 npm `vendor/yaml/` (yaml@2.9.0, ISC, 78 files, 480 KiB) were deleted with their

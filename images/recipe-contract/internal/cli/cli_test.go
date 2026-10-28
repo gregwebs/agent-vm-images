@@ -66,6 +66,9 @@ type childSpec struct {
 	env    []string
 	stdout streamTarget
 	stderr streamTarget
+	// extraFiles are passed as descriptors 3, 4, ... so a test can prove real
+	// descriptor inheritance instead of an in-process handle.
+	extraFiles []*os.File
 }
 
 func runChildProcess(t *testing.T, spec childSpec) result {
@@ -73,6 +76,7 @@ func runChildProcess(t *testing.T, spec childSpec) result {
 	command := exec.Command(os.Args[0], spec.args...)
 	command.Env = append([]string{processChildEnv + "=1"}, spec.env...)
 	command.Dir = spec.cwd
+	command.ExtraFiles = spec.extraFiles
 	var stdoutFile, stderrFile *os.File
 	var pipeWrite *os.File
 	switch spec.stdout {
@@ -517,6 +521,7 @@ func runShellChild(t *testing.T, spec childSpec, script string) result {
 	command := exec.Command("sh", append([]string{"-c", script, binary}, spec.args...)...)
 	command.Env = append([]string{processChildEnv + "=1"}, spec.env...)
 	command.Dir = spec.cwd
+	command.ExtraFiles = spec.extraFiles
 	var stdoutBuffer, stderrBuffer bytes.Buffer
 	command.Stdout = &stdoutBuffer
 	command.Stderr = &stderrBuffer

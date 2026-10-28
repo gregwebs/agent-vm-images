@@ -1,0 +1,109 @@
+{
+  "provenance": {
+    "issue": 52,
+    "phase": "0 feasibility gate (2026-10-28): authenticated selected-archive import, lock-only",
+    "root": {
+      "name": "@earendil-works/pi-coding-agent",
+      "version": "0.87.0",
+      "integrity": "sha512-S9JJVGHya/h0e0M+zwPTB6RkPe7PmLLqfBUTssFYW5mxAti6oZEILn4jvaUImENRC3U9RwXAB6H4gw8xj2J0GQ=="
+    },
+    "manager": {
+      "package": "pnpm",
+      "version": "11.11.0"
+    },
+    "notClaimed": [
+      "frozen cold install, payload bytes, physical layout or runtime health",
+      "independent signer attestation; SRI/TLS fidelity only",
+      "that pnpm transplants graphs; a per-selection comparator remains mandatory",
+      "native proposed-SHA acceptance"
+    ]
+  },
+  "counts": {
+    "allRecordExactIdentity": {
+      "binPresenceDifferentPairs": 0,
+      "declaredPeerComparisons": 8,
+      "edgeDeltas": {},
+      "effectivePeerChanges": 0,
+      "explicitPeerExpansionChangedEffectiveTargets": 0,
+      "explicitPeerExpansionEdges": 1,
+      "optionalClassificationDifferentPairs": 0,
+      "pairs": 144,
+      "peerDeclarationChanges": 1,
+      "sriEqualPairs": 144,
+      "sriRawEqualPairs": 144,
+      "sriRawUnequalPairs": 0,
+      "sriUnequalPairs": 0
+    },
+    "identityIntersection": 143,
+    "identityMultisetAddedOccurrences": 0,
+    "identityMultisetRemovedOccurrences": 1,
+    "newOnlyIdentities": 0,
+    "npmArchiveOccurrencesIncludingAuthenticatedRoot": 144,
+    "npmBinOccurrences": 9,
+    "npmMandatoryEdges": 248,
+    "npmOptionalEdges": 26,
+    "npmOptionalFlagOccurrences": 26,
+    "npmRootedMappedOccurrences": 144,
+    "npmUniqueArchiveIdentities": 143,
+    "npmUnreachableOccurrences": 0,
+    "npmUnresolvedDeclaredEdges": 0,
+    "npmWithoutRootedMapping": 0,
+    "oldOnlyIdentities": 0,
+    "pnpmArchivePackageRecords": 143,
+    "pnpmHasBinPackageRecords": 9,
+    "pnpmMandatoryEdges": 248,
+    "pnpmOptionalEdges": 27,
+    "pnpmOptionalFlagSnapshots": 26,
+    "pnpmPackageOptionalFieldRecords": 0,
+    "pnpmPackageRecordsWithoutReachableSnapshots": 0,
+    "pnpmPackageRecordsWithoutSnapshots": 0,
+    "pnpmRootedMappedSnapshots": 143,
+    "pnpmSnapshotRecords": 143,
+    "pnpmUniqueSnapshotIdentities": 143,
+    "pnpmUnreachableSnapshots": 0,
+    "pnpmWithoutRootedMapping": 0,
+    "rootedIdentityGuarded": {
+      "binPresenceDifferentPairs": 0,
+      "declaredPeerComparisons": 8,
+      "edgeDeltas": {},
+      "effectivePeerChanges": 0,
+      "explicitPeerExpansionChangedEffectiveTargets": 0,
+      "explicitPeerExpansionEdges": 1,
+      "optionalClassificationDifferentPairs": 0,
+      "pairs": 144,
+      "peerDeclarationChanges": 1,
+      "sriEqualPairs": 144,
+      "sriRawEqualPairs": 144,
+      "sriRawUnequalPairs": 0,
+      "sriUnequalPairs": 0
+    },
+    "rootedTargetDivergenceFrontiers": 0
+  },
+  "reviewedNormalizations": [
+    {
+      "kind": "occurrence-dedup",
+      "identity": "agent-base@9.0.0",
+      "npmOccurrences": 2,
+      "pnpmSnapshots": 1,
+      "reason": "two physical npm locations merge to one equivalent pnpm snapshot; archive identity set unchanged",
+      "approval": "operator approval 6 (2026-10-28); recorded in the migration ledger and ADR before activation"
+    },
+    {
+      "kind": "explicit-optional-peer-edge",
+      "source": "openai@6.40.0",
+      "peer": "ws",
+      "target": "ws@8.21.0",
+      "reason": "pnpm represents the already effective optional ws peer as a snapshot optional edge; npm resolves the same archive through ancestor lookup",
+      "approval": "operator approval 6 (2026-10-28); recorded in the migration ledger and ADR before activation"
+    },
+    {
+      "kind": "peer-declaration-completion",
+      "archive": "debug@4.4.3",
+      "peer": "supports-color",
+      "specification": "*",
+      "reason": "pnpm completes the declaration from optional peer metadata; both effective targets remain absent",
+      "approval": "operator approval 6 (2026-10-28); recorded in the migration ledger and ADR before activation"
+    }
+  ],
+  "consumerUse": "C3's build-only converter test consumes these vectors as data; this file records the reviewed Phase 0 result, it is not an allowlist for another selection"
+}

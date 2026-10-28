@@ -1,0 +1,118 @@
+[
+  {
+    "mutant": "sri",
+    "edits": [
+      {
+        "path": [
+          "packages",
+          "@earendil-works/pi-coding-agent@0.87.0",
+          "resolution",
+          "integrity"
+        ],
+        "value": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+      }
+    ],
+    "expect": [
+      {
+        "counter": "rootedIdentityGuarded.sriUnequalPairs",
+        "value": 1
+      },
+      {
+        "counter": "rootedIdentityGuarded.sriRawUnequalPairs",
+        "value": 1
+      }
+    ]
+  },
+  {
+    "mutant": "optional",
+    "edits": [
+      {
+        "path": [
+          "snapshots",
+          "@esbuild/linux-arm64@0.28.2",
+          "optional"
+        ],
+        "value": false
+      }
+    ],
+    "expect": [
+      {
+        "counter": "rootedIdentityGuarded.optionalClassificationDifferentPairs",
+        "value": 1
+      }
+    ]
+  },
+  {
+    "mutant": "edge",
+    "edits": [
+      {
+        "path": [
+          "snapshots",
+          "cross-spawn@7.0.6",
+          "dependencies",
+          "which"
+        ],
+        "value": "chalk@6.0.0"
+      }
+    ],
+    "expect": [
+      {
+        "counter": "rootedTargetDivergenceFrontiers",
+        "value": 1
+      }
+    ]
+  },
+  {
+    "mutant": "peer",
+    "edits": [
+      {
+        "path": [
+          "snapshots",
+          "openai@6.40.0(ws@8.21.0)",
+          "optionalDependencies",
+          "ws"
+        ],
+        "value": "chalk@6.0.0"
+      }
+    ],
+    "expect": [
+      {
+        "counter": "rootedIdentityGuarded.effectivePeerChanges",
+        "value": 1
+      }
+    ]
+  },
+  {
+    "mutant": "orphan",
+    "edits": [
+      {
+        "path": [
+          "packages",
+          "is-number@7.0.0"
+        ],
+        "value": {
+          "resolution": {
+            "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+          }
+        }
+      },
+      {
+        "path": [
+          "snapshots",
+          "is-number@7.0.0"
+        ],
+        "value": {}
+      }
+    ],
+    "expect": [
+      {
+        "counter": "newOnlyIdentities",
+        "value": 1
+      },
+      {
+        "counter": "pnpmUnreachableSnapshots",
+        "value": 1
+      }
+    ]
+  }
+]

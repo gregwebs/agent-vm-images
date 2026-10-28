@@ -59,6 +59,7 @@ func (m UpdateMode) String() string {
 
 // UpdateRequest names the two projects, the requested version and the mode.
 type UpdateRequest struct {
+	Kind      Kind
 	Before    Prefix
 	After     Prefix
 	Requested RequestedSelection
@@ -138,78 +139,171 @@ func CompareDshUpdateArgument(request UpdateRequest, argument string) (UpdateCom
 }
 
 func compareDshProjects(request UpdateRequest, before, after *DshProject) (UpdateComparison, *DshProject, error) {
-	requested := before.project.selection.Version
-	if version, ok := request.Requested.Version(); ok {
-		requested = version
+	comparison, err := compareSelection(KindDsh, projectSide(before.project), projectSide(after.project),
+		request.Requested, request.Refresh)
+	if err != nil {
+		return UpdateComparison{}, nil, err
 	}
-	if after.project.selection.Version != requested {
-		return UpdateComparison{}, nil, errorf("after selection differs from request")
-	}
-	changed := before.project.selection.Version != requested
-	refresh := request.Refresh == RefreshLock
-	root := KindDsh.Root().String()
+	return comparison, after, nil
+}
 
-	beforeManifest, err := normalizedManifest(before, changed, root)
+// CompareSelectionUpdate applies the ADR 0003 rules to two independently
+// validated reviewed projects of one consumer kind. It is the post-pin entry; a
+// private candidate enters through CompareSelectionCandidate instead.
+func CompareSelectionUpdate(request UpdateRequest) (UpdateComparison, *Project, error) {
+	return readAndCompareSelection(request, nil)
+}
+
+// CompareSelectionUpdateArgument preserves the retired read-before-version-check
+// order: a broken project wins over an invalid version argument.
+func CompareSelectionUpdateArgument(request UpdateRequest, argument string) (UpdateComparison, *Project, error) {
+	return readAndCompareSelection(request, &argument)
+}
+
+func readAndCompareSelection(request UpdateRequest, argument *string) (UpdateComparison, *Project, error) {
+	before, err := ReadProject(request.Before, request.Kind)
 	if err != nil {
 		return UpdateComparison{}, nil, err
 	}
-	afterManifest, err := normalizedManifest(after, changed, root)
+	after, err := ReadProject(request.After, request.Kind)
 	if err != nil {
 		return UpdateComparison{}, nil, err
+	}
+	if argument != nil {
+		if request.Requested, err = ParseRequestedSelection(*argument); err != nil {
+			return UpdateComparison{}, nil, err
+		}
+	}
+	comparison, err := compareSelection(request.Kind, projectSide(before), projectSide(after),
+		request.Requested, request.Refresh)
+	if err != nil {
+		return UpdateComparison{}, nil, err
+	}
+	return comparison, after, nil
+}
+
+// SelectionRequest is the closed comparison input: the requested exact version
+// (empty keeps the committed one) and whether a developer asked to refresh. It
+// carries no policy switch.
+type SelectionRequest struct {
+	Requested RequestedSelection
+	Refresh   RefreshMode
+}
+
+// comparisonSide is the pure comparison view shared by a reviewed Project and a
+// captured candidate. readInput exists only for the equal/no-refresh byte rule,
+// and inputNames names the files that rule compares.
+type comparisonSide struct {
+	selection Selection
+	manifest  document.Value
+	workspace []byte
+	lock      document.Value
+	snapshots []Snapshot
+	importer  []Edge
+	readInput func(name string) ([]byte, error)
+	// inputNames is the side's own file set; the equal rule compares over it.
+	inputNames []string
+}
+
+func projectSide(project *Project) comparisonSide {
+	prefix := project.prefix
+	names := append(append([]string{}, PinnedInputs...), pinFile)
+	return comparisonSide{
+		selection: project.selection,
+		manifest:  project.manifest,
+		workspace: project.workspaceBytes,
+		lock:      project.lock,
+		snapshots: project.snapshots,
+		importer:  project.importer,
+		readInput: func(name string) ([]byte, error) {
+			return nodefs.ReadBounded(filepath.Join(string(prefix), name))
+		},
+		inputNames: names,
+	}
+}
+
+func candidateSide(candidate *ValidatedCandidate) comparisonSide {
+	graph := candidate.Graph()
+	return comparisonSide{
+		selection:  graph.Selection,
+		manifest:   candidate.manifest,
+		workspace:  candidate.workspace,
+		lock:       candidate.lock,
+		snapshots:  graph.Snapshots,
+		importer:   graph.Importer,
+		readInput:  candidate.inputBytesFor,
+		inputNames: PinnedInputs,
+	}
+}
+
+func compareSelection(kind Kind, before, after comparisonSide, requested RequestedSelection, refresh RefreshMode) (UpdateComparison, error) {
+	if before.selection.Kind != kind || after.selection.Kind != kind {
+		return UpdateComparison{}, errorf("selection kind differs from the requested kind")
+	}
+	version := before.selection.Version
+	if explicit, ok := requested.Version(); ok {
+		version = explicit
+	}
+	if after.selection.Version != version {
+		return UpdateComparison{}, errorf("after selection differs from request")
+	}
+	changed := before.selection.Version != version
+	requestedRefresh := refresh == RefreshLock
+	root := kind.Root().String()
+
+	beforeManifest, err := normalizedManifest(before.manifest, changed, root)
+	if err != nil {
+		return UpdateComparison{}, err
+	}
+	afterManifest, err := normalizedManifest(after.manifest, changed, root)
+	if err != nil {
+		return UpdateComparison{}, err
 	}
 	if !deepEqual(afterManifest, beforeManifest) {
-		return UpdateComparison{}, nil, errorf("only dsh manifest selection may change")
+		return UpdateComparison{}, errorf("only %s manifest selection may change", kind.String())
 	}
-	beforeWorkspace, err := nodefs.ReadBounded(filepath.Join(string(request.Before), "pnpm-workspace.yaml"))
-	if err != nil {
-		return UpdateComparison{}, nil, err
+	if !bytes.Equal(before.workspace, after.workspace) {
+		return UpdateComparison{}, errorf("workspace bytes changed")
 	}
-	afterWorkspace, err := nodefs.ReadBounded(filepath.Join(string(request.After), "pnpm-workspace.yaml"))
-	if err != nil {
-		return UpdateComparison{}, nil, err
-	}
-	if !bytes.Equal(beforeWorkspace, afterWorkspace) {
-		return UpdateComparison{}, nil, errorf("workspace bytes changed")
-	}
-	beforeHeader := lockHeader(before, changed || refresh, root)
-	afterHeader := lockHeader(after, changed || refresh, root)
+	beforeHeader := lockHeader(before.lock, changed || requestedRefresh, root)
+	afterHeader := lockHeader(after.lock, changed || requestedRefresh, root)
 	if !deepEqual(afterHeader, beforeHeader) {
-		return UpdateComparison{}, nil, errorf("lock settings/overrides/importer changed")
+		return UpdateComparison{}, errorf("lock settings/overrides/importer changed")
 	}
-	if !changed && !refresh {
-		for _, file := range append(append([]string{}, PinnedInputs...), pinFile) {
-			beforeBytes, err := nodefs.ReadBounded(filepath.Join(string(request.Before), file))
+	if !changed && !requestedRefresh {
+		for _, file := range after.inputNames {
+			beforeBytes, err := before.readInput(file)
 			if err != nil {
-				return UpdateComparison{}, nil, err
+				return UpdateComparison{}, err
 			}
-			afterBytes, err := nodefs.ReadBounded(filepath.Join(string(request.After), file))
+			afterBytes, err := after.readInput(file)
 			if err != nil {
-				return UpdateComparison{}, nil, err
+				return UpdateComparison{}, err
 			}
 			if !bytes.Equal(beforeBytes, afterBytes) {
-				return UpdateComparison{}, nil, errorf("%s: equal selection requires identical bytes", file)
+				return UpdateComparison{}, errorf("%s: equal selection requires identical bytes", file)
 			}
 		}
 	}
-	oldClosure, err := closure(before.project)
+	oldClosure, err := closure(before.snapshots, before.importer)
 	if err != nil {
-		return UpdateComparison{}, nil, err
+		return UpdateComparison{}, err
 	}
-	newClosure, err := closure(after.project)
+	newClosure, err := closure(after.snapshots, after.importer)
 	if err != nil {
-		return UpdateComparison{}, nil, err
+		return UpdateComparison{}, err
 	}
 	mode := ModeEqual
 	switch {
-	case refresh:
+	case requestedRefresh:
 		mode = ModeRefresh
 	case changed:
 		mode = ModeChanged
 	}
 	result := UpdateComparison{
 		Mode:          mode,
-		BeforeVersion: before.project.selection.Version,
-		AfterVersion:  after.project.selection.Version,
+		BeforeVersion: before.selection.Version,
+		AfterVersion:  after.selection.Version,
 	}
 	for _, field := range []struct {
 		name         string
@@ -226,14 +320,14 @@ func compareDshProjects(request UpdateRequest, before, after *DshProject) (Updat
 		{
 			name: "packages", label: "Archives",
 			added: &result.AddedArchives, removed: &result.RemovedArchives, retained: &result.RetainedArchives,
-			oldRecords: before.project.lock.Get("packages"), newRecords: after.project.lock.Get("packages"),
+			oldRecords: before.lock.Get("packages"), newRecords: after.lock.Get("packages"),
 			closure: newClosure.archives.contains, oldClosure: oldClosure.archives.contains,
 			retainedWord: "archive",
 		},
 		{
 			name: "snapshots", label: "Snapshots",
 			added: &result.AddedSnapshots, removed: &result.RemovedSnapshots, retained: &result.RetainedSnapshots,
-			oldRecords: before.project.lock.Get("snapshots"), newRecords: after.project.lock.Get("snapshots"),
+			oldRecords: before.lock.Get("snapshots"), newRecords: after.lock.Get("snapshots"),
 			closure: newClosure.snapshots.contains, oldClosure: oldClosure.snapshots.contains,
 			retainedWord: "snapshot",
 		},
@@ -245,50 +339,50 @@ func compareDshProjects(request UpdateRequest, before, after *DshProject) (Updat
 		*field.retained = presentInBoth(oldKeys, newKeys)
 		for _, key := range *field.added {
 			if !field.closure(key) {
-				return UpdateComparison{}, nil, errorf("addition outside changed root closure: %s", key)
+				return UpdateComparison{}, errorf("addition outside changed root closure: %s", key)
 			}
 		}
 		for _, key := range *field.removed {
 			if !field.oldClosure(key) {
-				return UpdateComparison{}, nil, errorf("removal outside changed root closure: %s", key)
+				return UpdateComparison{}, errorf("removal outside changed root closure: %s", key)
 			}
 		}
 		for _, key := range *field.retained {
 			// Refresh may re-select transitive snapshots, never substitute a retained
 			// archive: npm versions are immutable, so a different SRI/tarball/metadata
 			// for the same name@version is a different artifact, not a refresh.
-			if refresh && field.name == "snapshots" {
+			if requestedRefresh && field.name == "snapshots" {
 				continue
 			}
 			oldRecord := field.oldRecords.Get(key).Clone()
 			newRecord := field.newRecords.Get(key).Clone()
 			if field.name == "snapshots" && changed &&
-				key == before.project.importer[0].Target && key == after.project.importer[0].Target {
+				key == before.importer[0].Target && key == after.importer[0].Target {
 				oldRecord = oldRecord.Without("dependencies", "optionalDependencies")
 				newRecord = newRecord.Without("dependencies", "optionalDependencies")
 			}
 			if !deepEqual(newRecord, oldRecord) {
-				return UpdateComparison{}, nil, errorf("retained %s changed: %s", field.retainedWord, key)
+				return UpdateComparison{}, errorf("retained %s changed: %s", field.retainedWord, key)
 			}
 		}
 	}
-	return result, after, nil
+	return result, nil
 }
 
-func normalizedManifest(project *DshProject, changed bool, root string) (document.Value, error) {
-	manifest := project.project.manifest.Clone()
+func normalizedManifest(manifest document.Value, changed bool, root string) (document.Value, error) {
+	normalized := manifest.Clone()
 	if changed {
-		dependencies, err := recordOf(manifest.Get("dependencies"))
+		dependencies, err := recordOf(normalized.Get("dependencies"))
 		if err != nil {
 			return document.Value{}, err
 		}
-		manifest = manifest.With("dependencies", dependencies.With(root, jsStringValue("<selected>")))
+		normalized = normalized.With("dependencies", dependencies.With(root, jsStringValue("<selected>")))
 	}
-	return manifest, nil
+	return normalized, nil
 }
 
-func lockHeader(project *DshProject, selected bool, root string) document.Value {
-	header := project.project.lock.Without("packages", "snapshots")
+func lockHeader(lock document.Value, selected bool, root string) document.Value {
+	header := lock.Without("packages", "snapshots")
 	if !selected {
 		return header
 	}
@@ -311,11 +405,11 @@ type projectClosure struct {
 	archives  closureSet
 }
 
-func closure(project *Project) (projectClosure, error) {
-	index := indexSnapshots(project.snapshots)
+func closure(snapshots []Snapshot, importer []Edge) (projectClosure, error) {
+	index := indexSnapshots(snapshots)
 	visited := closureSet{}
-	pending := make([]string, 0, len(project.importer))
-	for _, edge := range project.importer {
+	pending := make([]string, 0, len(importer))
+	for _, edge := range importer {
 		pending = append(pending, edge.Target)
 	}
 	for len(pending) > 0 {

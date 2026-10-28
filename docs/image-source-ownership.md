@@ -523,7 +523,8 @@ the runtime probes.
 ## Bounded pnpm primitives (#42, PR 1)
 
 The `recipe-contract` helper (`pnpmlock`, `pnpmenv`, `dshupgrade`,
-`internal/document`) and its committed Go vendor closure
+`internal/document`, and issue #52's `internal/candidatestage`) and its committed
+Go vendor closure
 (`vendor/go.yaml.in/yaml/v3`) are build-only data validators, not runtime payloads.
 They replaced the Node `pnpm-lock.mjs` and its npm `vendor/yaml/` distribution in
 #75. The [parser ADR](adr/0001-build-only-pnpm-graph-parser.md) owns the
@@ -539,6 +540,13 @@ regenerated and cold-installed in their owning slices. Rust owns source/path
 boundaries and runs this CLI as a syntax adapter for the migrated dsh project;
 Node owns graph, vendor digest and mutation checks.
 See [contributor commands](../CONTRIBUTING.md#bounded-pnpm-primitives).
+
+Issue #52 adds two build-only subcommands under the same boundary:
+`pnpm-selection-update` (one comparator for every consumer kind) and
+`pnpm-lock-candidate`, which captures a private unpinned preparation candidate
+through an inherited descriptor. Neither is a runtime payload or a production
+prefix capability, and no consumer, lock or failure producer moves in that
+primitive commit.
 
 The [terminal-failure ADR](adr/0002-pnpm-terminal-failure-boundary.md) records why
 pnpm remains hard-only and the proposed bridge-only loss of degraded transport

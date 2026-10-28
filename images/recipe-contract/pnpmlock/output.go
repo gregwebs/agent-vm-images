@@ -5,7 +5,10 @@ import (
 )
 
 // Graph is the reviewed graph projection: the only project data a caller may
-// publish. Its JSON is exactly the retired `graph(project)`.
+// publish. Its JSON keeps the retired `graph(project)` shape and adds the typed
+// hasBin/platform/optional fields every archive and snapshot now carries; the
+// additive keys are emitted for every record so no consumer has to distinguish
+// "absent" from a default.
 type Graph struct {
 	Selection Selection
 	Packages  []Archive
@@ -78,7 +81,29 @@ func (a Archive) Value() document.Value {
 		entry("tarball", jsStringValue(a.Tarball)),
 		entry("peers", peers),
 		entry("optionalPeers", sequenceValue(optional)),
+		entry("hasBin", boolValue(a.HasBin)),
+		entry("platform", a.Platform.Value()),
+		entry("optional", boolValue(a.Optional)),
 	)
+}
+
+// Value renders the platform selector triple. Every axis is emitted, so a
+// consumer never has to distinguish "absent" from an empty list.
+func (p PlatformSelectors) Value() document.Value {
+	return mappingValue(
+		entry("os", p.OS.Value()),
+		entry("cpu", p.CPU.Value()),
+		entry("libc", p.LibC.Value()),
+	)
+}
+
+// Value renders one selector list in retained order.
+func (l SelectorList) Value() document.Value {
+	items := make([]document.Value, 0, len(l.selectors))
+	for _, selector := range l.selectors {
+		items = append(items, jsStringValue(selector.String()))
+	}
+	return sequenceValue(items)
 }
 
 // Value renders the package identity.
@@ -98,6 +123,7 @@ func (s Snapshot) Value() document.Value {
 	return mappingValue(
 		entry("id", s.ID.Value()),
 		entry("edges", sequenceValue(edges)),
+		entry("optional", boolValue(s.Optional)),
 	)
 }
 

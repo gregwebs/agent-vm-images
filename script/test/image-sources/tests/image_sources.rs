@@ -408,11 +408,23 @@ struct DshArchive {
     version: String,
     integrity: String,
     tarball: String,
+    has_bin: bool,
+    platform: DshPlatform,
+    optional: bool,
 }
 
-/// One resolved snapshot: the full peer-context identity key.
+/// The archive's `os`/`cpu`/`libc` selectors, retained in list order.
+struct DshPlatform {
+    os: Vec<String>,
+    cpu: Vec<String>,
+    libc: Vec<String>,
+}
+
+/// One resolved snapshot: the full peer-context identity key and its own
+/// optional annotation, which is a separate fact from an edge's optional flag.
 struct DshSnapshot {
     key: String,
+    optional: bool,
 }
 
 /// One importer/root dependency edge.
@@ -430,6 +442,40 @@ struct DshGraph {
     packages: Vec<DshArchive>,
     snapshots: Vec<DshSnapshot>,
     importer: Vec<DshEdge>,
+}
+
+fn graph_report_bool(value: &Value, path: &[&str]) -> Result<bool, String> {
+    let mut current = value;
+    for key in path {
+        current = current
+            .get(*key)
+            .ok_or_else(|| format!("graph report has no {}", path.join(".")))?;
+    }
+    current
+        .as_bool()
+        .ok_or_else(|| format!("graph report field {} is not a boolean", path.join(".")))
+}
+
+fn graph_report_strings(value: &Value, path: &[&str]) -> Result<Vec<String>, String> {
+    let mut current = value;
+    for key in path {
+        current = current
+            .get(*key)
+            .ok_or_else(|| format!("graph report has no {}", path.join(".")))?;
+    }
+    current
+        .as_array()
+        .ok_or_else(|| format!("graph report field {} is not an array", path.join(".")))?
+        .iter()
+        .map(|entry| {
+            entry.as_str().map(str::to_owned).ok_or_else(|| {
+                format!(
+                    "graph report field {} has a non-string entry",
+                    path.join(".")
+                )
+            })
+        })
+        .collect()
 }
 
 fn graph_report_field(value: &Value, path: &[&str]) -> Result<String, String> {
@@ -462,6 +508,13 @@ impl DshGraph {
                 version: graph_report_field(entry, &["id", "version"])?,
                 integrity: graph_report_field(entry, &["integrity"])?,
                 tarball: graph_report_field(entry, &["tarball"])?,
+                has_bin: graph_report_bool(entry, &["hasBin"])?,
+                platform: DshPlatform {
+                    os: graph_report_strings(entry, &["platform", "os"])?,
+                    cpu: graph_report_strings(entry, &["platform", "cpu"])?,
+                    libc: graph_report_strings(entry, &["platform", "libc"])?,
+                },
+                optional: graph_report_bool(entry, &["optional"])?,
             });
         }
         let mut snapshots = Vec::new();
@@ -472,6 +525,7 @@ impl DshGraph {
         {
             snapshots.push(DshSnapshot {
                 key: graph_report_field(entry, &["id", "key"])?,
+                optional: graph_report_bool(entry, &["optional"])?,
             });
         }
         let mut importer = Vec::new();
@@ -904,6 +958,30 @@ fn every_dsh_locked_package_carries_integrity() {
     assert!(
         missing.is_empty(),
         "these graph packages carry no full sha512 integrity: {missing:?}"
+    );
+    // The additive projection is typed, not tolerated as loose JSON. These are
+    // hand-authored expectations from the pinned lock, not this graph's output.
+    assert!(dsh.has_bin, "the selected dsh root installs a bin");
+    assert!(!dsh.optional, "the selected root archive is not optional");
+    let sharp = graph
+        .packages_named("@img/sharp-libvips-linux-arm64")
+        .next()
+        .expect("the graph carries the sharp libvips arm64 platform package");
+    assert_eq!(sharp.platform.os, vec!["linux".to_string()]);
+    assert_eq!(sharp.platform.cpu, vec!["arm64".to_string()]);
+    assert_eq!(sharp.platform.libc, vec!["glibc".to_string()]);
+    let optional_snapshots = graph
+        .snapshots
+        .iter()
+        .filter(|entry| entry.optional)
+        .count();
+    assert_eq!(
+        optional_snapshots, 70,
+        "the pinned lock annotates exactly 70 optional snapshots"
+    );
+    assert!(
+        graph.packages.iter().all(|entry| !entry.optional),
+        "no archive-level optional flag is inferred from snapshot omissions"
     );
 }
 

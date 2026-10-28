@@ -123,6 +123,10 @@ if [ "$guard_only" = false ]; then
     # guard for the maintenance pins, not something these suites exercise (#92).
     python3 script/test/ci-boot-bind-mutants.py
     node script/test/pnpm-lock-inputs.mjs
+    # issue #52 Phase 0 selected-shrinkwrap vectors: replay the authenticated
+    # 0.87.0 identity/occurrence/SRI/edge/optional/peer comparison and its five
+    # offline mutants. Data-only; no manager, network or committed 0.87 lock.
+    python3 script/test/pi-shrinkwrap-vectors.py
     bash script/test/standard-node-consumers.sh --self-test
     python3 script/test/standard-node-layout.py --self-test
     bash script/test/standard-node-policy.sh --self-test

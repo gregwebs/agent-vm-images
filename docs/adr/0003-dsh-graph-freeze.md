@@ -32,11 +32,15 @@ what it does **not** guarantee.
 
 ## Decision
 
-`compareDshUpdate({before, after, requestedVersion, refresh})` in
-`images/recipe-contract/pnpm-lock.mjs` is the only production comparator. Both
-sides are complete validated dsh projects (structure, policy, no second
-importer, no pnpm archive/snapshot anywhere, reachable `dsh-sandbox-local`,
-effective exact peers). The rules, in order:
+`compareSelection` in `images/recipe-contract/pnpmlock` is the only production
+comparator; `dsh-lock-update` and the generic `pnpm-selection-update` are two argv
+adapter spellings of the same rules, never two implementations. A reviewed project
+enters after its four pinned inputs are validated; the private unpinned candidate
+of issue #52's preparation driver enters through `CompareSelectionCandidate` with
+the same rules and without a `Project`. For the dsh spelling both sides are
+complete validated dsh projects (structure, policy, no second importer, no pnpm
+archive/snapshot anywhere, reachable `dsh-sandbox-local`, effective exact peers).
+The rules, in order:
 
 1. **Selection changes only the root specifier.** After masking exactly
    `.dependencies['@deepseek-ai/dsh']` for a real changed request, the two
