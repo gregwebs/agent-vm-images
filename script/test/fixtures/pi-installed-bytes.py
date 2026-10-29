@@ -10,8 +10,16 @@ platform-excluded optional package, and two peer contexts of one identity.
 `meta` (printed as JSON) names every path and every derived expectation, so a
 mutant in the node suite is one filesystem edit plus one checker run, and a
 repaired positive is the same edit reverted, never a reinstall.
+
+`legacy-probe` is the same historical family plus the three payloads the runtime
+proof needs in order to finish offline: a `@google/genai` client export, a
+`protobufjs` `Root` and an `esbuild` wrapper whose transform and native command can
+run. Those three are stubs — the real ones are an integration leg (the focused
+harness) — and they exist only so `check-runtime.mjs` reaches its transform,
+scoped-chord and native-command proofs in a hermetic test.
 """
 import base64
+import gzip
 import hashlib
 import io
 import json
@@ -49,11 +57,44 @@ PACKAGES = {
     'marked': ('18.0.11', {'marked': 'bin/marked.js'}, {
         'bin/marked.js': ('#!/usr/bin/env node\nconsole.log("marked")\n', True),
     }),
-    'yaml': ('2.9.0', {'yaml': 'bin.mjs'}, {'bin.mjs': ('#!/usr/bin/env node\n', True)}),
-    'esbuild': ('0.28.2', {'esbuild': 'bin/esbuild'}, {'bin/esbuild': ('#!/bin/sh\necho esbuild\n', True)}),
+    # The published yaml@2.9.0 spelling: a leading `./` is a spelling, not a
+    # location, and pnpm normalizes it exactly like npm does.
+    'yaml': ('2.9.0', {'yaml': './bin.mjs'}, {'bin.mjs': ('#!/usr/bin/env node\n', True)}),
+    'esbuild': ('0.28.2', {'esbuild': 'bin/esbuild'}, {
+        'bin/esbuild': ('#!/bin/sh\necho esbuild\n', True),
+        # The transform probe imports the wrapper's JS entry, not its command.
+        'lib/main.js': ('export function transformSync(source) {\n'
+                        "  return {code: source.replace(/: *[A-Za-z_$]+/g, '')};\n"
+                        '}\n', False),
+    }),
     'diff': ('8.0.4', None, {'index.js': ('module.exports = 1;\n', False)}),
     'quickjs-wasi': ('3.6.2', None, {'index.js': ('module.exports = 1;\n', False)}),
-    '@esbuild/linux-arm64': ('0.28.2', None, {'bin/esbuild': ('ELF\n', True)}),
+    # The native platform package publishes no `bin` at all, exactly like the real
+    # 0.28.2 packages: the wrapper finds `bin/esbuild` by convention. It answers
+    # `--version` with its own version, so the file the probe runs is bound to the
+    # locked identity rather than to its name.
+    '@esbuild/linux-arm64': ('0.28.2', None, {'bin/esbuild': ('#!/bin/sh\necho 0.28.2\n', True)}),
+    # Stubs whose only job is to let the runtime proof reach its transform and
+    # native-command probes; the real @google/genai and protobufjs payloads are
+    # integration legs (the focused harness), never this fixture.
+    '@google/genai': ('1.0.0', None, {
+        'dist/index.js': ('export class GoogleGenAI {}\nexport const version = "1.0.0";\n', False),
+    }),
+    'protobufjs': ('7.0.0', None, {'index.js': (
+        'export function Root() {}\n'
+        'Root.fromJSON = () => ({\n'
+        '  lookupType: () => ({\n'
+        '    encode: value => ({finish: () => Buffer.from(JSON.stringify(value), "utf8")}),\n'
+        '    decode: bytes => JSON.parse(Buffer.from(bytes).toString("utf8")),\n'
+        '  }),\n'
+        '});\n', False)}),
+}
+
+# Packages that publish a `main` (PnP-less ESM resolution by file, no exports map).
+MAINS = {
+    '@google/genai': 'dist/index.js',
+    'protobufjs': 'index.js',
+    'esbuild': 'lib/main.js',
 }
 
 # A platform selector that no modelled target satisfies, so the omission rule is
@@ -94,11 +135,35 @@ SHAPES = {
         # wrong context can be substituted in a mutant.
         'contexts': {'diff': ['diff@8.0.4', 'diff@8.0.4(peerctx)']},
     },
+    # The historical shape plus the two probe payloads and an installed native
+    # package, so the runtime proof can run to completion: the positive control
+    # for the transform, the native command and the scoped chord instance. Its
+    # family is unchanged, so it is still a reviewed shape.
+    'legacy-probe': {
+        'version': '0.87.0',
+        'members': FAMILY,
+        'edges': {
+            ROOT: ['chord', 'pi-agent-core', 'pi-ai', 'pi-tui'],
+            f'{SCOPE}/chord': ['esbuild', '@esbuild/linux-arm64'],
+            f'{SCOPE}/pi-agent-core': ['pi-ai', 'pi-telemetry', 'yaml', 'diff',
+                                       '@google/genai', 'protobufjs'],
+            f'{SCOPE}/pi-ai': ['@anthropic-ai/sdk'],
+            f'{SCOPE}/pi-tui': ['marked'],
+            f'{SCOPE}/pi-telemetry': [],
+        },
+        'optional': set(),
+        'contexts': {},
+        # No platform selector: this shape installs the native package for the
+        # modelled linux/arm64 target instead of excusing its absence.
+        'platform': {},
+    },
 }
 
 
 def package_json(name, version, edges):
     manifest = {'name': name, 'version': version, 'type': 'module', 'license': 'MIT'}
+    if name in MAINS:
+        manifest['main'] = MAINS[name]
     if PACKAGES[name][1]:
         manifest['bin'] = PACKAGES[name][1]
     if edges:
@@ -204,7 +269,7 @@ def build(work, shape_name):
             'tarball': f'https://registry.npmjs.org/{name}/-/{name.rsplit("/", 1)[-1]}-{version_of[name]}.tgz',
             'peers': {}, 'optionalPeers': [],
             'hasBin': PACKAGES[name][1] is not None,
-            'platform': PLATFORM.get(name, {'os': [], 'cpu': [], 'libc': []}),
+            'platform': shape.get('platform', PLATFORM).get(name, {'os': [], 'cpu': [], 'libc': []}),
             'optional': name in shape['optional'],
         })
         for entry in entries:
@@ -339,10 +404,43 @@ HOSTILE = {
                  ('package/b', b'', 0o644, tarfile.LNKTYPE, 'package/a')],
     'link-escape': [('package/link', b'', 0o755, tarfile.SYMTYPE, '../../outside')],
     'link-absolute': [('package/link', b'', 0o755, tarfile.SYMTYPE, '/etc/passwd')],
+    # Each target here is inside the package read on its own: the escape and the
+    # cycle exist only once another member's link is followed to the root.
+    'link-composed': [('package/x', b'', 0o755, tarfile.SYMTYPE, '.'),
+                      ('package/b', b'', 0o755, tarfile.SYMTYPE, 'x/..')],
+    'link-cycle': [('package/a', b'', 0o755, tarfile.SYMTYPE, 'b'),
+                   ('package/b', b'', 0o755, tarfile.SYMTYPE, 'a')],
+    'link-self': [('package/self', b'', 0o755, tarfile.SYMTYPE, 'self')],
     'ancestor-file': [('package/a', b'file', 0o644, tarfile.REGTYPE, ''),
                       ('package/a/b', b'child', 0o644, tarfile.REGTYPE, '')],
     'ancestor-link': [('package/a', b'', 0o755, tarfile.SYMTYPE, 'b'),
                       ('package/a/c', b'child', 0o644, tarfile.REGTYPE, '')],
+    # Case folding: APFS stores `d/X` and `d/x` as one entry, so the link `d/X` to
+    # the package root is what `e/Y`'s target `../d/x/..` walks through -- one level
+    # *above* the extraction root -- and `e/y/PWNED` is written outside it. Every
+    # name and target here is contained when read byte for byte, and `e/Y` and
+    # `e/y` are the collision the preflight can see.
+    'case-collision': [
+        ('package/d/X', b'', 0o755, tarfile.SYMTYPE, '..'),
+        ('package/e/Y', b'', 0o755, tarfile.SYMTYPE, '../d/x/..'),
+        ('package/e/y/PWNED', b'pwned\n', 0o644, tarfile.REGTYPE, ''),
+    ],
+    # The same shape in Unicode: `d/\u00e9` (NFC) is the escaping link, the target
+    # spells it decomposed (`d/e` + U+0301), and the written-through link is
+    # `e/\u00fd` whose decomposed spelling is member `e/y` + U+0301.
+    'normalisation-collision': [
+        ('package/d/\u00e9', b'', 0o755, tarfile.SYMTYPE, '..'),
+        ('package/e/\u00fd', b'', 0o755, tarfile.SYMTYPE, '../d/e\u0301/..'),
+        ('package/e/y\u0301/PWNED', b'pwned\n', 0o644, tarfile.REGTYPE, ''),
+    ],
+    # A target that names another member's link in the other normalisation form.
+    # No member name collides here, so a byte-exact resolution reads `d/e` + U+0301
+    # as a plain missing directory and calls the target contained, while the
+    # filesystem follows `d/\u00e9` and its `..` out of the package.
+    'link-folded-target': [
+        ('package/d/\u00e9', b'', 0o755, tarfile.SYMTYPE, '..'),
+        ('package/e/other', b'', 0o755, tarfile.SYMTYPE, '../d/e\u0301/..'),
+    ],
     'privilege': [('package/x', b'x', 0o4755, tarfile.REGTYPE, '')],
     'unexpected-root': [('other/a', b'x', 0o644, tarfile.REGTYPE, '')],
     'deep': [('package/' + '/'.join(['d'] * 40) + '/f', b'x', 0o644, tarfile.REGTYPE, '')],
@@ -350,22 +448,177 @@ HOSTILE = {
 }
 
 
+def add_members(archive, members):
+    for name, payload, mode, kind, linkname in members:
+        info = tarfile.TarInfo(name)
+        info.mode = mode
+        info.mtime = 0
+        info.uid = info.gid = 0
+        info.uname = info.gname = ''
+        info.type = kind
+        info.linkname = linkname
+        if kind == tarfile.REGTYPE:
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+        else:
+            archive.addfile(info)
+
+
 def hostile(destination, case):
-    members = HOSTILE[case]
     with tarfile.open(destination, 'w:gz', format=tarfile.GNU_FORMAT) as archive:
-        for name, payload, mode, kind, linkname in members:
-            info = tarfile.TarInfo(name)
-            info.mode = mode
-            info.mtime = 0
-            info.uid = info.gid = 0
-            info.uname = info.gname = ''
-            info.type = kind
-            info.linkname = linkname
-            if kind == tarfile.REGTYPE:
-                info.size = len(payload)
-                archive.addfile(info, io.BytesIO(payload))
-            else:
-                archive.addfile(info)
+        add_members(archive, HOSTILE[case])
+
+
+def manifest(**fields):
+    return json.dumps(fields, sort_keys=True).encode() + b'\n'
+
+
+# Archives whose manifest declares a command the extractor must refuse to hash.
+# Only `evidence` reads a bin target, so these cannot live in HOSTILE: a link the
+# archive reaches its own command through is contained and still must not decide
+# which bytes the checker hashes.
+HOSTILE_EVIDENCE = {
+    'bin-link-ancestor': [
+        ('package/package.json', manifest(name='hostile', version='1.0.0',
+                                          bin={'review': 'lib/tool'}), 0o644,
+         tarfile.REGTYPE, ''),
+        ('package/lib', b'', 0o755, tarfile.SYMTYPE, 'real'),
+        ('package/real/tool', b'#!/bin/sh\n', 0o755, tarfile.REGTYPE, ''),
+    ],
+    'bin-link-final': [
+        ('package/package.json', manifest(name='hostile', version='1.0.0',
+                                          bin={'review': 'tool'}), 0o644,
+         tarfile.REGTYPE, ''),
+        ('package/real', b'#!/bin/sh\n', 0o755, tarfile.REGTYPE, ''),
+        ('package/tool', b'', 0o755, tarfile.SYMTYPE, 'real'),
+    ],
+    'bin-missing': [
+        ('package/package.json', manifest(name='hostile', version='1.0.0',
+                                          bin={'review': 'tool'}), 0o644,
+         tarfile.REGTYPE, ''),
+    ],
+}
+
+
+def hostile_evidence(destination, case):
+    with tarfile.open(destination, 'w:gz', format=tarfile.GNU_FORMAT) as archive:
+        add_members(archive, HOSTILE_EVIDENCE[case])
+
+
+# Archives about headers rather than members: the `package/` root entry and the
+# extended headers are read by tarfile before any member exists, so they are built
+# from raw header blocks instead of TarInfo, which cannot express a root file, a
+# directory with declared data or a large PAX record.
+def tar_header(name, typeflag=tarfile.REGTYPE, size=0, mode=0o644):
+    field = name.encode()
+    buf = bytearray(512)
+    buf[0:len(field)] = field
+    for start, length, value in ((100, 8, mode), (108, 8, 0), (116, 8, 0), (124, 12, size),
+                                 (136, 12, 0)):
+        buf[start:start + length] = f'{value:0{length - 1}o}'.encode() + b'\0'
+    buf[148:156] = b' ' * 8
+    buf[156:157] = typeflag
+    buf[257:265] = b'ustar\x0000'
+    buf[148:156] = f'{sum(buf):06o}'.encode() + b'\0 '
+    return bytes(buf)
+
+
+def tar_pad(payload):
+    return payload + b'\0' * (-len(payload) % 512)
+
+
+def pax_record(key, value):
+    body = b' ' + key + b'=' + value + b'\n'
+    length = len(body) + 1
+    while len(str(length)) + len(body) != length:
+        length = len(str(length)) + len(body)
+    return str(length).encode() + body
+
+
+MANIFEST_PAYLOAD = manifest(name='hostile', version='1.0.0')
+
+
+def raw_archive(destination, blocks):
+    # Streamed, not joined: `header-spread` is a gigabyte of repetitive header text
+    # whose whole point is that it compresses to a megabyte, and materialising it in
+    # this process would cost the fixture more memory than the case measures.
+    with gzip.GzipFile(destination, 'wb', mtime=0) as handle:
+        for block in blocks:
+            handle.write(block)
+        handle.write(b'\0' * 1024)
+
+
+HOSTILE_BUDGET = {
+    'root-duplicate': [
+        tar_header('package', tarfile.DIRTYPE), tar_header('package', tarfile.DIRTYPE),
+        tar_header('package/package.json', size=len(MANIFEST_PAYLOAD)),
+        tar_pad(MANIFEST_PAYLOAD),
+    ],
+    'root-file': [tar_header('package', size=8 * 1024 * 1024), b'\0' * (8 * 1024 * 1024)],
+    'root-size': [tar_header('package', tarfile.DIRTYPE, size=8 * 1024 * 1024),
+                  b'\0' * (8 * 1024 * 1024)],
+    # Exactly as many non-root members as the scaled budget allows, so only the
+    # root header can tip the count.
+    'root-count': [
+        tar_header('package', tarfile.DIRTYPE),
+        tar_header('package/package.json', size=len(MANIFEST_PAYLOAD)),
+        tar_pad(MANIFEST_PAYLOAD),
+        tar_header('package/a'),
+    ],
+}
+
+
+def pax_blocks(payload):
+    padded = tar_pad(payload)
+    return [tar_header('PaxHeaders/hostile', tarfile.XHDTYPE, size=len(padded)), padded]
+
+
+# PAX records are read between members, so neither the per-read cap nor a member's
+# declared size ever sees them. `header-comment` is one record whose value fills
+# 64 MiB -- the measured 600 MiB variant extracted with rc=0 and a 3.4 GB peak RSS --
+# and `header-chain` is a long run of tiny `x` headers, each one a recursion into
+# `tarfile.next()` that ended in a bare RecursionError traceback.
+HEADER_COMMENT_BYTES = 64 * 1024 * 1024
+HEADER_CHAIN_LENGTH = 5000
+# Just under the between-members window, spent on 1,000 members: the per-window
+# budget never fires, and 1.1 MB on the wire arrived as a 1.16 GB resident archive.
+HEADER_SPREAD_MEMBERS = 1000
+HEADER_SPREAD_BYTES = 1_040_000
+
+
+def header_spread_blocks():
+    for index in range(HEADER_SPREAD_MEMBERS):
+        yield from pax_blocks(pax_record(b'comment', b'x' * HEADER_SPREAD_BYTES))
+        yield tar_header(f'package/f{index:04d}')
+
+
+def header_case_blocks(case):
+    if case == 'header-spread':
+        return header_spread_blocks()
+    if case == 'header-comment':
+        blocks = pax_blocks(pax_record(b'SCHILY.xattr.user.comment',
+                                       b'x' * HEADER_COMMENT_BYTES))
+        return blocks + [tar_header('package/package.json', size=len(MANIFEST_PAYLOAD)),
+                         tar_pad(MANIFEST_PAYLOAD)]
+    if case == 'header-chain':
+        blocks = []
+        for _ in range(HEADER_CHAIN_LENGTH):
+            blocks += pax_blocks(pax_record(b'comment', b'chained'))
+        return blocks + [tar_header('package/package.json', size=len(MANIFEST_PAYLOAD)),
+                         tar_pad(MANIFEST_PAYLOAD)]
+    return None
+
+
+def hostile_budget(destination, case):
+    if case == 'pax-bomb':
+        # One valid PAX record whose value fills the declared 32 MiB buffer: the
+        # declared size reaches the reader before the member it annotates exists.
+        blocks = pax_blocks(pax_record(b'SCHILY.xattr.user.comment', b'x' * (32 * 1024 * 1024)))
+        blocks += [tar_header('package/package.json', size=len(MANIFEST_PAYLOAD)),
+                   tar_pad(MANIFEST_PAYLOAD)]
+    else:
+        blocks = header_case_blocks(case) or HOSTILE_BUDGET[case]
+    raw_archive(destination, blocks)
 
 
 def benign(destination):
@@ -396,6 +649,12 @@ def main(argv):
     if len(argv) == 3 and argv[0] == 'hostile':
         hostile(Path(argv[2]), argv[1])
         return
+    if len(argv) == 3 and argv[0] == 'hostile-evidence':
+        hostile_evidence(Path(argv[2]), argv[1])
+        return
+    if len(argv) == 3 and argv[0] == 'hostile-budget':
+        hostile_budget(Path(argv[2]), argv[1])
+        return
     if len(argv) == 2 and argv[0] == 'benign':
         benign(Path(argv[1]))
         return
@@ -403,7 +662,8 @@ def main(argv):
         build(argv[1], argv[2])
         return
     sys.stderr.write('usage: pi-installed-bytes.py {build WORK legacy|modern |'
-                     ' hostile CASE TARBALL | benign TARBALL}\n')
+                     ' hostile CASE TARBALL | hostile-evidence CASE TARBALL |'
+                     ' hostile-budget CASE TARBALL | benign TARBALL}\n')
     raise SystemExit(2)
 
 

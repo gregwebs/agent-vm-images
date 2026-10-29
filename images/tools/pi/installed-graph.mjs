@@ -286,6 +286,17 @@ function resolveDependency(context, ownerDir, name, label) {
   return null;
 }
 
+// The pinned manager writes these metadata files at the top of `node_modules`.
+// They are not packages, so an orphan scan must not read them as installed
+// payload -- but only a *regular file* of exactly this name is metadata: a
+// directory or a link with the same name is still reported, and every other
+// unexplained entry still fails. Installed by the focused harness' first real
+// cold install (pnpm 11.11.0 writes .modules.yaml, .package-map.json and
+// .pnpm-workspace-state-v1.json), so this is observed manager output, not a
+// convenience allowlist.
+const MANAGER_METADATA = new Set(['.modules.yaml', '.package-map.json',
+  '.pnpm-workspace-state-v1.json']);
+
 function physicalInstances(prefix) {
   const found = [];
   const modules = path.join(prefix, 'node_modules');
@@ -300,6 +311,7 @@ function physicalInstances(prefix) {
     for (const entry of entries) {
       const location = path.join(directory, entry.name);
       if (entry.name === '.bin') continue;
+      if (MANAGER_METADATA.has(entry.name) && entry.isFile()) continue;
       if (entry.name === '.pnpm') {
         for (const store of fs.readdirSync(location, {withFileTypes: true})) {
           if (store.name === 'node_modules') {
@@ -396,7 +408,17 @@ export function resolveInstances(prefixInput, graph, {platform = targetPlatform(
       const target = graph.snapshots.get(edge.target);
       if (target === undefined) fail('graph-json', `${owner.key} depends on unknown snapshot ${edge.target}`);
       const archive = packageOf(graph, target.id.packageId.name, target.id.packageId.version);
-      if (edge.optional === true && archive.optional === true && !platformAllows(archive.platform, platform)) {
+      // An absent payload is excused only by positive evidence: the declaring
+      // edge is optional, the lock marks the target itself optional, and the
+      // target's locked selectors exclude this platform. Optionality is a fact
+      // the lock records twice — on the package record and on the snapshot — and
+      // pnpm's `import` writes only the snapshot one, so either spelling of the
+      // same fact counts. The selectors are the part that makes the omission
+      // provable, and they must positively exclude the target: an unknown or
+      // empty selector set leaves the package required, so a compatible optional
+      // payload that is missing is still a hard failure.
+      const optionalTarget = archive.optional === true || target.optional === true;
+      if (edge.optional === true && optionalTarget && !platformAllows(archive.platform, platform)) {
         omitted.set(edge.target, {reason: 'platform', owner: owner.key, name: edge.name});
         continue;
       }
@@ -514,10 +536,13 @@ function addBin(targets, name, target, label) {
     fail('installed-bin', `${label} declares an invalid command name ${JSON.stringify(name)}`);
   }
   if (typeof target !== 'string' || target === '' || path.isAbsolute(target) || target.includes('\\')
-      || target.split('/').some(part => part === '..' || part === '.' || part === '')) {
+      || target.split('/').some(part => part === '..' || part === '')) {
     fail('installed-bin', `${label} bin.${name} is not a normalised relative path: ${JSON.stringify(target)}`);
   }
-  targets.set(name, target);
+  // A leading `./` is a spelling, not a location: npm and pnpm both collapse it
+  // (`yaml@2.9.0` publishes `"./bin.mjs"`), so the derived target is the same file.
+  // Every other dot segment was refused above.
+  targets.set(name, target.split('/').filter(part => part !== '.').join('/'));
 }
 
 export {FAMILY_VOCABULARY, REVIEWED_FAMILY_SHAPES, VIRTUAL_STORE, nodeModulesPaths, readManifest, relative};

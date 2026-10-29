@@ -55,11 +55,15 @@ class Consumer:
 
 
 CONSUMERS = {item.name: item for item in (
-    # dsh links a fixed command; Pi links its own warning wrapper and the bridge
-    # has no command at all, so those two carry None until their layers migrate.
+    # dsh links a fixed command. Pi's runtime command is the payload's own
+    # generated bin link -- the verifier authorizes exactly that, and the warning
+    # wrapper at /usr/local/bin/pi is a separate regular file checked by content,
+    # never a runtime target (a command outside the prefix cannot be one). The
+    # bridge has no command at all.
     Consumer('dsh', Path('/opt/agent-vm/dsh'), Path('/usr/local/bin/dsh'),
              'dsh-', 'AGENT_VM_DSH', Path('/tmp')),
-    Consumer('pi', Path('/opt/agent-vm/pi'), None, 'pi-', 'AGENT_VM_PI', Path('/tmp')),
+    Consumer('pi', Path('/opt/agent-vm/pi'), Path('/opt/agent-vm/pi/node_modules/.bin/pi'),
+             'pi-', 'AGENT_VM_PI', Path('/tmp')),
     Consumer('bridge', Path('/opt/agent-vm/pi-packages'), None,
              'bridge-', 'AGENT_VM_BRIDGE', Path('/tmp')),
 )}
@@ -527,6 +531,28 @@ def authorize_stage(stage, *, consumer=DSH, sources=()):
 _scratch: dict[Path, tuple[int, int]] = {}
 
 
+def scratch_parents(profile):
+    """Every directory an invocation may create its own scratch child in.
+
+    The canonical parent (or the authorized fixture root) plus, when the caller
+    names one, this consumer's `AGENT_VM_<CONSUMER>_WORK_DIR`. The work directory
+    is an *authorized parent*, never a scratch: the invocation still allocates a
+    fresh 0700 `mkdtemp` child with the consumer's token inside it and never
+    deletes the caller's directory. A shared fixed scratch is exactly what that
+    shape prevents (two concurrent runs would otherwise read each other's state),
+    so widening the parent does not widen what can be removed.
+    """
+    parents = [profile.scratch_parent]
+    work = os.environ.get(profile.host_env + '_WORK_DIR')
+    if work:
+        parent = absolute(work)
+        no_redirect(parent)
+        if not parent.is_dir() or parent.stat().st_uid != os.getuid():
+            raise ValueError('work directory must be an invocation-owned directory')
+        parents.append(parent)
+    return parents
+
+
 def owned_scratch(capability, parent=None):
     """Create this invocation's private scratch below the capability's parent.
 
@@ -535,14 +561,18 @@ def owned_scratch(capability, parent=None):
     bootstrap capability stages only inside its own authorized stage.
     """
     if capability.mutation:
-        fixed = capability.consumer.scratch_parent if capability.production else capability.root
-        parent = absolute(parent or fixed)
-        no_redirect(parent)
-        if not capability.production:
-            if parent != capability.root:
+        if capability.production:
+            fixed = capability.consumer.scratch_parent
+            parent = absolute(parent or fixed)
+            no_redirect(parent)
+            if parent not in scratch_parents(capability.consumer):
+                raise ValueError('production scratch parent is not authorized')
+        else:
+            parent = absolute(parent or capability.root)
+            no_redirect(parent)
+            fixed = capability.root
+            if parent != fixed:
                 below(parent, capability.root)
-        elif parent != fixed:
-            raise ValueError('production scratch parent is fixed')
     elif isinstance(capability, BootstrapAuthorization):
         # A bootstrap stage is itself the private scratch; work children never
         # escape it, so a stage cannot stage outside its authorized directory.
@@ -898,7 +928,7 @@ def remove_scratch(path, prefix=None, *, consumer=DSH):
     """
     profile = consumer_of(consumer)
     path = absolute(path)
-    parents = [profile.scratch_parent]
+    parents = scratch_parents(profile)
     fixture = os.environ.get('AGENT_VM_FIXTURE_ROOT') or os.environ.get('AGENT_VM_SCRATCH_ROOT')
     if fixture:
         parents.append(absolute(fixture))
@@ -940,27 +970,378 @@ def remove_partial_install(capability):
     shutil.rmtree(nodes)
 
 
-def manager_argv(capability):
-    """The manager argv this capability may start; never a PATH lookup.
+# --- Pi gate layout and absence authority -----------------------------------
+#
+# The Pi curl producer removes the *entire* Pi prefix on a genuine transport
+# failure, so no capability that requires a four-input project can describe the
+# result. Absence therefore has its own authority, deliberately narrower than
+# every ordinary one, and exactly one recognition site (the verifier's entry):
+#
+#   PiGateLayout            the fixed production tuple, or one all-fixture tuple
+#   PresentPi               an installed command; carries health checks only
+#   PiAbsenceAuthorization  a validated curl absence, plus a finite retirement
+#                           inventory (nothing else is deletable)
+#   PiTransportRemoval      the installer's own post-removal record, minted from
+#                           a live MutationAuthorization and a classified code
+#
+# Neither absence type can install, publish inputs, start a manager, delete the
+# status directory or reach caller state.
+PI_GATE_DEFAULTS = {
+    'pi': Path('/opt/agent-vm/pi'),
+    'bridge': Path('/opt/agent-vm/pi-packages'),
+    'extensions': Path('/opt/agent-vm/pi-extensions'),
+    'wrapper': Path('/usr/local/bin/pi'),
+    'seed': Path('/opt/agent-vm/seed.d/20-pi-claude-bridge'),
+    'status_dir': Path('/opt/agent-vm/install-status'),
+}
+# The retired npm vocabulary is not reachable here: an absent Pi prefix can only
+# be the independent curl producer's work, so the only admissible record is one
+# classified curl code.
+PI_CURL_CODES = frozenset({'5', '6', '7', '18', '28', '35', '52', '55', '56', '60'})
+PI_ABSENT_RECORD = 'absent-transport '
+BRIDGE_ABSENT_RECORD = 'absent-pi\n'
+
+
+@dataclass(frozen=True)
+class PiGateLayout:
+    """Every slot the Pi feature owns, validated as one closed tuple."""
+    pi: Path
+    bridge: Path
+    extensions: Path
+    wrapper: Path
+    seed: Path
+    status_dir: Path
+    contract: Path
+    root: Path
+    production: bool
+
+    def json(self):
+        return {name: str(getattr(self, name)) for name in
+                ('pi', 'bridge', 'extensions', 'wrapper', 'seed', 'status_dir', 'contract')}
+
+    @property
+    def pi_bin(self):
+        return self.pi / 'node_modules/.bin/pi'
+
+
+@dataclass(frozen=True)
+class PresentPi:
+    """The command exists; no mutation or health authority is implied."""
+    layout: PiGateLayout
+    mutation: Literal[False] = field(default=False, init=False)
+
+
+@dataclass(frozen=True)
+class PiAbsenceAuthorization:
+    """Authority to retire the feature for one recognised curl absence.
+
+    The inventory is finite and fixed by the layout: two regular leaves (the
+    warning wrapper and the seed hook), two owned directory roots (extensions
+    and the bridge payload) and one atomic bridge status record. The Pi status
+    record is preserved, because it is the evidence that authorises this work.
+    """
+    layout: PiGateLayout
+    code: str
+    mutation: Literal[False] = field(default=False, init=False)
+
+    def retire(self):
+        retire_absent_pi(self)
+
+
+@dataclass(frozen=True)
+class PiTransportRemoval:
+    """The installer's own removal, derived from its live mutation capability."""
+    capability: MutationAuthorization
+    code: str
+    mutation: Literal[False] = field(default=False, init=False)
+
+    def remove(self):
+        remove_pi_transport(self)
+
+
+def _slot(value):
+    """One gate slot: absolute and free of symlink waypoints."""
+    path = absolute(value)
+    no_redirect(path)
+    return path
+
+
+def authorize_pi_gate_layout(*, pi, bridge, extensions, wrapper, seed, status_dir,
+                             contract=None, consumer='pi'):
+    """Authorize the one closed tuple the absence decision may inspect.
+
+    Production is the fixed image tuple. A fixture must place *every* slot under
+    one authorized AGENT_VM_FIXTURE_ROOT, so a caller cannot combine a real
+    destination with a fixture one and retire the wrong tree. The Pi leaf prefix
+    may be missing here -- that is the state this layout exists to describe --
+    while the status directory, its ancestors and the contract executable must be
+    present and unredirected, or the answer is indeterminate rather than absent.
+    """
+    if consumer_of(consumer).name != 'pi':
+        raise ValueError('the Pi gate layout belongs to the pi consumer only')
+    if contract is not None:
+        # The contract directory selects executable policy. It is named once (by
+        # the build environment or by this explicit option) and then authorized
+        # below exactly like every other caller's contract directory; an
+        # unauthorized value fails there rather than silently taking effect.
+        os.environ['AGENT_VM_CONTRACT_DIR'] = str(contract)
+    slots = {}
+    for name in ('pi', 'bridge', 'extensions', 'wrapper', 'seed', 'status_dir'):
+        slots[name] = _slot({'pi': pi, 'bridge': bridge, 'extensions': extensions,
+                             'wrapper': wrapper, 'seed': seed,
+                             'status_dir': status_dir}[name])
+    productions = [slots[name] == PI_GATE_DEFAULTS[name] for name in slots]
+    if all(productions) != any(productions):
+        raise ValueError('mixed production/fixture Pi gate tuple')
+    production = all(productions)
+    disjoint(list(slots.values()))
+    if production:
+        if os.getuid() != 0:
+            raise ValueError('production Pi gate requires root')
+        root = Path('/opt/agent-vm')
+    else:
+        root = authorized_root()
+        for path in slots.values():
+            below(path, root)
+            below(path.resolve(strict=False), root)
+    directory = authorize_contract([slots['pi']], consumer='pi')
+    if contract is not None and Path(contract) != directory:
+        raise ValueError('gate contract directory is not the authorized contract directory')
+    status = slots['status_dir']
+    if not status.is_dir() or status.is_symlink():
+        # A missing (or relocated) status directory makes "no absence record"
+        # indistinguishable from "no status destination", so it is indeterminate.
+        raise ValueError('status directory must be an existing unredirected directory: ' + str(status))
+    if production and status != Path('/opt/agent-vm/install-status'):
+        raise ValueError('production status directory is fixed')
+    for name in ('wrapper', 'seed'):
+        if os.path.lexists(slots[name]):
+            regular(slots[name])
+    return PiGateLayout(slots['pi'], slots['bridge'], slots['extensions'], slots['wrapper'],
+                        slots['seed'], status, directory, root, production)
+
+
+def read_status_line(path, *, root=None):
+    """One exact, bounded, owned, single-link record file; anything else is None.
+
+    Deliberately not a stat-then-read: the same descriptor is opened with
+    O_NOFOLLOW, its identity is compared with the lstat that named it, and the
+    bytes are read from that descriptor, so a symlink or a swapped inode cannot
+    substitute a different record.
+    """
+    path = absolute(path)
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return None
+    if info.st_mode & 0o022 or info.st_uid != os.getuid():
+        return None
+    flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+            return None
+        data = os.read(descriptor, 4096)
+        if os.read(descriptor, 1):
+            return None
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+    return data
+
+
+def pi_absent_code(layout, *, contract=None):
+    """Validate `status-dir/pi` as one curl absence record and return its code."""
+    data = read_status_line(layout.status_dir / 'pi', root=layout.root)
+    if data is None:
+        return None
+    try:
+        text = data.decode('ascii')
+    except UnicodeDecodeError:
+        return None
+    if not text.startswith(PI_ABSENT_RECORD) or not text.endswith('\n') or text.count('\n') != 1:
+        return None
+    code = text[len(PI_ABSENT_RECORD):-1]
+    if code not in PI_CURL_CODES:
+        return None
+    return code
+
+
+def _path_state(contract, path):
+    """The Go helper's typed PathState, as (0 absent, 1 present, 2 indeterminate)."""
+    result = subprocess.run([str(Path(contract) / 'recipe-contract'), 'install-status',
+                             'path-state', str(path)], capture_output=True, text=True)
+    return result.returncode
+
+
+def _recheck_absent(layout):
+    state = _path_state(layout.contract, layout.pi)
+    if state != 0:
+        raise ValueError('the Pi prefix is not absent' if state == 1 else
+                         'the Pi prefix state is indeterminate')
+
+
+def pi_gate_entry(layout):
+    """The one absence-recognition site: exactly one answer per invocation.
+
+    A present command wins even when a stale absence record exists; a surviving
+    prefix, a dangling or non-executable command, a broken ancestor or an
+    indeterminate walk is a hard failure, never an absence. Absence additionally
+    requires the record grammar and a second, immediately repeated look at the
+    prefix, so the answer never describes a tree that changed under it.
+    """
+    state = _path_state(layout.contract, layout.pi_bin)
+    if state == 1:
+        return PresentPi(layout)
+    if state != 0:
+        raise ValueError('cannot classify ' + str(layout.pi_bin) + ' (permission/loop)')
+    _recheck_absent(layout)
+    code = pi_absent_code(layout)
+    if code is None:
+        raise ValueError('the Pi prefix is missing without a valid curl absence record')
+    _recheck_absent(layout)
+    if pi_absent_code(layout) != code:
+        raise ValueError('the Pi absence record changed during recognition')
+    return PiAbsenceAuthorization(layout, code)
+
+
+def _owned_root(path, root):
+    """A directory this feature owns: no symlink, correct owner, inside its root."""
+    if not path.is_dir() or path.is_symlink():
+        raise ValueError('expected an owned directory: ' + str(path))
+    below(path, root)
+    item = path.stat()
+    allowed = (0, os.getuid()) if os.getuid() == 0 else (os.getuid(),)
+    if item.st_uid not in allowed:
+        raise ValueError('directory ownership mismatch: ' + str(path))
+    return (item.st_dev, item.st_ino)
+
+
+def retire_absent_pi(authorization):
+    """Retire the feature for a recognised curl absence, and nothing else.
+
+    Everything is preflighted before the first unlink, every deletion is
+    non-following, and each target is rechecked against the identity recorded by
+    the preflight. A symlinked or replaced root fails instead of being followed,
+    so a sentinel outside the feature cannot be reached through it.
+    """
+    layout = authorization.layout
+    _recheck_absent(layout)
+    if pi_absent_code(layout) != authorization.code:
+        raise ValueError('the Pi absence record changed before retirement')
+    inventory = []
+    for name in ('wrapper', 'seed'):
+        path = getattr(layout, name)
+        if not os.path.lexists(path):
+            continue
+        regular(path)
+        info = path.lstat()
+        inventory.append(('leaf', path, (info.st_dev, info.st_ino)))
+    for name in ('extensions', 'bridge'):
+        path = getattr(layout, name)
+        if not os.path.lexists(path):
+            continue
+        inventory.append(('root', path, _owned_root(path, layout.root if not layout.production
+                                                    else Path('/opt/agent-vm'))))
+    record = layout.status_dir / 'pi-claude-bridge'
+    if os.path.lexists(record) and record.is_symlink():
+        raise ValueError('refusing to replace a symlinked bridge status record')
+    for kind, path, identity in inventory:
+        if kind == 'leaf':
+            info = path.lstat()
+            if (info.st_dev, info.st_ino) != identity:
+                raise ValueError('retirement target identity changed: ' + str(path))
+            path.unlink()
+        else:
+            info = path.lstat()
+            if (info.st_dev, info.st_ino) != identity or not stat.S_ISDIR(info.st_mode):
+                raise ValueError('retirement root identity changed: ' + str(path))
+            shutil.rmtree(path)
+    _write_record(record, BRIDGE_ABSENT_RECORD, layout.root)
+    if os.path.lexists(layout.pi):
+        raise ValueError('the Pi prefix reappeared during retirement')
+
+
+def _write_record(destination, text, root):
+    """Atomically publish one owned record, never through a symlink."""
+    parent = destination.parent
+    if not parent.is_dir() or parent.is_symlink():
+        raise ValueError('record destination directory is missing: ' + str(parent))
+    temporary = parent / ('.' + destination.name + '-agent-vm')
+    if os.path.lexists(temporary):
+        raise ValueError('refusing to reuse an existing temporary record: ' + str(temporary))
+    try:
+        with temporary.open('xb') as handle:
+            handle.write(text.encode('ascii'))
+        os.chmod(temporary, 0o644)
+        if os.path.lexists(destination) and destination.is_symlink():
+            raise ValueError('refusing to replace a symlinked record: ' + str(destination))
+        os.replace(temporary, destination)
+    except BaseException:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def remove_pi_transport(removal):
+    """The installer's own removal, then its curl absence record.
+
+    Minted only from a live MutationAuthorization for the Pi prefix and a code
+    the download contract classified; a pnpm failure, a checksum mismatch or a
+    stale record can never reach this function.
+    """
+    capability = removal.capability
+    if capability.consumer.name != 'pi':
+        raise ValueError('Pi transport removal belongs to the pi consumer only')
+    if removal.code not in PI_CURL_CODES:
+        raise ValueError('not a classified download code: ' + str(removal.code))
+    prefix = capability.prefix
+    if os.path.lexists(prefix):
+        no_redirect(prefix, None if capability.production else capability.root)
+        info = prefix.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError('Pi prefix must be an invocation-owned directory')
+        shutil.rmtree(prefix)
+    if os.path.lexists(prefix):
+        raise ValueError('the Pi prefix survived its own removal')
+    _write_record(capability.status_dir / 'pi', PI_ABSENT_RECORD + removal.code + '\n',
+                  capability.root)
+
+
+def pi_transport_removal(prefix, code, *, consumer='pi'):
+    """CLI/installer entry: authorize the live prefix, then record the removal."""
+    capability = authorize_mutation(prefix, consumer=consumer)
+    removal = PiTransportRemoval(capability, code)
+    return removal
+
+
+def _acquire_manager(profile, production, root, prefix):
+    """Resolve the manager argv for one consumer's capability; no PATH lookup.
 
     Production owns the launcher outright, so a developer host acquisition
     variable is refused there instead of being silently ignored. The three
     variables are named per consumer: a Pi invocation cannot borrow dsh's
     authenticated stock distribution (or vice versa).
     """
-    if not isinstance(capability, MutationAuthorization):
-        raise ValueError('runtime capability cannot start a package manager')
-    profile = capability.consumer
     acquired = {suffix: os.environ.get(profile.host_env + suffix)
                 for suffix in ('_PNPM_PACKAGE', '_PNPM_ARCHIVE', '_NODE')}
-    if capability.production:
+    if production:
         if any(acquired.values()):
             raise ValueError('production does not use host manager acquisition variables')
         return [str(PNPM_COMMANDS / 'pnpm')]
     if acquired['_PNPM_PACKAGE']:
         if os.environ.get('AGENT_VM_FIXTURE_PNPM') or os.environ.get('AGENT_VM_FIXTURE_BASE_PNPM'):
             raise ValueError('ambiguous fixture manager selection')
-        return authenticated_host_argv(capability.prefix, acquired['_PNPM_PACKAGE'],
+        return authenticated_host_argv(prefix, acquired['_PNPM_PACKAGE'],
                                        acquired['_PNPM_ARCHIVE'] or '',
                                        acquired['_NODE'] or '', consumer=profile)
     fake = os.environ.get('AGENT_VM_FIXTURE_PNPM')
@@ -969,7 +1350,7 @@ def manager_argv(capability):
         raise ValueError('ambiguous fixture manager selection')
     if fake:
         executable = absolute(fake)
-        no_redirect(executable, capability.root)
+        no_redirect(executable, root)
         regular(executable)
         if not os.access(executable, os.X_OK):
             raise ValueError('fixture manager must be executable')
@@ -981,6 +1362,30 @@ def manager_argv(capability):
         verify_base_distribution()
         return [str(PNPM_COMMANDS / 'pnpm')]
     raise ValueError('fixture requires an authorized fake or the authenticated base launcher')
+
+
+def manager_argv(capability):
+    """The manager argv an ordinary mutation capability may start."""
+    if not isinstance(capability, MutationAuthorization):
+        raise ValueError('runtime capability cannot start a package manager')
+    return _acquire_manager(capability.consumer, capability.production,
+                            capability.root, capability.prefix)
+
+
+def stage_manager_argv(capability):
+    """The manager argv a first-import bootstrap stage may start.
+
+    A freshly adopted project has no reviewed inputs yet, so its driver cannot
+    hold the MutationAuthorization `manager_argv` requires; it holds the stage
+    instead and gets the same closed manager routes: the fixed base launcher in
+    production, an authorized fake or the authenticated base launcher in a
+    fixture. Nothing else is reachable, so the weaker destination authority does
+    not widen who may be executed.
+    """
+    if not isinstance(capability, BootstrapAuthorization):
+        raise ValueError('stage manager requires a bootstrap authorization')
+    return _acquire_manager(capability.consumer, capability.production,
+                            capability.root, capability.stage)
 
 
 def authenticated_host_argv(prefix, package, archive, node, *, consumer=DSH):
@@ -1052,8 +1457,12 @@ def main(consumer=None):
     guard.add_argument('prefixes', nargs='*')
     manager = sub.add_parser('manager')
     manager.add_argument('prefix')
+    stage_manager = sub.add_parser('stage-manager')
+    stage_manager.add_argument('stage')
+    stage_manager.add_argument('--source', action='append', default=[])
     scratch = sub.add_parser('scratch')
     scratch.add_argument('prefix')
+    scratch.add_argument('--parent')
     cleanup = sub.add_parser('cleanup')
     cleanup.add_argument('path')
     cleanup.add_argument('--prefix')
@@ -1064,6 +1473,18 @@ def main(consumer=None):
     identity.add_argument('expected')
     contract = sub.add_parser('contract-dir')
     contract.add_argument('prefixes', nargs='*')
+    gate = sub.add_parser('pi-gate-entry')
+    gate.add_argument('--pi-prefix', required=True)
+    gate.add_argument('--bridge-prefix', required=True)
+    gate.add_argument('--extension-root', required=True)
+    gate.add_argument('--wrapper', required=True)
+    gate.add_argument('--seed', required=True)
+    gate.add_argument('--status-dir', required=True)
+    gate.add_argument('--contract-dir')
+    gate.add_argument('--retire', action='store_true')
+    transport = sub.add_parser('pi-transport-removal')
+    transport.add_argument('prefix')
+    transport.add_argument('code')
     options = vars(parser.parse_args())
     profile = consumer_of(options.pop('consumer', consumer))
     verb = options.pop('verb')
@@ -1080,9 +1501,12 @@ def main(consumer=None):
         guard_environment(options['prefixes'], consumer=profile)
     elif verb == 'manager':
         print('\n'.join(manager_argv(authorize_mutation(options['prefix'], consumer=profile))))
+    elif verb == 'stage-manager':
+        stage = authorize_stage(options['stage'], consumer=profile, sources=options['source'])
+        print('\n'.join(stage_manager_argv(stage)))
     elif verb == 'scratch':
         capability = authorize_mutation(options['prefix'], consumer=profile)
-        scratch = owned_scratch(capability)
+        scratch = owned_scratch(capability, options['parent'])
         # Cross-process use: cleanup re-authorizes the path instead of consulting
         # this process's registry, so drop the registration before printing.
         del _scratch[scratch]
@@ -1093,6 +1517,22 @@ def main(consumer=None):
         remove_partial_install(authorize_mutation(options['prefix'], consumer=profile))
     elif verb == 'command-identity':
         command_identity(options['name'], options['expected'])
+    elif verb == 'pi-gate-entry':
+        layout = authorize_pi_gate_layout(
+            pi=options['pi_prefix'], bridge=options['bridge_prefix'],
+            extensions=options['extension_root'], wrapper=options['wrapper'],
+            seed=options['seed'], status_dir=options['status_dir'],
+            contract=options['contract_dir'], consumer=profile)
+        entry = pi_gate_entry(layout)
+        if isinstance(entry, PresentPi):
+            print('present')
+        elif options['retire']:
+            entry.retire()
+            print('absent-retired')
+        else:
+            print('absent')
+    elif verb == 'pi-transport-removal':
+        pi_transport_removal(options['prefix'], options['code'], consumer=profile).remove()
     else:
         print(authorize_contract(options['prefixes'], consumer=profile))
 

@@ -20,8 +20,12 @@ func TestParseRecordVocabulary(t *testing.T) {
 		{name: "absent-pi", data: "absent-pi\n", kind: AbsentPi, wantValid: true},
 		{name: "absent-curl-5", data: "absent-transport 5\n", kind: AbsentTransport, code: "5", wantValid: true},
 		{name: "absent-curl-60", data: "absent-transport 60\n", kind: AbsentTransport, code: "60", wantValid: true},
-		{name: "absent-npm", data: "absent-transport EAI_AGAIN\n", kind: AbsentTransport, code: "EAI_AGAIN", wantValid: true},
-		{name: "absent-npm-timeout", data: "absent-transport ETIMEDOUT\n", kind: AbsentTransport, code: "ETIMEDOUT", wantValid: true},
+		// npm error codes retired with run-npm.sh. They are not translated into
+		// curl codes and not kept as a second vocabulary: a record naming one
+		// authorises nothing, exactly like any other unknown code.
+		{name: "retired-npm-eai-again", data: "absent-transport EAI_AGAIN\n"},
+		{name: "retired-npm-econnreset", data: "absent-transport ECONNRESET\n"},
+		{name: "retired-npm-etimedout", data: "absent-transport ETIMEDOUT\n"},
 		{name: "no-newline", data: "installed"},
 		{name: "two-lines", data: "installed\ninstalled\n"},
 		{name: "blank", data: "\n"},

@@ -44,11 +44,15 @@ archive and peer-context snapshot records stay frozen, while records inside the
 changed root's own closure may be replaced and nothing outside it may appear (see
 [ADR 0003](../../docs/adr/0003-dsh-graph-freeze.md)). An incompatible pair fails
 with the offending records named rather than silently refreshing the empty slot.
-Pi/bridge regenerate a
-changed project from its exact manifest and revalidate integrity, sibling and
-loader-alias invariants. New override transitives may be registry-dependent;
-a reviewed committed bump is the reproducible default. Pi and bridge are
-separate projects, so changing one does not rewrite the other.
+Pi and bridge are
+reviewed pnpm projects too: a changed Pi is prepared from its **authenticated
+selected archive** (shrinkwrap conversion when that archive carries one, an
+ordinary exact resolution when it does not), and the graph is compared before
+anything is pinned; a changed bridge starts from a fresh manifest and workspace.
+New transitives may be registry-dependent; a reviewed committed bump is the
+reproducible default. Pi and bridge are separate projects, so changing one does
+not rewrite the other. See `images/tools/pi/README.md` and
+[ADR 0011](../../docs/adr/0011-pi-selected-shrinkwrap.md).
 
 ## Failure and certification
 
@@ -58,14 +62,15 @@ owns their build-only delivery and record/access compatibility contract.
 
 `run-install.sh NAME RESULT_FILE INTERPRETER SCRIPT [ARG ...]` resets the record
 to `pending` before invocation. An inherited `installed` cannot mask failure.
-Exit 75 plus a matching fresh private transport receipt is reserved for known
-curl transport codes or npm error codes. Unknown errors, HTTP failures,
-checksum/sha512 mismatch, `EINTEGRITY`, native exit 75 and timeout are hard.
-Native subprocesses do not receive the receipt. Low-level isolated helpers
-retain classified development failure behavior for audit fidelity; an owning
-hook can only soften positively classified transport when explicitly enabled,
-remove its own partial artifacts and write `absent-transport CODE`. dsh never
-softens a partial pnpm tree and Copilot never softens a partial npm tree.
+Exit 75 plus a matching fresh private receipt is reserved for the
+download contract's own low-level curl codes: the receipt and status grammar
+accept `transport download CODE` only. The retired npm codes are ordinary
+invalid records now that `run-npm.sh` is deleted. Unknown errors, HTTP failures,
+checksum/sha512 mismatch, `EINTEGRITY`, native exit 75, timeout and every pnpm
+failure are hard. Native subprocesses do not receive the receipt. Pi's own
+independent archive download keeps the receipt-proved curl soft branch (soft 1
+or 0); dsh never softens a partial pnpm tree, the bridge has no absence producer
+at all, and Copilot remains an npm install until PR 4 of #42.
 
 **Maintained base and standard builds disable soft failure explicitly.** No
 soft-fail ARG, skip flag or successful partial product exists. Each standard
@@ -162,63 +167,69 @@ any further exception requires a maintainer decision. See the
 
 ### Pi integrity
 
-Pi 1.0.4+ publishes no `npm-shrinkwrap.json`, so the committed, fully hashed
-lock governs `npm ci` and npm authenticates every tarball it installs. The
-committed lock has no nested shrinkwrap-only entries; the build reports that
-explicitly instead of claiming five verified siblings.
+Pi and its bridge are image-owned pnpm projects: `package.json`,
+`pnpm-lock.yaml`, `pnpm-workspace.yaml` and `pnpm-inputs.sha256` (digests of
+exactly the first three) per prefix, with **no** npm project lock. Base pnpm
+11.11.0 installs both frozen, production-only, scripts disabled, from the npmjs
+registry with a private HOME/XDG/store and copy-import. Neither project has its
+own manager or a lifecycle-script approval.
 
-A shrinkwrapped selection (Pi 1.0.3 and older) behaves differently: its
-published shrinkwrap omits hashes for exactly five direct siblings (`chord`,
-`pi-agent-core`, `pi-ai`, `pi-telemetry`, `pi-tui`). Reviewed lock entries
-refill their registry `dist.integrity`. npm ignores our lock for that subtree,
-so installation re-fetches each sibling tarball, compares its sha512 to the
-committed integrity and compares extraction against the full installed tree.
-There is no recursive basename exclusion such as `diff -x node_modules` that
-could hide a shadow package inside a sibling's own dist directory.
+Two routes, chosen by the **authenticated selected archive's contents** — never
+by a version number and never as a fallback:
 
-Only the sibling's **lock-declared nested dependency directories** are folded
-from the installed tree; npm authenticated their shrinkwrap integrities. Every
-other path inside those five sibling trees must match reviewed archive bytes:
-extra, changed, missing files/directories/symlinks fail hard. A package beside
-one of those five is outside those compared trees; this is not an exhaustive
-independent authentication of the entire npm install. All other non-root lock
-entries must carry integrity, the nested sibling set must be empty or exactly
-those five at the pin, and sibling pin/layout changes require review.
+* the archive carries `npm-shrinkwrap.json` (e.g. 0.87.0): its root identity,
+  SRI and every descendant are synthesized into a staged npm-project-shaped lock,
+  imported once with bounded pnpm, compared against the pre-import expected
+  graph, and only then pinned and validated frozen. The five legacy siblings
+  whose shrinkwrap records omit `integrity` are completed from their own exact
+  registry metadata **after** each sibling archive's SRI is verified. The
+  planning diagnostic measured 143 identities, 144/144 byte-identical SRI and
+  three representation normalisations, which the operator accepted on 2026-10-28
+  as reviewed normalisations for that selection and which are never an allowlist
+  (see [ADR 0011](../../docs/adr/0011-pi-selected-shrinkwrap.md));
+* the archive carries no shrinkwrap (the 1.4.0 default): no fabricated
+  shrinkwrap, no "refill"; the exact selection is resolved under the reviewed
+  workspace and the complete identity/SRI/edge/optional/peer delta is reviewed.
 
-#### Proposed authenticated defences (issue #52, inactive)
+The family shape is a reviewed per-selection expectation, not a constant: 1.4.0
+reaches six members (`pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-mcp`,
+`pi-telemetry`, `pi-tui`; five direct root edges) and 0.87.0 the historical five
+(`chord`, `pi-agent-core`, `pi-ai`, `pi-telemetry`, `pi-tui`; four direct edges).
+1.4.0's published `chord` is unreachable and has no `esbuild` dependency.
 
-The Pi migration to image-owned pnpm adds five build-only modules under
-`images/tools/pi/`. They are source-only in this commit: no Pi or bridge input,
-lock, installer, verifier, wrapper, upgrade helper or Docker block uses them yet,
-so today's npm installation is unchanged. The activation commit is separate.
+Bytes are a separate proof. `install-pi.sh` downloads **all** reachable sibling
+archives independently, checks each SRI before extraction, and runs the mounted
+build-only `check-installed-bytes.mjs` against the pristine extraction. Only
+exactly-derived package-root `node_modules/.bin` directories/links are
+normalised; every other file, link, kind, byte and executable bit must match,
+including `dist`, `package.json` and any `npm-shrinkwrap.json` inside a sibling.
+The image's explicit `a+rX` step supplies read access; authenticated, locked
+declared bin targets are expected 0755 after pnpm's own fix-bin. The finished
+image is then audited independently by
+`script/test/standard-node-layout.py --consumer pi`.
 
-* `import-shrinkwrap.mjs` converts an authenticated Pi archive's own
-  `npm-shrinkwrap.json` into the npm-shaped project lock `pnpm import` consumes,
-  and compares what pnpm imported against that expectation. It rejects resolvers
-  the SRI proof cannot cover, refuses missing hashes outside the historically
-  hashless five siblings, and *reports* representation deltas instead of
-  allowlisting them. JSON syntax (including duplicate keys) stays with
-  `recipe-contract pnpm-json`; it parses no YAML and never contacts a registry.
-* `archive.py` owns bounded, authenticated extraction: whole-archive preflight for
-  the `package/` root only, normalised names, no traversal, duplicates, special
-  files or link escapes, size/count/depth budgets, no privilege modes, and the
-  archive's own executable bits. Shell still owns download and the head-of-line
-  SRI check; `evidence` rehashes a retained tarball against a locked SRI for the
-  byte checker.
-* `installed-graph.mjs` and `check-installed-bytes.mjs` derive the physical graph
-  from `recipe-contract pnpm-lock graph pi` plus the actual canonical package
-  directories, then compare each reachable sibling's installed tree with its
-  independently authenticated archive. Only a derived package-root
-  `node_modules/.bin` entry set and separately validated dependency links are
-  normalised, and only authenticated, locked declared bin targets are expected to
-  be 0755 after installation.
-* `check-runtime.mjs` re-proves the N6 packages from the real installed
-  resolution context: genai import, protobufjs encode/decode, the historical
-  `chord`-context TypeScript transform with its native optional package, and the
-  modern selection's explicit absence of chord/esbuild.
+The bridge keeps `nodeLinker: hoisted`, keeps the SDK **JavaScript** and omits
+only the SDK's per-platform native packages through the reviewed
+`ignoredOptionalDependencies` pattern; the old `--omit=optional
+--legacy-peer-deps` rationale is history (see
+[ADR 0011](../../docs/adr/0011-pi-selected-shrinkwrap.md)).
 
-These are reviewable now and unproven until the activation commit runs them
-against real cold installs.
+The build-only modules under `images/tools/pi/` are wired into both install and
+verify RUNs (never COPYed into runtime) and remain reviewable separately:
+
+* `import-shrinkwrap.mjs` — authenticated archive data -> staged npm-shaped lock
+  plus the expectation-vs-import delta. No download, npm, YAML or duplicate-key
+  parsing (`recipe-contract pnpm-json` owns JSON syntax), no guessed hashes.
+* `archive.py` — whole-archive preflight and bounded extraction, plus the
+  per-invocation rehash of a retained provider tarball. Shell still owns the
+  download and its head-of-line SRI check.
+* `installed-graph.mjs` / `check-installed-bytes.mjs` — lock-derived physical
+  graph and archive-versus-installed comparison; expectations never come from
+  the observed tree.
+* `check-runtime.mjs` — genai, protobufjs and the legacy chord-context esbuild
+  transform from the real installed resolution context.
+* `prepare-project.py` — the one owning process for a changed/refreshed
+  selection.
 
 ### Pi wrapper and bridge
 
@@ -228,14 +239,14 @@ loads the pinned bridge unless explicitly opted out. It injects no default
 trust or telemetry policy. Image-owned extensions remain outside HOME, where
 runtime state mounts cannot hide them. See [Pi notes](pi/README.md).
 
-The separate `/opt/agent-vm/pi-packages` project installs with
-`--ignore-scripts --omit=optional --legacy-peer-deps`. Legacy peers are mandatory
-for lock generation and ci: Pi's loader aliases its own peers, and normal npm
-peer solving would add a second version-skewed Pi. Optional omission drops the
-Claude SDK platform packages, each carrying a second native Claude CLI; standard
-already installs Claude at `/opt/agent/.local/bin/claude`.
-
-The bridge has no shrinkwrap hash exceptions: every entry has integrity. Its
+The separate `/opt/agent-vm/pi-packages` project is a hoisted pnpm install with
+`autoInstallPeers: false`. Its peer declarations on the Pi family and `typebox`
+stay unmet on purpose: no second Pi or `typebox` instance may exist, and peer
+declaration text is data, not a violation. `ignoredOptionalDependencies:
+['@anthropic-ai/claude-agent-sdk-*']` omits only the SDK platform packages, each
+carrying a second native Claude CLI; standard already installs Claude at
+`/opt/agent/.local/bin/claude`, and Pi's jiti supplies the SDK JavaScript. The
+bridge has no shrinkwrap hash exceptions: every entry has integrity. Its
 seed hook points the provider to the image's Claude. The wrapper loads it with
 an explicit extension, not `pi install` or HOME auto-discovery. Registration
 checks require actual positive provider/model counts; metadata existence alone

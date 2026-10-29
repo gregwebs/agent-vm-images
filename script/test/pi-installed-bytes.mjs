@@ -179,6 +179,18 @@ function editGraph(meta, change) {
   return restore;
 }
 
+// A variant that must still pass: the fixture is mutated, the positive is
+// re-proved, and the graph is restored. Used where two lock spellings of one
+// fact must be accepted, not just rejected alike.
+function withPositive(meta, label, mutate) {
+  const repair = mutate();
+  try {
+    expectPass(meta, label);
+  } finally {
+    repair();
+  }
+}
+
 function withMutation(meta, label, code, mutate, options = {}) {
   const repair = mutate();
   try {
@@ -378,6 +390,26 @@ withMutation(modern, 'unreachable installed payload', 'unreachable-payload', () 
 withMutation(legacy, 'compatible optional payload missing', 'missing-dependency', () => editGraph(legacy, graph => {
   for (const entry of graph.packages) {
     if (entry.id.name === '@esbuild/linux-arm64') entry.platform = {os: [], cpu: [], libc: []};
+  }
+}));
+
+// pnpm's `import` records optionality on the snapshot and not on the package
+// record, so the same omission must still be authorized when only the snapshot
+// carries the flag -- that is the real shape of an imported 0.87.0 graph.
+withPositive(legacy, 'import-style optionality (snapshot flag only)', () => editGraph(legacy, graph => {
+  for (const entry of graph.packages) {
+    if (entry.id.name === '@esbuild/linux-arm64') entry.optional = false;
+  }
+}));
+
+// Conversely, locked platform selectors never excuse a *required* payload: with
+// no optional target, a platform-excluded dependency is a hard failure.
+withMutation(legacy, 'platform-excluded required target', 'missing-dependency', () => editGraph(legacy, graph => {
+  for (const entry of graph.packages) {
+    if (entry.id.name === '@esbuild/linux-arm64') entry.optional = false;
+  }
+  for (const entry of graph.snapshots) {
+    if (entry.id.packageId.name === '@esbuild/linux-arm64') entry.optional = false;
   }
 }));
 
@@ -602,8 +634,20 @@ const hostileCases = {
   hardlink: 'special-member',
   'link-escape': 'link-escape',
   'link-absolute': 'link-escape',
+  'link-composed': 'link-escape',
+  'link-cycle': 'link-cycle',
+  'link-self': 'link-cycle',
   'ancestor-file': 'ancestor-overwrite',
   'ancestor-link': 'ancestor-overwrite',
+  // Case and Unicode normalisation decide how a filesystem names entries, not how
+  // the archive spells them: on APFS `d/X` and `d/x` are one entry, so `e/Y`'s
+  // target `../d/x/..` walks through a link to the package root and one level above
+  // it. Both vectors wrote `PWNED` outside the extraction root with status 0 before
+  // these refusals existed. `link-folded-target` is the same escape with no
+  // member-name collision at all, so only a folded resolution can see it.
+  'case-collision': 'name-collision',
+  'normalisation-collision': 'name-collision',
+  'link-folded-target': 'link-escape',
   privilege: 'privilege-mode',
   'unexpected-root': 'unexpected-root',
   deep: 'unsafe-path',
@@ -622,6 +666,130 @@ for (const [name, code] of Object.entries(hostileCases)) {
     `${name}: a refused archive must not leave extracted bytes`);
 }
 
+// A bin command the archive reaches through a link, or not at all, must be a
+// refusal: hashing through a link let the archive choose the bytes the checker
+// compared with the installed tree.
+const hostileEvidenceCases = {
+  'bin-link-ancestor': 'bin-target',
+  'bin-link-final': 'bin-target',
+  'bin-missing': 'bin-target',
+};
+for (const [name, code] of Object.entries(hostileEvidenceCases)) {
+  const tarball = path.join(work, `evidence-${name}.tgz`);
+  const built = spawnSync('python3', [builder, 'hostile-evidence', name, tarball], {encoding: 'utf8', timeout: 60000});
+  assert.equal(built.status, 0, built.stderr);
+  const integrity = `sha512-${crypto.createHash('sha512').update(fs.readFileSync(tarball)).digest('base64')}`;
+  const destination = path.join(work, `evidence-${name}-out`);
+  const result = archiveCase(['evidence', tarball, integrity, destination]);
+  assert.equal(result.status, 1, `${name}: expected a refusal, got status ${result.status}`);
+  assert.ok(result.stderr.startsWith(`archive.py: ${code}: `),
+    `${name}: expected ${code}, got ${result.stderr.trim()}`);
+}
+
+// Headers are read before members: the `package/` root entry and an extended
+// header reach tarfile with nothing yet visible, so they carry their own budgets.
+// Root entries used to be skipped before every check, which let repeated roots
+// stand in for the member count and let a root file or a directory with declared
+// data keep 8 MiB out of the totals.
+const budgetHelper = fileURLToPath(new URL('fixtures/pi-archive-budget.py', import.meta.url));
+
+function budgetCase(name, tarball) {
+  return spawnSync('python3', [budgetHelper, 'run', name, tarball], {encoding: 'utf8', timeout: 120000});
+}
+
+const rootCases = {
+  'root-duplicate': 'duplicate-member',
+  'root-file': 'unexpected-root',
+  'root-size': 'unexpected-root',
+};
+for (const [name, code] of Object.entries(rootCases)) {
+  const tarball = path.join(work, `${name}.tgz`);
+  const built = spawnSync('python3', [builder, 'hostile-budget', name, tarball], {encoding: 'utf8', timeout: 120000});
+  assert.equal(built.status, 0, built.stderr);
+  const result = archiveCase(['extract', tarball, path.join(work, `${name}-out`)]);
+  assert.equal(result.status, 1, `${name}: expected a refusal, got status ${result.status}`);
+  assert.ok(result.stderr.startsWith(`archive.py: ${code}: `),
+    `${name}: expected ${code}, got ${result.stderr.trim()}`);
+}
+
+// The production budgets are sized for a real npm tarball, so the scaled runs
+// are what can prove a header counts: each of these is accepted under the
+// module's own limits and refused once the budget is small enough to see it.
+for (const [name, code] of Object.entries({'root-count': 'member-count', 'root-size': 'total-size'})) {
+  const tarball = path.join(work, `${name}-scaled.tgz`);
+  const built = spawnSync('python3', [builder, 'hostile-budget', name, tarball], {encoding: 'utf8', timeout: 120000});
+  assert.equal(built.status, 0, built.stderr);
+  const result = budgetCase(name, tarball);
+  assert.equal(result.status, 0, `${name}: ${result.stderr}`);
+  const observed = JSON.parse(result.stdout);
+  assert.equal(observed.code, code, `${name}: expected ${code}, got ${JSON.stringify(observed)}`);
+  assert.ok(observed.peak < 4 * 1024 * 1024, `${name}: allocated ${observed.peak} bytes`);
+}
+
+// A valid 32 MiB PAX record is a valid archive under the production budget, so
+// the bound is proved by the scaled run plus the allocation it must precede: a
+// refusal that arrived after tarfile had the buffer would show its size as peak.
+{
+  const tarball = path.join(work, 'pax-bomb.tgz');
+  const built = spawnSync('python3', [builder, 'hostile-budget', 'pax-bomb', tarball], {encoding: 'utf8', timeout: 120000});
+  assert.equal(built.status, 0, built.stderr);
+  const result = budgetCase('pax-bomb', tarball);
+  assert.equal(result.status, 0, result.stderr);
+  const observed = JSON.parse(result.stdout);
+  assert.ok(['read-size', 'decompressed-size'].includes(observed.code),
+    `pax-bomb: expected a decompressed-stream refusal, got ${JSON.stringify(observed)}`);
+  assert.ok(observed.peak < 4 * 1024 * 1024,
+    `pax-bomb: the 32 MiB declared buffer reached tarfile before the refusal (${observed.peak} bytes)`);
+}
+
+// Extended headers are the other half of the same boundary: they are read between
+// members, in `_safe_read` chunks of their own, so neither the per-read cap nor a
+// member's declared size ever sees them. These run at the *production* budgets (no
+// scaling), which is what makes them cheap enough to build: a 64 MiB PAX value gzips
+// to 65 KiB, and 5000 chained `x` headers are small.
+//
+// `header-spread` is the archive-wide total: 1,000 zero-byte members each carrying a
+// 1,040,000-byte `comment`, which never fills a window. The archive is 1.1 MB on the
+// wire and was accepted with a 1,044,612,040-byte traced peak and 1.16 GB resident,
+// because `tarfile` keeps every member's `pax_headers`. Its peak is the 8 MiB budget
+// plus `tarfile`'s parse of the one record that would have crossed it.
+{
+  const headerCases = {
+    'header-comment': {code: 'header-bytes', peak: 4 * 1024 * 1024},
+    'header-chain': {code: 'header-chain', peak: 4 * 1024 * 1024},
+    'header-spread': {code: 'header-bytes', peak: 12 * 1024 * 1024},
+  };
+  for (const [name, {code, peak}] of Object.entries(headerCases)) {
+    const tarball = path.join(work, `${name}.tgz`);
+    const built = spawnSync('python3', [builder, 'hostile-budget', name, tarball],
+      {encoding: 'utf8', timeout: 120000});
+    assert.equal(built.status, 0, built.stderr);
+    const result = budgetCase('production', tarball);
+    assert.equal(result.status, 0, result.stderr);
+    const observed = JSON.parse(result.stdout);
+    assert.equal(observed.code, code, `${name}: expected ${code}, got ${JSON.stringify(observed)}`);
+    // The 64 MiB record arrived as 1 MiB chunks and was fully allocated before the
+    // between-members budget existed: 366 MiB peak for this archive, 3.4 GB for the
+    // 600 MiB one the review measured.
+    assert.ok(observed.peak < peak,
+      `${name}: allocated ${observed.peak} bytes before the refusal`);
+  }
+}
+
+// The write walk is a refusal of its own: every parent component is opened with
+// `O_NOFOLLOW` relative to the directory above it, so even a member whose parent
+// component is a link cannot be written through -- on a case-sensitive filesystem,
+// and for a spelling the preflight never saw.
+{
+  const result = spawnSync('python3', [budgetHelper, 'walk'], {encoding: 'utf8', timeout: 120000});
+  assert.equal(result.status, 0, result.stderr);
+  const observed = JSON.parse(result.stdout);
+  for (const label of ['directory-through-link', 'file-through-link', 'outside-link']) {
+    assert.equal(observed[label], 'link-traversal', `${label}: ${JSON.stringify(observed)}`);
+  }
+  assert.deepEqual(observed.escaped, [], 'a write reached a directory outside the root');
+}
+
 {
   const tarball = path.join(work, 'benign.tgz');
   const built = spawnSync('python3', [builder, 'benign', tarball], {encoding: 'utf8', timeout: 60000});
@@ -638,4 +806,4 @@ for (const [name, code] of Object.entries(hostileCases)) {
 }
 
 fs.rmSync(work, {recursive: true, force: true});
-process.stdout.write(`pi-installed-bytes: fixture, reviewed tables, ${Object.keys(hostileCases).length} archive refusals and every mutant diagnostic verified\n`);
+process.stdout.write(`pi-installed-bytes: fixture, reviewed tables, ${Object.keys(hostileCases).length} archive refusals, ${Object.keys(hostileEvidenceCases).length} bin-target refusals, ${Object.keys(rootCases).length} root-header refusals, scaled header budgets, the production per-window and archive-wide header budgets, the write walk and every mutant diagnostic verified\n`);

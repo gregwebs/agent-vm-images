@@ -428,7 +428,9 @@ func TestRecordsAndCwdIndependence(t *testing.T) {
 		return path
 	}
 	installed := write("record-installed", "installed\n")
-	transport := write("record-transport", "absent-transport ECONNRESET\n")
+	// A genuine curl transport code. The retired npm error codes (EAI_AGAIN,
+	// ECONNRESET, ...) are now unknown records, not a second vocabulary.
+	transport := write("record-transport", "absent-transport 56\n")
 	broken := write("record-broken", "absent-transport 99\n")
 	failingCwd := Environment{Environment: toolaccess.Environment{
 		WorkingDirectory: func() (toolaccess.PhysicalDirectory, error) {
@@ -439,7 +441,7 @@ func TestRecordsAndCwdIndependence(t *testing.T) {
 	if got := runInProcess(t, failingCwd, "install-status", "record", installed); got.status != 0 || string(got.stdout) != "installed\n" {
 		t.Fatalf("record with a failing cwd = %+v", got)
 	}
-	if got := runInProcess(t, failingCwd, "install-status", "code", transport); got.status != 0 || string(got.stdout) != "ECONNRESET\n" {
+	if got := runInProcess(t, failingCwd, "install-status", "code", transport); got.status != 0 || string(got.stdout) != "56\n" {
 		t.Fatalf("code with a failing cwd = %+v", got)
 	}
 	if got := runInProcess(t, failingCwd, "install-status", "code", installed); got.status != 1 || len(got.stdout) != 0 {

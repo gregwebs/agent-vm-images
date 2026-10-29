@@ -41,9 +41,18 @@ func (p *process) runPnpmLockCandidate(args []string) int {
 			return p.nodeUsage(2, pnpmLockCandidateUsage)
 		}
 	case candidateAdoptionGraph:
-		if flags.before != "" || flags.requestedVersion != "" || flags.refresh {
+		if flags.before != "" || flags.requestedVersion != "" || flags.refresh || flags.shrinkwrapAuthority {
 			return p.nodeUsage(2, pnpmLockCandidateUsage)
 		}
+	}
+	// The shrinkwrap authority is the authenticated Pi selected-archive route's
+	// statement that the archive's own shrinkwrap, compared separately, decides the
+	// graph. No other kind publishes such an archive, so naming it for them is not a
+	// policy relaxation a caller may reach for: it would trade the retained-edge
+	// freeze (a bridge edge moving from mandatory to optional, for instance) for
+	// nothing. The typed comparator refuses it too.
+	if flags.shrinkwrapAuthority && kind != pnpmlock.KindPi {
+		return p.nodeUsage(2, pnpmLockCandidateUsage)
 	}
 	return p.nodeCommand(pnpmLockCandidatePrefix, func() (string, error) {
 		descriptor, _ := strconv.Atoi(flags.scratchFD)
@@ -79,8 +88,15 @@ func (p *process) runPnpmLockCandidate(args []string) int {
 			if flags.refresh {
 				refresh = pnpmlock.RefreshLock
 			}
+			// The authority is typed, never a caller-supplied policy string: the
+			// driver that authenticated the selected archive names it on argv, and
+			// the zero value keeps every other caller on the retained freeze.
+			authority := pnpmlock.RetainedSnapshotFreeze
+			if flags.shrinkwrapAuthority {
+				authority = pnpmlock.ShrinkwrapAuthority
+			}
 			delta, err := pnpmlock.CompareSelectionCandidate(before, candidate,
-				pnpmlock.SelectionRequest{Requested: requested, Refresh: refresh})
+				pnpmlock.SelectionRequest{Requested: requested, Refresh: refresh, Authority: authority})
 			if err != nil {
 				return "", err
 			}
@@ -162,11 +178,12 @@ func parseSelectionFlags(args []string) (refresh, jsonOut, ok bool) {
 }
 
 type candidateFlagValues struct {
-	scratch          string
-	scratchFD        string
-	before           string
-	requestedVersion string
-	refresh          bool
+	scratch             string
+	scratchFD           string
+	before              string
+	requestedVersion    string
+	refresh             bool
+	shrinkwrapAuthority bool
 }
 
 func parseCandidateFlags(args []string) (candidateFlagValues, bool) {
@@ -180,6 +197,10 @@ func parseCandidateFlags(args []string) (candidateFlagValues, bool) {
 		seen[flag] = true
 		if flag == "--refresh-lock" {
 			values.refresh = true
+			continue
+		}
+		if flag == "--shrinkwrap-authority" {
+			values.shrinkwrapAuthority = true
 			continue
 		}
 		if index+1 >= len(args) {

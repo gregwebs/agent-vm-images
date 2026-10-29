@@ -21,7 +21,7 @@ const (
 
 // TransportCode is a classified network-failure code. The text is unexported and
 // only the record grammar builds one, so a code that was never looked up in the
-// curl/npm vocabulary cannot reach a caller.
+// download vocabulary cannot reach a caller.
 type TransportCode struct{ text string }
 
 // String returns the wire spelling the record carried.
@@ -31,14 +31,12 @@ func (c TransportCode) String() string { return c.text }
 // turn it into the legacy status without printing anything.
 var ErrInvalidRecord = errors.New("invalid recipe-contract record")
 
-// curlCodes and npmCodes mirror the classified-transport vocabulary written by
-// download.sh (curl exit codes) and run-npm.sh (npm error codes).
+// curlCodes mirror the classified-transport vocabulary written by download.sh.
+// The npm error codes that `run-npm.sh` used to produce were retired with that
+// adapter, so a receipt or record still naming one is an ordinary invalid record
+// rather than a softened transport failure.
 var curlCodes = map[string]struct{}{
 	"5": {}, "6": {}, "7": {}, "18": {}, "28": {}, "35": {}, "52": {}, "55": {}, "56": {}, "60": {},
-}
-
-var npmCodes = map[string]struct{}{
-	"EAI_AGAIN": {}, "ENOTFOUND": {}, "ECONNREFUSED": {}, "ECONNRESET": {}, "ETIMEDOUT": {},
 }
 
 const absentTransportPrefix = "absent-transport "
@@ -119,9 +117,6 @@ func (r Record) Code() (TransportCode, bool) {
 
 func lookupCode(text string) (TransportCode, bool) {
 	if _, ok := curlCodes[text]; ok {
-		return TransportCode{text: text}, true
-	}
-	if _, ok := npmCodes[text]; ok {
 		return TransportCode{text: text}, true
 	}
 	return TransportCode{}, false

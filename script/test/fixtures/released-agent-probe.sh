@@ -14,9 +14,15 @@ for tool in codex opencode claude copilot dsh pi pnpm; do
     timeout --kill-after=5s 60 "$tool" --version > "$tmp/$tool.out" 2> "$tmp/$tool.err"
 done
 python3 "$tmp/released-agent-report.py" "$tmp" "$codex" "$opencode" "$claude" "$copilot" "$dsh" "$pnpm" "$pi"
+# Pi and the bridge are reviewed pnpm projects too: four regular inputs and no
+# npm lock, not even a dangling link to one.
 for project in pi pi-packages; do
-    test -r "/opt/agent-vm/$project/package.json"
-    test -r "/opt/agent-vm/$project/package-lock.json"
+    for input in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
+        test -f "/opt/agent-vm/$project/$input"
+        test ! -L "/opt/agent-vm/$project/$input"
+    done
+    test ! -e "/opt/agent-vm/$project/package-lock.json"
+    test ! -L "/opt/agent-vm/$project/package-lock.json"
 done
 # dsh is a reviewed pnpm project installed by the base manager: four regular
 # inputs, no npm lock (nor a dangling link to one), and a direct link at the

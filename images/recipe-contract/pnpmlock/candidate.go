@@ -154,9 +154,15 @@ func (r CandidateReport) AppendJS(dst []byte) []byte { return r.Value().AppendJS
 // CompareSelectionCandidate applies the same manifest/workspace/manager,
 // retained-SRI and closure rules as a post-pin selection update. It is the only
 // comparison a candidate may enter, and it never returns a Project.
+//
+// The one thing the request may change is the snapshot authority: the
+// authenticated selected-shrinkwrap route names ShrinkwrapAuthority because it
+// validates the imported graph against the archive's own shrinkwrap, and this
+// comparator must not substitute the previous selection's frozen edges for it.
 func CompareSelectionCandidate(before *Project, after *ValidatedCandidate, request SelectionRequest) (UpdateComparison, error) {
 	if before.selection.Kind != after.kind {
 		return UpdateComparison{}, errorf("candidate kind differs from the reviewed project")
 	}
-	return compareSelection(after.kind, projectSide(before), candidateSide(after), request.Requested, request.Refresh)
+	return compareSelection(after.kind, projectSide(before), candidateSide(after), request.Requested,
+		request.Refresh, request.Authority)
 }

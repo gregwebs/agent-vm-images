@@ -59,8 +59,39 @@ def contract_context(platform):
     if not (context / 'out/recipe-contract').is_file():
         raise Failure('the ' + platform + ' recipe-contract build published no binary under ' + str(context))
     return context
-MIGRATED = ('dsh',)
-UNMIGRATED = ('pi', 'bridge', 'copilot')
+MIGRATED = ('dsh', 'pi', 'bridge')
+UNMIGRATED = ('copilot',)
+# The Pi/bridge legs do not run the fake-registry matrix (that matrix proves the
+# base policy, which those projects inherit unchanged). They prove the *owning
+# preparation boundary* of each project on its real four inputs: an equal request
+# starts no manager at all, every bypass/override is refused before Node, and a
+# changed or refreshed request is hard when the authorized manager route cannot
+# complete. The fixture's recorder shim is the only manager route in those cases,
+# so "the shim was never called" is an observable fact, not the driver's claim.
+PREPARE_INPUTS = ('package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-inputs.sha256')
+PREPARE_SOURCE = {'pi': 'images/tools/pi', 'bridge': 'images/tools/pi/bridge'}
+PREPARE_COMMITTED = {'pi': 'images/tools/pi', 'bridge': 'images/tools/pi/bridge'}
+# Expectations are authored here, not in the fixture: the fixture only reports
+# what happened. `managerCalls` False is the zero-manager guarantee; `reason` is
+# required diagnostic text for a hard failure.
+PREPARE_CASES = {
+    'equal': {'arguments': [], 'managerCalls': False, 'status': 0, 'reason': None},
+    'equal-exact-selection': {'arguments': ['exact'], 'managerCalls': False, 'status': 0,
+                              'reason': None},
+    'refresh-equal': {'arguments': ['--refresh-lock'], 'managerCalls': True, 'status': 1,
+                      'reason': None},
+    'changed': {'arguments': ['0.0.1'], 'managerCalls': True, 'status': 1, 'reason': None},
+    'manager-mismatch': {'arguments': ['0.0.1'], 'managerCalls': True, 'status': 1,
+                         'reason': '11.11.0'},
+    'node-options': {'arguments': [], 'managerCalls': False, 'status': 1,
+                     'reason': 'NODE_OPTIONS'},
+    'node-path': {'arguments': [], 'managerCalls': False, 'status': 1, 'reason': 'NODE_PATH'},
+    'bun-options': {'arguments': [], 'managerCalls': False, 'status': 1,
+                    'reason': 'BUN_OPTIONS'},
+    'npmrc': {'arguments': [], 'managerCalls': False, 'status': 1, 'reason': '.npmrc'},
+    'registry-env': {'arguments': [], 'managerCalls': False, 'status': 1,
+                     'reason': 'PNPM_CONFIG_REGISTRY'},
+}
 
 
 @dataclass(frozen=True)
@@ -126,9 +157,11 @@ def arguments(args):
     if consumer in UNMIGRATED:
         raise ValueError(f'consumer not migrated to pnpm yet: {consumer}')
     if consumer == 'all':
-        consumers = list(MIGRATED)
-    elif consumer == 'dsh':
+        # The default set stays dsh: it is the fake-registry matrix, and widening
+        # the default would silently change what a plain invocation proves.
         consumers = ['dsh']
+    elif consumer in MIGRATED:
+        consumers = [consumer]
     else:
         raise ValueError(f'unknown consumer: {consumer}\n{USAGE}')
     return image, platform, consumer, consumers
@@ -230,9 +263,10 @@ class Capture:
 
 
 class Invocation:
-    def __init__(self, image, requested):
+    def __init__(self, image, requested, consumer='dsh'):
         self.image = image
         self.requested = requested
+        self.consumer = consumer
         self.token = 'pnpm-policy-' + uuid.uuid4().hex
         self.logs = EVIDENCE_ROOT / self.token
         self.logs.mkdir(parents=True)
@@ -279,6 +313,8 @@ class Invocation:
         return name
 
     def execute(self):
+        if self.consumer in ('pi', 'bridge'):
+            return self.execute_prepare_policy()
         source = self.run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'])
         if source.returncode:
             raise Failure('cannot record the source revision')
@@ -325,7 +361,11 @@ class Invocation:
         name = self.create(self.token + '-policy', '--platform', platform, '--network', 'none',
                            '--cap-drop', 'ALL',
                            '--mount', f'type=bind,src={ROOT},dst=/source,readonly',
-                           '--mount', f'type=bind,src={self.contract / "out"},dst=/contract,readonly',
+                           # The owning filesystem module authorizes the contract
+                           # directory as a child of the fixture root, so it is
+                           # mounted there (exactly like the dsh harness) rather
+                           # than at an unrelated absolute path.
+                           '--mount', f'type=bind,src={self.contract / "out"},dst=/work/fixtures/contract,readonly',
                            '--mount', f'type=volume,src={self.volume},dst=/work',
                            self.image, 'sleep', 'infinity')
         self.docker('start', name)
@@ -372,6 +412,129 @@ class Invocation:
         print(f'migrated consumers exercised: {", ".join(MIGRATED)}; '
               f'{len(SCENARIOS)} scenarios x {len(SOFT_VALUES)} soft values', flush=True)
 
+    def prepare_inputs(self):
+        """The consumer's committed four inputs, as one unit."""
+        directory = ROOT / PREPARE_COMMITTED[self.consumer]
+        missing = [name for name in PREPARE_INPUTS if not (directory / name).is_file()]
+        if missing:
+            raise Failure(f'the committed {self.consumer} four inputs are incomplete: '
+                          + ', '.join(missing))
+        return directory
+
+    def execute_prepare_policy(self):
+        """Real guards, real driver, offline: one case per authored expectation."""
+        inputs = self.prepare_inputs()
+        selection = json.loads((inputs / 'package.json').read_text())[
+            'dependencies'][{'pi': '@earendil-works/pi-coding-agent',
+                             'bridge': 'pi-claude-bridge'}[self.consumer]]
+        source = self.run(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'])
+        if source.returncode:
+            raise Failure('cannot record the source revision')
+        source = source.stdout.strip()
+        recorded = [*(inputs / name for name in PREPARE_INPUTS),
+                    ROOT / f'{PREPARE_SOURCE[self.consumer]}/prepare-lock.sh',
+                    ROOT / 'images/tools/pi/prepare-project.py',
+                    ROOT / 'images/tools/pnpm-project.py',
+                    ROOT / 'script/test/standard-node-layout.py',
+                    ROOT / 'script/test/fixtures/standard-node-policy.py']
+        (self.logs / 'source.json').write_text(json.dumps({'source': source, 'selection': selection,
+                                                           'consumer': self.consumer,
+                                                           'inputs': {
+            str(item.relative_to(ROOT)) if ROOT in item.parents else str(item):
+                hashlib.sha256(item.read_bytes()).hexdigest()
+            for item in recorded}}, indent=2))
+        context = self.docker('context', 'show').strip()
+        driver = self.docker('buildx', 'inspect', context)
+        if not any(line.split() == ['Driver:', 'docker'] for line in driver.splitlines()):
+            raise Failure('daemon-backed docker driver required')
+        daemon = json.loads(self.docker('info', '--format', '{{json .}}'))
+        image = json.loads(self.docker('image', 'inspect', self.image))[0]
+        self.docker('history', '--no-trunc', self.image)
+        platform = self.requested or 'linux/' + {'aarch64': 'arm64', 'x86_64': 'amd64'}.get(
+            daemon['Architecture'], daemon['Architecture'])
+        if platform not in PLATFORMS:
+            raise Failure(f'unsupported native platform: {platform}')
+        if daemon['OSType'] != 'linux' or 'linux/' + {'aarch64': 'arm64', 'x86_64': 'amd64'}.get(
+                daemon['Architecture'], daemon['Architecture']) != platform:
+            raise Failure('daemon platform mismatch/emulation')
+        if image['Os'] != 'linux' or 'linux/' + {'aarch64': 'arm64', 'x86_64': 'amd64'}.get(
+                image['Architecture'], image['Architecture']) != platform:
+            raise Failure('base-image platform mismatch/emulation')
+        self.platform = platform
+        self.volume = self.token + '-fixtures'
+        self.docker('volume', 'create', self.volume)
+        self.contract = contract_context(platform)
+        name = self.create(self.token + '-policy', '--platform', platform, '--network', 'none',
+                           '--cap-drop', 'ALL',
+                           '--mount', f'type=bind,src={ROOT},dst=/source,readonly',
+                           # The owning filesystem module authorizes the contract
+                           # directory as a child of the fixture root, so it is
+                           # mounted there (exactly like the dsh harness) rather
+                           # than at an unrelated absolute path.
+                           '--mount', f'type=bind,src={self.contract / "out"},dst=/work/fixtures/contract,readonly',
+                           '--mount', f'type=volume,src={self.volume},dst=/work',
+                           self.image, 'sleep', 'infinity')
+        self.docker('start', name)
+        self.docker('exec', name, 'mkdir', '-p', '/work/fixtures')
+        ready = self.json_line(self.docker('exec', name, 'python3', '-B', FIXTURE, 'ready'),
+                              'readiness')
+        if ready.get('manager') != '11.11.0' or ready.get('readonly') is not True:
+            raise Failure('container readiness/identity evidence invalid: ' + json.dumps(ready))
+        self.docker('exec', name, 'mkdir', '-p', f'/work/{self.consumer}-inputs')
+        for input_name in PREPARE_INPUTS:
+            self.docker('cp', str(inputs / input_name),
+                        f'{name}:/work/{self.consumer}-inputs/{input_name}')
+        output = self.docker('exec', '--env', 'AGENT_VM_FIXTURE_ROOT=/work/fixtures', name,
+                             'python3', '-B', FIXTURE, 'prepare-policy', self.consumer, selection)
+        records = {}
+        for line in output.splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(record, dict) or 'case' not in record:
+                continue
+            if record['case'] in records:
+                raise Failure('duplicate preparation-policy record: ' + record['case'])
+            records[record['case']] = record
+        missing = sorted(set(PREPARE_CASES) - set(records))
+        if missing:
+            raise Failure('missing preparation-policy records: ' + ', '.join(missing))
+        extra = sorted(set(records) - set(PREPARE_CASES))
+        if extra:
+            raise Failure('unreviewed preparation-policy records: ' + ', '.join(extra))
+        for case in sorted(PREPARE_CASES):
+            expectation = PREPARE_CASES[case]
+            record = records[case]
+            problems = []
+            if record.get('consumer') != self.consumer:
+                problems.append(f'recorded consumer {record.get("consumer")} is not '
+                                f'{self.consumer}')
+            if record.get('selection') != selection:
+                problems.append(f'recorded selection {record.get("selection")} is not '
+                                f'{selection}')
+            if bool(record.get('managerCalls')) is not expectation['managerCalls']:
+                problems.append(f'manager calls {record.get("managerCalls")} are not '
+                                f'{expectation["managerCalls"]}')
+            if record.get('status') != expectation['status']:
+                problems.append(f'status {record.get("status")} is not {expectation["status"]}')
+            if record.get('inputsUnchanged') is not True:
+                problems.append('the four reviewed inputs changed during preparation')
+            if record.get('nodeModules') is not False:
+                problems.append('a partial node_modules survived')
+            if record.get('statusRecord') is not False:
+                problems.append('preparation wrote a health record')
+            if expectation['reason'] and expectation['reason'] not in (record.get('diagnostic')
+                                                                       or ''):
+                problems.append(f'diagnostic {record.get("diagnostic")!r} lacks '
+                                f'{expectation["reason"]!r}')
+            if problems:
+                raise Failure(f'{self.consumer}/{case}: ' + '; '.join(problems))
+            print(f'{self.consumer}/{case}: ' + json.dumps(
+                {'status': record['status'], 'managerCalls': record['managerCalls']}), flush=True)
+        print(f'{self.consumer}: preparation-policy matrix PASS (real guards and driver; the '
+              'recorder shim is the only manager route)', flush=True)
+
     def cleanup(self):
         errors = []
         for name in list(reversed(self.containers)):
@@ -403,10 +566,10 @@ def main(args):
         return 2
     if consumer == 'all':
         print('migrated consumers: ' + ', '.join(consumers), flush=True)
-    if consumers != ['dsh']:
+    if consumers[0] not in MIGRATED:
         print(f'standard-node-policy: unsupported consumer set {consumers}', file=sys.stderr)
         return 2
-    invocation = Invocation(image, requested)
+    invocation = Invocation(image, requested, consumers[0])
     status = 0
 
     def interrupted(number, _frame):
@@ -427,7 +590,10 @@ def main(args):
             if not status:
                 status = error.status
     if not status:
-        print('standard-node-policy: dsh owning policy matrix PASS')
+        if invocation.consumer == 'dsh':
+            print('standard-node-policy: dsh owning policy matrix PASS')
+        else:
+            print(f'standard-node-policy: {invocation.consumer} preparation-policy matrix PASS')
     return status
 
 

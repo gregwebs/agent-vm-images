@@ -207,6 +207,21 @@ func TestPnpmLockCandidatePiKind(t *testing.T) {
 	if report["graph"].(map[string]any)["selection"].(map[string]any)["kind"] != "pi" {
 		t.Errorf("graph kind = %v", report["graph"])
 	}
+	// The authenticated selected-shrinkwrap route names its snapshot authority on
+	// argv; every other caller leaves it off and keeps the retained freeze.
+	authoritative := runNode(t, nil, "pnpm-lock-candidate", "graph", "pi",
+		"--scratch", scratch, "--scratch-fd", itoa(fd), "--before", project,
+		"--requested-version", "0.1.5-rc.2", "--shrinkwrap-authority")
+	if authoritative.status != 0 {
+		t.Fatalf("pi shrinkwrap-authority candidate = %d %q", authoritative.status, authoritative.stderr)
+	}
+	var authoritativeReport map[string]any
+	if err := json.Unmarshal(authoritative.stdout, &authoritativeReport); err != nil {
+		t.Fatal(err)
+	}
+	if authoritativeReport["inputState"] != "candidate" {
+		t.Errorf("inputState = %v", authoritativeReport["inputState"])
+	}
 	// The kind is a policy selector, never a relabel: the same dsh graph is not a
 	// bridge candidate.
 	dshScratch, dshFD, _ := candidateFixture(t, nodeFixture(t))
@@ -237,6 +252,12 @@ func TestPnpmLockCandidateUsage(t *testing.T) {
 		{"pnpm-lock-candidate", "adoption-graph", "dsh", "--scratch", scratch, "--scratch-fd", fdText, "--before", before},
 		{"pnpm-lock-candidate", "adoption-graph", "dsh", "--scratch", scratch, "--scratch-fd", fdText, "--requested-version", "0.1.5-rc.2"},
 		{"pnpm-lock-candidate", "adoption-graph", "dsh", "--scratch", scratch, "--scratch-fd", fdText, "--refresh-lock"},
+		{"pnpm-lock-candidate", "adoption-graph", "dsh", "--scratch", scratch, "--scratch-fd", fdText, "--shrinkwrap-authority"},
+		// The shrinkwrap authority is the pi kind's: no other consumer publishes an
+		// authenticated dependency shrinkwrap whose graph could be authoritative.
+		{"pnpm-lock-candidate", "graph", "dsh", "--scratch", scratch, "--scratch-fd", fdText, "--before", before, "--requested-version", "0.1.5-rc.2", "--shrinkwrap-authority"},
+		{"pnpm-lock-candidate", "graph", "bridge", "--scratch", scratch, "--scratch-fd", fdText, "--before", before, "--requested-version", "0.1.5-rc.2", "--shrinkwrap-authority"},
+		{"pnpm-lock-candidate", "graph", "dsh", "--scratch", scratch, "--scratch-fd", fdText, "--before", before, "--requested-version", "0.1.5-rc.2", "--shrinkwrap-authority", "--shrinkwrap-authority"},
 	} {
 		got := runNode(t, nil, args...)
 		if got.status != 2 || !strings.HasPrefix(string(got.stderr), "usage: recipe-contract pnpm-lock-candidate ") {

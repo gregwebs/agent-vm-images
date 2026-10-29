@@ -167,13 +167,16 @@ run_install 2.1.286
 [[ ! -e "$CASE/status/claude" ]] || fail "a hard failure must not leave an absence record"
 unset FAKE_EXIT FAKE_RECEIPT SOFT
 
-# ...and only for a receipt with the right operation
+# ...and only for a receipt with the right operation. This is deliberately not a
+# valid download line: `transport npm 6` and `transport download 6` are both
+# *right-shaped* receipts for a different producer, so the control names an
+# operation that no helper produces at all.
 new_case transport-wrong-op
 FAKE_EXIT=75
-FAKE_RECEIPT='transport npm 6'
+FAKE_RECEIPT='transport wrong-operation 6'
 SOFT=1
 run_install 2.1.286
-[[ $RUN_STATUS -ne 0 ]] || fail "an npm receipt must not soften a native install"
+[[ $RUN_STATUS -ne 0 ]] || fail "a receipt for another operation must not soften a native install"
 unset FAKE_EXIT FAKE_RECEIPT SOFT
 
 # a bare 75 with no receipt is never classified

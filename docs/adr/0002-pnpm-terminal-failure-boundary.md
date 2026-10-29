@@ -1,8 +1,11 @@
 # 0002: pnpm terminal failures remain hard
 
-Status: current hard-only rule retained. Proposed bridge narrowing requires
-maintainer acknowledgement on #42 **before PR 3 removes its degraded producer**.
-PR 1 changes no production failure producer, receipt protocol or runner.
+Status: accepted. The hard-only rule is retained and the bridge's npm-only
+degraded producer has been removed, with the required acknowledgement recorded
+on #42: https://github.com/gregwebs/agent-vm-images/issues/42#issuecomment-6281925524
+(maintainer comment, 2026-10-20; #42 is closed). The acknowledged narrowing is
+now implemented: the producer is gone, and curl's low-level transport
+classification remains exactly as it was.
 
 ## Decision
 
@@ -12,14 +15,29 @@ independent low-level transport classifier remains unchanged. A new classifier
 would require a separately reviewed contract with terminal-structured evidence
 and mixed policy/integrity negatives.
 
-Dropping bridge's old npm-only degraded classification in PR 3 is an explicit
-proposed spec narrowing, not a claim that #42 never required transport fidelity.
-Record the evidence/deviation on #42 and obtain maintainer acknowledgement before
-removing that producer. Standard builds already require all agents with soft
-mode unset. Pi and bridge are live `run-npm.sh` callers in PR 1; PR 3 migrates
-both before deleting that adapter, npm-only receipt/status vocabulary and tests.
-Historical transfer inventories are annotated, never rewritten as if files had
-never existed.
+Dropping the bridge's old npm-only degraded classification was an explicit spec
+narrowing, not a claim that #42 never required transport fidelity. The evidence
+and deviation are recorded on #42 and the narrowing is acknowledged (link above).
+Standard builds still require every agent with soft mode unset, and the final
+standard image still rejects any absent or pending record.
+
+Current state, not a proposal:
+
+* Pi and the bridge are pnpm projects installed through the base manager; they
+  are no longer `run-npm.sh` callers, and `images/recipe-contract/run-npm.sh` is
+  deleted. A Pi pnpm/policy/preparation/byte failure is hard in every soft mode.
+* The receipt and status grammar accept **download only**
+  (`transport download CODE`). Retired npm codes are ordinary invalid records,
+  pinned by parser negatives (unknown, NUL, trailing, multiline, no newline).
+* Pi's *own* independent archive download keeps its receipt-proved low-level
+  transport soft branch for the curl failures the download contract actually
+  classifies, under soft 1 **or** 0. A checksum, byte, extraction, shrinkwrap,
+  preparation or manager failure can never mint that removal authority.
+* The bridge has no pnpm absence producer. Its only absence record is the
+  derivative `absent-pi` written after a genuine Pi curl absence retires the
+  feature; a present Pi with an absent bridge is hard.
+* Historical transfer inventories keep the retired path explicitly historical;
+  nothing rewrote them as if the adapter had never existed.
 
 Do not clear a caller receipt before pnpm. No supported path has a stale curl
 receipt there: child receipt isolation plus a fresh run-install envelope already

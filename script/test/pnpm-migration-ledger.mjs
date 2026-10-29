@@ -940,6 +940,12 @@ const RECORDED = {
       "completion of #42 or of any other consumer migration",
       "any whole-image, native, or proposed-SHA acceptance run",
       "a frozen transitive closure for changed selections",
+      "any Pi or bridge projection: this file is the generated dsh slice, and the "
+      + "Pi/bridge rows live in docs/standard-pnpm-migration.md (section 'Pi and the "
+      + "bridge: reviewed baselines and deltas') and in ADR 0011",
+      "any comparison against an independently authored per-package archive "
+      + "inventory: no caller passes --archive-inventories to the layout oracle, "
+      + "including standard-image.sh",
       "any count in this file as a constant to assert"
     ]
 };

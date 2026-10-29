@@ -26,6 +26,22 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 REAL_JQ="$(command -v jq || true)"
 [[ -n "$REAL_JQ" ]] || { echo "FAIL: jq is required" >&2; exit 1; }
 JQ_DIR="$(dirname "$REAL_JQ")"
+# The Pi/bridge upgrades require node; keep it reachable from the fixture PATH.
+NODE_DIR="$(dirname "$(command -v node)")"
+# The four reviewed pnpm inputs every migrated upgrade publishes.
+MIGRATED_INPUTS=(package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256)
+# The upgrade fixture must exercise the same bytes the image would ship, so it
+# reads the committed four inputs and refuses an incomplete set.
+reviewed_dir() { # $1 committed dir
+    local committed="$1" file
+    for file in "${MIGRATED_INPUTS[@]}"; do
+        [ -f "$REPO_ROOT/$committed/$file" ] || {
+            echo "the committed $committed project is missing $file" >&2
+            return 1
+        }
+    done
+    printf '%s' "$REPO_ROOT/$committed"
+}
 
 # The scripts under test are bash-only; run them under the same bash as this
 # test, so `bash script/test/upgrade-scripts.sh` and `/bin/bash ...` each cover
@@ -38,8 +54,6 @@ DSH_PIN="$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$REPO_ROOT/images/tools/ds
 PNPM_PIN="$(jq -r .version "$REPO_ROOT/images/pnpm/pin.json")"
 BRIDGE_PIN="$(jq -r '.dependencies["pi-claude-bridge"]' "$REPO_ROOT/images/tools/pi/bridge/package.json")"
 PNPM_BUMP=12.0.0
-PI_BUMP=0.87.2
-BRIDGE_BUMP=0.8.1
 
 STUB_BIN="$TEST_ROOT/bin"
 mkdir -p "$STUB_BIN"
@@ -152,6 +166,28 @@ norm() {
     printf '%s/%s' "$dir" "$base"
 }
 src=${@: -2:1}
+# A deterministic signal while one destination is being written: the copy has
+# already truncated it and exits successfully, so only the caller's own signal
+# handling can restore the file. `$PPID` is the upgrade script that started this
+# copy, exactly where a human's Ctrl-C or a supervisor's TERM would land.
+# One shot only: the restore the caller is about to make copies to the same
+# destination, and the signal must not be replayed into it.
+signalled() {
+    [ ! -e "${STUB_SIGNAL_MARKER:-/nonexistent}" ] && : >"${STUB_SIGNAL_MARKER:?}"
+}
+if [ -n "${STUB_CP_SIGNAL_DEST:-}" ] && [ ! -e "${STUB_SIGNAL_MARKER:-/nonexistent}" ] \
+    && [ "$(norm "$last")" = "$(norm "$STUB_CP_SIGNAL_DEST")" ]; then
+    signalled
+    printf partial >"$last"
+    kill -TERM "$PPID"
+    exit 0
+fi
+if [ -n "${STUB_CP_SIGNAL_BACKUP:-}" ] && [ ! -e "${STUB_SIGNAL_MARKER:-/nonexistent}" ] \
+    && [[ "$last" == */publish-backup/* ]]; then
+    signalled
+    kill -TERM "$PPID"
+    exit 0
+fi
 if [ -n "${STUB_CP_FAIL_DEST:-}" ] && [ "$(norm "$last")" = "$(norm "$STUB_CP_FAIL_DEST")" ]; then
     if [[ "$src" == */publish-backup/* ]]; then
         [[ "${STUB_ROLLBACK_FAIL:-}" == 1 ]] && exit 9
@@ -168,7 +204,8 @@ chmod +x "$STUB_BIN/cp"
 CASE=""
 
 new_case() {
-    unset STUB_ROLLBACK_FAIL STUB_VIEW_FAIL STUB_SEED_LOCK STUB_INSTALL_JQ PI_INTEGRITY STUB_CP_FAIL_DEST
+    unset STUB_ROLLBACK_FAIL STUB_VIEW_FAIL STUB_SEED_LOCK STUB_INSTALL_JQ PI_INTEGRITY STUB_CP_FAIL_DEST \
+        STUB_CP_SIGNAL_DEST STUB_CP_SIGNAL_BACKUP STUB_SIGNAL_MARKER
     CASE="$TEST_ROOT/$1"
     mkdir -p "$CASE/home" "$CASE/script/build" "$CASE/images/tools/pi/bridge" \
         "$CASE/images/tools/dsh" "$CASE/expected/pi" "$CASE/expected/dsh" \
@@ -176,14 +213,20 @@ new_case() {
     cp "$REPO_ROOT/script/build/npm-pin.sh" "$CASE/script/build/"
     cp "$REPO_ROOT/script/build/dockerfile-label.sh" "$CASE/script/build/"
     cp "$REPO_ROOT/script/build/transactional-publish.sh" "$CASE/script/build/"
-    cp "$REPO_ROOT/images/tools/pi/upgrade-pi.sh" "$CASE/images/tools/pi/"
-    cp "$REPO_ROOT/images/tools/pi/package.json" "$REPO_ROOT/images/tools/pi/package-lock.json" \
-        "$REPO_ROOT/images/tools/pi/prepare-lock.sh" \
+    cp "$REPO_ROOT/images/tools/pnpm-project.py" "$REPO_ROOT/images/tools/pnpm-host-manager.py" \
+        "$CASE/images/tools/"
+    cp "$REPO_ROOT/images/tools/pi/upgrade-pi.sh" "$REPO_ROOT/images/tools/pi/prepare-lock.sh" \
         "$CASE/images/tools/pi/"
     cp "$REPO_ROOT/images/tools/pi/bridge/upgrade-bridge.sh" \
-        "$REPO_ROOT/images/tools/pi/bridge/package.json" "$REPO_ROOT/images/tools/pi/bridge/package-lock.json" \
         "$REPO_ROOT/images/tools/pi/bridge/prepare-lock.sh" \
         "$CASE/images/tools/pi/bridge/"
+    local pi_dir bridge_dir
+    pi_dir="$(reviewed_dir images/tools/pi)"
+    bridge_dir="$(reviewed_dir images/tools/pi/bridge)"
+    for name in "${MIGRATED_INPUTS[@]}"; do
+        cp "$pi_dir/$name" "$CASE/images/tools/pi/$name"
+        cp "$bridge_dir/$name" "$CASE/images/tools/pi/bridge/$name"
+    done
     cp "$REPO_ROOT/images/tools/dsh/upgrade-dsh.sh" \
         "$REPO_ROOT/images/tools/dsh/package.json" "$REPO_ROOT/images/tools/dsh/pnpm-lock.yaml" \
         "$REPO_ROOT/images/tools/dsh/pnpm-workspace.yaml" "$REPO_ROOT/images/tools/dsh/pnpm-inputs.sha256" \
@@ -193,8 +236,10 @@ new_case() {
     cp "$REPO_ROOT/images/pnpm/pin.json" "$CASE/images/pnpm/pin.json"
     cp "$REPO_ROOT/images/standard/Dockerfile" "$CASE/images/standard/Dockerfile"
     # Pristine snapshots: a failed run must leave the live files byte-identical.
-    cp "$CASE/images/tools/pi/package.json" "$CASE/images/tools/pi/package-lock.json" "$CASE/expected/pi/"
-    cp "$CASE/images/tools/pi/bridge/package.json" "$CASE/images/tools/pi/bridge/package-lock.json" "$CASE/expected/bridge/"
+    for name in "${MIGRATED_INPUTS[@]}"; do
+        cp "$CASE/images/tools/pi/$name" "$CASE/expected/pi/$name"
+        cp "$CASE/images/tools/pi/bridge/$name" "$CASE/expected/bridge/$name"
+    done
     cp "$CASE/images/tools/dsh/package.json" "$CASE/images/tools/dsh/pnpm-lock.yaml" \
         "$CASE/images/tools/dsh/pnpm-workspace.yaml" "$CASE/images/tools/dsh/pnpm-inputs.sha256" "$CASE/expected/dsh/"
     # Dockerfile snapshots: the LABEL mirrors must not change on a failed run
@@ -202,33 +247,29 @@ new_case() {
     cp "$CASE/images/standard/Dockerfile" "$CASE/expected/pi/Dockerfile"
     cp "$CASE/images/standard/Dockerfile" "$CASE/expected/bridge/Dockerfile"
     cp "$CASE/images/standard/Dockerfile" "$CASE/expected/dsh/Dockerfile"
+    # The staged prefixes live outside the fixture checkout, so the composed
+    # helper must be the checkout's own `images/recipe-contract` directory: that
+    # is the authorized shape for an upgrade whose scratch tree is a canonical
+    # child of the checkout it came from.
+    mkdir -p "$CASE/images/recipe-contract"
+    cp -p "$COMPOSED_CONTRACT/recipe-contract" "$CASE/images/recipe-contract/"
     : >"$CASE/npm.log"
     write_registry
 }
 
-# The fixture registry, defaulting to the committed pins. Sibling integrity is
-# copied from the committed pi lock unless PI_INTEGRITY overrides it, so a
-# re-pin refills exactly the original bytes.
+# The fixture registry, defaulting to the committed pins. Only tag discovery is
+# left: the Pi/bridge upgrades take every archive identity and SRI from the pnpm
+# graph, so there is no npm `view … dist.integrity` refill to model.
 write_registry() {
     jq -n \
         --arg pi "$PI_PIN" --arg dsh "$DSH_PIN" --arg pnpm "$PNPM_PIN" \
-        --arg pnb "$PNPM_BUMP" --arg bridge "$BRIDGE_PIN" \
-        --arg override "${PI_INTEGRITY:-}" \
-        --slurpfile pilock "$CASE/images/tools/pi/package-lock.json" '
-        def sib($n): $pilock[0].packages
-            ["node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/" + $n].integrity;
-        def integ($n): if $override == "" then sib($n) else $override end;
+        --arg pnb "$PNPM_BUMP" --arg bridge "$BRIDGE_PIN" '
         {
           packages: {
             "@earendil-works/pi-coding-agent": {"dist-tags": {latest: $pi, next: $pi}, "versions": [$pi]},
             "@deepseek-ai/dsh": {"dist-tags": {latest: $dsh, next: $dsh}, "versions": [$dsh]},
             "pnpm": {"dist-tags": {latest: $pnpm, next: $pnpm}, "versions": [$pnpm, $pnb]},
-            "pi-claude-bridge": {"dist-tags": {latest: $bridge, next: $bridge}, "versions": [$bridge]},
-            "@earendil-works/chord": {"versions": [$pi], "integrity": {($pi): integ("chord")}},
-            "@earendil-works/pi-agent-core": {"versions": [$pi], "integrity": {($pi): integ("pi-agent-core")}},
-            "@earendil-works/pi-ai": {"versions": [$pi], "integrity": {($pi): integ("pi-ai")}},
-            "@earendil-works/pi-telemetry": {"versions": [$pi], "integrity": {($pi): integ("pi-telemetry")}},
-            "@earendil-works/pi-tui": {"versions": [$pi], "integrity": {($pi): integ("pi-tui")}}
+            "pi-claude-bridge": {"dist-tags": {latest: $bridge, next: $bridge}, "versions": [$bridge]}
           }
         }' >"$CASE/registry.json"
 }
@@ -252,9 +293,11 @@ run_upgrade() {
     shift
     set +e
     RUN_OUTPUT="$(env -i \
-        "PATH=$STUB_BIN:$JQ_DIR:/usr/bin:/bin" \
+        "PATH=$STUB_BIN:$JQ_DIR:$NODE_DIR:/usr/bin:/bin:/usr/sbin:/sbin" \
         "HOME=$CASE/home" \
         "TMPDIR=$CASE" \
+        "AGENT_VM_CONTRACT_DIR=$CASE/images/recipe-contract" \
+        "AGENT_VM_FIXTURE_PNPM=${AGENT_VM_FIXTURE_PNPM:-}" \
         "STUB_ROLLBACK_FAIL=${STUB_ROLLBACK_FAIL:-}" \
         "STUB_REGISTRY=$CASE/registry.json" \
         "STUB_LOG=$CASE/npm.log" \
@@ -262,6 +305,9 @@ run_upgrade() {
         "STUB_SEED_LOCK=${STUB_SEED_LOCK:-}" \
         "STUB_INSTALL_JQ=${STUB_INSTALL_JQ:-.}" \
         "STUB_CP_FAIL_DEST=${STUB_CP_FAIL_DEST:-}" \
+        "STUB_CP_SIGNAL_DEST=${STUB_CP_SIGNAL_DEST:-}" \
+        "STUB_CP_SIGNAL_BACKUP=${STUB_CP_SIGNAL_BACKUP:-}" \
+        "STUB_SIGNAL_MARKER=$CASE/signal-fired" \
         "$BASH_BIN" "$script" "$@" 2>&1)"
     RUN_STATUS=$?
     set -e
@@ -274,7 +320,9 @@ assert_files_unchanged() {
         dsh) base=images/tools/dsh; dockerfile="$CASE/images/standard/Dockerfile" ;;
         bridge) base=images/tools/pi/bridge; dockerfile="$CASE/images/standard/Dockerfile" ;;
     esac
-    for exp in package.json package-lock.json; do
+    local inputs=("${MIGRATED_INPUTS[@]}")
+    [ "$which" = dsh ] && inputs=(package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256)
+    for exp in "${inputs[@]}"; do
         cmp -s "$CASE/expected/$which/$exp" "$CASE/$base/$exp" \
             || fail "$which/$exp changed (expected byte-identical)"
     done
@@ -282,152 +330,218 @@ assert_files_unchanged() {
         || fail "$which Dockerfile changed (expected byte-identical)"
 }
 
-# --- pi: re-pin, failure modes, dist-tag, integrity refill, refusal ---------
+# --- pi/bridge: four-input publication, partial failure, absent pre-image ----
+#
+# The upgrades publish FOUR pnpm inputs plus one central Dockerfile LABEL in one
+# transaction. Resolution itself belongs to the owning preparation driver and is
+# proved by script/test/pi-prepare-project.py against a recorded manager; what
+# these cases own is the publication half, so the fixture binds a driver that
+# stages the reviewed four inputs at the requested version (keeping every archive
+# SRI) while the REAL composed `recipe-contract` still gates the result with
+# `pnpm-lock check` and `pnpm-lock graph`.
 
-new_case pi-repin
-run_upgrade "$CASE/images/tools/pi/upgrade-pi.sh" "$PI_PIN"
+# The fixture driver. It is deliberately a version-only re-pin: the graph's
+# identities, SRI, peers and edges stay the reviewed bytes, which is exactly the
+# shape the publication transaction must carry through unchanged.
+fixture_prepare() { # $1 case dir
+    cat >"$1/images/tools/pi/prepare-lock.sh" <<'SH'
+#!/bin/sh
+# Fixture-only preparation: stage the reviewed inputs at the requested exact
+# version. No manager, no network, no resolution.
+set -eu
+prefix=$1 version=$2
+shift 2
+[ "${1:-}" = --refresh-lock ] || exit 2
+[ -f "$prefix/package.json" ] || exit 1
+name=$(jq -r '.dependencies | keys[0]' "$prefix/package.json")
+old=$(jq -r --arg n "$name" '.dependencies[$n]' "$prefix/package.json")
+[ "$old" != "$version" ] || exit 1
+sed -e "s|^        specifier: $old\$|        specifier: $version|" \
+    -e "s|^        version: $old|        version: $version|" \
+    -e "s|^  '$name@$old|  '$name@$version|" \
+    -e "s|^  $name@$old|  $name@$version|" \
+    "$prefix/pnpm-lock.yaml" >"$prefix/pnpm-lock.yaml.tmp" || exit 1
+mv "$prefix/pnpm-lock.yaml.tmp" "$prefix/pnpm-lock.yaml"
+jq --arg n "$name" --arg v "$version" '.dependencies[$n] = $v' "$prefix/package.json" \
+    >"$prefix/package.json.tmp" || exit 1
+mv "$prefix/package.json.tmp" "$prefix/package.json"
+(cd "$prefix" && sha256sum package.json pnpm-lock.yaml pnpm-workspace.yaml >pnpm-inputs.sha256)
+SH
+    chmod +x "$1/images/tools/pi/prepare-lock.sh"
+    cp "$1/images/tools/pi/prepare-lock.sh" "$1/images/tools/pi/bridge/prepare-lock.sh"
+}
+
+# assert_published WHICH VERSION: the four live inputs are the staged bytes (the
+# pin file agrees with them), the project's label mirrors VERSION, and the other
+# project's inputs and label are untouched.
+assert_published() { # $1 which, $2 version
+    local which="$1" version="$2" base target label_arg pinned other
+    case "$which" in
+        pi) base=images/tools/pi; target=pi; label_arg=AGENT_VERSION_PI
+            pinned=@earendil-works/pi-coding-agent; other=bridge ;;
+        bridge) base=images/tools/pi/bridge; target=pi-claude-bridge
+            label_arg=AGENT_VERSION_PI_CLAUDE_BRIDGE
+            pinned=pi-claude-bridge; other=pi ;;
+    esac
+    [ "$(jq -r --arg n "$pinned" '.dependencies[$n]' "$CASE/$base/package.json")" = "$version" ] ||
+        fail "$which package.json was not published at $version"
+    (cd "$CASE/$base" && sha256sum -c pnpm-inputs.sha256 >/dev/null) ||
+        fail "$which pnpm-inputs.sha256 does not describe the published inputs"
+    grep -Fq "org.agent-vm.version.$target=\"\${$label_arg:-$version}\"" \
+        "$CASE/images/standard/Dockerfile" || fail "$which label was not published at $version"
+    for file in "${MIGRATED_INPUTS[@]}"; do
+        cmp -s "$CASE/expected/$other/$file" "$CASE/images/tools/$([ "$other" = pi ] && printf pi || printf pi/bridge)/$file" ||
+            fail "the $other project changed while $which was published"
+    done
+}
+
+# The composed helper is the real gate for the staged graph, so the native build
+# is resolved once and copied into each fixture checkout.
+COMPOSED_CONTRACT="${RECIPE_CONTRACT_CONTEXT:-$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)}/out"
+[ -x "$COMPOSED_CONTRACT/recipe-contract" ] ||
+    { echo 'FAIL: no composed recipe-contract helper' >&2; exit 1; }
+export AGENT_VM_FIXTURE_PNPM=1
+
+new_case pi-upgrade-publishes-four-inputs
+fixture_prepare "$CASE"
+registry_add_version @earendil-works/pi-coding-agent 1.4.1
+run_upgrade "$CASE/images/tools/pi/upgrade-pi.sh" 1.4.1
 assert_status_ok
-assert_contains "$RUN_OUTPUT" "pinning @earendil-works/pi-coding-agent: $PI_PIN -> $PI_PIN"
+assert_published pi 1.4.1
+
+new_case bridge-upgrade-publishes-four-inputs
+fixture_prepare "$CASE"
+registry_add_version pi-claude-bridge 0.8.1
+run_upgrade "$CASE/images/tools/pi/bridge/upgrade-bridge.sh" 0.8.1
+assert_status_ok
+assert_published bridge 0.8.1
+
+# A failure at any one of the five destinations restores every destination --
+# including the one whose write had already truncated -- and leaves the checkout
+# byte-identical.
+new_case pi-upgrade-partial-publish-restores
+fixture_prepare "$CASE"
+registry_add_version @earendil-works/pi-coding-agent 1.4.1
+for destination in \
+    images/tools/pi/package.json images/tools/pi/pnpm-lock.yaml \
+    images/tools/pi/pnpm-workspace.yaml images/tools/pi/pnpm-inputs.sha256 \
+    images/standard/Dockerfile; do
+    STUB_CP_FAIL_DEST="$CASE/$destination" \
+        run_upgrade "$CASE/images/tools/pi/upgrade-pi.sh" 1.4.1
+    assert_status_fail
+    assert_contains "$RUN_OUTPUT" "failed to publish"
+    assert_files_unchanged pi
+done
+
+# Rollback that cannot restore is status 3, and the recovery material is kept.
+new_case pi-upgrade-rollback-incomplete
+fixture_prepare "$CASE"
+registry_add_version @earendil-works/pi-coding-agent 1.4.1
+STUB_CP_FAIL_DEST="$CASE/images/tools/pi/pnpm-inputs.sha256" STUB_ROLLBACK_FAIL=1 \
+    run_upgrade "$CASE/images/tools/pi/upgrade-pi.sh" 1.4.1
+[ "$RUN_STATUS" -eq 3 ] || fail "an incomplete rollback must exit 3 (got $RUN_STATUS)"
+assert_contains "$RUN_OUTPUT" "recovery material retained at"
+
+# An absent pre-image is not "nothing to restore": the transaction records the
+# absence and removes the partially published file on failure.
+new_case bridge-upgrade-absent-preimage
+fixture_prepare "$CASE"
+registry_add_version pi-claude-bridge 0.8.1
+rm "$CASE/images/tools/pi/bridge/pnpm-workspace.yaml"
+STUB_CP_FAIL_DEST="$CASE/images/tools/pi/bridge/pnpm-inputs.sha256" \
+    run_upgrade "$CASE/images/tools/pi/bridge/upgrade-bridge.sh" 0.8.1
+assert_status_fail
+[ ! -e "$CASE/images/tools/pi/bridge/pnpm-workspace.yaml" ] ||
+    fail "an originally absent input was invented by the rollback"
+cmp -s "$CASE/expected/bridge/Dockerfile" "$CASE/images/standard/Dockerfile" ||
+    fail "the Dockerfile changed although the publication failed"
+
+# A signal during publication must never leave a half-published tree: the
+# interrupted transaction restores every destination from the backups it took
+# before the first copy, and the recovery material stays for a human. The second
+# destination is the lock, so the first input is already published when the TERM
+# lands and the reverse-inclusive restore has real work to do.
+assert_recovery_retained() { # $1 scratch name prefix
+    local dir index
+    dir=$(find "$CASE" -maxdepth 1 -name "$1-upgrade.*" -type d | head -1)
+    [ -n "$dir" ] || fail "no retained recovery material for $1"
+    [ -f "$dir/publish-backup/.complete" ] || fail "$1: retained backups are not complete"
+    for index in 0 1 2 3 4; do
+        [ -f "$dir/publish-backup/$index" ] || fail "$1: retained backup $index is missing"
+    done
+}
+
+new_case pi-upgrade-signal-during-publish
+fixture_prepare "$CASE"
+registry_add_version @earendil-works/pi-coding-agent 1.4.1
+STUB_CP_SIGNAL_DEST="$CASE/images/tools/pi/pnpm-lock.yaml" \
+    run_upgrade "$CASE/images/tools/pi/upgrade-pi.sh" 1.4.1
+[ "$RUN_STATUS" -eq 143 ] || fail "a TERM during publication must exit 143 (got $RUN_STATUS): $RUN_OUTPUT"
+assert_contains "$RUN_OUTPUT" "publication interrupted; sources restored"
+assert_files_unchanged pi
+assert_recovery_retained pi
+
+new_case bridge-upgrade-signal-during-publish
+fixture_prepare "$CASE"
+registry_add_version pi-claude-bridge 0.8.1
+STUB_CP_SIGNAL_DEST="$CASE/images/tools/pi/bridge/pnpm-lock.yaml" \
+    run_upgrade "$CASE/images/tools/pi/bridge/upgrade-bridge.sh" 0.8.1
+[ "$RUN_STATUS" -eq 143 ] || fail "a TERM during publication must exit 143 (got $RUN_STATUS): $RUN_OUTPUT"
+assert_contains "$RUN_OUTPUT" "publication interrupted; sources restored"
+assert_files_unchanged bridge
+assert_recovery_retained bridge
+
+# A signal while the backups themselves are being taken must not restore from a
+# partial backup: nothing has been written yet, so the sources must be untouched
+# and the incomplete recovery material is what carries status 3.
+new_case pi-upgrade-signal-during-backup
+fixture_prepare "$CASE"
+registry_add_version @earendil-works/pi-coding-agent 1.4.1
+STUB_CP_SIGNAL_BACKUP=1 run_upgrade "$CASE/images/tools/pi/upgrade-pi.sh" 1.4.1
+[ "$RUN_STATUS" -eq 3 ] || fail "a TERM during the backup phase must exit 3 (got $RUN_STATUS): $RUN_OUTPUT"
+assert_contains "$RUN_OUTPUT" "publication interrupted while taking backups"
 assert_files_unchanged pi
 
-new_case pi-latest-default
+# A repository still carrying the retired npm model cannot be re-pinned: the
+# reviewed-pnpm guard fires before any resolution.
+new_case pi-upgrade-refuses-npm-model
+fixture_prepare "$CASE"
+jq 'del(.packageManager)' "$CASE/images/tools/pi/package.json" >"$CASE/images/tools/pi/package.json.tmp"
+mv "$CASE/images/tools/pi/package.json.tmp" "$CASE/images/tools/pi/package.json"
 run_upgrade "$CASE/images/tools/pi/upgrade-pi.sh"
-assert_status_ok
-assert_contains "$RUN_OUTPUT" "latest @earendil-works/pi-coding-agent is $PI_PIN"
-assert_files_unchanged pi
-
-new_case pi-disttag
-run_upgrade "$CASE/images/tools/pi/upgrade-pi.sh" next
-assert_status_ok
-assert_contains "$RUN_OUTPUT" "pinning @earendil-works/pi-coding-agent: $PI_PIN -> $PI_PIN"
-assert_files_unchanged pi
-
-new_case pi-unpublished
-run_upgrade "$CASE/images/tools/pi/upgrade-pi.sh" 9.9.9
 assert_status_fail
-assert_contains "$RUN_OUTPUT" "@earendil-works/pi-coding-agent@9.9.9 is not a published version"
-assert_not_contains "$RUN_OUTPUT" "could not query"
-assert_files_unchanged pi
+assert_contains "$RUN_OUTPUT" "packageManager disagrees with the reviewed base pin"
 
-new_case pi-viewfail
-STUB_VIEW_FAIL=1
-run_upgrade "$CASE/images/tools/pi/upgrade-pi.sh" "$PI_PIN"
+new_case bridge-upgrade-refuses-npm-model
+fixture_prepare "$CASE"
+jq 'del(.packageManager)' "$CASE/images/tools/pi/bridge/package.json" \
+    >"$CASE/images/tools/pi/bridge/package.json.tmp"
+mv "$CASE/images/tools/pi/bridge/package.json.tmp" "$CASE/images/tools/pi/bridge/package.json"
+run_upgrade "$CASE/images/tools/pi/bridge/upgrade-bridge.sh"
 assert_status_fail
-assert_contains "$RUN_OUTPUT" "npm could not query @earendil-works/pi-coding-agent"
-assert_not_contains "$RUN_OUTPUT" "not a published version"
-assert_files_unchanged pi
+assert_contains "$RUN_OUTPUT" "packageManager disagrees with the reviewed base pin"
 
-# A real bump regenerates the whole lock and moves the Dockerfile LABEL. The
-# refill and lock-shape refusals (non-sibling integrity, pin mismatch, sibling
-# set) are exercised directly in script/test/pi-prepare-lock.sh.
-new_case pi-bump
-registry_add_version @earendil-works/pi-coding-agent "$PI_BUMP"
-STUB_SEED_LOCK="$CASE/expected/pi/package-lock.json"
-STUB_INSTALL_JQ="$(printf '.packages[""].dependencies["@earendil-works/pi-coding-agent"] = "%s" | .packages["node_modules/@earendil-works/pi-coding-agent"].version = "%s" | reduce (["chord","pi-agent-core","pi-ai","pi-telemetry","pi-tui"][]) as $n (.; .packages["node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/" + $n].version = "%s" | .packages["node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/" + $n].integrity = "sha512-FIXTURE")' "$PI_BUMP" "$PI_BUMP" "$PI_BUMP")"
-run_upgrade "$CASE/images/tools/pi/upgrade-pi.sh" "$PI_BUMP"
-assert_status_ok
-assert_contains "$RUN_OUTPUT" "pinning @earendil-works/pi-coding-agent: $PI_PIN -> $PI_BUMP"
-[[ "$(jq -r '.dependencies["@earendil-works/pi-coding-agent"]' "$CASE/images/tools/pi/package.json")" == "$PI_BUMP" ]] \
-    || fail "the pi pin was not updated"
-assert_label "$CASE/images/standard/Dockerfile" "org.agent-vm.version.pi=\"\${AGENT_VERSION_PI:-$PI_BUMP}\""
-assert_label "$CASE/images/standard/Dockerfile" "org.agent-vm.version.pi-claude-bridge=\"\${AGENT_VERSION_PI_CLAUDE_BRIDGE:-$BRIDGE_PIN}\""
-
-# D5: a later publication failure must not leave the manifest/lock changed
-# while the Dockerfile LABEL is not. The fake cp fails only the Dockerfile copy,
-# after the manifest and lock have already been published, so the helper must
-# restore them.
-new_case pi-publish-failure
-registry_add_version @earendil-works/pi-coding-agent "$PI_BUMP"
-STUB_SEED_LOCK="$CASE/expected/pi/package-lock.json"
-PI_BUMP_JQ="$(printf '.packages[""].dependencies["@earendil-works/pi-coding-agent"] = "%s" | .packages["node_modules/@earendil-works/pi-coding-agent"].version = "%s" | reduce (["chord","pi-agent-core","pi-ai","pi-telemetry","pi-tui"][]) as $n (.; .packages["node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/" + $n].version = "%s" | .packages["node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/" + $n].integrity = "sha512-FIXTURE")' "$PI_BUMP" "$PI_BUMP" "$PI_BUMP")"
-STUB_INSTALL_JQ="$PI_BUMP_JQ"
-STUB_CP_FAIL_DEST="$CASE/images/standard/Dockerfile"
-run_upgrade "$CASE/images/tools/pi/upgrade-pi.sh" "$PI_BUMP"
+new_case pi-upgrade-ci-refusal
+set +e
+RUN_OUTPUT="$(env -i "PATH=$STUB_BIN:/usr/bin:/bin" "HOME=$CASE/home" "TMPDIR=$CASE" \
+    "GITHUB_ACTIONS=true" "$BASH_BIN" "$CASE/images/tools/pi/upgrade-pi.sh" 2>&1)"
+RUN_STATUS=$?
+set -e
 assert_status_fail
-assert_contains "$RUN_OUTPUT" "restoring attempted files inclusively"
+assert_contains "$RUN_OUTPUT" "cannot run in GitHub Actions"
 assert_files_unchanged pi
 
-STUB_ROLLBACK_FAIL=1
-run_upgrade "$CASE/images/tools/pi/upgrade-pi.sh" "$PI_BUMP"
-[[ $RUN_STATUS == 3 ]] || fail 'rollback failure did not return 3'
-assert_contains "$RUN_OUTPUT" 'recovery material retained at '
-assert_not_contains "$RUN_OUTPUT" '==> pinned '
-recovery=$(printf '%s\n' "$RUN_OUTPUT" | sed -n 's/^error: recovery material retained at //p')
-[[ -f "$recovery/publish-backup/2" ]] || fail 'recovery directory deleted'
-cmp "$recovery/publish-backup/2" "$CASE/expected/pi/Dockerfile" || fail 'backup lost'
+new_case pi-upgrade-runtime-injection
+set +e
+RUN_OUTPUT="$(env -i "PATH=$STUB_BIN:/usr/bin:/bin" "HOME=$CASE/home" "TMPDIR=$CASE" \
+    "NODE_OPTIONS=--require=/tmp/evil.js" "$BASH_BIN" "$CASE/images/tools/pi/upgrade-pi.sh" 2>&1)"
+RUN_STATUS=$?
+set -e
+assert_status_fail
+assert_contains "$RUN_OUTPUT" "runtime injection is unsupported"
+assert_files_unchanged pi
 
-# --- dsh: independent four-input/pnpm and staged native-gate plumbing -------
 python3 "$REPO_ROOT/script/test/dsh-upgrade.py"
-
-# --- bridge: re-pin, failure modes, dist-tag bump, peer line, refusal -------
-
-new_case bridge-repin
-run_upgrade "$CASE/images/tools/pi/bridge/upgrade-bridge.sh" "$BRIDGE_PIN"
-assert_status_ok
-assert_contains "$RUN_OUTPUT" "pinning pi-claude-bridge: $BRIDGE_PIN -> $BRIDGE_PIN"
-assert_contains "$RUN_OUTPUT" "peer @earendil-works/pi-coding-agent: >=0.85.0 (image pins $PI_PIN; check compatibility)"
-assert_files_unchanged bridge
-
-new_case bridge-unpublished
-run_upgrade "$CASE/images/tools/pi/bridge/upgrade-bridge.sh" 9.9.9
-assert_status_fail
-assert_contains "$RUN_OUTPUT" "pi-claude-bridge@9.9.9 is not a published version"
-assert_not_contains "$RUN_OUTPUT" "could not query"
-assert_files_unchanged bridge
-
-new_case bridge-viewfail
-STUB_VIEW_FAIL=1
-run_upgrade "$CASE/images/tools/pi/bridge/upgrade-bridge.sh" "$BRIDGE_PIN"
-assert_status_fail
-assert_contains "$RUN_OUTPUT" "npm could not query pi-claude-bridge"
-assert_not_contains "$RUN_OUTPUT" "not a published version"
-assert_files_unchanged bridge
-
-new_case bridge-disttag-bump
-registry_add_version pi-claude-bridge 0.99.0 next
-STUB_SEED_LOCK="$CASE/expected/bridge/package-lock.json"
-STUB_INSTALL_JQ='.packages[""].dependencies["pi-claude-bridge"] = "0.99.0" | .packages["node_modules/pi-claude-bridge"].version = "0.99.0"'
-run_upgrade "$CASE/images/tools/pi/bridge/upgrade-bridge.sh" next
-assert_status_ok
-assert_contains "$RUN_OUTPUT" "pinning pi-claude-bridge: $BRIDGE_PIN -> 0.99.0"
-[[ "$(jq -r '.dependencies["pi-claude-bridge"]' "$CASE/images/tools/pi/bridge/package.json")" == "0.99.0" ]] \
-    || fail "the bridge pin was not updated"
-assert_label "$CASE/images/standard/Dockerfile" "org.agent-vm.version.pi-claude-bridge=\"\${AGENT_VERSION_PI_CLAUDE_BRIDGE:-0.99.0}\""
-assert_label "$CASE/images/standard/Dockerfile" "org.agent-vm.version.pi=\"\${AGENT_VERSION_PI:-$PI_PIN}\""
-
-# A real bump moves the PARENT pi Dockerfile's bridge LABEL in lockstep. The
-# loader-alias/pin/integrity refusals are exercised in script/test/pi-prepare-lock.sh.
-new_case bridge-bump
-registry_add_version pi-claude-bridge "$BRIDGE_BUMP"
-STUB_SEED_LOCK="$CASE/expected/bridge/package-lock.json"
-STUB_INSTALL_JQ="$(printf '.packages[""].dependencies["pi-claude-bridge"] = "%s" | .packages["node_modules/pi-claude-bridge"].version = "%s"' "$BRIDGE_BUMP" "$BRIDGE_BUMP")"
-run_upgrade "$CASE/images/tools/pi/bridge/upgrade-bridge.sh" "$BRIDGE_BUMP"
-assert_status_ok
-assert_contains "$RUN_OUTPUT" "pinning pi-claude-bridge: $BRIDGE_PIN -> $BRIDGE_BUMP"
-assert_contains "$RUN_OUTPUT" "peer @earendil-works/pi-coding-agent:"
-[[ "$(jq -r '.dependencies["pi-claude-bridge"]' "$CASE/images/tools/pi/bridge/package.json")" == "$BRIDGE_BUMP" ]] \
-    || fail "the bridge pin was not updated"
-assert_label "$CASE/images/standard/Dockerfile" "org.agent-vm.version.pi-claude-bridge=\"\${AGENT_VERSION_PI_CLAUDE_BRIDGE:-$BRIDGE_BUMP}\""
-assert_label "$CASE/images/standard/Dockerfile" "org.agent-vm.version.pi=\"\${AGENT_VERSION_PI:-$PI_PIN}\""
-
-new_case bridge-publish-failure
-registry_add_version pi-claude-bridge "$BRIDGE_BUMP"
-STUB_SEED_LOCK="$CASE/expected/bridge/package-lock.json"
-STUB_INSTALL_JQ="$(printf '.packages[""].dependencies["pi-claude-bridge"] = "%s" | .packages["node_modules/pi-claude-bridge"].version = "%s"' "$BRIDGE_BUMP" "$BRIDGE_BUMP")"
-STUB_CP_FAIL_DEST="$CASE/images/standard/Dockerfile"
-run_upgrade "$CASE/images/tools/pi/bridge/upgrade-bridge.sh" "$BRIDGE_BUMP"
-assert_status_fail
-assert_contains "$RUN_OUTPUT" "restoring attempted files inclusively"
-assert_files_unchanged bridge
-
-STUB_ROLLBACK_FAIL=1
-run_upgrade "$CASE/images/tools/pi/bridge/upgrade-bridge.sh" "$BRIDGE_BUMP"
-[[ $RUN_STATUS == 3 ]] || fail 'rollback failure did not return 3'
-assert_contains "$RUN_OUTPUT" 'recovery material retained at '
-assert_not_contains "$RUN_OUTPUT" '==> pinned '
-recovery=$(printf '%s\n' "$RUN_OUTPUT" | sed -n 's/^error: recovery material retained at //p')
-[[ -f "$recovery/publish-backup/2" ]] || fail 'recovery directory deleted'
-cmp "$recovery/publish-backup/2" "$CASE/expected/bridge/Dockerfile" || fail 'backup lost'
 
 # --- the resolver itself: exact-version membership, npm's one-version shape --
 # The end-to-end cases above resolve the committed pin through the `latest`

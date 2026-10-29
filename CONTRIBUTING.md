@@ -246,7 +246,28 @@ bash images/build.sh standard
 bash script/test/standard-image.sh agent-vm-base:local agent-vm-standard:local
 bash script/test/pi-runtime.sh agent-vm-base:local agent-vm-standard:local
 bash script/test/opencode-runtime.sh agent-vm-base:local agent-vm-standard:local
+# Focused Pi/bridge evidence on a disposable base (diagnostic locally; clean
+# proposed-SHA native CI is the acceptance record). Serial, never parallel.
+bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer pi --platform linux/arm64
+bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer pi --version 0.87.0 --platform linux/arm64
+bash script/test/standard-node-policy.sh agent-vm-base:local --consumer pi --platform linux/arm64
+bash script/test/standard-node-policy.sh agent-vm-base:local --consumer bridge --platform linux/arm64
+python3 script/test/standard-node-layout.py --consumer pi --root /extracted --platform linux/arm64
 ```
+
+The independent oracle (`standard-node-layout.py --consumer dsh|pi|bridge`) reads
+an extracted virtual root and knows nothing about the build's own success
+markers; `--archive-inventories FILE` additionally compares installed bytes with
+pre-run, independently authenticated tarball inventories. **No caller passes it:**
+`standard-image.sh` runs the oracle for all three consumers after extraction
+*without* `--archive-inventories`, and so do the focused Pi/bridge legs, so no
+cold leg compares the installed tree with an independently authored per-package
+inventory -- the 6/6 and 5/5 byte proofs and the shrinkwrap comparison carry that
+claim, and the oracle's inventory path is exercised only by its own self-test
+vectors. Capacity limits are measured,
+not assumed: focused cold installs are serial, the local base carries no revision
+attestation, and only clean native amd64+arm64 CI at the proposed SHA is
+acceptance.
 
 pnpm updates require reviewed exact URL, equivalent SHA-512/SRI and freshly
 extracted pristine-bundle SHA-256 together; never refresh checksums automatically.
@@ -259,8 +280,23 @@ The bumper resolves/validates all four upstream values before co-editing one
 scratch Dockerfile. Explicit developer latest queries are permitted; the bumper
 refuses GitHub Actions. Builds consume committed selections and never call bump
 scripts. Lock upgrades retain dsh graph-freeze review (retained records and
-sandbox reachability, not npm locations), Pi sibling hashes/full-tree checks and
-separate bridge peer-alias omission checks.
+sandbox reachability, not npm locations).
+
+Pi and the bridge publish **four** pnpm inputs plus the one central label per
+bump, in one transaction each, and they run **sequentially** (Pi, then bridge,
+each rereading the current Dockerfile; never two bumpers against one stale
+preimage). A Pi bump additionally reviews the selected archive's route (does the
+authenticated tarball carry `npm-shrinkwrap.json`?), the complete
+identity/SRI/edge/optional/peer delta, the reviewed family shape for the new
+selection, the per-version dispatch list and the sibling byte expectations — see
+[ADR 0011](docs/adr/0011-pi-selected-shrinkwrap.md) and
+`images/tools/pi/README.md`. A new lifecycle-script dependency, a new exact trust
+exception, a new missing-SRI sibling shape or a shrinkwrap-to-pnpm delta outside
+the reviewed three is a **stop and review**, never an automatic allowlist.
+Preparation status 1 restores and fails, 2 is usage, 3 is an incomplete rollback:
+on 3 stop, keep the scratch and recover from the printed path before any further
+edit, build or commit.
+
 Shared-file edits are sequential developer operations, not parallel maintenance.
 
 ### Codex payload closure

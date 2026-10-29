@@ -422,7 +422,44 @@ function importedPeerDeclarations(pkg) {
   return declared;
 }
 
-export function validateShrinkwrapDelta({shrinkwrap, importedProject, allowedMissingSiblingSris}) {
+// A `reported` entry is a representation normalisation: real, expected-looking
+// pnpm output that is nevertheless not byte-fidelity. Collecting them is not the
+// same as allowing them, so the caller must supply the normalisations an operator
+// reviewed *for this selection* and every reported entry must match one of them.
+// An empty review is the correct default for a selection nobody has reviewed: a
+// normalisation nobody named stops the conversion instead of entering the pinned
+// graph, which is the difference between a reviewed delta and an allowlist.
+function reviewedKey(entry) {
+  return `${entry.code}\u0000${JSON.stringify(entry.detail ?? {})}`;
+}
+
+function normalisationVerdict(reported, reviewedNormalisations) {
+  const approved = new Map();
+  for (const entry of reviewedNormalisations ?? []) {
+    const reviewed = expectObject(entry, 'reviewed normalisation');
+    const code = reviewed.code;
+    if (typeof code !== 'string' || code === '') fail('review-shape', 'a reviewed normalisation has no code');
+    if (!isPlainObject(reviewed.detail)) fail('review-shape', `reviewed ${code} has no detail object`);
+    const key = reviewedKey({code, detail: reviewed.detail});
+    approved.set(key, (approved.get(key) ?? 0) + 1);
+  }
+  const unreviewed = [];
+  for (const entry of reported) {
+    const key = reviewedKey(entry);
+    const remaining = approved.get(key) ?? 0;
+    if (remaining === 0) {
+      unreviewed.push({code: entry.code, detail: entry.detail});
+      continue;
+    }
+    approved.set(key, remaining - 1);
+  }
+  const unused = [...approved.entries()].filter(([, remaining]) => remaining > 0)
+    .map(([key]) => key.split('\u0000').slice(0, 2).join(' '));
+  return {unreviewed, unused};
+}
+
+export function validateShrinkwrapDelta({shrinkwrap, importedProject, allowedMissingSiblingSris,
+                                        reviewedNormalisations}) {
   const rejected = [];
   const reported = [];
   const reject = (code, detail) => rejected.push({code, detail});
@@ -503,6 +540,18 @@ export function validateShrinkwrapDelta({shrinkwrap, importedProject, allowedMis
     const identity = identityOf(location, record);
     if (!expectedIdentities.has(identity)) expectedIdentities.set(identity, []);
     expectedIdentities.get(identity).push(location);
+  }
+  // Every peer instance the authenticated graph can justify: for each record that
+  // declares a peer, the instance this graph resolves that peer to.
+  const peerInstances = new Map();
+  for (const [location, record] of expectedLocations.entries()) {
+    for (const name of peerDeclarations(record).keys()) {
+      const target = resolveFrom(expectedLocations, location, name);
+      if (target === null) continue;
+      const identity = identityOf(target, expectedLocations.get(target));
+      if (!peerInstances.has(name)) peerInstances.set(name, new Set());
+      peerInstances.get(name).add(identity);
+    }
   }
   const importedIdentities = new Set([...packages.keys()]);
   const addedIdentities = [...importedIdentities].filter(identity => !expectedIdentities.has(identity)).sort();
@@ -596,6 +645,8 @@ export function validateShrinkwrapDelta({shrinkwrap, importedProject, allowedMis
     binPresenceMismatches: 0,
     peerComparisons: 0,
     peerDeclarationChanges: 0,
+    peerContextPairs: 0,
+    peerContextChanges: 0,
     effectivePeerChanges: rejected.filter(entry => entry.code === 'effective-peer-changed').length,
     explicitPeerExpansions: reported.filter(entry => entry.code === 'explicit-peer-expansion').length,
     occurrenceMultiplicityCollapsed: 0,
@@ -650,6 +701,26 @@ export function validateShrinkwrapDelta({shrinkwrap, importedProject, allowedMis
       counts.binPresenceMismatches += 1;
       reject('bin-presence-changed', `${snapshot.name}@${snapshot.version}: imported hasBin=${importedPackage.hasBin === true}`);
     }
+    // Effective peer contexts. A snapshot key may name the peer instances its
+    // instance was resolved against (`name@version(peer@1.2.3)`), and ADR 0003
+    // keeps that text opaque, so it is never reconstructed here. What the
+    // authenticated graph *can* prove is what makes a peer context honest: an
+    // entry must name an instance of a package that some authenticated record
+    // declares as a peer and that this graph resolves for it. The retarget this
+    // refuses is the one a substituted archive would attempt -- pointing an
+    // instance at an unrelated installed package while leaving every edge and
+    // SRI equal.
+    counts.peerContextPairs += 1;
+    const contexts = Array.isArray(snapshot.id?.peerContext) ? snapshot.id.peerContext : [];
+    for (const context of contexts) {
+      const peerId = expectObject(context?.packageId, 'imported peer context package id');
+      const peerName = expectName(peerId.name, 'imported peer context name');
+      const peerVersion = expectVersion(peerId.version, 'imported peer context version');
+      const instance = `${peerName}@${peerVersion}`;
+      if (peerInstances.has(peerName) && peerInstances.get(peerName).has(instance)) continue;
+      counts.peerContextChanges += 1;
+      reject('peer-context-changed', `${key}: peer context names ${instance}, and no authenticated record declares ${peerName} as a peer that resolves to it`);
+    }
     const expectedPeers = peerDeclarations(record);
     const importedPeers = importedPeerDeclarations(importedPackage);
     for (const name of [...new Set([...expectedPeers.keys(), ...importedPeers.keys()])].sort()) {
@@ -694,11 +765,23 @@ export function validateShrinkwrapDelta({shrinkwrap, importedProject, allowedMis
     if (!mappedExpected.has(location)) reject('unmapped-occurrence', location);
   }
 
+  const verdict = normalisationVerdict(reported, reviewedNormalisations);
+  for (const entry of verdict.unreviewed) {
+    reject('unreviewed-normalisation', `${entry.code}: ${JSON.stringify(entry.detail)}`);
+  }
+  for (const entry of verdict.unused) {
+    // A reviewed normalisation that no longer occurs means this selection is not
+    // the one that was reviewed, so the record must be re-reviewed rather than
+    // trusted for a graph it no longer describes.
+    reject('review-unused', entry);
+  }
+
   return {
     accepted: rejected.length === 0,
     rejected,
     reported,
     counts,
+    reviewed: (reviewedNormalisations ?? []).length,
     supplements: [...supplements.keys()].sort(),
   };
 }
@@ -714,7 +797,8 @@ function readJson(file) {
 
 function usage() {
   process.stderr.write(`usage: import-shrinkwrap.mjs synthesize --manifest FILE --shrinkwrap FILE \\
-  --root FILE --siblings FILE | validate --expect FILE --graph FILE [--allowed-missing FILE]\n`);
+  --root FILE --siblings FILE | validate --expect FILE --graph FILE --reviewed FILE \
+  [--allowed-missing FILE]\n`);
   process.exit(2);
 }
 
@@ -751,12 +835,18 @@ function main(argv) {
     return;
   }
   if (verb === 'validate') {
-    if (!options.expect || !options.graph) usage();
+    // `--reviewed` is required rather than optional: an omitted review file would
+    // be indistinguishable from an empty review, and the two must not share a
+    // meaning. The caller may pass a file with no normalisations.
+    if (!options.expect || !options.graph || !options.reviewed) usage();
     const allowed = options['allowed-missing'] ? readJson(options['allowed-missing']) : [];
+    const reviewed = readJson(options.reviewed);
+    if (!Array.isArray(reviewed)) fail('review-shape', 'the reviewed normalisation file is not an array');
     const result = validateShrinkwrapDelta({
       shrinkwrap: readJson(options.expect),
       importedProject: readJson(options.graph),
       allowedMissingSiblingSris: allowed,
+      reviewedNormalisations: reviewed,
     });
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     if (!result.accepted) process.exit(1);

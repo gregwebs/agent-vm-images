@@ -47,217 +47,513 @@ fn dsh_pin() -> String {
         .to_string()
 }
 
-/// One pinned package: the manifest that declares it, the dependency key and
-/// the lock's resolved package key. Named fields rather than three adjacent
-/// `&str` selectors (`CODING_STANDARDS.md` → *Types*).
+/// The manifest-level pin of one migrated project: the manifest that declares
+/// it and the dependency key. The lock's answers come from the graph adapter, so
+/// no field here names an npm lock path.
 struct PinSpec<'a> {
-    manifest_relative: &'a str,
     dependency: &'a str,
-    package_key: &'a str,
 }
 
-/// Every non-root entry in a committed lock carries `integrity`. For a
-/// shrinkwrapped Pi (<=1.0.3) a freshly generated lock does NOT: npm inherits
-/// Pi's published `npm-shrinkwrap.json`, which omits the hashes for its five
-/// `@earendil-works` siblings, so those are refilled by hand. Pi 1.0.4+ ships no
-/// shrinkwrap, so every entry arrives hashed. This catches a regenerated lock
-/// that dropped them.
-fn check_lock_integrity(lock: &Value) -> Result<(), String> {
-    let packages = lock["packages"]
-        .as_object()
-        .ok_or_else(|| "the lock carries no `packages` object".to_string())?;
-    let missing: Vec<&str> = packages
-        .iter()
-        .filter(|(key, value)| !key.is_empty() && value.get("integrity").is_none())
-        .map(|(key, _)| key.as_str())
-        .collect();
-    if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "these committed lock entries carry no `integrity` hash: {missing:?}"
-        ))
+/// The reviewed Pi family, in the two shapes the project has had. The default
+/// `1.4.0` selection is the modern six; the `0.87.0` changed-selection leg keeps
+/// the historical five. Both are named here rather than derived from the graph,
+/// so a new or missing sibling is a review event.
+const PI_FAMILY_MODERN: [&str; 6] = [
+    "pi-agent-core",
+    "pi-ai",
+    "pi-codemode",
+    "pi-mcp",
+    "pi-telemetry",
+    "pi-tui",
+];
+const PI_FAMILY_HISTORICAL: [&str; 5] =
+    ["chord", "pi-agent-core", "pi-ai", "pi-telemetry", "pi-tui"];
+
+/// The package-root `.bin` entries the reviewed family derives, as
+/// sibling -> the bin-providing dependency identities. Independently authored
+/// from the C4 investigation, which recorded the same table for the default
+/// selection; the checker re-derives the targets from the provider manifests.
+const PI_GENERATED_BINS: [(&str, &[&str]); 6] = [
+    ("pi-agent-core", &["@earendil-works/pi-ai@1.4.0"]),
+    ("pi-ai", &["@anthropic-ai/sdk@0.129.0"]),
+    ("pi-codemode", &[]),
+    ("pi-mcp", &[]),
+    ("pi-telemetry", &[]),
+    ("pi-tui", &["marked@18.0.11"]),
+];
+
+/// The reviewed package counts. These are review thresholds, not invariants: the
+/// ticket asks for the changed count to be compared and reviewed, never for
+/// "SRI and edges unchanged" to be assumed from an equal identity count.
+const PI_DEFAULT_PACKAGES: usize = 120;
+const BRIDGE_DEFAULT_PACKAGES: usize = 96;
+
+/// The selected Pi root archive's registry SRI, independently taken from the
+/// release metadata during the C4 delta review rather than read back from this
+/// graph. It is the one identity every byte proof is anchored on.
+const PI_ROOT_INTEGRITY: &str = "sha512-Z41LpZ3yYHSC/UUps6Mr39UMFPwH8elhJBG9DY1P7kuzsE5qSK/6eMj2EHzO5evJRQWLbKSqUMw+4nCNtIyiQg==";
+const BRIDGE_ROOT_INTEGRITY: &str = "sha512-CaSXdCdMWLGcvvG4IZuKeyUIyLio2m8nEO7cUFZdxKPdkwWuf8Eq46Ys2z3VlSjCidlIpasLwiCdJStXSt6EZQ==";
+/// The Claude Agent SDK package that must stay installed as JavaScript while its
+/// eight platform payloads are the reviewed omission.
+const BRIDGE_SDK_INTEGRITY: &str = "sha512-JTbluTKmY3wKQPIXzeCTvz/K0FElTuQU5Y7ueLgUOBrHcks8cHlGugEgIRezffhc13WzBAqYtaY15tJ+Bfunzg==";
+
+// ---------------------------------------------------------------------------
+// Migrated pnpm projects: one reviewed four-input set, read through the shared
+// graph adapter (`recipe-contract pnpm-lock check|graph KIND PREFIX`)
+// ---------------------------------------------------------------------------
+
+/// One migrated project's reviewed inputs. `kind` is the adapter's own consumer
+/// name, so a Pi prefix can never be read with the bridge policy by mistake.
+///
+/// The adapter is a **syntax** adapter, not a second parser: it owns YAML, the
+/// pins, the workspace policy and the effective-peer rules
+/// (`docs/adr/0001-build-only-pnpm-graph-parser.md`). Every expectation below is
+/// hand-authored from the release metadata and the reviewed investigation, which
+/// is why this is an independent control rather than a read-back of production
+/// output.
+struct MigratedProject {
+    kind: &'static str,
+    prefix: PathBuf,
+}
+
+impl MigratedProject {
+    const INPUTS: [&'static str; 4] = [
+        "package.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "pnpm-inputs.sha256",
+    ];
+
+    fn committed(kind: &'static str, relative: &str) -> Self {
+        Self {
+            kind,
+            prefix: repo_path(relative),
+        }
+    }
+
+    fn input(&self, file: &str) -> PathBuf {
+        self.prefix.join(file)
+    }
+
+    /// After the activation commit no migrated project may keep an npm lock; the
+    /// adapter also refuses one as an unreviewed input.
+    fn carries_npm_lock(&self) -> bool {
+        self.input("package-lock.json").exists()
+    }
+
+    fn has_four_inputs(&self) -> bool {
+        Self::INPUTS.iter().all(|file| self.input(file).is_file())
     }
 }
 
-/// The lock's root dependency and the resolved package version both equal the
-/// manifest pin.
-fn check_pin_agrees(lock: &Value, spec: PinSpec) -> Result<(), String> {
-    let manifest = read_json(spec.manifest_relative);
-    let pinned = manifest["dependencies"][spec.dependency]
+fn run_graph_cli(verb: &str, kind: &str, prefix: &Path) -> Result<String, String> {
+    let binary = recipe_contract_binary();
+    let output = std::process::Command::new(binary)
+        .arg("pnpm-lock")
+        .arg(verb)
+        .arg(kind)
+        .arg(prefix)
+        .output()
+        .map_err(|error| format!("cannot run {}: {error}", binary.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "pnpm-lock {verb} {kind} rejected {}: {}",
+            prefix.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    String::from_utf8(output.stdout).map_err(|_| "pnpm-lock emitted non-UTF-8 output".to_string())
+}
+
+/// The `check` verb re-verifies the reviewed input digests, the workspace policy
+/// and every effective peer, so its exact report is the selection version.
+fn check_inputs(project: &MigratedProject) -> Result<String, String> {
+    run_graph_cli("check", project.kind, &project.prefix)
+}
+
+fn read_graph(project: &MigratedProject) -> Result<GraphReport, String> {
+    let text = run_graph_cli("graph", project.kind, &project.prefix)?;
+    let value: Value = serde_json::from_str(&text)
+        .map_err(|error| format!("graph report is not JSON: {error}"))?;
+    GraphReport::from_value(&value, project.kind)
+}
+
+/// The committed four-input project at `committed`. The four inputs are one
+/// unit, so an incomplete set is a hard failure rather than a skip.
+fn committed_project(kind: &'static str, committed: &str) -> MigratedProject {
+    let project = MigratedProject::committed(kind, committed);
+    assert!(
+        project.has_four_inputs(),
+        "the committed {kind} project does not carry its four reviewed inputs"
+    );
+    project
+}
+
+fn pi_project() -> MigratedProject {
+    committed_project("pi", "images/tools/pi")
+}
+
+fn bridge_project() -> MigratedProject {
+    committed_project("bridge", "images/tools/pi/bridge")
+}
+
+/// The manifest's exact dependency pin for one root.
+fn pinned_dependency(project: &MigratedProject, spec: &PinSpec) -> Result<String, String> {
+    project_manifest(project)?["dependencies"][spec.dependency]
         .as_str()
+        .map(str::to_owned)
         .ok_or_else(|| {
             format!(
-                "{} does not pin {}",
-                spec.manifest_relative, spec.dependency
+                "the {} manifest does not pin {}",
+                project.kind, spec.dependency
             )
-        })?;
-    let root = lock["packages"][""]["dependencies"][spec.dependency]
-        .as_str()
-        .ok_or_else(|| format!("the lock's root does not record {}", spec.dependency))?;
-    if root != pinned {
+        })
+}
+
+/// The project's own manifest, read from its prefix. A repo-relative path would
+/// silently read the retired npm manifest while the proposals are reviewed.
+fn project_manifest(project: &MigratedProject) -> Result<Value, String> {
+    let path = project.input("package.json");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    serde_json::from_str(&text).map_err(|error| format!("{} is not JSON: {error}", path.display()))
+}
+
+/// The manifest, the image label and the graph select one version, and the
+/// project is a private single-root pnpm project that asserts the base pin.
+fn check_project_shape(
+    project: &MigratedProject,
+    manifest_name: &str,
+    label_dependency: &str,
+) -> Result<(), String> {
+    let manifest = project_manifest(project)?;
+    if manifest["name"].as_str() != Some(manifest_name) {
+        return Err(format!("{manifest_name}: unexpected manifest name"));
+    }
+    if manifest["private"].as_bool() != Some(true) {
+        return Err(format!("{manifest_name}: the project must be private"));
+    }
+    let dependencies = manifest["dependencies"]
+        .as_object()
+        .ok_or_else(|| format!("{manifest_name}: no dependencies"))?;
+    let roots: Vec<&str> = dependencies.keys().map(String::as_str).collect();
+    if roots != [label_dependency] {
         return Err(format!(
-            "the lock's root {} is {root}, the manifest pins {pinned}",
-            spec.dependency
+            "{manifest_name}: the project must have exactly one root, got {roots:?}"
         ));
     }
-    let locked = lock["packages"][spec.package_key]["version"]
+    if manifest.get("devDependencies").is_some() {
+        return Err(format!("{manifest_name}: no development root is reviewed"));
+    }
+    let base = read_json("images/pnpm/pin.json")["version"]
         .as_str()
-        .ok_or_else(|| format!("{} is not locked", spec.package_key))?;
-    if locked != pinned {
+        .expect("the base pin carries a version")
+        .to_string();
+    if manifest["packageManager"] != format!("pnpm@{base}") {
         return Err(format!(
-            "npm ci would install {locked}, but the manifest pins {pinned}"
+            "{manifest_name}: packageManager must assert the base pin pnpm@{base}"
+        ));
+    }
+    if project.carries_npm_lock() {
+        return Err(format!(
+            "{manifest_name}: an npm project lock survived the migration"
         ));
     }
     Ok(())
 }
 
-/// `install-pi.sh` verifies the `@earendil-works` siblings nested directly under
-/// pi-coding-agent's own `node_modules`, at the pi pin. That layout belongs to a
-/// shrinkwrapped Pi (<=1.0.3); Pi 1.0.4+ publishes no `npm-shrinkwrap.json`, so
-/// the committed lock is authoritative, every entry carries a hash, and the
-/// nested set is legitimately empty. Only those two layouts are legal: a
-/// different nonempty set means Pi's dependency layout moved and needs review.
-/// The selector is deliberately direct-children-only: pi-ai carries deeper
-/// nested deps that DO carry npm-checked integrity, so a looser match
-/// over-matches.
-fn check_pi_siblings(lock: &Value) -> Result<(), String> {
-    const SIBLINGS: [&str; 5] = ["chord", "pi-agent-core", "pi-ai", "pi-telemetry", "pi-tui"];
-    const PREFIX: &str =
-        "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/";
-    let pinned = pi_pin();
-    let packages = lock["packages"]
-        .as_object()
-        .ok_or_else(|| "the lock carries no `packages` object".to_string())?;
-    let mut matched: Vec<(String, String)> = Vec::new();
-    for (key, value) in packages {
-        let Some(name) = key.strip_prefix(PREFIX) else {
-            continue;
-        };
-        if name.contains('/') {
+/// The graph selects the same exact version as the manifest and the label, and
+/// one importer edge reaches the root archive's own snapshot.
+fn check_graph_pin_agrees(project: &MigratedProject, pinned: &str) -> Result<(), String> {
+    let graph = read_graph(project)?;
+    if graph.version != pinned {
+        return Err(format!(
+            "the graph selects {}, the manifest pins {pinned}",
+            graph.version
+        ));
+    }
+    if check_inputs(project)? != format!("{pinned}\n") {
+        return Err("the pinned-input check reported another selection".to_string());
+    }
+    if graph.importer.len() != 1 {
+        return Err(format!("{} imported roots", graph.importer.len()));
+    }
+    let root = &graph.importer[0];
+    if !root.target.starts_with(&format!("{}@{pinned}", root.name)) {
+        return Err(format!(
+            "the root resolves to another selection: {}",
+            root.target
+        ));
+    }
+    if !graph.snapshots.iter().any(|entry| entry.key == root.target) {
+        return Err("the imported root is not a graph snapshot".to_string());
+    }
+    Ok(())
+}
+
+/// Every archive carries a full sha512 SRI and the canonical npmjs tarball, and
+/// every snapshot is reachable from the imported root. An unreachable archive or
+/// snapshot is a payload addition with no reviewed edge.
+fn check_graph_integrity_and_reachability(graph: &GraphReport) -> Result<(), String> {
+    let missing: Vec<&str> = graph
+        .packages
+        .iter()
+        .filter(|entry| !is_full_sha512(&entry.integrity))
+        .map(|entry| entry.name.as_str())
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "these graph packages carry no full sha512 integrity: {missing:?}"
+        ));
+    }
+    for archive in &graph.packages {
+        let expected = format!("https://registry.npmjs.org/{}/-/", archive.name);
+        if !archive.tarball.starts_with(&expected) {
+            return Err(format!(
+                "{} is not resolved from the canonical npmjs registry: {}",
+                archive.name, archive.tarball
+            ));
+        }
+    }
+    let by_key: BTreeMap<&str, &GraphSnapshot> = graph
+        .snapshots
+        .iter()
+        .map(|entry| (entry.key.as_str(), entry))
+        .collect();
+    let mut reached: BTreeSet<&str> = BTreeSet::new();
+    let mut pending: Vec<&str> = graph
+        .importer
+        .iter()
+        .map(|edge| edge.target.as_str())
+        .collect();
+    while let Some(key) = pending.pop() {
+        if !reached.insert(key) {
             continue;
         }
-        matched.push((
-            name.to_string(),
-            value["version"].as_str().unwrap_or("<none>").to_string(),
+        let snapshot = by_key
+            .get(key)
+            .ok_or_else(|| format!("edge target {key} has no snapshot"))?;
+        pending.extend(snapshot.edges.iter().map(|edge| edge.target.as_str()));
+    }
+    if reached.len() != graph.snapshots.len() {
+        return Err(format!(
+            "{} snapshots are not reachable from the imported root",
+            graph.snapshots.len() - reached.len()
         ));
     }
-    matched.sort();
-    if matched.is_empty() {
-        return Ok(());
-    }
-    let mut expected: Vec<(String, String)> = SIBLINGS
+    let archives: BTreeSet<(&str, &str)> = graph
+        .packages
         .iter()
-        .map(|name| (name.to_string(), pinned.clone()))
+        .map(|archive| (archive.name.as_str(), archive.version.as_str()))
         .collect();
-    expected.sort();
-    if matched == expected {
-        Ok(())
-    } else {
-        Err(format!(
-            "the nested sibling set drifted: matched {matched:?}, expected [] or {expected:?}"
-        ))
-    }
-}
-
-#[test]
-fn the_pinned_pi_version_agrees_across_the_manifest_and_the_lockfile() {
-    let lock = read_json("images/tools/pi/package-lock.json");
-    check_pin_agrees(
-        &lock,
-        PinSpec {
-            manifest_relative: "images/tools/pi/package.json",
-            dependency: "@earendil-works/pi-coding-agent",
-            package_key: "node_modules/@earendil-works/pi-coding-agent",
-        },
-    )
-    .expect("the pi pin agrees with its lock");
-}
-
-#[test]
-fn every_locked_package_carries_integrity() {
-    let lock = read_json("images/tools/pi/package-lock.json");
-    assert!(
-        lock["packages"].as_object().is_some_and(
-            |packages| packages.contains_key("node_modules/@earendil-works/pi-coding-agent")
-        ),
-        "the pi lock must actually carry pi"
-    );
-    check_lock_integrity(&lock).unwrap_or_else(|problem| {
-        panic!(
-            "{problem}\nA freshly generated lock for a shrinkwrapped Pi omits integrity for its five \
-             @earendil-works siblings. Refill them from the registry (see images/tools/README.md)."
-        )
-    });
-}
-
-#[test]
-fn the_build_verified_sibling_set_is_empty_or_exactly_the_five_nested_earendil_packages() {
-    let lock = read_json("images/tools/pi/package-lock.json");
-    check_pi_siblings(&lock)
-        .expect("the build-verified sibling set is empty or exactly the five packages");
-}
-
-// ---------------------------------------------------------------------------
-// Pinned bridge packages: full integrity and no second Pi
-// ---------------------------------------------------------------------------
-
-/// The bridge pin is an exact version (not a range): the tree has no shrinkwrap,
-/// so a regenerated lock could otherwise move the installed version without this
-/// repo moving the pin.
-fn check_bridge_pin_locked(lock: &Value) -> Result<(), String> {
-    let pinned = bridge_pin();
-    let range_characters = ['^', '~', '>', '<', '=', '*', '|', ' ', 'x', 'X'];
-    if pinned.split('.').count() < 3 || pinned.chars().any(|c| range_characters.contains(&c)) {
+    let snapshots: BTreeSet<(&str, &str)> = graph
+        .snapshots
+        .iter()
+        .map(|snapshot| (snapshot.name.as_str(), snapshot.version.as_str()))
+        .collect();
+    if archives != snapshots {
+        let extra: Vec<&(&str, &str)> = archives.difference(&snapshots).collect();
         return Err(format!(
-            "the pi-claude-bridge pin must be an exact version, not a range: {pinned:?}"
-        ));
-    }
-    let root = lock["packages"][""]["dependencies"]["pi-claude-bridge"]
-        .as_str()
-        .ok_or_else(|| "the lock's root does not record pi-claude-bridge".to_string())?;
-    if root != pinned {
-        return Err(format!(
-            "the lock's root dependency {root} != the manifest pin {pinned}"
-        ));
-    }
-    let locked = lock["packages"]["node_modules/pi-claude-bridge"]["version"]
-        .as_str()
-        .ok_or_else(|| "pi-claude-bridge is not locked".to_string())?;
-    if locked != pinned {
-        return Err(format!(
-            "npm ci would install {locked}, but the manifest pins {pinned}"
+            "orphan archive: {extra:?} has no resolved snapshot"
         ));
     }
     Ok(())
 }
 
-/// No bridge-lock entry names a package Pi's extension loader aliases to its own
-/// copies. The bridge was locked with `--legacy-peer-deps` precisely to avoid
-/// dragging in a second, version-skewed `@earendil-works/pi-coding-agent`.
-fn check_no_loader_aliased_pi_package(lock: &Value) -> Result<(), String> {
-    const ALIASED: [&str; 5] = [
-        "@earendil-works",
+/// The Pi family: the selected root version for every reachable
+/// `@earendil-works` sibling, one peer context each, in one reviewed shape. The
+/// historical `yaml`/`esbuild`/`chord` members must not reappear in the modern
+/// selection, and a duplicate or wrong-version sibling is the substitution the
+/// byte proof would otherwise accept as "some sibling at that name".
+fn check_pi_family(graph: &GraphReport) -> Result<(), String> {
+    let root = &graph.importer[0].name;
+    let reachable = reachable_keys(graph)?;
+    // A family member reachable only through an optional edge is not installed
+    // by a platform that omits it; the byte proof would then compare an archive
+    // against a directory pnpm legitimately never created.
+    let mut required: BTreeSet<&str> = BTreeSet::new();
+    let mut optional: BTreeSet<&str> = BTreeSet::new();
+    for edge in graph.importer.iter().chain(
+        graph
+            .snapshots
+            .iter()
+            .flat_map(|snapshot| snapshot.edges.iter()),
+    ) {
+        if edge.optional {
+            optional.insert(edge.target.as_str());
+        } else {
+            required.insert(edge.target.as_str());
+        }
+    }
+    let mut observed: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    for key in &reachable {
+        let identity = identity_of(graph, key)?;
+        let Some(base) = identity.0.strip_prefix("@earendil-works/") else {
+            continue;
+        };
+        if identity.0 == *root {
+            continue;
+        }
+        if !PI_FAMILY_MODERN.contains(&base) && !PI_FAMILY_HISTORICAL.contains(&base) {
+            return Err(format!(
+                "{}@{} is reachable but is not a reviewed family name",
+                identity.0, identity.1
+            ));
+        }
+        observed.entry(base.to_string()).or_default().push(key);
+    }
+    let shape: Vec<String> = observed.keys().cloned().collect();
+    let modern: Vec<String> = PI_FAMILY_MODERN
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    let historical: Vec<String> = PI_FAMILY_HISTORICAL
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    if shape != modern && shape != historical {
+        return Err(format!(
+            "reachable family {shape:?} is neither the modern {modern:?} nor the historical \
+             {historical:?} shape"
+        ));
+    }
+    for (base, keys) in &observed {
+        if keys.len() != 1 {
+            return Err(format!(
+                "{base} is reachable in more than one peer context: {keys:?}"
+            ));
+        }
+        if optional.contains(keys[0]) && !required.contains(keys[0]) {
+            return Err(format!(
+                "{base} is reachable only through an optional edge and would not always be                  installed"
+            ));
+        }
+        let (_, version) = identity_of(graph, keys[0])?;
+        if version != graph.version {
+            return Err(format!(
+                "{base}@{version} is reachable but the selection is {}",
+                graph.version
+            ));
+        }
+    }
+    for banned in ["yaml", "esbuild", "chord"] {
+        if shape.contains(&banned.to_string()) {
+            return Err(format!(
+                "the selection installs the retired family member {banned}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The generated package-root bin inventory, derived from the reviewed family's
+/// own locked edges rather than from an installed tree. A sibling that gains or
+/// loses a bin-providing dependency changes what pnpm links into `.bin`, so the
+/// derivation is the control the byte checker normalises against.
+fn check_pi_generated_bins(graph: &GraphReport, cells: &[(&str, &[&str])]) -> Result<(), String> {
+    let reachable = reachable_keys(graph)?;
+    for (base, expected) in cells {
+        let name = format!("@earendil-works/{base}");
+        let keys: Vec<&str> = reachable
+            .iter()
+            .copied()
+            .filter(|key| {
+                identity_of(graph, key)
+                    .map(|identity| identity.0 == name)
+                    .unwrap_or(false)
+            })
+            .collect();
+        let [key] = keys.as_slice() else {
+            return Err(format!("{base} is not reachable exactly once"));
+        };
+        let snapshot = graph
+            .snapshots
+            .iter()
+            .find(|entry| entry.key == *key)
+            .ok_or_else(|| format!("{base} has no snapshot"))?;
+        let mut derived: Vec<String> = Vec::new();
+        for edge in &snapshot.edges {
+            let identity = identity_of(graph, &edge.target)?;
+            let key = format!("{}@{}", identity.0, identity.1);
+            let bin = graph
+                .packages
+                .iter()
+                .find(|archive| archive.name == identity.0 && archive.version == identity.1)
+                .ok_or_else(|| format!("{} has no archive record", key))?;
+            if bin.has_bin {
+                derived.push(key);
+            }
+        }
+        derived.sort();
+        let mut expected: Vec<String> = expected.iter().map(|item| (*item).to_string()).collect();
+        expected.sort();
+        if derived != expected {
+            return Err(format!(
+                "{base} derives generated bins {derived:?}, the reviewed table says {expected:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// No resolved bridge identity is a package Pi's extension loader aliases to its
+/// own copy. A **peer declaration** naming one is legitimate and required: Pi
+/// supplies that peer through jiti, so only an installed identity is an offence.
+fn check_no_loader_aliased_pi_package(graph: &GraphReport) -> Result<(), String> {
+    const ALIASED: [&str; 6] = [
+        "@earendil-works/",
+        "@sinclair/typebox",
         "typebox",
         "pi-agent-core",
         "pi-tui",
         "pi-ai",
     ];
-    let packages = lock["packages"]
-        .as_object()
-        .ok_or_else(|| "the lock carries no `packages` object".to_string())?;
-    let offending: Vec<&str> = packages
-        .keys()
-        .map(String::as_str)
-        .filter(|key| ALIASED.iter().any(|aliased| key.contains(aliased)))
+    let root = &graph.importer[0].name;
+    let offending: Vec<String> = graph
+        .packages
+        .iter()
+        .filter(|archive| {
+            archive.name != *root && ALIASED.iter().any(|aliased| archive.name.contains(aliased))
+        })
+        .map(|archive| format!("{}@{}", archive.name, archive.version))
         .collect();
-    if offending.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "the bridge lock installs a package Pi's loader aliases: {offending:?}"
-        ))
+    if !offending.is_empty() {
+        return Err(format!(
+            "the bridge installs packages Pi's loader aliases: {offending:?}"
+        ));
     }
+    Ok(())
+}
+
+/// The Claude Agent SDK stays as JavaScript and its eight platform payloads stay
+/// omitted. The SDK is what the bridge's loader needs; the platform packages are
+/// the reviewed `ignoredOptionalDependencies` omission, so a payload that appears
+/// is an un-reviewed ~197 MiB addition and a missing JS package is a broken
+/// bridge.
+fn check_bridge_sdk_omission(graph: &GraphReport) -> Result<(), String> {
+    let sdk = graph
+        .packages
+        .iter()
+        .find(|archive| archive.name == "@anthropic-ai/claude-agent-sdk")
+        .ok_or_else(|| "the bridge does not install the Claude Agent SDK JavaScript".to_string())?;
+    if sdk.integrity != BRIDGE_SDK_INTEGRITY {
+        return Err(format!(
+            "the Claude Agent SDK SRI is {}, not the reviewed {BRIDGE_SDK_INTEGRITY}",
+            sdk.integrity
+        ));
+    }
+    let payloads: Vec<String> = graph
+        .packages
+        .iter()
+        .filter(|archive| archive.name.starts_with("@anthropic-ai/claude-agent-sdk-"))
+        .map(|archive| format!("{}@{}", archive.name, archive.version))
+        .collect();
+    if !payloads.is_empty() {
+        return Err(format!(
+            "the bridge ships the omitted SDK platform payloads: {payloads:?}"
+        ));
+    }
+    Ok(())
 }
 
 /// `--omit=optional` and `--legacy-peer-deps` are mandatory on the layer's
@@ -272,21 +568,46 @@ fn check_no_loader_aliased_pi_package(lock: &Value) -> Result<(), String> {
 /// flags. Trailing shell comments are stripped first, so a mandatory flag that
 /// exists only after a `#` is never accepted as present.
 fn check_bridge_install_flags(script: &str) -> Result<(), String> {
-    const MANDATORY: [&str; 3] = ["--ignore-scripts", "--omit=optional", "--legacy-peer-deps"];
-    let installers: Vec<&str> = script
+    // The bridge is installed by the reviewed base pnpm through the shared hard
+    // runner. These are the reviewed argv facts (frozen lock, scripts off, copy
+    // import) and the workarounds that must never come back: the reviewed
+    // hoisted workspace omits only the SDK platform packages, so `--no-optional`
+    // (a pnpm 11.11.0 lockfile bug), `--legacy-peer-deps` (npm), a second
+    // Pi/typebox (an alias/NODE_PATH) and a bridge absence producer are all
+    // retired rather than translated.
+    const REQUIRED: [&str; 4] = [
+        "install --prod --frozen-lockfile",
+        "--ignore-scripts",
+        "--package-import-method=copy",
+        "--config.trust-policy=no-downgrade",
+    ];
+    const FORBIDDEN: [&str; 6] = [
+        "npm ci",
+        "--legacy-peer-deps",
+        "--no-optional",
+        "--omit=optional",
+        "NODE_PATH=",
+        "absent-transport",
+    ];
+    let active: String = script
         .lines()
         .filter(|line| !line.trim_start().starts_with('#'))
         .map(strip_shell_comment)
-        .filter(|command| is_npm_ci(command))
-        .collect();
-    if installers.is_empty() {
-        return Err("no active `npm ci` invocation in install-pi-packages.sh".to_string());
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !active.contains("run-pnpm.sh") {
+        return Err("install-pi-packages.sh does not use the shared hard runner".to_string());
     }
-    for line in &installers {
-        for flag in MANDATORY {
-            if !line.contains(flag) {
-                return Err(format!("an active npm ci line dropped {flag}: {line}"));
-            }
+    for flag in REQUIRED {
+        if !active.contains(flag) {
+            return Err(format!("the frozen install argv dropped {flag}"));
+        }
+    }
+    for retired in FORBIDDEN {
+        if active.contains(retired) {
+            return Err(format!(
+                "install-pi-packages.sh carries the retired {retired}"
+            ));
         }
     }
     Ok(())
@@ -312,136 +633,89 @@ fn strip_shell_comment(line: &str) -> &str {
     line
 }
 
-/// Whether the command text invokes `npm ci` (bare or with flags), as two
-/// adjacent **unquoted** whitespace-separated tokens. A bare `npm ci` counts, so
-/// a second unflagged install cannot hide behind an earlier valid one, while
-/// `npm ci` inside a quoted string (an error message) is not an invocation.
-fn is_npm_ci(command: &str) -> bool {
-    let mut words: Vec<(String, bool)> = Vec::new();
-    let mut current = String::new();
-    let mut current_quoted = false;
-    let mut in_single = false;
-    let mut in_double = false;
-    for ch in command.chars() {
-        match ch {
-            '\'' if !in_double => {
-                in_single = !in_single;
-                current_quoted = true;
-            }
-            '"' if !in_single => {
-                in_double = !in_double;
-                current_quoted = true;
-            }
-            c if c.is_whitespace() && !in_single && !in_double => {
-                if !current.is_empty() {
-                    words.push((std::mem::take(&mut current), current_quoted));
-                    current_quoted = false;
-                }
-            }
-            c => current.push(c),
+fn reachable_keys(graph: &GraphReport) -> Result<BTreeSet<&str>, String> {
+    let mut reached: BTreeSet<&str> = BTreeSet::new();
+    let mut pending: Vec<&str> = graph
+        .importer
+        .iter()
+        .map(|edge| edge.target.as_str())
+        .collect();
+    while let Some(key) = pending.pop() {
+        if !reached.insert(key) {
+            continue;
         }
+        let snapshot = graph
+            .snapshot(key)
+            .ok_or_else(|| format!("edge target {key} has no snapshot"))?;
+        pending.extend(snapshot.edges.iter().map(|edge| edge.target.as_str()));
     }
-    if !current.is_empty() {
-        words.push((current, current_quoted));
-    }
-    words
-        .windows(2)
-        .any(|pair| !pair[0].1 && !pair[1].1 && pair[0].0 == "npm" && pair[1].0 == "ci")
+    Ok(reached)
 }
 
-#[test]
-fn every_bridge_locked_package_carries_integrity() {
-    let lock = read_json("images/tools/pi/bridge/package-lock.json");
-    assert!(
-        lock["packages"]
-            .as_object()
-            .is_some_and(|packages| packages.contains_key("node_modules/pi-claude-bridge")),
-        "the bridge lock must actually carry pi-claude-bridge"
-    );
-    check_lock_integrity(&lock).expect("every bridge lock entry carries integrity");
-}
-
-#[test]
-fn the_bridge_pin_is_exact_and_the_lock_agrees() {
-    let lock = read_json("images/tools/pi/bridge/package-lock.json");
-    check_bridge_pin_locked(&lock).expect("the bridge pin is exact and the lock agrees");
-}
-
-#[test]
-fn the_bridge_lock_installs_no_loader_aliased_pi_package() {
-    let lock = read_json("images/tools/pi/bridge/package-lock.json");
-    check_no_loader_aliased_pi_package(&lock)
-        .expect("no loader-aliased package in the bridge lock");
-}
-
-#[test]
-fn the_bridge_install_passes_npm_ci_the_mandatory_flags() {
-    let script = read_text("images/tools/pi/install-pi-packages.sh");
-    check_bridge_install_flags(&script).expect("install-pi-packages.sh passes the mandatory flags");
+fn identity_of(graph: &GraphReport, key: &str) -> Result<(String, String), String> {
+    let snapshot = graph
+        .snapshot(key)
+        .ok_or_else(|| format!("edge target {key} has no snapshot"))?;
+    Ok((snapshot.name.clone(), snapshot.version.clone()))
 }
 
 // ---------------------------------------------------------------------------
 // Pinned dsh layer: one reviewed pnpm project read through the shared CLI
 // ---------------------------------------------------------------------------
 
-/// The four reviewed dsh inputs. A named field rather than a bare `PathBuf`
-/// argument, so a pi/bridge prefix cannot be passed to a dsh gate by mistake.
-struct DshProjectFiles {
-    prefix: PathBuf,
-}
-
-impl DshProjectFiles {
-    fn committed() -> Self {
-        Self {
-            prefix: repo_path("images/tools/dsh"),
-        }
-    }
-
-    fn carries_npm_lock(&self) -> bool {
-        self.prefix.join("package-lock.json").exists()
-    }
-}
-
 /// One resolved archive as the graph module reported it.
-struct DshArchive {
+#[derive(Clone)]
+struct GraphArchive {
     name: String,
     version: String,
     integrity: String,
     tarball: String,
     has_bin: bool,
-    platform: DshPlatform,
+    platform: GraphPlatform,
     optional: bool,
+    /// The archive's declared peer ranges. A declaration is not a resolution, so
+    /// a bridge may declare Pi as a peer while installing no Pi identity.
+    peers: Vec<(String, String)>,
 }
 
 /// The archive's `os`/`cpu`/`libc` selectors, retained in list order.
-struct DshPlatform {
+#[derive(Clone)]
+struct GraphPlatform {
     os: Vec<String>,
     cpu: Vec<String>,
     libc: Vec<String>,
 }
 
-/// One resolved snapshot: the full peer-context identity key and its own
-/// optional annotation, which is a separate fact from an edge's optional flag.
-struct DshSnapshot {
+/// One resolved snapshot: the full peer-context identity key, the package
+/// identity it resolves, and its own optional annotation, which is a separate
+/// fact from an edge's optional flag.
+#[derive(Clone)]
+struct GraphSnapshot {
     key: String,
+    name: String,
+    version: String,
     optional: bool,
+    edges: Vec<GraphEdge>,
 }
 
-/// One importer/root dependency edge.
-struct DshEdge {
+/// One importer or snapshot dependency edge.
+#[derive(Clone)]
+struct GraphEdge {
     name: String,
     target: String,
+    optional: bool,
 }
 
 /// A typed read of `recipe-contract pnpm-lock graph dsh`. A syntax adapter, never
 /// a second parser: the composed helper owns YAML, pins and the effective-peer
 /// rules (`docs/adr/0001-build-only-pnpm-graph-parser.md`), so Rust only types
 /// what it printed and asserts independently authored expectations over it.
-struct DshGraph {
+#[derive(Clone)]
+struct GraphReport {
     version: String,
-    packages: Vec<DshArchive>,
-    snapshots: Vec<DshSnapshot>,
-    importer: Vec<DshEdge>,
+    packages: Vec<GraphArchive>,
+    snapshots: Vec<GraphSnapshot>,
+    importer: Vec<GraphEdge>,
 }
 
 fn graph_report_bool(value: &Value, path: &[&str]) -> Result<bool, String> {
@@ -491,11 +765,11 @@ fn graph_report_field(value: &Value, path: &[&str]) -> Result<String, String> {
         .ok_or_else(|| format!("graph report field {} is not a string", path.join(".")))
 }
 
-impl DshGraph {
-    fn from_value(value: &Value) -> Result<Self, String> {
-        match graph_report_field(value, &["selection", "kind"])?.as_str() {
-            "dsh" => {}
-            other => return Err(format!("graph report is for {other}, not dsh")),
+impl GraphReport {
+    fn from_value(value: &Value, kind: &str) -> Result<Self, String> {
+        let reported = graph_report_field(value, &["selection", "kind"])?;
+        if reported != kind {
+            return Err(format!("graph report is for {reported}, not {kind}"));
         }
         let mut packages = Vec::new();
         for entry in value
@@ -503,18 +777,30 @@ impl DshGraph {
             .and_then(Value::as_array)
             .ok_or_else(|| "graph report has no packages array".to_string())?
         {
-            packages.push(DshArchive {
+            packages.push(GraphArchive {
                 name: graph_report_field(entry, &["id", "name"])?,
                 version: graph_report_field(entry, &["id", "version"])?,
                 integrity: graph_report_field(entry, &["integrity"])?,
                 tarball: graph_report_field(entry, &["tarball"])?,
                 has_bin: graph_report_bool(entry, &["hasBin"])?,
-                platform: DshPlatform {
+                platform: GraphPlatform {
                     os: graph_report_strings(entry, &["platform", "os"])?,
                     cpu: graph_report_strings(entry, &["platform", "cpu"])?,
                     libc: graph_report_strings(entry, &["platform", "libc"])?,
                 },
                 optional: graph_report_bool(entry, &["optional"])?,
+                peers: entry
+                    .get("peers")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| "graph archive has no peers object".to_string())?
+                    .iter()
+                    .map(|(name, range)| {
+                        range
+                            .as_str()
+                            .map(|range| (name.clone(), range.to_string()))
+                            .ok_or_else(|| format!("peer range of {name} is not a string"))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
             });
         }
         let mut snapshots = Vec::new();
@@ -523,9 +809,24 @@ impl DshGraph {
             .and_then(Value::as_array)
             .ok_or_else(|| "graph report has no snapshots array".to_string())?
         {
-            snapshots.push(DshSnapshot {
+            snapshots.push(GraphSnapshot {
                 key: graph_report_field(entry, &["id", "key"])?,
+                name: graph_report_field(entry, &["id", "packageId", "name"])?,
+                version: graph_report_field(entry, &["id", "packageId", "version"])?,
                 optional: graph_report_bool(entry, &["optional"])?,
+                edges: entry
+                    .get("edges")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| "graph snapshot has no edges array".to_string())?
+                    .iter()
+                    .map(|edge| {
+                        Ok::<GraphEdge, String>(GraphEdge {
+                            name: graph_report_field(edge, &["name"])?,
+                            target: graph_report_field(edge, &["target"])?,
+                            optional: graph_report_bool(edge, &["optional"])?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
             });
         }
         let mut importer = Vec::new();
@@ -534,9 +835,10 @@ impl DshGraph {
             .and_then(Value::as_array)
             .ok_or_else(|| "graph report has no importer array".to_string())?
         {
-            importer.push(DshEdge {
+            importer.push(GraphEdge {
                 name: graph_report_field(entry, &["name"])?,
                 target: graph_report_field(entry, &["target"])?,
+                optional: graph_report_bool(entry, &["optional"])?,
             });
         }
         Ok(Self {
@@ -547,11 +849,15 @@ impl DshGraph {
         })
     }
 
-    fn packages_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a DshArchive> {
+    fn snapshot(&self, key: &str) -> Option<&GraphSnapshot> {
+        self.snapshots.iter().find(|entry| entry.key == key)
+    }
+
+    fn packages_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a GraphArchive> {
         self.packages.iter().filter(move |entry| entry.name == name)
     }
 
-    fn package(&self, name: &str, version: &str) -> Option<&DshArchive> {
+    fn package(&self, name: &str, version: &str) -> Option<&GraphArchive> {
         self.packages
             .iter()
             .find(|entry| entry.name == name && entry.version == version)
@@ -617,69 +923,57 @@ fn recipe_contract_binary() -> &'static Path {
     })
 }
 
-fn run_graph_cli(verb: &str, prefix: &Path) -> Result<String, String> {
-    let binary = recipe_contract_binary();
-    let output = std::process::Command::new(binary)
-        .arg("pnpm-lock")
-        .arg(verb)
-        .arg("dsh")
-        .arg(prefix)
-        .output()
-        .map_err(|error| format!("cannot run {}: {error}", binary.display()))?;
-    if !output.status.success() {
-        return Err(format!(
-            "pnpm-lock {verb} rejected {}: {}",
-            prefix.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    String::from_utf8(output.stdout).map_err(|_| "pnpm-lock emitted non-UTF-8 output".to_string())
+/// Every case computes the fixture pins with an independent hash, so a stale
+/// digest can never be the reason a mutation is rejected.
+fn rejected_graph_mutation(
+    source: &MigratedProject,
+    label: &str,
+    mutate: impl FnOnce(&ProjectFixture),
+    expected: &str,
+) {
+    let fixture = ProjectFixture::copy(source, label);
+    mutate(&fixture);
+    fixture.repin();
+    let error = match read_graph(&fixture.project) {
+        Ok(_) => panic!(
+            "{label}: the mutated {} project must not validate",
+            source.kind
+        ),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains(expected),
+        "{label}: expected {expected:?} in the rejection, got {error:?}"
+    );
 }
 
-/// The `check` verb re-verifies the reviewed input digests and every effective
-/// peer, so its exact report is the selection version.
-fn check_dsh_inputs(project: &DshProjectFiles) -> Result<String, String> {
-    run_graph_cli("check", &project.prefix)
-}
-
-fn read_dsh_graph(project: &DshProjectFiles) -> Result<DshGraph, String> {
-    let text = run_graph_cli("graph", &project.prefix)?;
-    let value: Value = serde_json::from_str(&text)
-        .map_err(|error| format!("graph report is not JSON: {error}"))?;
-    DshGraph::from_value(&value)
-}
-
-/// A disposable copy of the four reviewed inputs. Mutation controls need the
-/// intended structural gate to be the one that rejects, so the fixture can
-/// recompute the pin file as test data after an edit.
-struct DshFixture {
+/// A disposable copy of one project's four reviewed inputs. Mutation controls
+/// need the intended structural gate to be the one that rejects, so the fixture
+/// can recompute the pin file as test data after an edit.
+struct ProjectFixture {
     directory: PathBuf,
-    project: DshProjectFiles,
+    project: MigratedProject,
 }
 
-impl DshFixture {
-    const INPUTS: [&'static str; 4] = [
-        "package.json",
-        "pnpm-lock.yaml",
-        "pnpm-workspace.yaml",
-        "pnpm-inputs.sha256",
-    ];
-
-    fn copy(label: &str) -> Self {
-        let directory =
-            std::env::temp_dir().join(format!("image-sources-dsh-{}-{label}", std::process::id()));
+impl ProjectFixture {
+    fn copy(source: &MigratedProject, label: &str) -> Self {
+        let directory = std::env::temp_dir().join(format!(
+            "image-sources-{}-{}-{label}",
+            source.kind,
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("fixture directory");
-        for file in Self::INPUTS {
-            std::fs::copy(
-                repo_path(&format!("images/tools/dsh/{file}")),
-                directory.join(file),
-            )
-            .expect("copy reviewed input");
+        for file in MigratedProject::INPUTS {
+            std::fs::copy(source.input(file), directory.join(file))
+                .unwrap_or_else(|error| panic!("copy {}: {error}", source.input(file).display()));
         }
         Self {
             directory: directory.clone(),
-            project: DshProjectFiles { prefix: directory },
+            project: MigratedProject {
+                kind: source.kind,
+                prefix: directory,
+            },
         }
     }
 
@@ -692,6 +986,10 @@ impl DshFixture {
             "{file}: the mutation must change the fixture"
         );
         std::fs::write(&path, after).expect("write fixture input");
+    }
+
+    fn write(&self, file: &str, content: &str) {
+        std::fs::write(self.directory.join(file), content).expect("write fixture input");
     }
 
     fn repin(&self) {
@@ -711,7 +1009,7 @@ impl DshFixture {
     }
 }
 
-impl Drop for DshFixture {
+impl Drop for ProjectFixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.directory);
     }
@@ -720,11 +1018,12 @@ impl Drop for DshFixture {
 /// Every case recomputes the fixture pins, so a stale digest can never be the
 /// reason a mutation is rejected; the expected diagnostic proves the intended
 /// rule fired.
-fn rejected_mutation(label: &str, mutate: impl FnOnce(&DshFixture), expected: &str) {
-    let fixture = DshFixture::copy(label);
+fn rejected_dsh_mutation(label: &str, mutate: impl FnOnce(&ProjectFixture), expected: &str) {
+    let source = MigratedProject::committed("dsh", "images/tools/dsh");
+    let fixture = ProjectFixture::copy(&source, label);
     mutate(&fixture);
     fixture.repin();
-    let error = match read_dsh_graph(&fixture.project) {
+    let error = match read_graph(&fixture.project) {
         Ok(_) => panic!("{label}: the mutated dsh project must not validate"),
         Err(error) => error,
     };
@@ -765,7 +1064,7 @@ fn edit_yaml_block(text: &str, header: &str, edit: impl FnOnce(&str) -> String) 
 /// reason a mutation is rejected.
 #[test]
 fn dsh_graph_and_effective_peer_mutations_are_rejected() {
-    let graph = read_dsh_graph(&DshProjectFiles::committed())
+    let graph = read_graph(&MigratedProject::committed("dsh", "images/tools/dsh"))
         .expect("the reviewed dsh inputs form a valid graph");
     let schemastery: Vec<&str> = graph
         .packages_named("@deepseek-ai/schemastery")
@@ -777,7 +1076,7 @@ fn dsh_graph_and_effective_peer_mutations_are_rejected() {
         "the peer mutation needs the correct version to exist globally"
     );
 
-    rejected_mutation(
+    rejected_dsh_mutation(
         "package-manager",
         |fixture| {
             fixture.rewrite("package.json", |text| {
@@ -787,7 +1086,7 @@ fn dsh_graph_and_effective_peer_mutations_are_rejected() {
         "pnpm@11.11.0",
     );
 
-    rejected_mutation(
+    rejected_dsh_mutation(
         "missing-integrity",
         |fixture| {
             fixture.rewrite("pnpm-lock.yaml", |text| {
@@ -805,7 +1104,7 @@ fn dsh_graph_and_effective_peer_mutations_are_rejected() {
         "missing key: integrity",
     );
 
-    rejected_mutation(
+    rejected_dsh_mutation(
         "bad-integrity",
         |fixture| {
             fixture.rewrite("pnpm-lock.yaml", |text| {
@@ -819,7 +1118,7 @@ fn dsh_graph_and_effective_peer_mutations_are_rejected() {
         "full sha512 required",
     );
 
-    rejected_mutation(
+    rejected_dsh_mutation(
         "wrong-effective-peer",
         |fixture| {
             fixture.rewrite("pnpm-lock.yaml", |text| {
@@ -839,7 +1138,7 @@ fn dsh_graph_and_effective_peer_mutations_are_rejected() {
         "peer @deepseek-ai/schemastery wanted 3.18.4, got @deepseek-ai/schemastery@3.18.2",
     );
 
-    rejected_mutation(
+    rejected_dsh_mutation(
         "orphan",
         |fixture| {
             fixture.rewrite("pnpm-lock.yaml", |text| {
@@ -858,7 +1157,7 @@ fn dsh_graph_and_effective_peer_mutations_are_rejected() {
         "orphan",
     );
 
-    rejected_mutation(
+    rejected_dsh_mutation(
         "absent-sandbox",
         |fixture| {
             fixture.rewrite("pnpm-lock.yaml", |text| {
@@ -875,7 +1174,7 @@ fn dsh_graph_and_effective_peer_mutations_are_rejected() {
 
 #[test]
 fn the_pinned_dsh_version_agrees_across_the_manifest_and_the_lockfile() {
-    let project = DshProjectFiles::committed();
+    let project = MigratedProject::committed("dsh", "images/tools/dsh");
     let manifest = read_json("images/tools/dsh/package.json");
     assert_eq!(manifest["name"], "agent-vm-dsh-layer");
     assert_eq!(manifest["private"], true);
@@ -898,14 +1197,14 @@ fn the_pinned_dsh_version_agrees_across_the_manifest_and_the_lockfile() {
         "packageManager asserts the base pin instead of selecting a second manager"
     );
 
-    let graph = read_dsh_graph(&project).expect("the reviewed dsh inputs form a valid graph");
+    let graph = read_graph(&project).expect("the reviewed dsh inputs form a valid graph");
     assert_eq!(
         graph.version,
         dsh_pin(),
         "the manifest, the image label and the graph select one version"
     );
     assert_eq!(
-        check_dsh_inputs(&project).expect("the CLI verifies every reviewed dsh input"),
+        check_inputs(&project).expect("the CLI verifies every reviewed dsh input"),
         format!("{}\n", dsh_pin())
     );
     assert_eq!(graph.importer.len(), 1, "one imported root");
@@ -929,7 +1228,7 @@ fn the_pinned_dsh_version_agrees_across_the_manifest_and_the_lockfile() {
 
 #[test]
 fn every_dsh_locked_package_carries_integrity() {
-    let graph = read_dsh_graph(&DshProjectFiles::committed())
+    let graph = read_graph(&MigratedProject::committed("dsh", "images/tools/dsh"))
         .expect("the reviewed dsh inputs form a valid graph");
     assert!(!graph.packages.is_empty(), "the report carries the graph");
     let dsh = graph
@@ -983,6 +1282,450 @@ fn every_dsh_locked_package_carries_integrity() {
         graph.packages.iter().all(|entry| !entry.optional),
         "no archive-level optional flag is inferred from snapshot omissions"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Pi and the bridge: committed four-input projects read through the adapter
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pi_project_is_one_pinned_pnpm_root_read_by_the_graph_adapter() {
+    let project = pi_project();
+    let spec = PinSpec {
+        dependency: "@earendil-works/pi-coding-agent",
+    };
+    check_project_shape(
+        &project,
+        "agent-vm-guest-pi",
+        "@earendil-works/pi-coding-agent",
+    )
+    .expect("the Pi project is a private single-root pnpm project");
+    let pinned = pinned_dependency(&project, &spec).expect("the Pi manifest pins its root");
+    assert_eq!(
+        pinned,
+        version_label("pi", "AGENT_VERSION_PI"),
+        "the manifest and the image label select one Pi version"
+    );
+    check_graph_pin_agrees(&project, &pinned).expect("the graph agrees with the label");
+    let graph = read_graph(&project).expect("the reviewed Pi inputs form a valid graph");
+    check_graph_integrity_and_reachability(&graph)
+        .expect("every Pi archive is hashed, canonical and reachable");
+    assert_eq!(
+        graph.packages.len(),
+        PI_DEFAULT_PACKAGES,
+        "the reviewed default selection has {PI_DEFAULT_PACKAGES} archives; a different count \
+         is a review event, not an invariant"
+    );
+    let root = graph
+        .package("@earendil-works/pi-coding-agent", &pinned)
+        .expect("the graph carries the selected Pi root");
+    assert_eq!(root.integrity, PI_ROOT_INTEGRITY);
+    assert!(
+        root.has_bin,
+        "the selected Pi root installs the bin the wrapper's PI_ENTRY links"
+    );
+    assert!(
+        !project.carries_npm_lock(),
+        "the migration deleted the npm lock"
+    );
+}
+
+#[test]
+fn pi_family_is_the_reviewed_shape_at_the_selected_version() {
+    let project = pi_project();
+    let graph = read_graph(&project).expect("the reviewed Pi inputs form a valid graph");
+    check_pi_family(&graph).expect("the default selection is the reviewed modern six");
+    let reachable = reachable_keys(&graph).expect("every root edge resolves");
+    let family: Vec<&str> = reachable
+        .iter()
+        .copied()
+        .filter(|key| {
+            identity_of(&graph, key)
+                .map(|id| id.0)
+                .unwrap_or_default()
+                .starts_with("@earendil-works/")
+        })
+        .collect();
+    assert_eq!(
+        family.len(),
+        PI_FAMILY_MODERN.len() + 1,
+        "the six siblings plus the root are the only @earendil-works identities"
+    );
+    for banned in ["chord", "esbuild"] {
+        assert!(
+            !graph.packages.iter().any(|archive| archive.name == banned),
+            "{banned} belongs to the historical selection, not this one"
+        );
+    }
+}
+
+#[test]
+fn pi_generated_bin_inventory_is_derived_from_locked_edges() {
+    let project = pi_project();
+    let graph = read_graph(&project).expect("the reviewed Pi inputs form a valid graph");
+    // The reviewed table above is independent; this proves the graph's own
+    // locked edges still derive it, which is what the byte checker normalises
+    // against. `yaml` appears only in the historical selection's pi-agent-core.
+    check_pi_generated_bins(&graph, &PI_GENERATED_BINS)
+        .expect("the reviewed family derives exactly the reviewed bin inventory");
+}
+
+#[test]
+fn bridge_is_hoisted_javascript_sdk_without_aliases_or_payloads() {
+    let project = bridge_project();
+    let spec = PinSpec {
+        dependency: "pi-claude-bridge",
+    };
+    check_project_shape(&project, "agent-vm-guest-pi-packages", "pi-claude-bridge")
+        .expect("the bridge project is a private single-root pnpm project");
+    let pinned = pinned_dependency(&project, &spec).expect("the bridge manifest pins its root");
+    assert_eq!(
+        pinned,
+        version_label("pi-claude-bridge", "AGENT_VERSION_PI_CLAUDE_BRIDGE"),
+        "the manifest and the image label select one bridge version"
+    );
+    check_graph_pin_agrees(&project, &pinned).expect("the graph agrees with the label");
+    let workspace = std::fs::read_to_string(project.input("pnpm-workspace.yaml"))
+        .expect("the bridge workspace is readable");
+    assert!(
+        workspace.contains("nodeLinker: hoisted"),
+        "the reviewed bridge layout is hoisted so Pi's jiti loader can resolve the SDK"
+    );
+    assert!(
+        workspace.contains("ignoredOptionalDependencies: ['@anthropic-ai/claude-agent-sdk-*']"),
+        "the only reviewed bridge omission is the SDK platform payloads"
+    );
+    let graph = read_graph(&project).expect("the reviewed bridge inputs form a valid graph");
+    check_graph_integrity_and_reachability(&graph)
+        .expect("every bridge archive is hashed, canonical and reachable");
+    assert_eq!(
+        graph.packages.len(),
+        BRIDGE_DEFAULT_PACKAGES,
+        "the reviewed bridge graph is the {BRIDGE_DEFAULT_PACKAGES} nonoptional identities; a \
+         different count is a review event"
+    );
+    let root = graph
+        .package("pi-claude-bridge", &pinned)
+        .expect("the graph carries the selected bridge root");
+    assert_eq!(root.integrity, BRIDGE_ROOT_INTEGRITY);
+    check_bridge_sdk_omission(&graph).expect("the SDK JavaScript stays and its payloads do not");
+    check_no_loader_aliased_pi_package(&graph)
+        .expect("the bridge installs no package Pi's loader aliases");
+    // A peer **declaration** is legitimate and required: Pi supplies that peer
+    // through jiti, so only an installed identity would be a defect.
+    let declared = graph
+        .packages
+        .iter()
+        .find(|archive| archive.name == "pi-claude-bridge")
+        .is_some_and(|archive| {
+            archive
+                .peers
+                .iter()
+                .any(|(name, _)| name == "@earendil-works/pi-coding-agent")
+        });
+    assert!(
+        declared,
+        "the bridge declares the image's Pi as a peer range (information, not a resolution)"
+    );
+}
+
+#[test]
+fn pi_and_bridge_graph_mutations_are_rejected() {
+    // Re-pinned lock mutations: the workspace policy, the SRI grammar and the
+    // archive identity are the adapter's own gates, so each is edited in the
+    // lock and re-pinned as test data.
+    {
+        let bridge = bridge_project();
+        rejected_graph_mutation(
+            &bridge,
+            "bridge-node-linker",
+            |fixture| {
+                fixture.rewrite("pnpm-workspace.yaml", |text| {
+                    text.replacen("nodeLinker: hoisted", "nodeLinker: isolated", 1)
+                });
+            },
+            "workspace policy: nodeLinker",
+        );
+        rejected_graph_mutation(
+            &bridge,
+            "bridge-optional-omission",
+            |fixture| {
+                fixture.rewrite("pnpm-workspace.yaml", |text| {
+                    text.replacen(
+                        "ignoredOptionalDependencies: ['@anthropic-ai/claude-agent-sdk-*']",
+                        "ignoredOptionalDependencies: []",
+                        1,
+                    )
+                });
+            },
+            "workspace policy: ignoredOptionalDependencies",
+        );
+        rejected_graph_mutation(
+            &bridge,
+            "bridge-missing-integrity",
+            |fixture| {
+                fixture.rewrite("pnpm-lock.yaml", |text| {
+                    edit_yaml_block(text, "  hono@4.13.8:\n", |block| {
+                        let mut lines: Vec<String> = block.lines().map(str::to_string).collect();
+                        let index = lines
+                            .iter()
+                            .position(|line| line.trim_start().starts_with("resolution:"))
+                            .expect("the archive declares a resolution");
+                        lines[index] = "    resolution: {}".to_string();
+                        lines.join("\n")
+                    })
+                });
+            },
+            "missing key: integrity",
+        );
+        rejected_graph_mutation(
+            &bridge,
+            "bridge-short-sri",
+            |fixture| {
+                fixture.rewrite("pnpm-lock.yaml", |text| {
+                    edit_yaml_block(text, "  express@5.2.1:\n", |block| {
+                        edit_resolution_integrity(block, "sha512-short")
+                    })
+                });
+            },
+            "full sha512 required",
+        );
+    }
+    {
+        let pi = pi_project();
+        rejected_graph_mutation(
+            &pi,
+            "pi-trust-exception",
+            |fixture| {
+                fixture.rewrite("pnpm-workspace.yaml", |text| {
+                    text.replacen(
+                        "trustPolicyExclude: ['undici-types@6.21.0']",
+                        "trustPolicyExclude: []",
+                        1,
+                    )
+                });
+            },
+            "workspace policy: trustPolicyExclude",
+        );
+        rejected_graph_mutation(
+            &pi,
+            "pi-peer-automation",
+            |fixture| {
+                fixture.rewrite("pnpm-workspace.yaml", |text| {
+                    text.replacen("autoInstallPeers: true", "autoInstallPeers: false", 1)
+                });
+            },
+            "workspace policy: autoInstallPeers",
+        );
+    }
+
+    // Independent expectation mutants: the family shape, the per-identity SRI,
+    // the alias rule and the SDK omission are Rust-authored controls, so they are
+    // exercised on typed graph copies rather than on the lock.
+    {
+        let pi = pi_project();
+        let graph = read_graph(&pi).expect("the reviewed Pi inputs form a valid graph");
+        check_pi_family(&graph).expect("the committed family passes");
+        check_pi_generated_bins(&graph, &PI_GENERATED_BINS).expect("the committed bins pass");
+        check_graph_integrity_and_reachability(&graph).expect("the committed graph passes");
+
+        let root_key = graph.importer[0].target.clone();
+        let drop_member = |name: &str| {
+            let mut mutated = graph.clone();
+            mutated.snapshots.retain(|entry| entry.name != name);
+            mutated.packages.retain(|entry| entry.name != name);
+            for snapshot in &mut mutated.snapshots {
+                if snapshot.key == root_key {
+                    snapshot.edges.retain(|edge| edge.name != name);
+                }
+            }
+            mutated
+        };
+        let four = drop_member("@earendil-works/pi-mcp");
+        let error =
+            check_pi_family(&four).expect_err("a five-member modern family is not reviewed");
+        assert!(
+            error.contains("neither the modern") && error.contains("nor the historical"),
+            "the family-shape control must name both reviewed shapes: {error:?}"
+        );
+        let missing_ai = drop_member("@earendil-works/pi-ai");
+        assert!(
+            check_pi_family(&missing_ai).is_err(),
+            "dropping a sibling the modern table requires must fail"
+        );
+
+        let mut optional_only = graph.clone();
+        for snapshot in &mut optional_only.snapshots {
+            if snapshot.name == "@earendil-works/pi-telemetry" {
+                snapshot.version = "1.4.0".to_string();
+            }
+            for edge in &mut snapshot.edges {
+                if edge.name == "@earendil-works/pi-telemetry" {
+                    edge.optional = true;
+                }
+            }
+        }
+        let error = check_pi_family(&optional_only)
+            .expect_err("a family member behind an optional edge must fail the family control");
+        assert!(error.contains("only through an optional edge"), "{error:?}");
+
+        let mut wrong_version = graph.clone();
+        for snapshot in &mut wrong_version.snapshots {
+            if snapshot.name == "@earendil-works/pi-tui" {
+                snapshot.version = "0.0.0".to_string();
+            }
+        }
+        let error = check_pi_family(&wrong_version).expect_err("a re-pinned sibling version fails");
+        assert!(
+            error.contains("the selection is"),
+            "the version control must name the selection: {error:?}"
+        );
+
+        let mut duplicate_context = graph.clone();
+        let sibling = graph
+            .snapshots
+            .iter()
+            .find(|entry| entry.name == "@earendil-works/pi-tui")
+            .expect("pi-tui is reachable")
+            .clone();
+        let mut second = sibling.clone();
+        second.key = format!("{}(@fixture/peer@1.0.0)", sibling.key);
+        duplicate_context.snapshots.push(second);
+        for snapshot in &mut duplicate_context.snapshots {
+            if snapshot.key == root_key {
+                snapshot.edges.push(GraphEdge {
+                    name: "@earendil-works/pi-tui".to_string(),
+                    target: sibling.key.clone() + "(@fixture/peer@1.0.0)",
+                    optional: false,
+                });
+            }
+        }
+        let error = check_pi_family(&duplicate_context)
+            .expect_err("a second peer context of one sibling is a substitution");
+        assert!(
+            error.contains("more than one peer context"),
+            "the context control must name the duplicate: {error:?}"
+        );
+
+        let mut blank_sri = graph.clone();
+        if let Some(archive) = blank_sri
+            .packages
+            .iter_mut()
+            .find(|archive| archive.name == "@earendil-works/pi-tui")
+        {
+            archive.integrity = String::new();
+        }
+        let error = check_graph_integrity_and_reachability(&blank_sri)
+            .expect_err("a sibling without SRI must fail the integrity control");
+        assert!(error.contains("full sha512"), "{error:?}");
+
+        let mut orphan = graph.clone();
+        orphan.packages.push(GraphArchive {
+            name: "@earendil-works/pi-fixture".to_string(),
+            version: "1.0.0".to_string(),
+            integrity: PI_ROOT_INTEGRITY.to_string(),
+            tarball: "https://registry.npmjs.org/@earendil-works/pi-fixture/-/pi-fixture-1.0.0.tgz"
+                .to_string(),
+            has_bin: false,
+            platform: GraphPlatform {
+                os: Vec::new(),
+                cpu: Vec::new(),
+                libc: Vec::new(),
+            },
+            optional: false,
+            peers: Vec::new(),
+        });
+        let error = check_graph_integrity_and_reachability(&orphan)
+            .expect_err("an archive with no reviewed edge must fail reachability");
+        assert!(error.contains("orphan archive"), "{error:?}");
+    }
+
+    {
+        let bridge = bridge_project();
+        let graph = read_graph(&bridge).expect("the reviewed bridge inputs form a valid graph");
+        check_bridge_sdk_omission(&graph).expect("the committed bridge passes");
+        check_no_loader_aliased_pi_package(&graph).expect("the committed bridge has no alias");
+
+        let mut aliased = graph.clone();
+        aliased.packages.push(GraphArchive {
+            name: "@earendil-works/pi-ai".to_string(),
+            version: "1.4.0".to_string(),
+            integrity: PI_ROOT_INTEGRITY.to_string(),
+            tarball: "https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-1.4.0.tgz"
+                .to_string(),
+            has_bin: true,
+            platform: GraphPlatform {
+                os: Vec::new(),
+                cpu: Vec::new(),
+                libc: Vec::new(),
+            },
+            optional: false,
+            peers: Vec::new(),
+        });
+        let error = check_no_loader_aliased_pi_package(&aliased)
+            .expect_err("a second Pi identity must fail the alias control");
+        assert!(error.contains("loader aliases"), "{error:?}");
+
+        let mut no_sdk = graph.clone();
+        no_sdk
+            .packages
+            .retain(|archive| archive.name != "@anthropic-ai/claude-agent-sdk");
+        let error = check_bridge_sdk_omission(&no_sdk)
+            .expect_err("a bridge without the SDK JavaScript is broken");
+        assert!(error.contains("Claude Agent SDK JavaScript"), "{error:?}");
+
+        let mut payload = graph.clone();
+        payload.packages.push(GraphArchive {
+            name: "@anthropic-ai/claude-agent-sdk-linux-x64".to_string(),
+            version: "0.3.281".to_string(),
+            integrity: BRIDGE_SDK_INTEGRITY.to_string(),
+            tarball: "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-linux-x64/-/claude-agent-sdk-linux-x64-0.3.281.tgz".to_string(),
+            has_bin: false,
+            platform: GraphPlatform {
+                os: vec!["linux".to_string()],
+                cpu: vec!["x64".to_string()],
+                libc: Vec::new(),
+            },
+            optional: true,
+            peers: Vec::new(),
+        });
+        let error = check_bridge_sdk_omission(&payload)
+            .expect_err("a re-added SDK platform payload must fail the omission control");
+        assert!(error.contains("omitted SDK platform payloads"), "{error:?}");
+
+        let mut moved_sdk = graph.clone();
+        for archive in &mut moved_sdk.packages {
+            if archive.name == "@anthropic-ai/claude-agent-sdk" {
+                archive.integrity = PI_ROOT_INTEGRITY.to_string();
+            }
+        }
+        let error = check_bridge_sdk_omission(&moved_sdk)
+            .expect_err("a re-pinned SDK identity must fail the reviewed-SRI control");
+        assert!(error.contains("not the reviewed"), "{error:?}");
+    }
+}
+
+/// The image label's `ARG` fallback for one product, i.e. the version the label
+/// publishes when the build does not override it. The manifest pin must equal it.
+fn version_label(product: &str, arg: &str) -> String {
+    let dockerfile = standard_dockerfile();
+    let value = label_value(&dockerfile, &format!("org.agent-vm.version.{product}"));
+    value
+        .strip_prefix(&format!("${{{arg}:-"))
+        .and_then(|rest| rest.strip_suffix('}'))
+        .unwrap_or_else(|| panic!("the {product} label does not fall back to {arg}: {value}"))
+        .to_string()
+}
+
+/// Replace one archive block's SRI, leaving the rest of the block alone.
+fn edit_resolution_integrity(block: &str, integrity: &str) -> String {
+    let mut lines: Vec<String> = block.lines().map(str::to_string).collect();
+    let index = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("resolution:"))
+        .expect("the archive declares a resolution");
+    lines[index] = format!("    resolution: {{integrity: {integrity}}}");
+    lines.join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -1549,6 +2292,9 @@ fn exact_image_install_hooks_exist() {
         "pi/installed-graph.mjs",
         "pi/check-installed-bytes.mjs",
         "pi/check-runtime.mjs",
+        // The owning preparation process (#52 C4): mounted with the Pi source,
+        // never COPYed into a runtime layer.
+        "pi/prepare-project.py",
     ];
     for relative in expected {
         let path = repo_path(&format!("images/tools/{relative}"));
@@ -1572,6 +2318,8 @@ fn pi_build_only_helpers_are_never_copied() {
         "tools/pi/installed-graph.mjs",
         "tools/pi/check-installed-bytes.mjs",
         "tools/pi/check-runtime.mjs",
+        "tools/pi/prepare-project.py",
+        "tools/pi/reviewed-normalisations.json",
     ];
     for line in dockerfile.lines() {
         let trimmed = line.trim_start();
@@ -1594,131 +2342,102 @@ fn pi_build_only_helpers_are_never_copied() {
 
 #[test]
 fn image_source_guards_reject_mutations() {
-    // A dropped bridge npm-ci flag must fail the mandatory-flags gate.
+    // The bridge installer must keep the reviewed pnpm argv and none of the
+    // retired workarounds. Each mutation below is an in-memory copy.
     let script = read_text("images/tools/pi/install-pi-packages.sh");
     assert!(check_bridge_install_flags(&script).is_ok());
-    let without_omit = script.replace(" --omit=optional", "");
-    assert_ne!(without_omit, script, "the mutation must change the script");
-    assert!(
-        check_bridge_install_flags(&without_omit).is_err(),
-        "dropping --omit=optional must fail the gate"
-    );
-
-    // A commented-out command carrying every flag must not satisfy the gate:
-    // there is no active `npm ci` to check.
-    let commented_only = "# npm ci --ignore-scripts --omit=optional --legacy-peer-deps\n";
-    assert!(
-        check_bridge_install_flags(commented_only).is_err(),
-        "a commented-only npm ci must not satisfy the gate"
-    );
-
-    // A commented valid command must not mask a later active command missing a
-    // flag: every active invocation is inspected.
-    let masked = "# npm ci --ignore-scripts --omit=optional --legacy-peer-deps\n\
-                  npm ci --ignore-scripts --omit=optional\n";
-    assert!(
-        check_bridge_install_flags(masked).is_err(),
-        "a commented valid npm ci must not mask an active invalid one"
-    );
-
-    // A second, bare `npm ci` with no flags must fail even when a valid
-    // invocation precedes it: every active invocation is inspected, flagged or
-    // not (permanent control for the previous `contains("npm ci --")` bypass).
-    let bare_second = "npm ci --ignore-scripts --omit=optional --legacy-peer-deps\nnpm ci\n";
-    assert!(
-        check_bridge_install_flags(bare_second).is_err(),
-        "an active bare npm ci must not hide behind a valid one"
-    );
-
-    // A mandatory flag that exists only in a trailing shell comment is never
-    // passed to npm and must not satisfy the gate (permanent control for the
-    // previous whole-line `contains(flag)` bypass).
-    let flags_in_comment = "npm ci --ignore-scripts # --omit=optional --legacy-peer-deps\n";
-    assert!(
-        check_bridge_install_flags(flags_in_comment).is_err(),
-        "a mandatory flag only in a trailing comment must not satisfy the gate"
-    );
-
-    // A pi lock entry with its integrity removed must fail the integrity gate.
-    let mut pi_lock = read_json("images/tools/pi/package-lock.json");
-    if let Some(packages) = pi_lock["packages"].as_object_mut() {
-        for (key, value) in packages.iter_mut() {
-            if key.is_empty() {
-                continue;
-            }
-            if let Some(entry) = value.as_object_mut() {
-                entry.remove("integrity");
-                break;
-            }
-        }
-    }
-    assert!(
-        check_lock_integrity(&pi_lock).is_err(),
-        "a lock entry without integrity must fail the gate"
-    );
-
-    // A pi lock whose nested sibling layout is neither empty nor the reviewed
-    // shrinkwrap set must fail the sibling-set gate, and so must a reviewed
-    // sibling at the wrong version. Build the fixtures rather than mutating the
-    // committed lock: Pi 1.0.4+ legitimately has no nested siblings at all.
-    const SIBLING_PREFIX: &str =
-        "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/";
-    let nested_lock = |versions: &[(&str, &str)]| {
-        let mut packages = serde_json::Map::new();
-        for (name, version) in versions {
-            packages.insert(
-                format!("{SIBLING_PREFIX}{name}"),
-                serde_json::json!({ "version": version }),
-            );
-        }
-        serde_json::json!({ "packages": Value::Object(packages) })
-    };
-    let pin = pi_pin();
-    let full: Vec<(&str, &str)> = ["chord", "pi-agent-core", "pi-ai", "pi-telemetry", "pi-tui"]
-        .iter()
-        .map(|name| (*name, pin.as_str()))
-        .collect();
-    // The empty layout (Pi 1.0.4+) and the complete reviewed shrinkwrap layout
-    // both pass; a wrong version or a different nonempty set does not.
-    assert!(
-        check_pi_siblings(&nested_lock(&[])).is_ok(),
-        "an empty nested sibling set is the Pi 1.0.4+ layout and must pass"
-    );
-    assert!(
-        check_pi_siblings(&nested_lock(&full)).is_ok(),
-        "the complete reviewed shrinkwrap layout must pass"
-    );
-    let mut wrong_version = full.clone();
-    wrong_version[4].1 = "0.0.0";
-    assert!(
-        check_pi_siblings(&nested_lock(&wrong_version)).is_err(),
-        "a nested sibling at the wrong version must fail the gate"
-    );
-    assert!(
-        check_pi_siblings(&nested_lock(&full[..4])).is_err(),
-        "a different nonempty nested sibling set must fail the gate"
-    );
-
-    // An aliased package inserted into the bridge lock must fail the gate.
-    let mut bridge_lock = read_json("images/tools/pi/bridge/package-lock.json");
-    if let Some(packages) = bridge_lock["packages"].as_object_mut() {
-        packages.insert(
-            "node_modules/@earendil-works/pi-ai".to_string(),
-            serde_json::json!({ "version": "0.0.0" }),
+    for (name, mutated) in [
+        (
+            "dropping --frozen-lockfile",
+            script.replace(" --frozen-lockfile", ""),
+        ),
+        (
+            "dropping --ignore-scripts",
+            script.replace("--ignore-scripts", "--frozen-lockfile"),
+        ),
+        (
+            "restoring --legacy-peer-deps",
+            script.replace("--ignore-scripts", "--ignore-scripts --legacy-peer-deps"),
+        ),
+        (
+            "restoring --no-optional",
+            script.replace("--ignore-scripts", "--ignore-scripts --no-optional"),
+        ),
+        (
+            "reintroducing a bridge absence producer",
+            script.replace(
+                "installed=1",
+                "printf 'absent-transport %s\\n' 56 >\"$STATUS_DIR/pi-claude-bridge\"",
+            ),
+        ),
+        (
+            "bypassing the hard runner",
+            script.replace("run-pnpm.sh", "sh -c"),
+        ),
+    ] {
+        assert_ne!(
+            mutated, script,
+            "the {name} mutation must change the script"
+        );
+        assert!(
+            check_bridge_install_flags(&mutated).is_err(),
+            "{name} must fail the gate"
         );
     }
+
+    // A required flag that exists only in a trailing shell comment is never
+    // passed to the manager and must not satisfy the gate.
+    let commented = "# run-pnpm.sh install --prod --frozen-lockfile\nrun-pnpm.sh ok \\\n    --ignore-scripts # --package-import-method=copy --config.trust-policy=no-downgrade\n";
     assert!(
-        check_no_loader_aliased_pi_package(&bridge_lock).is_err(),
-        "an aliased bridge package must fail the gate"
+        check_bridge_install_flags(commented).is_err(),
+        "a required flag only in a trailing comment must not satisfy the gate"
     );
+
+    // A reviewed project whose four-input bytes no longer match its pins must
+    // fail the digest gate before any structural claim is made about it. The
+    // graph adapter is the only reader of a migrated project, so this is the
+    // control that the retired npm-lock readers used to provide.
+    for source in [pi_project(), bridge_project()] {
+        let fixture = ProjectFixture::copy(&source, "stale-pin");
+        fixture.rewrite("package.json", |text| {
+            text.replacen("\"version\": \"0.0.0\"", "\"version\": \"0.0.1\"", 1)
+        });
+        let error = match read_graph(&fixture.project) {
+            Ok(_) => panic!("a stale {} input pin must fail the graph gate", source.kind),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("bytes differ from reviewed pin"),
+            "the digest gate, not a downstream rule, must reject a stale input: {error:?}"
+        );
+    }
+
+    // An npm project lock reappearing beside the four pnpm inputs must fail the
+    // unreviewed-input gate: the migration cannot leave a second lock format.
+    {
+        let source = pi_project();
+        let fixture = ProjectFixture::copy(&source, "npm-lock-returned");
+        fixture.write("package-lock.json", "{\"lockfileVersion\": 3}\n");
+        let error = match read_graph(&fixture.project) {
+            Ok(_) => panic!("a returned npm lock must fail the graph gate"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("unreviewed input: package-lock.json"),
+            "an npm lock must be refused as an unreviewed input: {error:?}"
+        );
+    }
 
     // A dsh input whose bytes no longer match the reviewed pins must fail the
     // graph gate before any structural claim is made about it.
-    let stale = DshFixture::copy("stale-pin");
+    let stale = ProjectFixture::copy(
+        &MigratedProject::committed("dsh", "images/tools/dsh"),
+        "stale-pin",
+    );
     stale.rewrite("package.json", |text| {
         text.replacen("\"0.1.5-rc.2\"", "\"0.1.5-rc.1\"", 1)
     });
-    let error = match read_dsh_graph(&stale.project) {
+    let error = match read_graph(&stale.project) {
         Ok(_) => panic!("a stale dsh input pin must fail the graph gate"),
         Err(error) => error,
     };
@@ -1767,13 +2486,26 @@ fn image_source_guards_reject_mutations() {
     );
 }
 
-/// The `sh <script>` command each recipe phase must run. dsh is the migrated
-/// pnpm consumer, so both of its files come from the bound source directory.
-fn dsh_or_npm_invocations(tool: &str) -> [(&'static str, String); 2] {
+/// The `sh <script>` command each recipe phase must run. dsh and Pi are the
+/// migrated pnpm consumers, so their files come from a bound source directory:
+/// dsh keeps `/tmp/dsh-source` and Pi mounts the whole tools directory at
+/// `/tmp/standard-tools`, which is also the finished gate's path.
+fn phase_invocations(tool: &str) -> [(&'static str, String); 2] {
     if tool == "dsh" {
         [
             ("install", "sh /tmp/dsh-source/install-dsh.sh".to_string()),
             ("verify", "sh /tmp/dsh-source/verify-dsh.sh".to_string()),
+        ]
+    } else if tool == "pi" {
+        [
+            (
+                "install",
+                "sh /tmp/standard-tools/pi/install-pi.sh".to_string(),
+            ),
+            (
+                "verify",
+                "sh /tmp/standard-tools/pi/verify-pi.sh".to_string(),
+            ),
         ]
     } else {
         [
@@ -7175,6 +7907,92 @@ fn check_dsh_source_block(active: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The Pi block binds the whole tool directory (preparation driver, converter,
+/// extractor, installed-graph and byte/runtime checkers, dispatch data), the
+/// shared project module at the sibling path both adapters resolve, the pnpm
+/// sources and the composed helper. Every helper is a mount: a COPY would put
+/// the archive parser and byte comparator in the runtime layer.
+fn check_pi_source_block(active: &str) -> Result<(), String> {
+    for (prefix, target) in [
+        ("tools/pi", "/opt/agent-vm/pi/"),
+        ("tools/pi/bridge", "/opt/agent-vm/pi-packages/"),
+    ] {
+        let copy = format!(
+            "COPY {prefix}/package.json {prefix}/pnpm-lock.yaml {prefix}/pnpm-workspace.yaml \
+             {prefix}/pnpm-inputs.sha256 {target}"
+        );
+        if active.matches(&copy).count() != 1 {
+            return Err(format!("{target} needs exactly one four-input COPY"));
+        }
+        if active.contains(&format!("COPY {prefix}/package-lock.json")) {
+            return Err(format!("{target} must not COPY an npm project lock"));
+        }
+    }
+    for (phase, script) in phase_invocations("pi") {
+        let instruction = active
+            .lines()
+            .find(|line| line.contains(&script))
+            .ok_or_else(|| format!("missing {phase}-pi invocation"))?;
+        for token in [
+            RECIPE_CONTRACT_MOUNT,
+            "--mount=type=bind,source=tools/pi,target=/tmp/standard-tools/pi,ro",
+            "--mount=type=bind,source=tools/pnpm-project.py,target=/tmp/standard-tools/pnpm-project.py,ro",
+            "--mount=type=bind,source=tools/pnpm-host-manager.py,target=/tmp/standard-tools/pnpm-host-manager.py,ro",
+            "--mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro",
+            "AGENT_INSTALL_SOFT_FAIL=",
+            "AGENT_VM_PI_SOURCE_DIR=/tmp/standard-tools/pi",
+            "AGENT_VM_PI_SHARED=/tmp/standard-tools/pnpm-project.py",
+            "PNPM_SOURCE_DIR=/tmp/pnpm-source",
+        ] {
+            if !instruction.split_whitespace().any(|word| word == token) {
+                return Err(format!("pi {phase} RUN misses {token}"));
+            }
+        }
+    }
+    let bridge_install = active
+        .lines()
+        .find(|line| line.contains("sh /tmp/standard-tools/pi/install-pi-packages.sh"))
+        .ok_or("missing install-pi-packages invocation")?;
+    for token in [
+        RECIPE_CONTRACT_MOUNT,
+        "--mount=type=bind,source=tools/pi,target=/tmp/standard-tools/pi,ro",
+        "--mount=type=bind,source=tools/pnpm-project.py,target=/tmp/standard-tools/pnpm-project.py,ro",
+        "--mount=type=bind,source=tools/pnpm-host-manager.py,target=/tmp/standard-tools/pnpm-host-manager.py,ro",
+        "--mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro",
+        "AGENT_INSTALL_SOFT_FAIL=",
+        "AGENT_VM_PI_SOURCE_DIR=/tmp/standard-tools/pi",
+        "AGENT_VM_PI_SHARED=/tmp/standard-tools/pnpm-project.py",
+        "PNPM_SOURCE_DIR=/tmp/pnpm-source",
+    ] {
+        if !bridge_install.split_whitespace().any(|word| word == token) {
+            return Err(format!("bridge install RUN misses {token}"));
+        }
+    }
+    // The byte checker and the target platform travel as explicit values: the
+    // host is never guessed and a default path is never relied on.
+    let install = active
+        .lines()
+        .find(|line| line.contains(&phase_invocations("pi")[0].1))
+        .ok_or("missing install-pi invocation")?;
+    for token in [
+        "AGENT_VM_PI_BYTES_CHECK=/tmp/standard-tools/pi/check-installed-bytes.mjs",
+        "AGENT_VM_PI_TARGET_PLATFORM=linux/${TARGETARCH}",
+        "AGENT_VM_PI_WORK_DIR=/tmp/pi-verify",
+    ] {
+        if !install.contains(token) {
+            return Err(format!("pi install RUN misses {token}"));
+        }
+    }
+    // The mounted typescript source is build-only, so the runtime keeps the
+    // wrapper and the seed as the only executable Pi artefacts.
+    if active.contains("COPY tools/pi/prepare-project.py")
+        || active.contains("COPY tools/pi/check-installed-bytes.mjs")
+    {
+        return Err("a build-only Pi helper is COPYed into the layer".into());
+    }
+    Ok(())
+}
+
 // Narrow presence checks over active continued instructions, not a layer parser.
 fn check_standard_blocks(text: &str) -> Result<(), String> {
     let active = text
@@ -7194,13 +8012,14 @@ fn check_standard_blocks(text: &str) -> Result<(), String> {
     }
     check_recipe_contract_builder(text)?;
     for tool in RECIPES {
-        for (phase, script) in dsh_or_npm_invocations(tool) {
+        for (phase, script) in phase_invocations(tool) {
             if !active.contains(&script) {
                 return Err(format!("missing {phase}-{tool} invocation"));
             }
         }
     }
     check_dsh_source_block(&active)?;
+    check_pi_source_block(&active)?;
     if !active.contains("sh /tmp/verify-standard.sh") {
         return Err("missing final gate".into());
     }
@@ -7235,7 +8054,7 @@ fn standard_blocks_and_mutations() {
     for tool in RECIPES {
         assert!(!repo_path(&format!("images/tools/{tool}/Dockerfile")).exists());
         assert!(!repo_path(&format!("images/tools/{tool}/contract")).exists());
-        for (phase, script) in dsh_or_npm_invocations(tool) {
+        for (phase, script) in phase_invocations(tool) {
             assert!(text.contains(&script), "{phase}-{tool} must be invoked");
             assert!(
                 check_standard_blocks(&text.replacen(&script, "true", 1)).is_err(),
@@ -7260,7 +8079,7 @@ fn standard_blocks_and_mutations() {
     // Each dsh phase owns its own mount, so one RUN cannot borrow another's. Every
     // phase is mutated on its own mount: removed, wrong source, wrong stage and
     // writable. The claim recorded for the review was per-RUN, not first-RUN.
-    for (phase, script) in dsh_or_npm_invocations("dsh") {
+    for (phase, script) in phase_invocations("dsh") {
         let script_at = text.find(&script).expect("dsh script");
         let mount_at = text[..script_at]
             .rfind(RECIPE_CONTRACT_MOUNT)
@@ -7316,6 +8135,86 @@ fn standard_blocks_and_mutations() {
         .is_err(),
         "a generated .bin wrapper must be rejected"
     );
+
+    // The Pi block's mounts are per-RUN too: the preparation driver, the shared
+    // module, the pnpm sources and the composed helper cannot be borrowed from
+    // another RUN, and the bridge install cannot quietly drop back to a COPYed
+    // installer. Each mount is mutated on its own phase.
+    const PI_MOUNTS: [&str; 5] = [
+        "--mount=type=bind,source=tools/pi,target=/tmp/standard-tools/pi,ro",
+        "--mount=type=bind,source=tools/pnpm-project.py,target=/tmp/standard-tools/pnpm-project.py,ro",
+        "--mount=type=bind,source=tools/pnpm-host-manager.py,target=/tmp/standard-tools/pnpm-host-manager.py,ro",
+        "--mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro",
+        RECIPE_CONTRACT_MOUNT,
+    ];
+    for (phase, script) in phase_invocations("pi") {
+        let script_at = text.find(&script).expect("pi script");
+        for mount in PI_MOUNTS {
+            let mount_at = text[..script_at]
+                .rfind(mount)
+                .unwrap_or_else(|| panic!("{phase}-pi must precede {mount}"));
+            let mutated = format!(
+                "{}{}{}",
+                &text[..mount_at],
+                "--mount=type=bind,source=missing,ro",
+                &text[mount_at + mount.len()..]
+            );
+            assert!(
+                check_standard_blocks(&mutated).is_err(),
+                "pi {phase} accepted a rewritten {mount}"
+            );
+        }
+    }
+    let bridge_script = "sh /tmp/standard-tools/pi/install-pi-packages.sh";
+    let bridge_at = text.find(bridge_script).expect("bridge script");
+    for mount in PI_MOUNTS {
+        let mount_at = text[..bridge_at]
+            .rfind(mount)
+            .expect("bridge mount precedes the script");
+        let mutated = format!(
+            "{}{}{}",
+            &text[..mount_at],
+            "--mount=type=bind,source=missing,ro",
+            &text[mount_at + mount.len()..]
+        );
+        assert!(
+            check_standard_blocks(&mutated).is_err(),
+            "bridge install accepted a rewritten {mount}"
+        );
+    }
+    for mutation in [
+        "AGENT_VM_PI_TARGET_PLATFORM=linux/${TARGETARCH}",
+        "AGENT_VM_PI_BYTES_CHECK=/tmp/standard-tools/pi/check-installed-bytes.mjs",
+        "AGENT_VM_PI_SHARED=/tmp/standard-tools/pnpm-project.py",
+        "AGENT_VM_PI_WORK_DIR=/tmp/pi-verify",
+    ] {
+        let mutated = text.replacen(mutation, "AGENT_VM_UNUSED=1", 1);
+        assert_ne!(mutated, text, "the mutation must change {mutation}");
+        assert!(
+            check_standard_blocks(&mutated).is_err(),
+            "a dropped {mutation} must be rejected"
+        );
+    }
+    // A COPYed build-only helper in place of its mount must be rejected.
+    let copied = text.replacen(
+        "--mount=type=bind,source=tools/pi,target=/tmp/standard-tools/pi,ro",
+        "--mount=type=bind,source=tools/pi/install-pi.sh,target=/tmp/install-pi.sh,ro",
+        1,
+    );
+    assert!(
+        check_standard_blocks(&copied).is_err(),
+        "whole-source mount is required"
+    );
+    let npm_copy = text.replacen(
+        "COPY tools/pi/package.json tools/pi/pnpm-lock.yaml tools/pi/pnpm-workspace.yaml tools/pi/pnpm-inputs.sha256 /opt/agent-vm/pi/",
+        "COPY tools/pi/package.json tools/pi/package-lock.json /opt/agent-vm/pi/",
+        1,
+    );
+    assert_ne!(npm_copy, text);
+    assert!(
+        check_standard_blocks(&npm_copy).is_err(),
+        "the four-input COPY must replace the two-file npm COPY"
+    );
 }
 
 #[test]
@@ -7349,7 +8248,7 @@ fn base_pnpm_pin_and_launcher_ownership() {
         manifest["dependencies"].get("pnpm").is_none(),
         "the dsh project must not depend on pnpm"
     );
-    let graph = read_dsh_graph(&DshProjectFiles::committed())
+    let graph = read_graph(&MigratedProject::committed("dsh", "images/tools/dsh"))
         .expect("the reviewed dsh inputs form a valid graph");
     assert!(
         !graph.carries("pnpm"),

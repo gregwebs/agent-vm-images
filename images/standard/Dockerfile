@@ -77,33 +77,64 @@ RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro 
     sh /tmp/dsh-source/verify-dsh.sh
 
 # pi
+# Pi and the bridge are reviewed pnpm projects, so the block mirrors dsh: four
+# published inputs per prefix, and every build-only helper arrives through a
+# read-only mount and never through COPY. The repository shape is reproduced
+# under /tmp/standard-tools so the preparation driver resolves its shared module
+# as a sibling both here and in the finished gate, and the target platform is
+# passed explicitly because a guest image may be built on another architecture.
+#
+# Both RUN lines that execute Pi code begin by removing every inherited
+# AGENT_VM_PI_*: an image ENV, or a build reusing another stage's environment,
+# would otherwise choose the wrapper the gate executes, switch its bridge gates
+# off, or pick the extension files its registration probes load. The removal is a
+# family statement rather than a list, so a seam added later is covered, and it
+# precedes the assignments below -- anything assigned before it goes with the
+# rest. `script/test/pi-verify.sh` executes the statement and fails if either RUN
+# line drops it.
+ARG TARGETARCH
 ARG AGENT_VERSION_PI=
 ARG AGENT_VERSION_PI_CLAUDE_BRIDGE=
 
 LABEL org.agent-vm.version.pi="${AGENT_VERSION_PI:-1.4.0}" \
       org.agent-vm.version.pi-claude-bridge="${AGENT_VERSION_PI_CLAUDE_BRIDGE:-0.8.0}"
 
-COPY tools/pi/package.json tools/pi/package-lock.json /opt/agent-vm/pi/
+COPY tools/pi/package.json tools/pi/pnpm-lock.yaml tools/pi/pnpm-workspace.yaml tools/pi/pnpm-inputs.sha256 /opt/agent-vm/pi/
 RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
-    --mount=type=bind,source=tools/pi/install-pi.sh,target=/tmp/install-pi.sh,ro \
-    --mount=type=bind,source=tools/pi/prepare-lock.sh,target=/tmp/prepare-pi-lock.sh,ro \
+    --mount=type=bind,source=tools/pi,target=/tmp/standard-tools/pi,ro \
+    --mount=type=bind,source=tools/pnpm-project.py,target=/tmp/standard-tools/pnpm-project.py,ro \
+    --mount=type=bind,source=tools/pnpm-host-manager.py,target=/tmp/standard-tools/pnpm-host-manager.py,ro \
+    --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
+    unset $(env | sed -n 's/^\(AGENT_VM_PI_[0-9A-Za-z_]*\)=.*/\1/p') && \
+    mkdir -p /tmp/pi-verify && \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
-    AGENT_VM_PREPARE_LOCK=/tmp/prepare-pi-lock.sh \
+    AGENT_VM_PI_SOURCE_DIR=/tmp/standard-tools/pi \
+    AGENT_VM_PI_SHARED=/tmp/standard-tools/pnpm-project.py \
+    AGENT_VM_PI_BYTES_CHECK=/tmp/standard-tools/pi/check-installed-bytes.mjs \
+    AGENT_VM_PI_RUNTIME_CHECK=/tmp/standard-tools/pi/check-runtime.mjs \
+    AGENT_VM_PI_WORK_DIR=/tmp/pi-verify \
+    AGENT_VM_PI_TARGET_PLATFORM=linux/${TARGETARCH} \
     AGENT_VM_VERSION_PI="${AGENT_VERSION_PI}" \
     AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
-    sh /tmp/recipe-contract/run-install.sh pi /opt/agent-vm/install-status/pi sh /tmp/install-pi.sh
+    PNPM_SOURCE_DIR=/tmp/pnpm-source \
+    sh /tmp/recipe-contract/run-install.sh pi /opt/agent-vm/install-status/pi sh /tmp/standard-tools/pi/install-pi.sh; \
+    status=$?; rmdir /tmp/pi-verify || { echo "pi: invocation scratch parent was not cleaned" >&2; status=1; }; exit $status
 
-COPY tools/pi/bridge/package.json tools/pi/bridge/package-lock.json /opt/agent-vm/pi-packages/
+COPY tools/pi/bridge/package.json tools/pi/bridge/pnpm-lock.yaml tools/pi/bridge/pnpm-workspace.yaml tools/pi/bridge/pnpm-inputs.sha256 /opt/agent-vm/pi-packages/
 RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
-    --mount=type=bind,source=tools/pi/install-pi-packages.sh,target=/tmp/install-pi-packages.sh,ro \
-    --mount=type=bind,source=tools/pi/bridge/prepare-lock.sh,target=/tmp/prepare-bridge-lock.sh,ro \
+    --mount=type=bind,source=tools/pi,target=/tmp/standard-tools/pi,ro \
+    --mount=type=bind,source=tools/pnpm-project.py,target=/tmp/standard-tools/pnpm-project.py,ro \
+    --mount=type=bind,source=tools/pnpm-host-manager.py,target=/tmp/standard-tools/pnpm-host-manager.py,ro \
+    --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
-    AGENT_VM_PREPARE_LOCK=/tmp/prepare-bridge-lock.sh \
+    AGENT_VM_PI_SOURCE_DIR=/tmp/standard-tools/pi \
+    AGENT_VM_PI_SHARED=/tmp/standard-tools/pnpm-project.py \
     AGENT_VM_VERSION_PI_CLAUDE_BRIDGE="${AGENT_VERSION_PI_CLAUDE_BRIDGE}" \
     AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
-    sh /tmp/recipe-contract/run-install.sh pi-claude-bridge /opt/agent-vm/install-status/pi-claude-bridge sh /tmp/install-pi-packages.sh
+    PNPM_SOURCE_DIR=/tmp/pnpm-source \
+    sh /tmp/recipe-contract/run-install.sh pi-claude-bridge /opt/agent-vm/install-status/pi-claude-bridge sh /tmp/standard-tools/pi/install-pi-packages.sh
 
 COPY --chmod=0755 tools/pi/seed-claude-bridge-config.sh /opt/agent-vm/seed.d/20-pi-claude-bridge
 
@@ -113,13 +144,23 @@ RUN chmod -R a+rX /opt/agent-vm/pi-extensions
 COPY --chmod=0755 tools/pi/pi.sh /usr/local/bin/pi
 
 RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
-    --mount=type=bind,source=tools/pi/verify-pi.sh,target=/tmp/verify-pi.sh,ro \
+    --mount=type=bind,source=tools/pi,target=/tmp/standard-tools/pi,ro \
+    --mount=type=bind,source=tools/pnpm-project.py,target=/tmp/standard-tools/pnpm-project.py,ro \
+    --mount=type=bind,source=tools/pnpm-host-manager.py,target=/tmp/standard-tools/pnpm-host-manager.py,ro \
+    --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
+    unset $(env | sed -n 's/^\(AGENT_VM_PI_[0-9A-Za-z_]*\)=.*/\1/p') && \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
+    AGENT_VM_PI_SOURCE_DIR=/tmp/standard-tools/pi \
+    AGENT_VM_PI_SHARED=/tmp/standard-tools/pnpm-project.py \
     AGENT_VM_VERSION_PI="${AGENT_VERSION_PI}" \
     AGENT_VM_VERSION_PI_CLAUDE_BRIDGE="${AGENT_VERSION_PI_CLAUDE_BRIDGE}" \
+    AGENT_VM_PI_TARGET_PLATFORM=linux/${TARGETARCH} \
+    AGENT_VM_PI_RUNTIME_CHECK=/tmp/standard-tools/pi/check-runtime.mjs \
+    AGENT_VM_PI_ENTRY=/opt/agent-vm/pi/node_modules/.bin/pi \
     AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
-    sh /tmp/verify-pi.sh
+    PNPM_SOURCE_DIR=/tmp/pnpm-source \
+    sh /tmp/standard-tools/pi/verify-pi.sh
 
 # codex
 ARG AGENT_VERSION_CODEX=rust-v0.159.3

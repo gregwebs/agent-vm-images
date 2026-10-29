@@ -21,7 +21,7 @@
 #
 # It also owns two shared mechanics:
 #   * a private mktemp receipt path exported as AGENT_VM_TRANSPORT_RECEIPT, so
-#     download.sh/run-npm.sh have one home for a classified failure;
+#     download.sh has one home for a classified failure;
 #   * the RESULT_FILE status record, written `pending` before the attempt so an
 #     inherited `installed` from an earlier layer cannot mask a failed install.
 set -eu
@@ -55,7 +55,10 @@ if [ "$status" -eq 0 ]; then
     exit 0
 fi
 
-if [ "$status" -eq 75 ] && grep -Eq '^transport (download [0-9]+|npm [A-Za-z0-9_]+)$' "$AGENT_VM_TRANSPORT_RECEIPT"; then
+# Only the download operation has a classified producer. `transport npm CODE`
+# was retired with run-npm.sh and is deliberately not accepted here, so a stale
+# or hand-written receipt cannot soften a failure.
+if [ "$status" -eq 75 ] && grep -Eq '^transport download [0-9]+$' "$AGENT_VM_TRANSPORT_RECEIPT"; then
     echo "run-install.sh: $name hit a classified transport failure the owning hook did not soften" >&2
     echo "run-install.sh: receipt: $(cat "$AGENT_VM_TRANSPORT_RECEIPT")" >&2
     exit 1

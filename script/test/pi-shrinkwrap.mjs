@@ -37,6 +37,10 @@ const expected = read('synthesized-package-lock.json');
 const importedRaw = read('result/parse-yaml.stdout');
 const curatedMutants = read('mutants.json');
 const expectedDelta = read('expected-delta.json');
+// The committed per-selection review the production driver hands the validator.
+const reviewed = JSON.parse(fs.readFileSync(
+  fileURLToPath(new URL('../../images/tools/pi/reviewed-normalisations.json', import.meta.url)), 'utf8'));
+const reviewedFor087 = reviewed.selections['@earendil-works/pi-coding-agent@0.87.0'].normalisations;
 
 // The converter's staged project name is its own; it is not fidelity data, so it
 // is the one field both sides drop before the deep comparison.
@@ -259,6 +263,7 @@ function delta(imported, overrides = {}) {
     shrinkwrap: overrides.shrinkwrap ?? staged,
     importedProject: imported,
     allowedMissingSiblingSris: overrides.allowed ?? allowedSiblings,
+    reviewedNormalisations: overrides.reviewed ?? reviewedFor087,
   });
 }
 
@@ -288,6 +293,46 @@ assert.equal(reported.get('occurrence-multiplicity-collapse').detail.identity, '
 assert.equal(reported.get('explicit-peer-expansion').detail.imported, 'ws@8.21.0');
 assert.equal(reported.get('peer-declaration-completion').detail.peer, 'supports-color');
 for (const entry of clean.reported) assert.equal(entry.requiresReview, true, `${entry.code} must stay review-only`);
+
+// --- normalisations are reviewed per selection, never allowlisted -----------
+//
+// The three entries above are accepted because the committed record names exactly
+// them for 0.87.0. The same graph with any other review is refused, so a reported
+// normalisation has to be reviewed to enter a pinned graph.
+assert.deepEqual(clean.reported.map(entry => ({code: entry.code, detail: entry.detail})),
+  reviewedFor087, 'the committed review must describe exactly what the converter reports');
+
+const noReview = delta(toGraph(importedRaw), {reviewed: []});
+assert.equal(noReview.accepted, false, 'no review must accept no normalisation');
+assert.deepEqual(noReview.rejected.map(entry => entry.code).sort(),
+  ['unreviewed-normalisation', 'unreviewed-normalisation', 'unreviewed-normalisation']);
+assert.ok(noReview.rejected.some(entry => entry.detail.startsWith('peer-declaration-completion:')));
+
+// One unreviewed normalisation among reviewed ones is enough to stop it: an
+// injected completion for another owner/peer must not ride along with the three.
+const partial = delta(toGraph(importedRaw), {reviewed: reviewedFor087.slice(1)});
+assert.equal(partial.accepted, false);
+assert.deepEqual(partial.rejected.map(entry => entry.code), ['unreviewed-normalisation']);
+assert.ok(partial.rejected[0].detail.startsWith('explicit-peer-expansion:'));
+
+const injected = delta(toGraph(importedRaw), {reviewed: [
+  ...reviewedFor087,
+  {code: 'peer-declaration-completion',
+    detail: {owner: 'typescript@5.9.3', peer: 'chalk', expected: null, imported: '*'}},
+]});
+assert.equal(injected.accepted, false, 'a reviewed entry that never occurs is not a licence');
+assert.deepEqual(injected.rejected.map(entry => entry.code), ['review-unused']);
+assert.ok(injected.rejected[0].detail.includes('typescript@5.9.3'));
+
+// A reviewed record that has drifted from this selection (same kind, another
+// owner) cannot substitute for the reviewed one.
+const drifted = delta(toGraph(importedRaw), {reviewed: reviewedFor087.map(entry =>
+  entry.code === 'occurrence-multiplicity-collapse'
+    ? {code: entry.code, detail: {...entry.detail, identity: 'agent-base@7.1.2'}}
+    : entry)});
+assert.equal(drifted.accepted, false);
+assert.deepEqual(drifted.rejected.map(entry => entry.code).sort(),
+  ['review-unused', 'unreviewed-normalisation']);
 
 function mutateImport(edits) {
   const raw = clone(importedRaw);
@@ -322,6 +367,34 @@ const peerRange = mutateImport([{
   path: ['packages', 'debug@4.4.3', 'peerDependencies', 'supports-color'], value: '^9.0.0',
 }]);
 assert.ok(delta(peerRange).rejected.some(entry => entry.code === 'peer-declaration-changed'));
+
+// A retargeted peer context: `pi-agent-core`'s instance was resolved against
+// `ws@8.21.0`, and moving that text to another installed package while every edge,
+// SRI and declaration stays equal must still be refused. Contexts are opaque whole
+// keys (ADR 0003), so what is checked is that the entry names an instance the
+// authenticated graph declares as a peer and resolves for it.
+function retargeted() {
+  const raw = clone(importedRaw);
+  const name = '@earendil-works/pi-agent-core';
+  const before = `${name}@0.87.0(ws@8.21.0)`;
+  const after = `${name}@0.87.0(debug@4.4.3)`;
+  raw.snapshots[after] = raw.snapshots[before];
+  delete raw.snapshots[before];
+  for (const snapshot of Object.values(raw.snapshots)) {
+    for (const field of ['dependencies', 'optionalDependencies']) {
+      if (snapshot[field]?.[name] === '0.87.0(ws@8.21.0)') snapshot[field][name] = '0.87.0(debug@4.4.3)';
+    }
+  }
+  return toGraph(raw);
+}
+const retarget = delta(retargeted());
+assert.equal(retarget.accepted, false, 'a retargeted peer context must be refused');
+assert.ok(retarget.rejected.some(entry => entry.code === 'peer-context-changed'
+  && entry.detail.includes('debug@4.4.3')), JSON.stringify(retarget.rejected.slice(0, 3)));
+// The keeper: the committed conversion has one context-bearing identity per
+// mapped pair and no context change, so the check is not refusing by accident.
+assert.equal(clean.counts.peerContextPairs, clean.counts.mappedPairs);
+assert.equal(clean.counts.peerContextChanges, 0);
 
 // The supplement set is bound: an extra or mis-versioned receipt is refused.
 const extraAllowed = delta(toGraph(importedRaw), {allowed: [...allowedSiblings, {
@@ -370,14 +443,26 @@ assert.equal(JSON.parse(cli.stdout).supplements, undefined);
 assert.equal(JSON.parse(cli.stderr.replace('completed SRIs: ', '')).length, 5, cli.stderr);
 
 const graphFile = write('graph.json', toGraph(importedRaw));
+const reviewedFile = write('reviewed.json', reviewedFor087);
 const accepted = run(['validate', '--expect', synthesizedFile, '--graph', graphFile,
-  '--allowed-missing', write('allowed.json', allowedSiblings)]);
+  '--reviewed', reviewedFile, '--allowed-missing', write('allowed.json', allowedSiblings)]);
 assert.equal(accepted.status, 0, accepted.stderr);
 assert.equal(JSON.parse(accepted.stdout).accepted, true);
 
+// The review file is a required input: an omitted one would be indistinguishable
+// from an empty one, and the two must not share a meaning.
+const noReviewFile = run(['validate', '--expect', synthesizedFile, '--graph', graphFile,
+  '--allowed-missing', write('allowed3.json', allowedSiblings)]);
+assert.equal(noReviewFile.status, 2, '--reviewed is required');
+const emptyReview = run(['validate', '--expect', synthesizedFile, '--graph', graphFile,
+  '--reviewed', write('empty-reviewed.json', []),
+  '--allowed-missing', write('allowed4.json', allowedSiblings)]);
+assert.equal(emptyReview.status, 1, 'an empty review must reject every normalisation');
+assert.equal(JSON.parse(emptyReview.stdout).rejected[0].code, 'unreviewed-normalisation');
+
 const badGraph = write('bad-graph.json', mutateImport(curatedMutants[0].edits));
 const rejected = run(['validate', '--expect', synthesizedFile, '--graph', badGraph,
-  '--allowed-missing', write('allowed2.json', allowedSiblings)]);
+  '--reviewed', reviewedFile, '--allowed-missing', write('allowed2.json', allowedSiblings)]);
 assert.equal(rejected.status, 1, 'a rejected delta must exit 1');
 assert.equal(JSON.parse(rejected.stdout).accepted, false);
 assert.equal(JSON.parse(rejected.stdout).rejected[0].code, 'sri-changed');
@@ -388,4 +473,4 @@ const unknown = run(['wat']);
 assert.equal(unknown.status, 2);
 
 fs.rmSync(work, {recursive: true, force: true});
-process.stdout.write(`pi-shrinkwrap: ${curatedMutants.length} curated mutants and ${'a'} reviewed delta verified\n`);
+process.stdout.write(`pi-shrinkwrap: ${curatedMutants.length} curated mutants, the reviewed 0.87.0 delta and its per-selection normalisation gate verified\n`);

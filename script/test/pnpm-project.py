@@ -264,6 +264,36 @@ class CapabilityTests(unittest.TestCase):
             project.owned_scratch(capability, self.root)
         project.cleanup_scratch(scratch)
 
+    def test_stage_manager_route_is_closed(self):
+        stage = self.root / 'manager-stage'
+        stage.mkdir(mode=0o700)
+        capability = project.authorize_stage(stage, consumer='pi')
+        # The ordinary manager verb still refuses a bootstrap capability: a first
+        # import has no reviewed inputs and so cannot hold mutation authority.
+        with self.assertRaises(ValueError):
+            project.manager_argv(capability)
+        # A fixture needs an authorized fake or the authenticated base launcher.
+        with self.assertRaises(ValueError):
+            project.stage_manager_argv(capability)
+        with self.assertRaises(ValueError):
+            project.stage_manager_argv(project.authorize_mutation(self.prefix, consumer='pi'))
+        fake = self.root / 'fake-pnpm'
+        fake.write_text('#!/bin/sh\nexit 0\n')
+        fake.chmod(0o755)
+        with patch.dict(os.environ, {'AGENT_VM_FIXTURE_PNPM': str(fake)}):
+            self.assertEqual(project.stage_manager_argv(capability), [str(fake)])
+            # The stage route may not borrow the consumer's host acquisition
+            # variables either; ambiguity fails instead of picking one.
+            with patch.dict(os.environ, {'AGENT_VM_PI_PNPM_PACKAGE': str(self.root / 'stock')}):
+                with self.assertRaises(ValueError):
+                    project.stage_manager_argv(capability)
+        with patch.dict(os.environ, {'AGENT_VM_FIXTURE_PNPM': '',
+                                     'AGENT_VM_FIXTURE_BASE_PNPM': '1'}):
+            # The stock route authenticates the whole installed distribution; this
+            # host has none, so it fails instead of falling back to a PATH lookup.
+            with self.assertRaises((ValueError, OSError)):
+                project.stage_manager_argv(capability)
+
     def test_stage_authorization_refusals(self):
         inside = self.root / 'work'
         inside.mkdir()

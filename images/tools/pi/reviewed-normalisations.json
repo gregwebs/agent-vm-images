@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "purpose": "The representation normalisations an operator reviewed for one exact Pi selection. `import-shrinkwrap.mjs validate` reports every normalisation it finds and accepts only the ones listed here; a selection with no entry accepts none. This is a per-selection record of a review, not an allowlist for another selection or another version.",
+  "selections": {
+    "@earendil-works/pi-coding-agent@0.87.0": {
+      "review": "operator approval 6 (2026-10-28), recorded in docs/adr/0011-pi-selected-shrinkwrap.md and docs/standard-pnpm-migration.md; the three kinds and their effective equivalence are the reviewed Phase 0 result, transcribed here from script/test/fixtures/pi-shrinkwrap-0.87.0/expected-delta.json so the validator can bind the review to this selection's exact report",
+      "normalisations": [
+        {
+          "code": "explicit-peer-expansion",
+          "detail": {
+            "owner": "node_modules/@earendil-works/pi-coding-agent/node_modules/openai",
+            "name": "ws",
+            "imported": "ws@8.21.0"
+          }
+        },
+        {
+          "code": "occurrence-multiplicity-collapse",
+          "detail": {
+            "identity": "agent-base@9.0.0",
+            "expectedOccurrences": 2,
+            "importedSnapshots": 1
+          }
+        },
+        {
+          "code": "peer-declaration-completion",
+          "detail": {
+            "owner": "debug@4.4.3",
+            "peer": "supports-color",
+            "expected": null,
+            "imported": "*"
+          }
+        }
+      ]
+    }
+  }
+}

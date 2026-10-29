@@ -24,7 +24,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 import {
-  GraphError, binTargetsOf, hashFile, inventory, readGraph, readManifest, relative,
+  GraphError, binTargetsOf, familyShape, hashFile, inventory, readGraph, readManifest, relative,
   resolveInstances, targetPlatform,
 } from './installed-graph.mjs';
 
@@ -42,8 +42,51 @@ const DIRECTORY_ACCESS = 0o555;
 const fail = (code, detail) => { throw new GraphError(code, detail); };
 
 function usage() {
-  process.stderr.write('usage: check-installed-bytes.mjs PREFIX SIBLING EXTRACTED_PACKAGE\n');
+  process.stderr.write('usage: check-installed-bytes.mjs PREFIX SIBLING EXTRACTED_PACKAGE\n'
+    + '       check-installed-bytes.mjs inventory PREFIX\n');
   process.exit(2);
+}
+
+// The installer is the shell half of the same proof: it owns curl and the SRI
+// check, so it must learn *which* authenticated archives to fetch from the lock
+// rather than from the installed tree. `inventory` is that list and nothing
+// else: the reviewed family, and the bin-providing dependencies whose evidence
+// this checker will rehash. Both are derived from the lock alone.
+function familyInventory(prefixOperand) {
+  const contractDir = process.env.AGENT_VM_CONTRACT_DIR ?? '/tmp/recipe-contract';
+  const platform = targetPlatform().spelling;
+  const graph = readGraph({contractDir, prefix: prefixOperand});
+  const family = familyShape(graph);
+  const record = key => {
+    const snapshot = graph.snapshots.get(key);
+    const identity = snapshot.id.packageId;
+    const archive = graph.packages.get(`${identity.name}@${identity.version}`);
+    if (archive === undefined) fail('graph-json', `${key} has no archive record`);
+    if (typeof archive.integrity !== 'string' || !archive.integrity.startsWith('sha512-')) {
+      fail('lock-sri', `${identity.name}@${identity.version} has no sha512 SRI in the lock`);
+    }
+    if (typeof archive.tarball !== 'string' || !archive.tarball.startsWith('https://')) {
+      fail('lock-tarball', `${identity.name}@${identity.version} has no https tarball`);
+    }
+    return {name: identity.name, version: identity.version,
+            integrity: archive.integrity, tarball: archive.tarball};
+  };
+  const members = family.shape.map(base => record(family.keys.get(base)));
+  const familyNames = new Set(members.map(member => member.name));
+  const providers = new Map();
+  for (const base of family.shape) {
+    const snapshot = graph.snapshots.get(family.keys.get(base));
+    for (const edge of snapshot.edges ?? []) {
+      const target = graph.snapshots.get(edge.target);
+      const identity = target.id.packageId;
+      const archive = graph.packages.get(`${identity.name}@${identity.version}`);
+      if (archive === undefined) fail('graph-json', `${edge.target} has no archive record`);
+      // Family providers come from the family extractions, never from evidence.
+      if (archive.hasBin !== true || familyNames.has(identity.name)) continue;
+      providers.set(`${identity.name}@${identity.version}`, record(edge.target));
+    }
+  }
+  return {platform, family: members, providers: [...providers.values()]};
 }
 
 function sha512Integrity(tarball) {
@@ -318,6 +361,10 @@ function compareInventories({label, ownerArchive, installed, expectedLinks, expe
 }
 
 function main(argv) {
+  if (argv.length === 2 && argv[0] === 'inventory') {
+    process.stdout.write(`${JSON.stringify(familyInventory(argv[1]))}\n`);
+    return;
+  }
   if (argv.length !== 3) usage();
   const [prefixOperand, sibling, extractionOperand] = argv;
   if (!SIBLING_ARGUMENT.test(sibling)) fail('bad-sibling', `SIBLING must be a family package base name: ${JSON.stringify(sibling)}`);

@@ -32,22 +32,72 @@ set -eu
 # non-empty value as "skip" (dist/utils/version-check.js).
 export PI_SKIP_VERSION_CHECK=1
 
-# Overridable only so the black-box test in script/test/pi-wrapper.sh can point
-# at a fake. It is not a protection: the warning is advisory (the microVM is the
-# boundary), and a guest can reach the entry point directly anyway.
+# Overridable only so the black-box test in script/test/pi-wrapper.sh can point at a
+# fake. It is not a protection: the warning is advisory (the microVM is the
+# boundary), and a guest can reach the entry point directly anyway -- which is also
+# why the seam is *pinned* rather than removed: the standard image's verify RUN sets
+# AGENT_VM_PI_ENTRY to exactly this path, so the build-time gate cannot inherit a
+# different binary from an image ENV. `script/test/pi-verify.sh` fails if that pin
+# disappears.
 PI_ENTRY="${AGENT_VM_PI_ENTRY:-/opt/agent-vm/pi/node_modules/.bin/pi}"
 
 MANDATORY_EXTENSION=/opt/agent-vm/pi-extensions/guest-credential-warning.js
 
 # Pi dispatches a subcommand only when it is the FIRST argument: `pi -e X list`
 # treats `list` as a prompt and runs an agent turn, and `pi list -e X` rejects
-# the option. So a subcommand invocation is forwarded verbatim. The image build
-# asserts this list equals `pi --help`'s Commands block, so a pin bump that adds
-# a subcommand fails the build instead of silently mis-dispatching.
+# the option. So a subcommand invocation is forwarded verbatim.
+#
+# WHICH words are subcommands belongs to the installed Pi, not to this file: Pi
+# 0.87.0 has no `mcp` command, and forwarding `pi mcp ...` for it would let an
+# upstream prompt turn skip the mandatory extension. The installer therefore
+# generates `/opt/agent-vm/pi/agent-vm-subcommands` from the installed CLI's own
+# bounded `--help`, after checking it against a reviewed per-version expectation,
+# and publishes it as data only: one canonical sorted word per line, root-owned
+# 0644. This file owns the closed *vocabulary* below and refuses anything else, so
+# the data can only select words a reviewed wrapper already understands. An image
+# that ships no data file (or a replacement Pi in a later layer) keeps the literal
+# default list, exactly as before.
 PI_SUBCOMMANDS="auth config install list mcp remove uninstall update"
+PI_SUBCOMMAND_VOCABULARY=$PI_SUBCOMMANDS
+SUBCOMMAND_FILE="${AGENT_VM_PI_SUBCOMMANDS:-/opt/agent-vm/pi/agent-vm-subcommands}"
+
+if [ -e "$SUBCOMMAND_FILE" ] || [ -L "$SUBCOMMAND_FILE" ]; then
+    # A malformed list is refused before dispatch rather than silently falling
+    # back: a file that exists is an assertion about this Pi, not a hint.
+    if [ -L "$SUBCOMMAND_FILE" ] || [ ! -f "$SUBCOMMAND_FILE" ] || [ ! -r "$SUBCOMMAND_FILE" ]; then
+        echo "pi: refusing the subcommand list at $SUBCOMMAND_FILE (not a readable regular file)" >&2
+        exit 2
+    fi
+    if [ -s "$SUBCOMMAND_FILE" ]; then
+        LC_ALL=C awk -v vocabulary="$PI_SUBCOMMAND_VOCABULARY" '
+            BEGIN { count = 0; split(vocabulary, allowed, " ");
+                    for (slot in allowed) known[allowed[slot]] = 1; previous = "" }
+            { if (NF != 1 || $0 != $1 || !($1 in known)) exit 1
+              if (previous != "" && !(previous < $1)) exit 1
+              previous = $1
+              count++ }
+            END { if (count == 0) exit 1 }
+        ' "$SUBCOMMAND_FILE" >/dev/null 2>&1 || {
+            echo "pi: refusing the malformed subcommand list at $SUBCOMMAND_FILE" >&2
+            exit 2
+        }
+        if [ "$(tail -c 1 "$SUBCOMMAND_FILE" | wc -l | tr -d ' ')" != 1 ]; then
+            echo "pi: refusing the malformed subcommand list at $SUBCOMMAND_FILE" >&2
+            exit 2
+        fi
+        selected=
+        while IFS= read -r word || [ -n "$word" ]; do
+            selected="$selected $word"
+        done <"$SUBCOMMAND_FILE"
+        PI_SUBCOMMANDS=$selected
+    else
+        echo "pi: refusing the empty subcommand list at $SUBCOMMAND_FILE" >&2
+        exit 2
+    fi
+fi
 
 if [ "$#" -gt 0 ]; then
-    for subcommand in ${PI_SUBCOMMANDS}; do
+    for subcommand in $PI_SUBCOMMANDS; do
         if [ "$1" = "${subcommand}" ]; then
             exec "${PI_ENTRY}" "$@"
         fi

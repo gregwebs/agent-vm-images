@@ -140,7 +140,7 @@ func CompareDshUpdateArgument(request UpdateRequest, argument string) (UpdateCom
 
 func compareDshProjects(request UpdateRequest, before, after *DshProject) (UpdateComparison, *DshProject, error) {
 	comparison, err := compareSelection(KindDsh, projectSide(before.project), projectSide(after.project),
-		request.Requested, request.Refresh)
+		request.Requested, request.Refresh, RetainedSnapshotFreeze)
 	if err != nil {
 		return UpdateComparison{}, nil, err
 	}
@@ -175,7 +175,7 @@ func readAndCompareSelection(request UpdateRequest, argument *string) (UpdateCom
 		}
 	}
 	comparison, err := compareSelection(request.Kind, projectSide(before), projectSide(after),
-		request.Requested, request.Refresh)
+		request.Requested, request.Refresh, RetainedSnapshotFreeze)
 	if err != nil {
 		return UpdateComparison{}, nil, err
 	}
@@ -183,12 +183,40 @@ func readAndCompareSelection(request UpdateRequest, argument *string) (UpdateCom
 }
 
 // SelectionRequest is the closed comparison input: the requested exact version
-// (empty keeps the committed one) and whether a developer asked to refresh. It
-// carries no policy switch.
+// (empty keeps the committed one), whether a developer asked to refresh, and
+// which snapshot authority the request names. It carries no caller-supplied
+// policy switch: the authority is a typed value, and its zero value is the
+// retained freeze every existing path keeps using.
 type SelectionRequest struct {
 	Requested RequestedSelection
 	Refresh   RefreshMode
+	Authority SnapshotAuthority
 }
+
+// SnapshotAuthority names who decides what a retained snapshot record may say.
+//
+// The default is the retained freeze: once a project is reviewed, the same
+// name@version snapshot may not acquire, lose or rewrite edges, because the old
+// selection is the authority for those edges. That is right for an ordinary
+// update and for an initial adoption.
+//
+// A changed Pi selection whose authenticated archive carries its own
+// npm-shrinkwrap.json is different: the upstream shrinkwrap, not the previous
+// selection, is the authority for the graph. The preparation driver converts
+// that shrinkwrap and compares the imported graph against it separately, so the
+// frozen old edges must not be substituted for it. Archives stay frozen in both
+// modes (an SRI for the same name@version is immutable), as do the manifest,
+// workspace and manager invariants and the closure rules for additions and
+// removals.
+type SnapshotAuthority uint8
+
+const (
+	// RetainedSnapshotFreeze is the ordinary comparator: reviewed edges are frozen.
+	RetainedSnapshotFreeze SnapshotAuthority = iota
+	// ShrinkwrapAuthority is only reachable through the authenticated
+	// selected-shrinkwrap route, which imposes its own upstream comparator.
+	ShrinkwrapAuthority
+)
 
 // comparisonSide is the pure comparison view shared by a reviewed Project and a
 // captured candidate. readInput exists only for the equal/no-refresh byte rule,
@@ -236,9 +264,15 @@ func candidateSide(candidate *ValidatedCandidate) comparisonSide {
 	}
 }
 
-func compareSelection(kind Kind, before, after comparisonSide, requested RequestedSelection, refresh RefreshMode) (UpdateComparison, error) {
+func compareSelection(kind Kind, before, after comparisonSide, requested RequestedSelection, refresh RefreshMode, authority SnapshotAuthority) (UpdateComparison, error) {
 	if before.selection.Kind != kind || after.selection.Kind != kind {
 		return UpdateComparison{}, errorf("selection kind differs from the requested kind")
+	}
+	// Only pi publishes an authenticated dependency shrinkwrap, so only pi can
+	// name that shrinkwrap as the authority for its graph. For another kind the
+	// mode would silently replace the retained-edge freeze with nothing.
+	if authority == ShrinkwrapAuthority && kind != KindPi {
+		return UpdateComparison{}, errorf("shrinkwrap authority is only available for the %s kind", KindPi)
 	}
 	version := before.selection.Version
 	if explicit, ok := requested.Version(); ok {
@@ -352,6 +386,13 @@ func compareSelection(kind Kind, before, after comparisonSide, requested Request
 			// archive: npm versions are immutable, so a different SRI/tarball/metadata
 			// for the same name@version is a different artifact, not a refresh.
 			if requestedRefresh && field.name == "snapshots" {
+				continue
+			}
+			// The authenticated selected shrinkwrap is the authority for a changed
+			// Pi graph, so its snapshot records are compared by the upstream
+			// comparator instead of this freeze. Archive records are not relaxed:
+			// a changed SRI for the same name@version is still hard here.
+			if authority == ShrinkwrapAuthority && field.name == "snapshots" {
 				continue
 			}
 			oldRecord := field.oldRecords.Get(key).Clone()

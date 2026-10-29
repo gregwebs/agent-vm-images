@@ -85,14 +85,23 @@ installer and the only reader of a pin in an image;
 ## Current pnpm ownership
 
 Base owns `images/pnpm/`, authenticated bootstrap and the pnpm selection label.
-dsh now owns its four pnpm inputs (`package.json`, `pnpm-lock.yaml`,
-`pnpm-workspace.yaml`, `pnpm-inputs.sha256`) and its build-only preparation,
-comparison, override-derivation, install and runtime-check helpers; it inherits
-the base launcher without a private pnpm package. Pi, bridge and Copilot retain
-their current npm paths pending their #42 slices. Historical transfer entries
-below are historical, not current install instructions. See
-[runtime defaults](node-package-defaults.md),
-[ADR 0003](adr/0003-dsh-graph-freeze.md) and the
+dsh, Pi and the Pi bridge own their four pnpm inputs (`package.json`,
+`pnpm-lock.yaml`, `pnpm-workspace.yaml`, `pnpm-inputs.sha256`) and their
+build-only preparation/comparison/install/runtime-check helpers; all three
+inherit the base launcher without a private pnpm package. Copilot retains its
+npm path until PR 4 of #42. The build-only Pi/bridge helpers are mounted
+read-only during the install and verify RUNs and never COPYed into the image:
+whole directories (`images/tools/pi/`), the shared filesystem module
+(`images/tools/pnpm-project.py`, `images/tools/pnpm-host-manager.py`), the pnpm
+sources and the composed `recipe-contract` directory. The new
+`images/tools/pi/prepare-project.py` is the single owning preparation driver for
+a changed or refreshed Pi/bridge selection, and the maintainer-only
+`script/dev/adopt-pi-bridge-pnpm.py` is the initial adoption driver that reads
+the fixed reviewed baseline git objects and never runs from an ordinary
+preparation. Historical transfer entries below are historical, not current
+install instructions. See [runtime defaults](node-package-defaults.md),
+[ADR 0003](adr/0003-dsh-graph-freeze.md),
+[ADR 0011](adr/0011-pi-selected-shrinkwrap.md) and the
 [migration ledger](standard-pnpm-migration.md).
 
 ## Selective migration manifest (historical)
@@ -103,7 +112,11 @@ READMEs may be adapted to their new owner):
 - `images/install-zellij.sh`
 - `images/recipe-contract/run-install.sh`
 - `images/recipe-contract/download.sh`
-- `images/recipe-contract/run-npm.sh`
+- `images/recipe-contract/run-npm.sh` — historical: deleted in #52 when Pi and
+  the bridge moved to the four pnpm inputs and the last two live callers left.
+  The classified-transport receipt vocabulary is download-only from then on;
+  the reviewed bytes remain in git history and no current helper, test or image
+  executes it
 - `images/recipe-contract/run-report.sh`
 - `images/recipe-contract/` — Go record/access predicates; see [ADR 0004](adr/0004-go-build-helpers.md)
 - `images/tools/dsh/install-dsh.sh`
@@ -120,19 +133,32 @@ READMEs may be adapted to their new owner):
 - `images/tools/pi/verify-pi.sh`
 - `images/tools/pi/prepare-lock.sh`
 - `images/tools/pi/pi.sh`
-- `images/tools/pi/import-shrinkwrap.mjs` — added in #52 C3, build-only and
-  inactive until the activation commit
-- `images/tools/pi/archive.py` — added in #52 C3, build-only
-- `images/tools/pi/installed-graph.mjs` — added in #52 C3, build-only
-- `images/tools/pi/check-installed-bytes.mjs` — added in #52 C3, build-only
-- `images/tools/pi/check-runtime.mjs` — added in #52 C3, build-only
+- `images/tools/pi/import-shrinkwrap.mjs` — added in #52, build-only and mounted
+  read-only during install/verify; never copied into the image
+- `images/tools/pi/archive.py` — added in #52, build-only
+- `images/tools/pi/installed-graph.mjs` — added in #52, build-only
+- `images/tools/pi/prepare-project.py` — added in #52, build-only owning
+  preparation driver (candidate stage, route selection, comparison, pin,
+  frozen validation, four-input publication)
+- `images/tools/pi/check-installed-bytes.mjs`, `check-runtime.mjs` — added in
+  #52, build-only
+- `script/dev/adopt-pi-bridge-pnpm.py` — added in #52, maintainer-only initial
+  adoption from the fixed reviewed baseline; never a runtime or build caller
 - `images/tools/pi/seed-claude-bridge-config.sh`
 - `images/tools/pi/README.md`
-- `images/tools/pi/package.json`
-- `images/tools/pi/package-lock.json`
+- `images/tools/pi/package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`,
+  `pnpm-inputs.sha256` — the reviewed four pnpm inputs
+- `images/tools/pi/dispatch/{1.4.0,0.87.0}.txt` — reviewed per-selection
+  subcommand expectations used by the installer-generated dispatch data
+- `images/tools/pi/package-lock.json` — historical: removed in #52 when Pi moved
+  to the four pnpm inputs; the reviewed bytes remain in git history. No current
+  helper, test, image or upgrade reads it
 - `images/tools/pi/extensions/guest-credential-warning.js`
-- `images/tools/pi/bridge/package.json`
-- `images/tools/pi/bridge/package-lock.json`
+- `images/tools/pi/bridge/package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`,
+  `pnpm-inputs.sha256` — the reviewed four pnpm inputs
+- `images/tools/pi/bridge/package-lock.json` — historical: removed in #52 when
+  the bridge moved to the four pnpm inputs; the reviewed bytes remain in git
+  history
 - `images/tools/pi/bridge/prepare-lock.sh`
 - `images/tools/codex/install-codex.sh`
 - `images/tools/codex/verify-codex.sh`

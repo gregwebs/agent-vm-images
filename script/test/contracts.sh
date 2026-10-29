@@ -111,8 +111,9 @@ if [ "$guard_only" = false ]; then
     python3 script/test/gopls-closure-maintenance.py --go-root "$selected_goroot"
     for suite in agent-versions apt-sources claude-installer codex-installer copilot-installer copilot-verify \
         opencode-installer opencode-pnpm-prepare-lock opencode-pnpm-install opencode-pnpm-upgrade \
-        opencode-plugins-verify run-pnpm dsh-prepare-lock dsh-verify pi-install pi-prepare-lock pi-verify \
-        pi-wrapper shipped-installer-contracts tool-access vendored-installers upgrade-scripts \
+        opencode-plugins-verify run-pnpm dsh-prepare-lock dsh-verify pi-install pi-bridge-install \
+        pi-prepare-lock pi-verify pi-wrapper shipped-installer-contracts tool-access \
+        vendored-installers upgrade-scripts \
         install-build-ca install-shellcheck install-zellij install-pnpm host-watchdog transactional-publish \
         standard-certification build-entrypoint contracts-formatter release-content release-operations release-http \
         ci-boot-bind ci-boot-runtime ci-boot-evidence ci-boot-prepare; do
@@ -133,6 +134,27 @@ if [ "$guard_only" = false ]; then
     # contract CLI seam and never a package manager.
     node script/test/pi-shrinkwrap.mjs
     node script/test/pi-installed-bytes.mjs
+    # The focused harness's loader model: a nested `node_modules` inside the bridge is
+    # what the bridge's own import reaches first, so the report has to resolve from
+    # the requiring directory instead of naming the expected path. Synthetic trees
+    # only; the container leg compares the answer with the reviewed one.
+    python3 script/test/fixtures/standard-node-pi.py resolution-self-test
+    # The production root-command proof, against the same real isolated layout: the
+    # installer and the verifier both run this checker before executing installed Pi
+    # code, so its refusals are what makes that ordering worth anything.
+    node script/test/pi-runtime-check.mjs
+    # Focused consumer drivers, including the Pi/bridge one
+    # (`standard-node-pi.py`): the argument grammar, the independent shrinkwrap
+    # comparator against the committed authenticated 0.87.0 vectors, and the
+    # MANDATORY five-case fake-Docker subset -- the whole ordered leg, a fake 6/6
+    # byte success, a missing evidence fixture, an unreviewed edge in the
+    # authenticated shrinkwrap and the two-record split. Those five run here on
+    # every invocation. The other seventeen plumbing cases are gated behind
+    # AGENT_VM_PI_PLUMBING_SELF_TEST=1 (each re-runs the whole leg; five of them are
+    # scripted action-status cases and one is the layout-status case, none of which
+    # the fake models) and are listed where they are declared in
+    # `standard-node-consumers-self-test.py`. The real legs are the native audit's,
+    # never this aggregate.
     bash script/test/standard-node-consumers.sh --self-test
     python3 script/test/standard-node-layout.py --self-test
     bash script/test/standard-node-policy.sh --self-test
@@ -143,6 +165,11 @@ if [ "$guard_only" = false ]; then
     # transaction's absent-destination and mode behaviour.
     python3 script/test/dsh-project.py
     python3 script/test/pnpm-project.py
+    # The Pi/bridge preparation driver's ordering table (#52 C4): zero-manager
+    # no-ops, refusal before pinning, publication last, and the maintainer
+    # adoption reading its baseline from Git. Fake manager and fake contract;
+    # no registry, no network.
+    python3 script/test/pi-prepare-project.py
     node script/test/pnpm-inputs.mjs
     python3 script/test/opencode-probe.py
     python3 script/test/opencode-audit-tests.py

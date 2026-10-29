@@ -1,15 +1,81 @@
 # Standard pnpm migration ledger
 
-This is the reviewed npm→pnpm selection ledger for the one migrated consumer,
+This is the reviewed npm→pnpm selection record for the migrated consumers,
 **dsh** ([#51](https://github.com/gregwebs/agent-vm-images/issues/51), PR 2 of 4
-for [#42](https://github.com/gregwebs/agent-vm-images/issues/42)), together with
-the evidence that produced it. [ADR 0003](adr/0003-dsh-graph-freeze.md) owns the
-freeze rule this ledger is reviewed against, [ADR 0001](adr/0001-build-only-pnpm-graph-parser.md)
+for [#42](https://github.com/gregwebs/agent-vm-images/issues/42)) and
+**Pi + the Pi Claude bridge** (issue [#52](https://github.com/gregwebs/agent-vm-images/issues/52),
+PR 3 of 4), together with the evidence that produced it. The document covers both
+consumers; the **machine record**
+([`standard-pnpm-migration.json`](standard-pnpm-migration.json)) is the generated
+**dsh slice only**. The Pi/bridge projection is written out by hand in the
+"Pi and the bridge" section below and is deliberately not in the JSON: its
+generator reads exactly the dsh baseline lock and the committed dsh inputs.
+[ADR 0003](adr/0003-dsh-graph-freeze.md) owns the dsh freeze rule,
+[ADR 0011](adr/0011-pi-selected-shrinkwrap.md) owns Pi's selected-archive routes
+and family/bin expectations, [ADR 0001](adr/0001-build-only-pnpm-graph-parser.md)
 owns the build-only graph parser that produced the records, and
 [ADR 0002](adr/0002-pnpm-terminal-failure-boundary.md) keeps every pnpm failure
-hard. Pi, bridge and Copilot stay on their current npm paths until their own
-slices; OpenCode was already a separate pnpm consumer with its own byte-only
-checker. Nothing here announces those migrations.
+hard. Copilot stays on its npm path until PR 4; OpenCode was already a separate
+pnpm consumer with its own byte-only checker. Nothing here announces that
+migration.
+
+## Pi and the bridge: reviewed baselines and deltas (#52)
+
+The JSON record below is the generated dsh slice: it is derived from exactly the
+dsh baseline lock and the committed dsh four inputs, and `--check` keeps it
+byte-tied to them. The Pi/bridge rows are **not** in it: the generator emits the
+dsh slice only, there is no consumer table behind it, and a Pi/bridge projection
+would need its own recorded measurements (manager transcripts and script payload
+hashes) rather than a section appended here. This section records those rows from
+the committed inputs and the harness evidence. The facts either form must
+reproduce are:
+
+| Consumer | npm baseline (read-only `git show`) | Reviewed expectation |
+|---|---|---|
+| Pi | `bc1b2df:images/tools/pi/package-lock.json`, 121 nonroot locations, **120 distinct identities** | import the current reviewed all-hashed graph; recompute identities/SRI/edges; no 143 assertion |
+| bridge | `bc1b2df:images/tools/pi/bridge/package-lock.json`, 106 locations, 104 identities, **96 nonoptional identities** | hoisted install, SDK JavaScript kept, platform payloads omitted |
+
+The "143 identities" figure in the original issue belongs to a different
+observation (the 0.87.0 shrinkwrapped selection, 144 archive occurrences) and is
+not the default's identity count. A preserved count is never evidence that SRI,
+edges, peer contexts or optional payloads stayed equal; every one of those is
+recomputed per selection.
+
+The default-selection conversion has exactly two deltas from the reviewed npm
+baseline, and the operator accepted both on 2026-10-29:
+
+* **Pi** — on the `@aws-sdk/client-bedrock-runtime@3.1127.0` edge,
+  `@smithy/node-http-handler` resolves to **4.13.0** under pnpm instead of npm's
+  hoisted 4.12.1. Both archives were already in the reviewed npm graph; the 120
+  identities and 121/121 byte-identical SRIs do not change, only which
+  already-reviewed archive satisfies that one range.
+* **bridge** — `zod` and `ajv` peer declarations become concrete snapshot edges
+  and `ajv` moves from an optional peer to a **mandatory** edge, which is
+  stricter than npm rather than weaker. The 96 identities are exactly the npm
+  non-optional set (the 8 omitted `@anthropic-ai/claude-agent-sdk-*` platform
+  packages are the reviewed `ignoredOptionalDependencies` design), and 98/98
+  mapped SRIs are equal.
+
+Nothing else was accepted: a further delta still stops review. Both deltas are
+also recorded in [ADR 0011](adr/0011-pi-selected-shrinkwrap.md).
+
+Script-bearing packages in the reviewed Pi graph, and why none of them runs:
+
+| Package | Field | Content / consequence |
+|---|---|---|
+| `@google/genai` 2.21.0 | preinstall | literally `echo 'preinstall: no-op'`; shipped dist JS, no install-generated runtime dependency |
+| `protobufjs` 7.6.6 | postinstall | only a dependent version-scheme warning; the shipped JS encode/decode path is probed instead |
+| `esbuild` (legacy 0.87.0 graph only, through `chord`) | postinstall | checks/optimises and could fall back to downloading a binary; the platform optional package already supplies it, so the transform is proven from chord's resolution context with scripts disabled |
+
+The bridge has no script-bearing package. `allowBuilds: {}` stays empty for both
+projects: a new lifecycle-script dependency needs explicit review plus runtime
+evidence before any exception, never a blanket approval.
+
+Evidence for the 0.87.0 changed-selection leg (selected archive route, graph
+comparison, all-five bytes, chord esbuild transform, dispatch list) belongs to
+the focused harness output and the CI run at the proposed SHA, not to this
+ledger's generated rows. It is **not** a committed 0.87 lock: committing one
+would stop proving that preparation honoured the authenticated archive.
 
 The ledger compares two **selections**, not two health claims. Every row answers
 "what identity, archive, edge or peer did this file select", and a successful
@@ -160,12 +226,39 @@ workspace, the settings, an override selector or a record outside that closure.
 
 ## What this ledger does not claim
 
+- **No independently authored archive inventory in the cold legs.** Neither the
+  focused Pi/bridge layout oracle nor the finished-image caller
+  (`standard-image.sh`, all three consumers) passes `--archive-inventories`, so
+  every cold leg compares the extracted tree's layout, family, edges, bins and
+  wrapper against authored expectations and *not* against a per-package inventory
+  derived from separately extracted archives. The 6/6 and 5/5 byte proofs and the
+  shrinkwrap comparison carry the byte claim; the oracle's inventory path is
+  exercised only by its own self-test vectors.
 - **No independent cryptographic attestation verification.** Integrity/SRI and
   registry provenance metadata were compared; that is not signature or
   attestation verification of the upstream publication, and pnpm's policy check
   is not one either.
-- **No completion of #42.** dsh alone is migrated here; Pi, bridge and Copilot
-  keep their npm paths, and a dsh strict-egress profile is still PR 4.
+- **No completion of #42.** dsh, Pi and the bridge are migrated here; Copilot
+  keeps its npm path and the new consumer egress profiles are still PR 4. No
+  document claims a repository-wide npm-free state.
+- **No unrun native claim.** The Pi/bridge cold-install legs, the 0.87.0 changed
+  selection and both native architectures are gated on clean proposed-SHA CI;
+  local focused runs against a diagnostic base are recorded as diagnostic. The
+  focused Pi default leg has such a diagnostic run (native arm64, 1 m 16 s, both
+  cold installs, 6/6 byte proof, 13 real-layout mutants, seed matrix, two
+  independent records, four offline numeric pairs), and so does the changed
+  selection: `--version 0.87.0`, native arm64, 1 m 31 s, route `shrinkwrap` from
+  the authenticated archive, 144/144 SRI pairs equal with exactly the three
+  reviewed normalisations, 5/5 sibling bytes, the chord-context esbuild transform
+  with native `@esbuild/linux-arm64`, the seven-command dispatch list, both
+  records, and the harness's own pre-preparation SRI as the comparator anchor. See
+  ADR 0011's implementation-status section.
+- **Measured, not inherited.** The reviewed bridge `0.8.0` registers **14** models
+  beside Pi `1.4.0` and **11** beside the authenticated legacy `0.87.0` graph (it
+  enumerates the providers the selected Pi SDK ships); the planning investigation
+  recorded 12. The focused harness records both counts per selection (a change is
+  a review stop) while the verifier keeps accepting one canonical positive
+  `models=N`.
 - **No "identity count" shortcut.** A preserved count (for example the Pi slice's
   "143 identities" observation, which belongs to a different consumer) never
   substitutes for SRI, edge and peer comparison.
@@ -183,9 +276,12 @@ workspace, the settings, an override selector or a record outside that closure.
 ## Machine-readable ledger
 
 [`docs/standard-pnpm-migration.json`](standard-pnpm-migration.json) is the one
-canonical machine record: every retained archive row, every edge row with its
-derived reason, all per-context peer rows and the inspected script excerpts.
-It is **generated**, not hand-written, from exactly two reviewable inputs — the
+canonical machine record **of the dsh slice**: every retained dsh archive row,
+every dsh edge row with its derived reason, all per-context dsh peer rows and the
+inspected script excerpts. It carries `"consumer": "dsh"` and, in `notClaimed`, the
+statement that it holds no Pi or bridge projection. The Pi/bridge rows are the
+hand-written section above. It is **generated**, not hand-written, from exactly two
+reviewable inputs — the
 baseline npm lock at commit `6c51509` (read through `git show`, so the deleted
 file still needs no copy) and the committed
 `images/tools/dsh/{package.json,pnpm-workspace.yaml,pnpm-lock.yaml}`:

@@ -1,0 +1,7 @@
+auth
+config
+install
+list
+remove
+uninstall
+update

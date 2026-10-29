@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Black-box contract tests for the shared recipe helpers
-# (images/recipe-contract/{run-install,download,run-npm,run-report}.sh).
+# (images/recipe-contract/{run-install,download,run-report}.sh). The retired
+# `run-npm.sh` section is now a deletion/negative control.
 #
 # Hermetic: no Docker, no network, no real npm/curl. Every helper is driven as a
 # subprocess with exact argv/env and its status, receipt, result record and
@@ -205,152 +206,39 @@ RUN_STATUS=$?
 set -e
 assert_eq "$RUN_STATUS" 1 "without a receipt path the download cannot be classified"
 
-# =============================== run-npm.sh =================================
+# ========================= retired npm adapter ==============================
+# `run-npm.sh` is deleted with the Pi/bridge pnpm migration; nothing produces an
+# npm transport receipt any more. The surviving controls that the old case block
+# covered live where their helper still exists: the timeout bound and the
+# --kill-after escalation in script/test/run-pnpm.sh (plus report-term-ignoring
+# below), signal exits in the run-pnpm status matrix, and the JSON report capture
+# in run-pnpm's result-file assertions.
+[[ ! -e "$CONTRACT/run-npm.sh" ]] || fail "run-npm.sh must stay deleted"
 
-new_case npm-success
-make_exec npm <<'SH'
+# A `transport npm CODE` receipt is retired vocabulary. It must not classify a
+# 75, so an installer that still wrote one cannot soften a failure.
+new_case install-retired-npm-receipt
+make_exec install-npm-receipt <<'SH'
 #!/bin/sh
-printf '{"added":1}\n'
-exit 0
+printf 'transport npm EAI_AGAIN\n' >"$AGENT_VM_TRANSPORT_RECEIPT"
+exit 75
 SH
-run_helper run-npm.sh "$CASE/report" -- npm ci
-assert_eq "$RUN_STATUS" 0 "a successful npm run returns 0"
-assert_eq "$(cat "$CASE/report")" '{"added":1}' "the JSON report is captured"
+run_helper run-install.sh demo "$CASE/status" sh "$CASE/bin/install-npm-receipt"
+assert_eq "$RUN_STATUS" 1 "a retired npm receipt must not classify a 75"
+[[ "$RUN_OUTPUT" == *"no classified receipt"* ]] ||
+    fail "a retired npm receipt must be reported as unclassified (got: $RUN_OUTPUT)"
 
-new_case npm-transport
-make_exec npm <<'SH'
+# The same receipt shape with the download operation is still classified, so the
+# negative above is about the retired operation, not about receipts in general.
+new_case install-download-receipt
+make_exec install-download-receipt <<'SH'
 #!/bin/sh
-printf '{\n  "error": {\n    "code": "EAI_AGAIN",\n    "summary": "getaddrinfo EAI_AGAIN",\n    "detail": ""\n  }\n}\n'
-printf 'npm error code EAI_AGAIN\nnpm error syscall getaddrinfo\n' >&2
-exit 1
+printf 'transport download 56\n' >"$AGENT_VM_TRANSPORT_RECEIPT"
+exit 75
 SH
-run_helper run-npm.sh "$CASE/report" -- npm ci
-assert_eq "$RUN_STATUS" 75 "an allowlisted npm transport error is classified"
-assert_eq "$(cat "$RECEIPT")" "transport npm EAI_AGAIN" "the receipt names the npm code"
-
-new_case npm-integrity
-make_exec npm <<'SH'
-#!/bin/sh
-printf '{"error":{"code":"EINTEGRITY","summary":"integrity checksum failed"}}\n'
-printf 'npm error code EINTEGRITY\n' >&2
-exit 1
-SH
-run_helper run-npm.sh "$CASE/report" -- npm ci
-assert_eq "$RUN_STATUS" 1 "an EINTEGRITY failure is hard regardless of soft input"
-assert_eq "$(cat "$RECEIPT")" "" "an EINTEGRITY failure writes no receipt"
-
-new_case npm-unparseable
-make_exec npm <<'SH'
-#!/bin/sh
-printf 'boom: not json\n'
-exit 1
-SH
-run_helper run-npm.sh "$CASE/report" -- npm ci
-assert_eq "$RUN_STATUS" 1 "unparseable npm stdout is hard"
-
-new_case npm-multiple-json
-make_exec npm <<'SH'
-#!/bin/sh
-printf '{"error":{"code":"EAI_AGAIN"}}\n{"error":{"code":"EAI_AGAIN"}}\n'
-exit 1
-SH
-run_helper run-npm.sh "$CASE/report" -- npm ci
-assert_eq "$RUN_STATUS" 1 "multiple error objects are hard"
-
-new_case npm-contradictory
-make_exec npm <<'SH'
-#!/bin/sh
-printf '{"error":{"code":"EAI_AGAIN"}}\n'
-printf 'npm error code EINTEGRITY\n' >&2
-exit 1
-SH
-run_helper run-npm.sh "$CASE/report" -- npm ci
-assert_eq "$RUN_STATUS" 1 "a contradictory stderr code is hard"
-
-# A3/B5/D3: the same contradiction on a final line with NO trailing newline is
-# still hard. A bare `while read` drops it, so an explicit integrity error would
-# be softened as transport and post an absence record.
-new_case npm-unterminated-contradictory
-make_exec npm <<'SH'
-#!/bin/sh
-printf '{"error":{"code":"EAI_AGAIN"}}\n'
-printf 'npm error code EINTEGRITY' >&2
-exit 1
-SH
-run_helper run-npm.sh "$CASE/report" -- npm ci
-assert_eq "$RUN_STATUS" 1 "an unterminated contradictory stderr code is hard"
-assert_eq "$(cat "$RECEIPT")" "" "an unterminated contradiction writes no receipt"
-
-# The EOF fix must not turn every unterminated line hard: an unterminated line
-# that repeats the allowlisted code is still a clean transport classification.
-new_case npm-unterminated-matching
-make_exec npm <<'SH'
-#!/bin/sh
-printf '{"error":{"code":"EAI_AGAIN"}}\n'
-printf 'npm error code EAI_AGAIN' >&2
-exit 1
-SH
-run_helper run-npm.sh "$CASE/report" -- npm ci
-assert_eq "$RUN_STATUS" 75 "an unterminated matching stderr code stays transport"
-assert_eq "$(cat "$RECEIPT")" "transport npm EAI_AGAIN" "the matching receipt is written"
-
-new_case npm-timeout
-make_exec npm <<'SH'
-#!/bin/sh
-exit 124
-SH
-run_helper run-npm.sh "$CASE/report" -- npm ci
-assert_eq "$RUN_STATUS" 1 "a timeout exit is hard"
-
-# A4/B3: the 600s npm bound must escalate to SIGKILL. The fake `timeout` keeps
-# the helper's --kill-after option but shortens the (otherwise 600s) duration,
-# so a TERM-ignoring npm proves the real bound terminates instead of hanging.
-new_case npm-term-ignoring
-make_exec timeout <<'SH'
-#!/bin/sh
-printf '%s\n' "$*" >>"$TIMEOUT_LOG"
-case "$1" in
-    --kill-after=*) kill_after=$1 ;;
-    *)
-        echo "fake-timeout: run-npm did not pass --kill-after" >&2
-        exit 99
-        ;;
-esac
-shift # --kill-after=N
-shift # the helper's fixed 600s duration
-exec "$REAL_TIMEOUT" "$kill_after" 1 "$@"
-SH
-make_exec npm <<'SH'
-#!/bin/sh
-trap '' TERM
-sleep 30
-exit 0
-SH
-TIMEOUT_LOG="$CASE/timeout.log"
-EXTRA_ENV=("TIMEOUT_LOG=$CASE/timeout.log" "REAL_TIMEOUT=$TIMEOUT_BIN")
-_start="$(date +%s)"
-run_helper run-npm.sh "$CASE/report" -- npm ci
-_elapsed=$(( $(date +%s) - _start ))
-[[ $RUN_STATUS -ne 0 ]] || fail "a TERM-ignoring npm must not pass"
-[[ $_elapsed -lt 15 ]] || fail "the npm bound must SIGKILL a TERM-ignoring child (took ${_elapsed}s)"
-grep -q -- '--kill-after=' "$TIMEOUT_LOG" || fail "run-npm must escalate with --kill-after"
-
-new_case npm-signal
-make_exec npm <<'SH'
-#!/bin/sh
-exit 137
-SH
-run_helper run-npm.sh "$CASE/report" -- npm ci
-assert_eq "$RUN_STATUS" 1 "a signal exit is hard"
-
-new_case npm-unknown-code
-make_exec npm <<'SH'
-#!/bin/sh
-printf '{"error":{"code":"ERESOLVE"}}\n'
-exit 1
-SH
-run_helper run-npm.sh "$CASE/report" -- npm ci
-assert_eq "$RUN_STATUS" 1 "an unknown npm error code is hard"
+run_helper run-install.sh demo "$CASE/status" sh "$CASE/bin/install-download-receipt"
+assert_eq "$RUN_STATUS" 1 "a classified 75 the owning hook did not soften is hard"
+assert_contains "$RUN_OUTPUT" "classified transport failure"
 
 # ============================== run-report.sh ===============================
 
@@ -419,10 +307,6 @@ make_exec mytool <<'SH'
 #!/bin/sh
 printf 'ok\n'
 SH
-make_exec npm <<'SH'
-#!/bin/sh
-printf '{"added":1}\n'
-SH
 make_exec mktemp <<'SH'
 #!/bin/sh
 case "${1:-}" in
@@ -450,8 +334,8 @@ run_with_evil_tmpdir() {
 }
 run_with_evil_tmpdir run-report.sh 5 "$CASE/out" "$CASE/err" "$CASE/bin/mytool"
 assert_eq "$RUN_STATUS" 0 "run-report must succeed with a quote in TMPDIR"
-run_with_evil_tmpdir run-npm.sh "$CASE/report" -- npm ci
-assert_eq "$RUN_STATUS" 0 "run-npm must succeed with a quote in TMPDIR"
+# run-pnpm.sh owns the other scratch/trap pair; its suite carries the same
+# control, so this file only keeps the surviving helper it can drive here.
 [[ ! -e "$CASE/MARKER" ]] || fail "a quote in TMPDIR injected into the cleanup trap"
 
 echo "shipped-installer-contracts black-box tests passed"

@@ -27,7 +27,9 @@ import {
 const PROBE_TIMEOUT_MS = 120_000;
 const PROTOBUF_VALUE = 'pi-runtime-probe';
 const TYPESCRIPT_SOURCE = 'let x: number = 1';
-const MODERN_ABSENT = ['@earendil-works/chord', 'esbuild'];
+// The family packages are scoped; an unscoped `chord` is not the locked identity.
+const CHORD = '@earendil-works/chord';
+const MODERN_ABSENT = [CHORD, 'esbuild'];
 const MODERN_SHIPPED = ['quickjs-wasi', 'cross-spawn'];
 
 const fail = (code, detail) => { throw new GraphError(code, detail); };
@@ -104,7 +106,7 @@ async function probeProtobuf(resolution) {
 // The transform must go through chord's resolution context, so a missing native
 // package is a hard failure instead of a silent postinstall download.
 async function probeLegacyTransform(resolution, platform) {
-  const chord = requirePackage(resolution, 'chord');
+  const chord = requirePackage(resolution, CHORD);
   const esbuild = requirePackage(resolution, 'esbuild');
   for (const owner of [chord, esbuild]) {
     const declared = owner.children.get('esbuild');
@@ -133,11 +135,22 @@ function platformNative(resolution, platform) {
   return instance;
 }
 
+// esbuild's platform packages publish no `bin` at all (0.28.2's manifest is
+// name/version/engines/os/cpu only): the wrapper resolves its own platform
+// package's `bin/esbuild` by convention at runtime. The path is therefore an
+// authored expectation, and the version probe below is what binds it to the
+// locked package: a different file in the tree cannot print that version.
+// A selection whose native package does declare `bin` uses the declaration.
+const NATIVE_COMMAND = 'bin/esbuild';
+
 function checkNativeBinary(native) {
   const declared = readManifest(native.dir, 'esbuild native').bin;
-  const relative = typeof declared === 'string' ? declared : declared?.esbuild;
+  const relative = (typeof declared === 'string' ? declared : declared?.esbuild) ?? NATIVE_COMMAND;
   assert.equal(typeof relative, 'string', `${native.key} declares no esbuild command`);
-  const binary = path.join(native.dir, ...relative.split('/'));
+  if (path.isAbsolute(relative) || relative.split('/').some(part => part === '..' || part === '')) {
+    fail('native-command', `${native.key} bin path ${JSON.stringify(relative)} escapes the package`);
+  }
+  const binary = path.join(native.dir, ...relative.split('/').filter(part => part !== '.'));
   const info = fs.lstatSync(binary);
   assert.ok(info.isFile(), `${binary} is not a regular file`);
   assert.equal(info.mode & 0o111, 0o111, `${binary} is not executable`);
@@ -170,17 +183,32 @@ function checkRootCommand(resolution) {
     fail('root-command', `${link} is absent`);
   }
   if (!info.isSymbolicLink()) fail('root-command', `${link} is not a direct symlink`);
-  // pnpm links a project's direct commands through the public package link, not
-  // through the virtual-store directory, so that is the text it must have; the
-  // resolved file still has to be the locked root instance's own command.
-  const exported = path.join(resolution.prefix, 'node_modules', ...root.manifest.name.split('/'), ...relative.split('/'));
-  const expected = path.relative(path.dirname(link), exported);
-  if (fs.readlinkSync(link) !== expected) {
-    fail('root-command', `${link} points at ${fs.readlinkSync(link)}, the canonical target is ${expected}`);
-  }
+  // Two equivalent canonical texts are real pnpm output: the public package link
+  // for a package installed without a peer context, and the virtual-store
+  // instance directory when the root package does have one. A real cold install
+  // of the reviewed selection (focused harness, pnpm 11.11.0) produced the
+  // second, so the text is not the contract -- the resolved file is. Both shapes
+  // stay inside the payload, and a shim, a copy or a link through another
+  // package still fails because the resolved file must be the locked bin target.
+  const text_ = fs.readlinkSync(link);
   const command = path.join(root.dir, ...relative.split('/'));
-  const target = fs.realpathSync(link);
-  if (target !== fs.realpathSync(command)) fail('root-command', `${link} resolves to ${target}, not ${command}`);
+  // A dangling link or an absent bin target is a refusal with a root-command
+  // diagnostic, not a raw ENOENT from the resolver: the reader of a failed build
+  // needs to know which proof failed.
+  const resolved = file => {
+    try {
+      return fs.realpathSync(file);
+    } catch {
+      fail('root-command', `${file} does not resolve`);
+    }
+  };
+  const target = resolved(link);
+  if (target !== resolved(command)) fail('root-command', `${link} resolves to ${target}, not ${command}`);
+  if (path.isAbsolute(text_)) fail('root-command', `${link} is an absolute link: ${text_}`);
+  const resolvedLink = path.resolve(path.dirname(link), text_);
+  if (resolvedLink !== link && !resolvedLink.startsWith(path.resolve(resolution.prefix) + path.sep)) {
+    fail('root-command', `${link} points outside the payload: ${text_}`);
+  }
   const targetInfo = fs.lstatSync(command);
   if (!targetInfo.isFile() || (targetInfo.mode & 0o111) !== 0o111) {
     fail('root-command', `${command} is not an executable regular file`);

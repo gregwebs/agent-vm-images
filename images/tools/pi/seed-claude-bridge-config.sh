@@ -3,15 +3,17 @@
 # under /opt/agent-vm/seed.d/ before exec'ing the agent).
 #
 # Point the image-owned pi-claude-bridge at the image's own Claude Code binary.
-# agent-vm created this condition itself: images/standard/Dockerfile installs
-# the bridge with `--omit=optional`, deliberately dropping the Claude Agent
-# SDK's platform packages (each carries a whole second Claude Code; see
+# agent-vm created this condition itself: the bridge's reviewed pnpm workspace
+# (`images/tools/pi/bridge/pnpm-workspace.yaml`) omits exactly the Claude Agent
+# SDK's platform packages through
+# `ignoredOptionalDependencies: ['@anthropic-ai/claude-agent-sdk-*']` (each
+# carries a whole second Claude Code; see
 # https://github.com/gregwebs/agent-vm/blob/3ec78eebb7bdf743c93942a6ed2e5510de15c52d/docs/adr/0023-image-owned-pi-extension-packages.md for the guest-platform
-# size) in favour of the one the claude layer already ships at
-# /opt/agent/.local/bin/claude. So agent-vm is the one that repairs it -- the
-# parity principle (ADR-0021), not a policy agent-vm is imposing on Pi.
-# Without this the SDK throws "Native CLI binary for <platform>-<arch> not
-# found" on every bridge turn.
+# size), keeping the SDK JavaScript, in favour of the one the claude layer
+# already ships at /opt/agent/.local/bin/claude. So agent-vm is the one that
+# repairs it -- the parity principle (ADR-0021), not a policy agent-vm is
+# imposing on Pi. Without this the SDK throws "Native CLI binary for
+# <platform>-<arch> not found" on every bridge turn.
 #
 # The bridge reads the key from `~/.pi/agent/claude-bridge.json`, i.e. the
 # project-scoped state dir this guest maps `~/.pi` onto (ADR-0021). Merge only
