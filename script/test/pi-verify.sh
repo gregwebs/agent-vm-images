@@ -359,6 +359,38 @@ run_gate
 require_failure 'AGENT_VM_PI_TARGET_PLATFORM must name the image platform'
 assert_absent "$CASE/root/install-status/pi"
 
+# ... and every RUN in the image that reaches this gate -- directly, or through
+# `verify-standard.sh` -- has to pass that input. The certification RUN shipped
+# without it once, which fails the whole image at its last stage, so the
+# Dockerfile is parsed here: a match in a comment cannot satisfy the check.
+DOCKERFILE="$REPO_ROOT/images/standard/Dockerfile"
+[[ -f "$DOCKERFILE" ]] || fail "the standard image Dockerfile is missing"
+
+# Print every RUN paragraph that reaches the gate without naming the platform.
+unplatformed_run() {
+    awk '
+        function check() {
+            if (block ~ /sh \/tmp\/(standard-tools\/pi\/verify-pi|verify-standard)\.sh/ &&
+                block !~ /AGENT_VM_PI_TARGET_PLATFORM=linux\//) {
+                print block "---"
+            }
+        }
+        /^RUN / { if (inrun) check(); block = $0 "\n"; inrun = 1; next }
+        inrun { block = block $0 "\n"; if ($0 !~ /\\[[:space:]]*$/) { check(); inrun = 0 } }
+        END { if (inrun) check() }
+    ' "$1"
+}
+[[ -z "$(unplatformed_run "$DOCKERFILE")" ]] ||
+    fail "a RUN that reaches verify-pi.sh does not name AGENT_VM_PI_TARGET_PLATFORM: $(unplatformed_run "$DOCKERFILE")"
+
+# The guard has to be able to fail: the same parse over a copy with every platform
+# line removed must name the certification RUN.
+sabotaged=$(mktemp "${TMPDIR:-/tmp}/dockerfile.XXXXXX")
+sed '/AGENT_VM_PI_TARGET_PLATFORM=linux\//d' "$DOCKERFILE" >"$sabotaged"
+[[ "$(unplatformed_run "$sabotaged")" == *'verify-standard.sh'* ]] ||
+    fail 'the Dockerfile platform check cannot detect a RUN that omits the platform'
+rm -f "$sabotaged"
+
 # A stale absence record cannot override a present command.
 new_case present-with-stale-record
 printf 'absent-transport 56\n' >"$CASE/root/install-status/pi"

@@ -331,4 +331,5 @@ RUN --mount=type=bind,source=standard/verify-standard.sh,target=/tmp/verify-stan
     AGENT_VM_VERSION_COPILOT="${AGENT_VERSION_COPILOT}" \
     AGENT_VM_VERSION_OPENCODE_CLAUDE="${AGENT_VERSION_OPENCODE_CLAUDE}" \
     AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
+    AGENT_VM_PI_TARGET_PLATFORM=linux/${TARGETARCH} \
     sh /tmp/verify-standard.sh
