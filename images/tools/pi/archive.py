@@ -279,19 +279,27 @@ class _BoundedStream:
     def read(self, size: int = -1) -> bytes:
         if size is None or size < 0:
             raise ArchiveError('read-size', f'{self._label}: read of the whole stream')
+        # The extended-header budget is decided before the per-read cap. Whether a
+        # header block arrives as one large read (CPython 3.12) or as chunks (3.15+)
+        # is an interpreter detail, and a diagnostic that changed with it would make
+        # the refusal depend on the Python the image happens to ship. Inside the
+        # between-members window every byte is header bytes, so an oversized read
+        # there is a header-budget refusal either way.
+        if self._headers:
+            if self._total_header_bytes + size > MAX_TOTAL_HEADER_BYTES:
+                raise ArchiveError('header-bytes',
+                                   f'{self._label}: more than {MAX_TOTAL_HEADER_BYTES} bytes of '
+                                   'extended headers in the archive')
+            if size > MAX_HEADER_BYTES:
+                raise ArchiveError('header-bytes',
+                                   f'{self._label}: a single extended-header read of {size} bytes '
+                                   f'exceeds {MAX_HEADER_BYTES}')
         if size > MAX_READ_BYTES:
             raise ArchiveError('read-size', f'{self._label}: a single read of {size} bytes '
                                             f'exceeds {MAX_READ_BYTES}')
         if self._handle.tell() + size > MAX_DECOMPRESSED_BYTES:
             raise ArchiveError('decompressed-size',
                                f'{self._label}: read past {MAX_DECOMPRESSED_BYTES} decompressed bytes')
-        # The archive total is charged to the declaration, like the two bounds above:
-        # `tarfile` retains what it reads, so the buffer that would push the archive
-        # past its budget must not exist first.
-        if self._headers and self._total_header_bytes + size > MAX_TOTAL_HEADER_BYTES:
-            raise ArchiveError('header-bytes',
-                               f'{self._label}: more than {MAX_TOTAL_HEADER_BYTES} bytes of '
-                               'extended headers in the archive')
         data = self._handle.read(size)
         if self._headers:
             self._header_bytes += len(data)
