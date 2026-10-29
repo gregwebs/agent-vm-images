@@ -99,9 +99,19 @@ case "\$1" in
             alias) mkdir -p "$CASE/root/bridge/node_modules/@earendil-works" ;;
             nosrc) rm -rf "$CASE/root/bridge/node_modules/pi-claude-bridge/src" ;;
         esac
-        printf '{"name":"@anthropic-ai/claude-agent-sdk","version":"0.3.281"}\n' \\
-            >"$CASE/root/bridge/node_modules/@anthropic-ai/claude-agent-sdk/package.json" 2>/dev/null || :
-        : >"$CASE/root/bridge/node_modules/pi-claude-bridge/src/index.ts" 2>/dev/null || :
+        # A layout may have removed the directory a payload file goes into, and a
+        # redirect into a missing directory is fatal in dash: a redirection error on
+        # the null command exits a non-interactive shell, so a trailing
+        # double-pipe-colon guard never runs. Guard the writes instead.
+        sdk_dir="$CASE/root/bridge/node_modules/@anthropic-ai/claude-agent-sdk"
+        if [ -d "\$sdk_dir" ]; then
+            printf '{"name":"@anthropic-ai/claude-agent-sdk","version":"0.3.281"}\n' \\
+                >"\$sdk_dir/package.json"
+        fi
+        src_dir="$CASE/root/bridge/node_modules/pi-claude-bridge/src"
+        if [ -d "\$src_dir" ]; then
+            : >"\$src_dir/index.ts"
+        fi
         exit 0 ;;
 esac
 exit 0
