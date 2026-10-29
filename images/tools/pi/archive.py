@@ -279,12 +279,17 @@ class _BoundedStream:
     def read(self, size: int = -1) -> bytes:
         if size is None or size < 0:
             raise ArchiveError('read-size', f'{self._label}: read of the whole stream')
-        # The extended-header budget is decided before the per-read cap. Whether a
-        # header block arrives as one large read (CPython 3.12) or as chunks (3.15+)
-        # is an interpreter detail, and a diagnostic that changed with it would make
-        # the refusal depend on the Python the image happens to ship. Inside the
-        # between-members window every byte is header bytes, so an oversized read
-        # there is a header-budget refusal either way.
+        # The order below is what makes each refusal stable across interpreters.
+        # `tarfile` asks for a header block in one read on CPython 3.12 and in
+        # chunks on 3.15, so a pending read is first judged against the stream it
+        # would decompress -- a declared 32 MiB buffer is a decompressed-stream
+        # refusal on both, not a per-read one on one of them -- then against the
+        # extended-header budgets, which every read in the between-members window
+        # is spending. Only a read that survives both is what the per-read cap is
+        # for.
+        if self._handle.tell() + size > MAX_DECOMPRESSED_BYTES:
+            raise ArchiveError('decompressed-size',
+                               f'{self._label}: read past {MAX_DECOMPRESSED_BYTES} decompressed bytes')
         if self._headers:
             if self._total_header_bytes + size > MAX_TOTAL_HEADER_BYTES:
                 raise ArchiveError('header-bytes',
@@ -297,9 +302,6 @@ class _BoundedStream:
         if size > MAX_READ_BYTES:
             raise ArchiveError('read-size', f'{self._label}: a single read of {size} bytes '
                                             f'exceeds {MAX_READ_BYTES}')
-        if self._handle.tell() + size > MAX_DECOMPRESSED_BYTES:
-            raise ArchiveError('decompressed-size',
-                               f'{self._label}: read past {MAX_DECOMPRESSED_BYTES} decompressed bytes')
         data = self._handle.read(size)
         if self._headers:
             self._header_bytes += len(data)
