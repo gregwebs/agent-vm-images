@@ -79,7 +79,7 @@ class SelectionTests(unittest.TestCase):
 
 
 class OpenCodeGuestProbeTests(unittest.TestCase):
-    def test_nine_selections_and_nested_probe_timeouts(self):
+    def test_ten_selections_and_nested_probe_timeouts(self):
         with tempfile.TemporaryDirectory() as directory:
             instance = verify.Verification.__new__(verify.Verification)
             instance.root = Path(directory)
@@ -95,9 +95,15 @@ class OpenCodeGuestProbeTests(unittest.TestCase):
             argv = calls[0].args[0]
             self.assertEqual(argv[argv.index('--timeout') + 1], '10m')
             arguments = argv[argv.index('released-agent-probe') + 1:]
-            self.assertEqual(len(arguments), 11)
+            self.assertEqual(len(arguments), 12)
             self.assertEqual(arguments[:2], ['12345', '23456'])
-            self.assertEqual(arguments[-1], operations.selections()['opencode-claude'])
+            # The complete ordered vector, not just its last element: a
+            # reordering or a missed selection fails here.
+            order = ('codex', 'opencode', 'claude', 'copilot', 'dsh', 'pnpm', 'pi', 'pi-claude-bridge',
+                     'opencode-claude', 'agy')
+            selected = operations.selections()
+            self.assertEqual(arguments[2:], [selected[x] for x in order])
+            self.assertEqual(set(selected), content.SELECTIONS)
             self.assertEqual(calls[0].kwargs['timeout'], 660)
 
 

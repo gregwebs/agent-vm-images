@@ -150,6 +150,53 @@ def self_test():
     assert not re.search(r"[0-9a-f]{64}", probe), "pins are rendered, never committed into the template"
     assert "pnpm-lock.mjs" not in payload and "lockfileVersion" not in payload
 
+    # The transferred report helper IS the released probe's report oracle, so run
+    # it against scratch captures instead of the image. Its status loop reads
+    # /opt/agent-vm, which this host need not have: a healthy set therefore ends
+    # in FileNotFoundError there, and that is the proof every report and stderr
+    # check passed first. The agy rows fail earlier, in the report itself.
+    values = {'codex': 'rust-v0.159.3', 'opencode': 'v2.0.29', 'claude': '2.1.286',
+              'copilot': '1.0.90', 'dsh': '0.1.5-rc.2', 'pnpm': '11.11.0',
+              'pi': '1.4.0', 'agy': '1.4.11'}
+    reports = {'codex': 'codex-cli 0.159.3\n', 'opencode': 'opencode v2.0.29\n',
+               'claude': '2.1.286 (Claude Code)\n',
+               'copilot': "GitHub Copilot CLI 1.0.90.\nRun 'copilot update' to check for updates.\n",
+               'dsh': '0.1.5-rc.2\n', 'pnpm': '11.11.0\n', 'pi': '1.4.0\n', 'agy': '1.4.11\n'}
+
+    def report_run(mutate=None):
+        with tempfile.TemporaryDirectory() as private:
+            root = Path(private)
+            for tool, report in reports.items():
+                (root / (tool + '.out')).write_bytes(report.encode())
+                (root / (tool + '.err')).write_bytes(b'')
+            if mutate:
+                mutate(root)
+            return subprocess.run(
+                [sys.executable, str(ROOT / SOURCES["released-agent-report.py"]), str(root),
+                 *(values[tool] for tool in ('codex', 'opencode', 'claude', 'copilot', 'dsh',
+                                             'pnpm', 'pi', 'agy'))],
+                timeout=30, capture_output=True, text=True)
+
+    healthy = report_run()
+    if Path('/opt/agent-vm').exists():
+        print("release report oracle: healthy captures skipped (/opt/agent-vm is present here)")
+    else:
+        assert healthy.returncode != 0, "healthy captures reach the install-status loop"
+        assert 'install-status' in healthy.stderr, healthy.stderr
+    for label, report, needle in (
+        ('agy wrong version', '1.4.10\n', 'agy exact report'),
+        ('agy missing newline', '1.4.11', 'agy exact report'),
+        ('agy extra line', '1.4.11\nextra\n', 'agy exact report'),
+    ):
+        def changed(root, report=report):
+            (root / 'agy.out').write_bytes(report.encode())
+        result = report_run(changed)
+        assert result.returncode != 0 and needle in result.stderr, (label, result.stderr)
+    def stray_stderr(root):
+        (root / 'agy.err').write_bytes(b'warning: x\n')
+    result = report_run(stray_stderr)
+    assert result.returncode != 0 and 'agy stderr' in result.stderr, result.stderr
+
     def hash_probe(mutate=None):
         with tempfile.TemporaryDirectory() as private:
             root = Path(private)

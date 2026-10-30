@@ -36,8 +36,9 @@ of being adopted. Ordinary builds only verify the committed pins: no latest
 lookup, graph regeneration, checksum refresh, silent fallback or image-owned
 first-use download. Only the explicit maintenance paths below - a
 [parent refresh](#maintenance-refreshing-a-parent), a
-[release-artifact refresh](#maintenance-refreshing-a-pinned-release-artifact) and
-a [Codex payload closure refresh](#codex-standalone-payloads) - may resolve and
+[release-artifact refresh](#maintenance-refreshing-a-pinned-release-artifact), a
+[Codex payload closure refresh](#codex-standalone-payloads) and an
+[agy hash-only pin refresh](#the-agy-hash-only-artifact) - may resolve and
 re-place a pin, and they write a reviewed proposal for a human to
 commit; they never auto-adopt or auto-merge, and they refuse to run in CI. Installs that a user or their project triggers are outside this guarantee.
 
@@ -264,6 +265,73 @@ Statuses are the shared ones: `0` published or unchanged, `1` failed with the
 sources unchanged or fully restored, `2` usage, `3` undecided/incomplete recovery
 with every retained directory printed, `128+N` after a signal whose rollback
 succeeded.
+
+## The agy hash-only artifact
+
+The Antigravity CLI is a release artifact with **no upstream signature at all**.
+The decision, its rejected alternatives and its stop condition are in
+[ADR 0012](adr/0012-agy-hash-only-artifact-pin.md); this section is the canonical
+policy.
+
+| Selected | Committed identity | Authentication |
+|---|---|---|
+| `1.4.11` (`org.agent-vm.version.agy`, `ARG AGENT_VERSION_AGY`) | `images/tools/agy/pin.json`: exact `linux/amd64` and `linux/arm64` release URLs plus SHA-256 **and** SHA-512, the `release.json` GitHub metadata and the two per-architecture updater manifests, all four committed by SHA-256 | `hash-only`: at pin time the downloaded bytes had to equal both GitHub's asset `digest` and the manifest's `sha512`, and the build re-checks the committed records before it fetches. Integrity is cryptographic (SHA-256/SHA-512); publisher authentication is not — no signature, attestation or independent identity is verified |
+
+`hash-only` is a named authentication kind in the shared model and is bound to
+the artifact name: `agy` accepts it, Node and the GitHub CLI still refuse it.
+The pin is **not** a base input — `images/tools/agy/`, unlike
+`images/artifacts/`, is not covered by `images/base-inputs.sha256` — because it
+records an agent selection that the standard recipe owns.
+
+**Build ordering.** `install-agy.sh` reads the committed version, refuses any
+`AGENT_VM_VERSION_AGY` the pin does not select, and only then runs the shared
+installer, which re-hashes and re-parses the committed corroboration evidence
+against the pin *before* it fetches anything. A hand-edited evidence file, a
+manifest naming another version, or a release whose digest disagrees with the pin
+is a refusal with zero requests made. Then: exactly one download of the computed
+release URL, SHA-256 (and the committed SHA-512) compared, archive preflighted
+(exactly one regular executable member `antigravity`, within the per-artifact
+ceilings), ELF machine checked for the pin's architecture, and published as
+`/usr/local/bin/agy` and nothing else. The image sets
+`AGY_CLI_DISABLE_AUTO_UPDATE=1` because the binary would otherwise replace the
+reviewed bytes in a guest.
+
+**Single-URL egress.** An `agy` build reaches exactly one endpoint: the committed
+release's asset for the architecture under test, on `github.com`, HTTPS/443, `GET`,
+no query, plus the signed CDN redirect GitHub issues for it.
+`script/test/shipped-installer-network.sh` denies the tag API, the manifest host,
+GCS, `latest` paths, the musl asset and every adjacent version.
+
+**No arbitrary versions.** A version the pin does not select is refused, and the
+alternate column for `agy` in
+`script/test/fixtures/installer-egress/selections.tsv` is `-`. The maintenance
+tool can only pin the release Google's manifest currently names: an older
+`--version` is refused rather than fetched, and a same-release upstream rewrite is
+refused rather than re-pinned. A real bump therefore needs a human to update the
+`selections.tsv` default after reviewing the proposal.
+
+**Maintenance.** Only `script/dev/pin-agy.py` writes the pin, its three evidence
+files and the agy ARG, and only through the shared Python publication transaction.
+Typical commands:
+
+```bash
+python3 script/dev/pin-agy.py --check
+python3 script/dev/pin-agy.py --version 1.4.11
+bash script/build/agent-versions.sh --check
+bash script/build/agent-versions.sh --write --cosign /absolute/path/to/cosign
+```
+
+`--check` is offline: it re-hashes the committed evidence, requires it to agree
+with the pin and the single ARG/label, and says it is not a fresh corroboration.
+The write path downloads the manifests, the release metadata and both archives,
+corroborates each archive against both channels, preflights both archives and
+publishes the five files as one transaction. Statuses are the shared ones: `0`
+published or unchanged, `1` failed with the sources unchanged or fully restored,
+`2` usage, `3` undecided/incomplete recovery with every retained directory
+printed, `128+N` after a signal whose rollback succeeded.
+`script/build/agent-versions.sh --write` resolves the manifest and delegates to
+this tool **before** the Codex transaction, so a manifest that moves mid-run
+leaves every file untouched.
 
 ## The Rust example's toolchain closure
 
@@ -528,6 +596,17 @@ The Rust example's `rustup-init` bootstrap is a third instance, scoped to that
 example: its record lives in the example's `pin.json`
 ([details above](#the-rust-examples-toolchain-closure)) and it is re-reviewed on
 every bootstrap identity change or newly published signing/attestation scheme.
+
+`agy` (the standard image's seventh agent) is a fourth instance, and the only
+one inside a maintained runtime image: Google publishes no signature, attestation
+or immutable release for the Antigravity CLI, so the pin is `hash-only` and is
+corroborated only by GitHub's asset digest plus Google's updater manifest. The
+rationale, the two-channel argument, the reassessment condition and the accepted
+risk are in [ADR 0012](adr/0012-agy-hash-only-artifact-pin.md) and the
+[agy hash-only artifact](#the-agy-hash-only-artifact) section above. It is
+re-reviewed whenever the upstream distribution gains anything verifiable, and it
+is never treated as a precedent for a lower bar on an artifact that could be
+signed.
 
 The Go example's closure is a different kind of record: it is a **dated, scoped
 module-channel determination**, not an absence-of-signatures exception. It states

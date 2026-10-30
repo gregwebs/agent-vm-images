@@ -216,7 +216,7 @@ def selections() -> dict[str, str]:
     import re
     dockerfile = (ROOT / 'images/standard/Dockerfile').read_text()
     selected = {}
-    for name in ('codex', 'opencode', 'claude', 'copilot'):
+    for name in ('codex', 'opencode', 'claude', 'copilot', 'agy'):
         matches = re.findall(r'^ARG AGENT_VERSION_' + name.upper() + r'=(.+)$', dockerfile, re.M)
         if len(matches) != 1:
             raise ValueError('invalid committed single-slot selection')

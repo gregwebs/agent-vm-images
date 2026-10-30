@@ -4,7 +4,7 @@ These directories own installer inputs, exact locks, reviewed vendor snapshots
 and explicit runtime payloads. They are **not** standalone image products.
 [`../standard/Dockerfile`](../standard/Dockerfile) is the one maintained
 all-agent recipe, built with `images/` as context. It installs in order
-**dsh → Pi → Codex → OpenCode → Claude → Copilot**. Larger, rarely bumped
+**dsh → Pi → Codex → OpenCode → Claude → Copilot → agy**. Larger, rarely bumped
 locked trees remain below frequently changed CLI installs for Docker cache
 locality; there are no intermediate tool tags, predecessor identities or
 launcher catalog inputs.
@@ -25,6 +25,7 @@ Node 22, base-owned pnpm, fetch/diagnostic facilities, explicit optional trust a
 | opencode | AGENT_VERSION_OPENCODE | v2.0.29 / v2.SEMVER |
 | claude | AGENT_VERSION_CLAUDE | 2.1.286 / SEMVER |
 | copilot | AGENT_VERSION_COPILOT | 1.0.90 / SEMVER |
+| agy | AGENT_VERSION_AGY | 1.4.11 / X.Y.Z (pin-selected, see [ADR 0012](../../docs/adr/0012-agy-hash-only-artifact-pin.md)) |
 | dsh | AGENT_VERSION_DSH | manifest 0.1.5-rc.2 / SEMVER |
 | pnpm (inherited base) | AGENT_VERSION_PNPM (compatibility only) | base pin.json 11.11.0 / SEMVER |
 | pi | AGENT_VERSION_PI | manifest 1.4.0 / SEMVER |
@@ -35,7 +36,7 @@ Single-slot defaults are exact nonempty ARGs; empty values, dist-tags, ranges,
 URLs and malformed versions fail before network access. Locked slots have empty
 ARGs intentionally. Empty/equal slots reuse committed manifest/lock/configuration bytes during preparation without
 registry resolution; literal LABEL fallbacks mirror manifests because Docker
-cannot execute jq in LABEL. These nine `org.agent-vm.version.*` labels record
+cannot execute jq in LABEL. These ten `org.agent-vm.version.*` labels record
 **selection, not health**. There is no build-time latest query.
 
 An explicit different exact locked selection prepares a build-local lock; it
@@ -76,12 +77,12 @@ at all, and Copilot remains an npm install until PR 4 of #42.
 soft-fail ARG, skip flag or successful partial product exists. Each standard
 block requires its bounded exact report, access audit and `installed` record.
 Pi records `pi` and `pi-claude-bridge`; dsh records both dsh/pnpm health in `dsh`.
-That is eight agent records for nine selections, including `opencode-claude`.
+That is nine agent records for ten selections, including `opencode-claude`.
 Bridge or plugin absence is not success.
 
 The mandatory build-only final gate checks strict `installed\n` records before
-and after re-running all seven agent verifiers (excluding separate pnpm verification calls). It compares the first lexically existing
-PATH candidate for dsh, Codex, OpenCode, Claude and Pi to their fixed-path verified
+and after re-running all eight agent verifiers (excluding separate pnpm verification calls). It compares the first lexically existing
+PATH candidate for dsh, Codex, OpenCode, Claude, Pi and agy to their fixed-path verified
 files, before and after verification. dsh's target is the installed
 `node_modules/@deepseek-ai/dsh/lib/bin.js` the image links directly, so a
 generated `.bin` wrapper is a different file. Wrong executable shadows, dangling/cyclic
@@ -108,11 +109,17 @@ Vendored snapshot + patch + runnable copy keep installer edits reviewable:
 upstream assets still arrive over the network. Vendor manifests detect
 corruption, not independent signing or upstream replacement of an exact-version
 asset. OpenCode has no independent archive
-checksum; its trust is TLS plus exact registry tarball URL. Codex is the exception:
-its two payloads are bound by a committed content pin, so an exact version that
-the pin does not select is refused — see the
+checksum; its trust is TLS plus exact registry tarball URL. Two tools are the
+exception. Codex's two payloads are bound by a committed content pin, so an exact
+version that the pin does not select is refused — see the
 [Codex payload policy](../../docs/image-input-policy.md#codex-standalone-payloads)
-and [ADR 0009](../../docs/adr/0009-codex-payload-pins.md). These are explicit trust
+and [ADR 0009](../../docs/adr/0009-codex-payload-pins.md). agy publishes nothing
+to verify against, so its pin is hash-only, corroborated at pin time by GitHub's
+asset digest and Google's updater manifest and re-checked from the committed
+evidence at build time — the weakest guarantee in this repository, recorded in
+[ADR 0012](../../docs/adr/0012-agy-hash-only-artifact-pin.md) and in the
+[agy hash-only artifact](../../docs/image-input-policy.md#the-agy-hash-only-artifact)
+section of the input policy. These are explicit trust
 limits, not an assertion of fully reproducible OS or supply chain.
 
 ### dsh and pnpm

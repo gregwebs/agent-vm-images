@@ -882,7 +882,636 @@ def case_bundled_npm(work: Path, fixture: Fixture) -> None:
     fixture.restore()
 
 
-# --- ordering across the process boundary -----------------------------------
+# --- agy: the hash-only artifact ---------------------------------------------
+
+AGY_MACHINES = {'linux/amd64': 62, 'linux/arm64': 183}
+AGY_RELEASE_JSON = 'evidence/release.json'
+
+
+def elf_header(machine: int, elf_class: int = 2) -> bytes:
+    """The first 64 bytes of an ELF binary for one machine, which is all the
+    installer reads before publishing."""
+    header = bytearray(64)
+    header[0:4] = b'\x7fELF'
+    header[4] = elf_class
+    header[5] = 1  # little-endian
+    header[6] = 1  # EV_CURRENT
+    header[18:20] = machine.to_bytes(2, 'little')
+    return bytes(header)
+
+
+def agy_archive(body: bytes = None) -> bytes:
+    """The reviewed shape: one prefixless executable named after the project."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode='w:gz', format=tarfile.GNU_FORMAT) as tar:
+        add(tar, 'antigravity', body if body is not None else elf_header(62), 0o755)
+    return buffer.getvalue()
+
+
+def agy_hostile(kind: str) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode='w:gz', format=tarfile.GNU_FORMAT) as tar:
+        if kind == 'extra-member':
+            add(tar, 'antigravity', elf_header(62), 0o755)
+            add(tar, 'antigravity-cli', elf_header(62), 0o755)
+        elif kind == 'non-canonical':
+            add(tar, './antigravity', elf_header(62), 0o755)
+        elif kind == 'prefixed':
+            add(tar, 'agy/antigravity', elf_header(62), 0o755)
+        elif kind == 'symlink':
+            add_link(tar, 'antigravity', '../../etc/passwd')
+        elif kind == 'setuid':
+            add(tar, 'antigravity', elf_header(62), 0o4755)
+        elif kind == 'not-executable':
+            add(tar, 'antigravity', elf_header(62), 0o644)
+        elif kind.startswith('mode-'):
+            # A permission mode the review did not select. The digest covers the
+            # mode too, so the fixture is internally consistent: only the
+            # member-mode check separates `-rwxrwxrwx /usr/local/bin/agy` from the
+            # reviewed 0755.
+            add(tar, 'antigravity', elf_header(62), int(kind.split('-', 1)[1], 8))
+        else:
+            raise SystemExit(f'artifact-pins: unknown agy archive {kind}')
+    return buffer.getvalue()
+
+
+class AgyFixture:
+    """The committed corroboration layout of the hash-only artifact.
+
+    `pin.json` and `evidence/` are the two records a build re-checks against each
+    other: GitHub's release digests and Google's per-architecture updater
+    manifests. The served archives are `file:` fixtures, but the evidence URLs and
+    the pin's archive URLs are the computed upstream ones.
+    """
+
+    def __init__(self, work: Path) -> None:
+        self.work = work
+        self.directory = work / 'agy'
+        self.evidence = self.directory / 'evidence'
+        self.evidence.mkdir(parents=True)
+        self.releases = work / 'agy-releases'
+        self.releases.mkdir()
+        self.bytes = {platform: agy_archive(elf_header(machine))
+                      for platform, machine in AGY_MACHINES.items()}
+        self.original = dict(self.bytes)
+        for platform, raw in self.bytes.items():
+            self.path(platform).write_bytes(raw)
+        self.write_evidence()
+        self.write_pin()
+
+    def filename(self, platform: str) -> str:
+        return artifact_pin.expected_filename('agy', VERSION, platform)
+
+    def path(self, platform: str) -> Path:
+        return self.releases / self.filename(platform)
+
+    def url(self, platform: str) -> str:
+        return self.path(platform).as_uri()
+
+    def manifest_name(self, platform: str) -> str:
+        return artifact_pin.AGY_EVIDENCE[platform]
+
+    def write_evidence(self) -> None:
+        assets = [{'name': self.filename(platform),
+                   'size': len(raw),
+                   'digest': 'sha256:' + sha256(raw),
+                   'uploader': {'login': 'fixture'},
+                   'download_count': 4102}
+                  for platform, raw in self.bytes.items()]
+        release = {'tag_name': VERSION, 'draft': False, 'prerelease': False,
+                   'immutable': False, 'assets': assets}
+        (self.directory / AGY_RELEASE_JSON).write_text(json.dumps(release, indent=2) + '\n')
+        for platform, raw in self.bytes.items():
+            manifest = {'version': VERSION,
+                        'url': f'https://storage.googleapis.com/fixture/{self.filename(platform)}',
+                        'sha512': artifact_pin.sha512(raw)}
+            (self.directory / self.manifest_name(platform)).write_text(
+                json.dumps(manifest, indent=2) + '\n')
+
+    def write_pin(self, tamper=None) -> None:
+        pin = {
+            'schema': 1, 'name': 'agy', 'kind': 'release-archive', 'version': VERSION,
+            'upstream': {'project': f'https://github.com/{artifact_pin.AGY_REPOSITORY}',
+                         'release': artifact_pin.release_tag('agy', VERSION)},
+            'install': {'destination': '/usr/local',
+                        'payload': [{'member': member, 'path': path}
+                                    for member, path in artifact_pin.AGY_PAYLOAD],
+                        'links': []},
+            'platforms': {
+                platform: {
+                    'url': self.url(platform),
+                    'archive': 'tar.gz',
+                    'member_prefix': '',
+                    'sha256': sha256(raw),
+                    'sha512': artifact_pin.sha512(raw),
+                } for platform, raw in self.bytes.items()
+            },
+            'authentication': {
+                'method': 'hash-only',
+                'release': {'url': artifact_pin.AGY_RELEASE_API + VERSION,
+                            'path': AGY_RELEASE_JSON,
+                            'sha256': sha256((self.directory / AGY_RELEASE_JSON).read_bytes())},
+                'manifests': {
+                    platform: {'url': artifact_pin.manifest_url(platform),
+                               'path': self.manifest_name(platform),
+                               'sha256': sha256(
+                                   (self.directory / self.manifest_name(platform)).read_bytes())}
+                    for platform in AGY_MACHINES
+                },
+                'verified_on': '2026-10-30',
+                'reason': 'fixture',
+            },
+        }
+        if tamper:
+            tamper(pin)
+        (self.directory / 'pin.json').write_text(json.dumps(pin, indent=2) + '\n')
+
+    def restore(self) -> None:
+        self.bytes = dict(self.original)
+        for platform, raw in self.bytes.items():
+            self.path(platform).write_bytes(raw)
+        self.write_evidence()
+        self.write_pin()
+
+
+def install_agy(fixture: AgyFixture, root: Path, arch: str = 'amd64', *,
+                pin: Path | None = None, events: Path | None = None,
+                environment: dict | None = None) -> subprocess.CompletedProcess:
+    env = dict(os.environ, ARTIFACT_SOURCE_DIR=str(ROOT / 'images'))
+    env.update(environment or {})
+    argv = ['bash', str(INSTALLER), 'agy', str(pin or fixture.directory / 'pin.json'), arch,
+            '--root', str(root)]
+    if events is not None:
+        argv.extend(['--events', str(events)])
+    return run(argv, env=env)
+
+
+def events_of(log: Path) -> list[str]:
+    return [line.split(' ', 1)[0] for line in log.read_text().splitlines() if line.strip()]
+
+
+def expect_agy_refusal(label: str, result: subprocess.CompletedProcess, needle: str,
+                       root: Path) -> None:
+    """A refusal, its message, and — the rule this suite holds every row to —
+    nothing published: a check placed after publication cannot pass."""
+    if result.returncode == 0:
+        fail(label, f'installed instead of refusing: {result.stderr.strip()}')
+        return
+    if needle not in (result.stderr + result.stdout):
+        fail(label, f'refusal does not mention {needle!r}: {result.stderr.strip()}')
+        return
+    published = root / 'usr/local/bin/agy'
+    if published.exists() or (root / 'usr').exists() and any((root / 'usr').rglob('*')):
+        fail(label, f'nothing may be published on a refusal, found {published}')
+        return
+    report(label)
+
+
+def case_agy_install(work: Path, fixture: AgyFixture) -> None:
+    for arch, platform in (('amd64', 'linux/amd64'), ('arm64', 'linux/arm64')):
+        root = work / f'agy-happy-{arch}'
+        root.mkdir()
+        log = work / f'agy-happy-{arch}.log'
+        result = install_agy(fixture, root, arch, events=log)
+        if result.returncode != 0:
+            fail(f'agy {arch} installs', result.stderr.strip())
+            return
+        published = root / 'usr/local/bin/agy'
+        if not published.is_file():
+            fail(f'agy {arch} publishes /usr/local/bin/agy', graph(root))
+            return
+        if published.read_bytes() != elf_header(AGY_MACHINES[platform]):
+            fail(f'agy {arch} publishes the reviewed bytes', 'the published bytes differ')
+            return
+        if published.stat().st_mode & 0o777 != 0o755:
+            fail(f'agy {arch} publishes mode 0755', oct(published.stat().st_mode))
+            return
+        if (root / 'usr/local/bin/antigravity').exists():
+            fail('agy publishes no antigravity alias', graph(root))
+            return
+        if graph(root) != ['usr', 'usr/local', 'usr/local/bin', 'usr/local/bin/agy']:
+            fail(f'agy {arch} publishes exactly one path', graph(root))
+            return
+        entries = [tuple(line.split(' ', 1)) for line in log.read_text().splitlines()
+                   if line.strip()]
+        kinds = [kind for kind, _ in entries]
+        if kinds != ['verify', 'fetch', 'extract', 'publish']:
+            fail('agy: corroboration, then one fetch, then extraction, then publication',
+                 str(entries))
+            return
+        if entries[0][1] != 'corroboration':
+            fail('agy verifies the committed corroboration first', str(entries[0]))
+            return
+    report('agy installs from committed corroboration and publishes one alias-free binary')
+
+
+def case_agy_committed_corroboration(work: Path, fixture: AgyFixture) -> None:
+    """The committed records and the pin must still agree. Each row is refused
+    before any fetch, so a substituted archive is never even requested."""
+    cases = {
+        'tampered release evidence': (
+            lambda: (fixture.directory / AGY_RELEASE_JSON)
+            .write_text((fixture.directory / AGY_RELEASE_JSON).read_text().replace('4102', '4103')),
+            'release.json'),
+        'release names another tag': (
+            lambda: _rewrite_json(fixture.directory / AGY_RELEASE_JSON,
+                                  lambda value: value.update({'tag_name': '9.9.8'})),
+            'the pin says'),
+        'release is a draft': (
+            lambda: _rewrite_json(fixture.directory / AGY_RELEASE_JSON,
+                                  lambda value: value.update({'draft': True})),
+            'not a published release'),
+        'release digest disagrees with the pin': (
+            lambda: _rewrite_json(fixture.directory / AGY_RELEASE_JSON,
+                                  lambda value: value['assets'][0].update(
+                                      {'digest': 'sha256:' + '0' * 64})),
+            'the pin says sha256:'),
+        'release omits the asset': (
+            lambda: _rewrite_json(fixture.directory / AGY_RELEASE_JSON,
+                                  lambda value: value.update({'assets': value['assets'][1:]})),
+            'carries no'),
+        'release repeats an asset name': (
+            lambda: _rewrite_json(fixture.directory / AGY_RELEASE_JSON,
+                                  lambda value: value.update(
+                                      {'assets': value['assets'] + value['assets'][:1]})),
+            'twice'),
+        'manifest names another version': (
+            lambda: _rewrite_json(fixture.directory / fixture.manifest_name('linux/amd64'),
+                                  lambda value: value.update({'version': '9.9.8'})),
+            'the pin says'),
+        'manifest sha512 disagrees with the pin': (
+            lambda: _rewrite_json(fixture.directory / fixture.manifest_name('linux/amd64'),
+                                  lambda value: value.update({'sha512': '0' * 128})),
+            'the manifest sha512 is'),
+        'manifest carries an extra key': (
+            lambda: _rewrite_json(fixture.directory / fixture.manifest_name('linux/amd64'),
+                                  lambda value: value.update({'signature': 'none'})),
+            'unknown'),
+        'manifest has a duplicate key': (
+            lambda: (fixture.directory / fixture.manifest_name('linux/amd64')).write_text(
+                '{"version": "9.9.9", "version": "9.9.9", "url": "https://x/", '
+                '"sha512": "' + artifact_pin.sha512(
+                    fixture.bytes['linux/amd64']) + '"}\n'),
+            'duplicate'),
+        'manifest url is not https': (
+            lambda: _rewrite_json(fixture.directory / fixture.manifest_name('linux/amd64'),
+                                  lambda value: value.update({'url': 'file:///tmp/x'})),
+            'https URL'),
+        # The corroboration is per platform, and the build checks the platform it
+        # was *not* asked for too: an amd64 build still refuses an arm64 record
+        # that disagrees with the pin, so a loop narrowed to one platform fails
+        # here instead of silently pinning half a release.
+        'arm64 release digest disagrees with the pin': (
+            lambda: _rewrite_json(fixture.directory / AGY_RELEASE_JSON,
+                                  lambda value: _asset(value, fixture, 'linux/arm64')
+                                  .update({'digest': 'sha256:' + '0' * 64})),
+            'the pin says sha256:'),
+        'arm64 manifest sha512 disagrees with the pin': (
+            lambda: _rewrite_json(fixture.directory / fixture.manifest_name('linux/arm64'),
+                                  lambda value: value.update({'sha512': '0' * 128})),
+            'the manifest sha512 is'),
+        'arm64 manifest names another version': (
+            lambda: _rewrite_json(fixture.directory / fixture.manifest_name('linux/arm64'),
+                                  lambda value: value.update({'version': '9.9.8'})),
+            'the pin says'),
+    }
+    for index, (label, (mutate, needle)) in enumerate(cases.items()):
+        fixture.restore()
+        mutate()
+        # The pin records the evidence digests, so a hand-edited evidence file is
+        # first re-hashed into the pin for the "changed evidence" row: the point
+        # is that the *content* cannot disagree, not only the hash.
+        if label != 'tampered release evidence':
+            fixture.write_pin()
+        root = work / f'agy-evidence-{index}'
+        root.mkdir()
+        log = work / f'agy-evidence-{index}.log'
+        result = install_agy(fixture, root, events=log)
+        expect_agy_refusal(label, result, needle, root)
+        if log.exists() and 'fetch' in events_of(log):
+            fail(label, f'the archive must not be fetched: {log.read_text().strip()}')
+    fixture.restore()
+
+
+def _rewrite_json(path: Path, mutate) -> None:
+    value = json.loads(path.read_text())
+    mutate(value)
+    path.write_text(json.dumps(value, indent=2) + '\n')
+
+
+def _asset(release: dict, fixture: AgyFixture, platform: str) -> dict:
+    """One platform's asset record, addressed by name rather than position so a
+    row cannot silently tamper the other architecture."""
+    name = fixture.filename(platform)
+    return next(asset for asset in release['assets'] if asset['name'] == name)
+
+
+def case_agy_archive_bytes(work: Path, fixture: AgyFixture) -> None:
+    """The bytes, the second hash and the archive's own shape, each with the
+    committed corroboration kept consistent so only one check can refuse."""
+    changed = agy_archive(elf_header(62) + b'# a different build\n')
+    fixture.path('linux/amd64').write_bytes(changed)
+    root = work / 'agy-sha256'
+    root.mkdir()
+    log = work / 'agy-sha256.log'
+    expect_agy_refusal('changed bytes are refused before extraction',
+                       install_agy(fixture, root, events=log), 'the pin says', root)
+    if 'extract' in events_of(log):
+        fail('a mismatch never starts extraction', str(events_of(log)))
+    fixture.restore()
+
+    # Both corroboration records name a sha512 the served bytes do not have, and
+    # they agree with each other: only the post-fetch hash check can refuse, so
+    # this row proves the check runs after the fetch and before extraction.
+    zeros = '0' * 128
+    _rewrite_json(fixture.directory / fixture.manifest_name('linux/amd64'),
+                  lambda value: value.update({'sha512': zeros}))
+    fixture.write_pin(lambda pin: pin['platforms']['linux/amd64'].update({'sha512': zeros}))
+    root = work / 'agy-sha512'
+    root.mkdir()
+    log = work / 'agy-sha512.log'
+    expect_agy_refusal('a corroborated sha512 is checked after the fetch',
+                       install_agy(fixture, root, events=log), 'corroborated sha512', root)
+    entries = events_of(log)
+    if 'fetch' not in entries or 'extract' in entries:
+        fail('the sha512 is checked after the fetch and before extraction', str(entries))
+    fixture.restore()
+
+    for index, (kind, needle) in enumerate({
+            'extra-member': 'the archive carries',
+            'non-canonical': 'not a canonical path',
+            'prefixed': 'the archive carries',
+            'symlink': 'links outside the archive',
+            'setuid': 'setuid',
+            'not-executable': 'is mode 0644',
+            # The reviewed mode is exactly 0755. A mode the review did not select
+            # is refused rather than repaired: the image publishes
+            # `/usr/local/bin/agy` for every guest UID, so `-rwxrwxrwx` would let
+            # one guest replace the binary another runs. Group/world-write and
+            # setuid are the dangerous ones, and 0700/0750 are refused too because
+            # the rule is one exact mode, not a set of acceptable ones.
+            'mode-777': 'is mode 0777',
+            'mode-775': 'is mode 0775',
+            'mode-750': 'is mode 0750',
+            'mode-700': 'is mode 0700'}.items()):
+        raw = agy_hostile(kind)
+        fixture.bytes['linux/amd64'] = raw
+        fixture.path('linux/amd64').write_bytes(raw)
+        fixture.write_evidence()
+        fixture.write_pin()
+        root = work / f'agy-shape-{index}'
+        root.mkdir()
+        expect_agy_refusal(f'agy archive shape: {kind}', install_agy(fixture, root), needle, root)
+    fixture.restore()
+
+    # A consistent-hash wrong-architecture upload: both channels and the archive
+    # digest agree, so only the ELF header separates the two binaries.
+    wrong = agy_archive(elf_header(183))
+    fixture.bytes['linux/amd64'] = wrong
+    fixture.path('linux/amd64').write_bytes(wrong)
+    fixture.write_evidence()
+    fixture.write_pin()
+    root = work / 'agy-wrong-elf'
+    root.mkdir()
+    expect_agy_refusal('a consistent-hash wrong-architecture binary is refused',
+                       install_agy(fixture, root), 'ELF machine 183', root)
+    fixture.restore()
+
+    not_elf = agy_archive(b'not an ELF header at all\n')
+    fixture.bytes['linux/amd64'] = not_elf
+    fixture.path('linux/amd64').write_bytes(not_elf)
+    fixture.write_evidence()
+    fixture.write_pin()
+    root = work / 'agy-not-elf'
+    root.mkdir()
+    expect_agy_refusal('a published member that is not ELF is refused',
+                       install_agy(fixture, root), 'is not an ELF binary', root)
+    fixture.restore()
+
+    # A 32-bit ELF for the right machine: `e_machine` cannot tell it apart from the
+    # reviewed binary, so only the class/endianness header check can.
+    thirty_two_bit = agy_archive(elf_header(62, elf_class=1))
+    fixture.bytes['linux/amd64'] = thirty_two_bit
+    fixture.path('linux/amd64').write_bytes(thirty_two_bit)
+    fixture.write_evidence()
+    fixture.write_pin()
+    root = work / 'agy-elf-class'
+    root.mkdir()
+    expect_agy_refusal('a 32-bit ELF for the right machine is refused',
+                       install_agy(fixture, root), 'not a 64-bit little-endian ELF', root)
+    fixture.restore()
+
+
+def case_agy_ceiling(work: Path, fixture: AgyFixture) -> None:
+    """The 64 MiB ceiling that suits Node would refuse agy's real amd64 archive,
+    so the ceiling is per artifact — and the decoded member has its own."""
+    if artifact_pin.MAX_ARCHIVE_BYTES['agy'] <= 67_990_723:
+        fail('the agy archive ceiling admits the real amd64 archive',
+             str(artifact_pin.MAX_ARCHIVE_BYTES['agy']))
+        return
+    if artifact_pin.MAX_ARCHIVE_BYTES['node'] != 64 << 20 \
+            or artifact_pin.MAX_ARCHIVE_BYTES['gh'] != 64 << 20:
+        fail('the node and gh ceilings are unchanged', str(artifact_pin.MAX_ARCHIVE_BYTES))
+        return
+    report('the per-artifact archive ceilings leave node and gh unchanged')
+
+    import install_artifact
+    previous = artifact_pin.MAX_MEMBER_BYTES['agy']
+    artifact_pin.MAX_MEMBER_BYTES['agy'] = len(elf_header(62)) - 1
+    try:
+        root = work / 'agy-member-ceiling'
+        root.mkdir()
+        status = install_artifact.main(
+            ['agy', str(fixture.directory / 'pin.json'), 'amd64', '--root', str(root)])
+    finally:
+        artifact_pin.MAX_MEMBER_BYTES['agy'] = previous
+    if status == 0 or (root / 'usr/local/bin/agy').exists():
+        fail('a member past the decoded ceiling is refused before extraction',
+             f'status {status}')
+        return
+    report('a member past the decoded ceiling is refused before extraction')
+
+
+def case_agy_publish_conflict(work: Path, fixture: AgyFixture) -> None:
+    """An installed `agy` is another input's path: the install publishes nothing
+    and leaves the existing bytes in place."""
+    root = work / 'agy-conflict'
+    (root / 'usr/local/bin').mkdir(parents=True)
+    existing = root / 'usr/local/bin/agy'
+    existing.write_bytes(b'#!/bin/sh\necho 1.0.0\n')
+    result = install_agy(fixture, root)
+    if result.returncode == 0:
+        fail('an installed agy is not replaced', 'the install succeeded')
+        return
+    if 'refusing to replace an installed path' not in result.stderr:
+        fail('an installed agy is not replaced', result.stderr.strip())
+        return
+    if existing.read_bytes() != b'#!/bin/sh\necho 1.0.0\n':
+        fail('an installed agy is not replaced', 'the existing bytes changed')
+        return
+    report('an installed agy is left untouched and nothing else is published')
+
+
+def case_agy_pin_refusals(work: Path, fixture: AgyFixture) -> None:
+    """The pin itself: the method is bound to the name, the payload is the
+    reviewed rename, and the URLs are computed rather than matched."""
+    created = artifact_pin.canonical_url('agy', VERSION, 'linux/amd64')
+    asset = artifact_pin.expected_filename('agy', VERSION, 'linux/amd64')
+    rows = [
+        ('downgraded-to-openpgp',
+         lambda pin: pin['authentication'].update({'method': 'openpgp-signed-manifest'}),
+         'must be hash-only'),
+        ('payload-member',
+         lambda pin: pin['install']['payload'][0].update({'member': 'agy'}), 'payload'),
+        ('payload-path',
+         lambda pin: pin['install']['payload'][0].update({'path': 'bin/antigravity'}),
+         'payload'),
+        ('payload-string',
+         lambda pin: pin['install'].update({'payload': ['antigravity']}), 'payload'),
+        ('v-prefixed-tag',
+         lambda pin: pin['upstream'].update({'release': f'v{VERSION}'}), 'upstream release'),
+        ('v-prefixed-url',
+         lambda pin: pin['platforms']['linux/amd64'].update(
+             {'url': created.replace(f'/download/{VERSION}/', f'/download/v{VERSION}/')}),
+         'must be exactly'),
+        ('musl-asset',
+         lambda pin: pin['platforms']['linux/amd64'].update(
+             {'url': created.replace('linux_x64', 'linux_musl')}), 'must be exactly'),
+        ('another-repository',
+         lambda pin: pin['platforms']['linux/amd64'].update(
+             {'url': created.replace(artifact_pin.AGY_REPOSITORY, 'attacker/repo')}),
+         'must be exactly'),
+        ('query-string',
+         lambda pin: pin['platforms']['linux/amd64'].update({'url': created + '?raw=1'}),
+         'must be exactly'),
+        ('missing-sha512',
+         lambda pin: pin['platforms']['linux/amd64'].pop('sha512'), 'missing sha512'),
+        ('upper-case-sha512',
+         lambda pin: pin['platforms']['linux/amd64'].update(
+             {'sha512': pin['platforms']['linux/amd64']['sha512'].upper()}), 'SHA-512'),
+        ('member-prefix',
+         lambda pin: pin['platforms']['linux/amd64'].update({'member_prefix': 'agy/'}),
+         'member_prefix'),
+        ('release-evidence-url',
+         lambda pin: pin['authentication']['release'].update(
+             {'url': 'https://api.github.com/repos/attacker/repo/releases/tags/' + VERSION}),
+         'the url must be exactly'),
+        ('manifest-evidence-url',
+         lambda pin: pin['authentication']['manifests']['linux/amd64'].update(
+             {'url': pin['authentication']['manifests']['linux/arm64']['url']}),
+         'the url must be exactly'),
+        ('evidence-path',
+         lambda pin: pin['authentication']['manifests']['linux/amd64'].update(
+             {'path': 'evidence/other.json'}), 'the path must be'),
+        ('evidence-missing-volume',
+         lambda pin: pin['authentication'].pop('manifests'), 'missing manifests'),
+        ('links',
+         lambda pin: pin['install'].update(
+             {'links': [{'path': '/usr/local/bin/antigravity',
+                         'target': '/usr/local/bin/agy'}]}), 'links'),
+    ]
+    for index, (label, tamper, needle) in enumerate(rows):
+        fixture.restore()
+        fixture.write_pin(tamper)
+        root = work / f'agy-pin-{index}'
+        root.mkdir()
+        expect_agy_refusal(f'agy pin refusal: {label}', install_agy(fixture, root), needle, root)
+    fixture.restore()
+    report(f'agy: {len(rows)} pin mutations are refused, naming the field')
+    if asset != 'agy_cli_linux_x64.tar.gz':
+        fail('the agy asset name', asset)
+
+
+def case_agy_named_by_directory(work: Path, fixture: AgyFixture) -> None:
+    """`images/tools/<name>/pin.json` names its artifact by its directory, which is
+    how the committed agy pin gets its name."""
+    tree = work / 'committed' / 'agy'
+    tree.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(fixture.directory, tree)
+    if artifact_pin.load(tree / 'pin.json').name != 'agy':
+        fail('a pin.json names its artifact by its directory', 'the name differs')
+        return
+    report('a pin.json names its artifact by its directory')
+
+
+def case_agy_duplicate_keys(work: Path, fixture: AgyFixture) -> None:
+    """A pin is read exactly once and exactly one way.
+
+    `json.loads` keeps the last of two identical keys, so a pin could carry one
+    version for a reviewer's reader and another for the installer — and the Rust
+    gate already refuses duplicates, so the two would disagree about the pin.
+    """
+    fixture.restore()
+    text = (fixture.directory / 'pin.json').read_text()
+    amd64 = sha256(fixture.bytes['linux/amd64'])
+    zeros = '0' * 64
+    rows = [
+        ('top-level version',
+         f'"version": "{VERSION}",',
+         f'"version": "0.0.1", "version": "{VERSION}",'),
+        ('top-level authentication method',
+         '"method": "hash-only",',
+         '"method": "hash-only", "method": "openpgp-signed-manifest",'),
+        ('nested platform sha256',
+         f'"sha256": "{amd64}",',
+         f'"sha256": "{zeros}", "sha256": "{amd64}",'),
+    ]
+    for index, (label, needle, replacement) in enumerate(rows):
+        if needle not in text:
+            fail(f'a duplicate-key row still applies: {label}', 'the pin changed shape')
+            return
+        (fixture.directory / 'pin.json').write_text(text.replace(needle, replacement, 1))
+        root = work / f'agy-duplicate-{index}'
+        root.mkdir()
+        log = work / f'agy-duplicate-{index}.log'
+        expect_agy_refusal(f'agy pin refusal: duplicate {label}',
+                           install_agy(fixture, root, events=log), 'duplicate JSON key', root)
+        if log.exists() and 'fetch' in events_of(log):
+            fail(f'duplicate {label}', 'a refused pin must not fetch anything')
+    fixture.restore()
+    report('agy: a pin with a duplicate key is refused before any fetch')
+
+
+def case_unknown_artifact_name(work: Path, fixture: AgyFixture) -> None:
+    """An unknown `images/tools/<x>/pin.json` is refused, not read as `gh`.
+
+    The loader names a pin after its directory, so any new artifact's directory
+    reaches the parser. Before this refusal an unknown name fell through to the
+    GitHub CLI defaults and then died on a missing per-artifact ceiling instead of
+    naming what was wrong.
+    """
+    tree = work / 'unknown' / 'other'
+    tree.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(fixture.directory, tree)
+    root = work / 'agy-unknown-name'
+    root.mkdir()
+    result = install_agy(fixture, root, pin=tree / 'pin.json')
+    if result.returncode == 0:
+        fail('an unknown artifact name is refused', 'it installed')
+        return
+    if 'unknown artifact' not in result.stderr or 'other' not in result.stderr:
+        fail('an unknown artifact name is refused', result.stderr.strip())
+        return
+    report('a pin whose directory names no reviewed artifact is refused')
+
+
+def case_agy_wrong_artifact(work: Path, fixture: AgyFixture) -> None:
+    """A pin may only be installed as the artifact it names, however the caller
+    spells the path."""
+    installed = ROOT / 'images/tools/agy/pin.json'
+    if not installed.is_file():
+        fail('the committed agy pin exists', f'{installed} is missing')
+        return
+    result = run(['bash', str(INSTALLER), 'gh', str(installed), 'amd64',
+                  '--root', str(work / 'agy-wrong-artifact')],
+                 env=dict(os.environ, ARTIFACT_SOURCE_DIR=str(ROOT / 'images')))
+    if result.returncode == 0 or 'pins agy, not gh' not in result.stderr:
+        fail('the committed agy pin cannot be installed as gh', result.stderr.strip())
+        return
+    report('the committed agy pin cannot be installed as another artifact')
+
+
+
 
 def ordering_problems(log: Path, archive_name: str,
                       expect_extraction: bool = True) -> list[str]:
@@ -950,20 +1579,24 @@ def case_ordering(work: Path, fixture: Fixture) -> None:
         digest_check = """        if artifact_pin.sha256(payload) != archive.digest:
             raise Refusal(f'{archive.filename} is {artifact_pin.sha256(payload)}, '
                           f'the pin says {archive.digest}')
+        if archive.sha512 is not None and artifact_pin.sha512(payload) != archive.sha512:
+            raise Refusal(f'{archive.filename} does not match the corroborated sha512')
 """
         extraction = """        archive_file = scratch / archive.filename
         archive_file.write_bytes(payload)
         with tarfile.open(archive_file, 'r:' + ('xz' if archive.archive == 'tar.xz' else 'gz')) as tar:
             members = preflight(tar, archive.member_prefix)
+            check_members(pin, members)
             extract(members, tar, staging, archive.member_prefix)
+        check_executable(pin, platform, staging)
 """
         regressions = {
             'extraction before the digest check': (
                 digest_check + extraction, extraction + digest_check),
             'a second fetch after the mismatch': (
-                "        payload = fetch(archive.url, MAX_ARCHIVE_BYTES)\n",
-                "        payload = fetch(archive.url, MAX_ARCHIVE_BYTES)\n"
-                "        payload = fetch(archive.url, MAX_ARCHIVE_BYTES)\n"),
+                "        payload = fetch(archive.url, artifact_pin.MAX_ARCHIVE_BYTES[pin.name])\n",
+                "        payload = fetch(archive.url, artifact_pin.MAX_ARCHIVE_BYTES[pin.name])\n"
+                "        payload = fetch(archive.url, artifact_pin.MAX_ARCHIVE_BYTES[pin.name])\n"),
         }
         for label, (from_text, to_text) in regressions.items():
             tree = work / 'mutated-images'
@@ -1004,6 +1637,7 @@ def main() -> int:
     work = Path(tempfile.mkdtemp(prefix='artifact-pins.')).resolve()
     try:
         fixture = Fixture(work)
+        agy = AgyFixture(work)
         case_happy_path(work, fixture)
         case_changed_bytes(work, fixture)
         case_wrong_architecture(work, fixture)
@@ -1021,6 +1655,16 @@ def main() -> int:
         case_attestation_before_publication(work, fixture)
         case_bundled_npm(work, fixture)
         case_ordering(work, fixture)
+        case_agy_install(work, agy)
+        case_agy_committed_corroboration(work, agy)
+        case_agy_archive_bytes(work, agy)
+        case_agy_ceiling(work, agy)
+        case_agy_publish_conflict(work, agy)
+        case_agy_pin_refusals(work, agy)
+        case_agy_named_by_directory(work, agy)
+        case_agy_duplicate_keys(work, agy)
+        case_unknown_artifact_name(work, agy)
+        case_agy_wrong_artifact(work, agy)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     if failures:

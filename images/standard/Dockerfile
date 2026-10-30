@@ -20,7 +20,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 FROM ${BASE_IMAGE}
 LABEL org.opencontainers.image.title="agent-vm standard coding-agent image"
-LABEL org.opencontainers.image.description="dsh, Pi, Codex, OpenCode, Claude and Copilot with reviewed exact selections."
+LABEL org.opencontainers.image.description="dsh, Pi, Codex, OpenCode, Claude, Copilot and agy with reviewed exact selections."
 
 # The inherited stamp proves which sources the base was built from; comparing it
 # with this checkout's manifest is the first product RUN so a base from other
@@ -310,6 +310,39 @@ RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro 
     AGENT_VM_VERSION_OPENCODE_CLAUDE="${AGENT_VERSION_OPENCODE_CLAUDE}" \
     sh /tmp/opencode-source/verify-opencode-plugins.sh
 
+# agy
+ARG AGENT_VERSION_AGY=1.4.11
+
+LABEL org.agent-vm.version.agy="${AGENT_VERSION_AGY}"
+
+# The background self-update would replace the reviewed binary in a guest.
+ENV AGY_CLI_DISABLE_AUTO_UPDATE=1
+
+# `tools/agy` is mounted at a directory literally named `agy`: the shared loader
+# names a `pin.json` after its own directory, so the mount target is part of the
+# pin's identity, not a label.
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
+    --mount=type=bind,source=tools/agy,target=/tmp/agy,ro \
+    --mount=type=bind,source=tools/agy/install-agy.sh,target=/tmp/install-agy.sh,ro \
+    --mount=type=bind,source=install-artifact.sh,target=/tmp/artifact-source/install-artifact.sh,ro \
+    --mount=type=bind,source=artifacts,target=/tmp/artifact-source/artifacts,ro \
+    AGENT_INSTALL_SOFT_FAIL= \
+    AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
+    AGENT_VM_AGY_SOURCE_DIR=/tmp/agy \
+    ARTIFACT_SOURCE_DIR=/tmp/artifact-source \
+    AGENT_VM_AGY_ARCH="${TARGETARCH}" \
+    AGENT_VM_VERSION_AGY="${AGENT_VERSION_AGY}" \
+    AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
+    sh /tmp/recipe-contract/run-install.sh agy /opt/agent-vm/install-status/agy sh /tmp/install-agy.sh
+
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
+    --mount=type=bind,source=tools/agy/verify-agy.sh,target=/tmp/verify-agy.sh,ro \
+    AGENT_INSTALL_SOFT_FAIL= \
+    AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
+    AGENT_VM_VERSION_AGY="${AGENT_VERSION_AGY}" \
+    AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
+    sh /tmp/verify-agy.sh
+
 # Certification of the finished filesystem and its unmodified final PATH.
 # The PATH-identity helper is a sibling of the script under /tmp: bind only that
 # file, never the directory, so nothing is COPYed into the runtime image.
@@ -330,6 +363,7 @@ RUN --mount=type=bind,source=standard/verify-standard.sh,target=/tmp/verify-stan
     AGENT_VM_VERSION_CLAUDE="${AGENT_VERSION_CLAUDE}" \
     AGENT_VM_VERSION_COPILOT="${AGENT_VERSION_COPILOT}" \
     AGENT_VM_VERSION_OPENCODE_CLAUDE="${AGENT_VERSION_OPENCODE_CLAUDE}" \
+    AGENT_VM_VERSION_AGY="${AGENT_VERSION_AGY}" \
     AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
     AGENT_VM_PI_TARGET_PLATFORM=linux/${TARGETARCH} \
     sh /tmp/verify-standard.sh

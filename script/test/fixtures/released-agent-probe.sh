@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Credential-free probe supplied verbatim to Docker and native msb guests.
 set -euo pipefail
-[ "$#" -eq 11 ] || { echo 'probe requires UID GID and nine source-derived selections' >&2; exit 2; }
+[ "$#" -eq 12 ] || { echo 'probe requires UID GID and ten source-derived selections' >&2; exit 2; }
 uid=$1 gid=$2 codex=$3 opencode=$4 claude=$5 copilot=$6 dsh=$7 pnpm=$8 pi=$9 bridge=${10} opencode_claude=${11}
+agy=${12}
 [ "$(id -u)" = "$uid" ] && [ "$(id -g)" = "$gid" ]
 : "${HOME:?fresh writable HOME required}"
 printf 'numeric uid probe\n' > "$HOME/agent-vm-probe"
@@ -10,10 +11,10 @@ tmp=$(mktemp -d "$HOME/probe.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 # OPENCODE_PROBE_SOURCES
 export PI_TELEMETRY=0 PI_SKIP_VERSION_CHECK=1
-for tool in codex opencode claude copilot dsh pi pnpm; do
+for tool in codex opencode claude copilot dsh pi pnpm agy; do
     timeout --kill-after=5s 60 "$tool" --version > "$tmp/$tool.out" 2> "$tmp/$tool.err"
 done
-python3 "$tmp/released-agent-report.py" "$tmp" "$codex" "$opencode" "$claude" "$copilot" "$dsh" "$pnpm" "$pi"
+python3 "$tmp/released-agent-report.py" "$tmp" "$codex" "$opencode" "$claude" "$copilot" "$dsh" "$pnpm" "$pi" "$agy"
 # Pi and the bridge are reviewed pnpm projects too: four regular inputs and no
 # npm lock, not even a dangling link to one.
 for project in pi pi-packages; do

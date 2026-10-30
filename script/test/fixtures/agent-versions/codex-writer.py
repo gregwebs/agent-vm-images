@@ -24,6 +24,12 @@ Environment:
   FIXTURE_CODEX_INJECT_AT  destination file NAME to fail publishing (e.g. release.json)
   FIXTURE_CODEX_REFUSE_RESTORE  "1" to refuse every restore
   FIXTURE_CODEX_RECORD_ENOSPC   "1" to fail writing recovery.json with ENOSPC
+  FIXTURE_CODEX_STAGE_SNAPSHOT  copy the Dockerfile this run staged into this path
+
+Everything below the module load runs only when this file IS the process: a
+fixture repository puts it at `script/dev/pin-codex.py`, where the agy writer
+imports it as its transport, so an import must never parse arguments or install
+faults.
 """
 from __future__ import annotations
 
@@ -36,7 +42,9 @@ import sys
 from pathlib import Path
 
 WRITER = Path(os.environ['FIXTURE_CODEX_WRITER'])
-ASSETS = Path(os.environ['FIXTURE_CODEX_ASSETS'])
+# Optional for the same reason the agy adapter's is: this file is imported as a
+# fixture repository's transport, where nothing fetches anything.
+ASSETS = Path(os.environ.get('FIXTURE_CODEX_ASSETS', ''))
 
 spec = importlib.util.spec_from_file_location('pin_codex_under_test', WRITER)
 module = importlib.util.module_from_spec(spec)
@@ -59,6 +67,8 @@ def fixture_file(url: str) -> Path:
 def fixture_fetch(url: str, output: Path, limit: int) -> None:
     if url == os.environ.get('FIXTURE_CODEX_FAIL_URL'):
         raise module.Refusal(f'cannot fetch {url}: HTTP 500 (fixture)')
+    if not str(ASSETS):
+        raise module.Refusal(f'cannot fetch {url}: no fixture assets are configured')
     source = fixture_file(url)
     if not source.is_file():
         raise module.Refusal(f'cannot fetch {url}: HTTP 404 (fixture)')
@@ -77,6 +87,9 @@ def fixture_verify(cosign):
 
 module.https_fetch = fixture_fetch
 module.cosign_blob_verifier = fixture_verify
+# A fixture repository puts this adapter where the shared transport lives, so
+# `script/dev/pin-agy.py` binds it as its own transport and needs its Refusal.
+Refusal = module.Refusal
 
 def repo_root_from_argv() -> Path:
     """The writer's own --repo-root, so the fault-injected publisher is the one
@@ -88,7 +101,7 @@ def repo_root_from_argv() -> Path:
 
 
 injection = os.environ.get('FIXTURE_CODEX_INJECT', 'none')
-if injection != 'none':
+if __name__ == '__main__' and injection != 'none':
     publisher = module.publisher_module(repo_root_from_argv())
     real_copyfile = shutil.copyfile
     armed = [True]
@@ -118,4 +131,23 @@ if injection != 'none':
             raise OSError(errno.ENOSPC, 'no space left on device')
         publisher.Publisher.recovery_record = enospc_record
 
-sys.exit(module.main(sys.argv[1:]))
+def record_staged_dockerfile(status: int) -> None:
+    """Copy the Dockerfile this run staged, so a caller can prove what it read.
+
+    `agent-versions.sh` runs the agy transaction before this one. Only a snapshot of
+    the Codex-staged file distinguishes "agy published first" from "both writers
+    ran in some order".
+    """
+    destination = os.environ.get('FIXTURE_CODEX_STAGE_SNAPSHOT')
+    argv = sys.argv[1:]
+    if not destination or status != 0 or '--stage-dir' not in argv:
+        return
+    staged = Path(argv[argv.index('--stage-dir') + 1]) / 'Dockerfile'
+    if staged.is_file():
+        shutil.copyfile(staged, destination)
+
+
+if __name__ == '__main__':
+    exit_status = module.main(sys.argv[1:])
+    record_staged_dockerfile(exit_status)
+    sys.exit(exit_status)

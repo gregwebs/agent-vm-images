@@ -127,12 +127,12 @@ def payload_for(config: dict) -> str:
     raise SystemExit('the codex allowlist has no github.com rule')
 
 
-def gate_config(platform: str) -> dict:
-    finished = subprocess.run(['bash', str(GATE), '--emit-config', 'codex',
+def gate_config(platform: str, tool: str = 'codex') -> dict:
+    finished = subprocess.run(['bash', str(GATE), '--emit-config', tool,
                                '--platform', platform],
                               capture_output=True, text=True)
     if finished.returncode != 0:
-        raise SystemExit(f'shipped-installer-network.sh --emit-config failed: '
+        raise SystemExit(f'shipped-installer-network.sh --emit-config {tool} failed: '
                          f'{finished.stderr.strip()}')
     return json.loads(finished.stdout)
 
@@ -256,6 +256,57 @@ def case_unlisted_is_denied(addon, work: Path) -> None:
         report(label)
 
 
+def case_agy_profile(platform: str, work: Path) -> None:
+    """agy's whole build egress is one committed release asset.
+
+    Its pin-time channels -- the GitHub tag API and Google's updater manifest --
+    are inputs a build must never fetch, so they are not in the allowlist at all;
+    this row is the hermetic proof that the production config says exactly that.
+    """
+    label = 'agy_profile'
+    config = gate_config(platform, 'agy')
+    problems = []
+    if config.get('https_only') is not True:
+        problems.append('not https_only')
+    expected_hosts = ['release-assets.githubusercontent.com',
+                      'objects.githubusercontent.com']
+    if config.get('learn_hosts') != expected_hosts:
+        problems.append(f'learn_hosts {config.get("learn_hosts")!r}')
+    payload = payload_for(config)
+    if '/google-antigravity/antigravity-cli/releases/download/' not in payload \
+            or '/agy_cli_linux_' not in payload:
+        problems.append(f'the allowed path is not the agy asset: {payload}')
+    if problems:
+        fail(label, '; '.join(problems))
+        return
+    log = work / 'agy.log'
+    scenario = load_addon(_write_config(work, 'agy-config.json', config), log)
+    allowed = StubFlow(payload)
+    scenario.request(allowed)
+    if allowed.response is not None:
+        fail(label, f'the pinned asset was refused with {allowed.response.status_code}')
+        return
+    for name, url in [
+            ('tag_api', 'https://api.github.com/repos/google-antigravity/antigravity-cli'
+                        '/releases/tags/1.4.11'),
+            ('manifest', 'https://antigravity-cli-auto-updater-974169037036.us-central1.run.app'
+                         '/manifests/linux_amd64.json'),
+            ('gcs', 'https://storage.googleapis.com/antigravity-cli/agy.tar.gz'),
+            ('musl', payload.replace('.tar.gz', '_musl.tar.gz'))]:
+        denied = StubFlow(url)
+        scenario.request(denied)
+        if denied.response is None or denied.response.status_code != 403:
+            fail(f'{label}/{name}', 'accepted')
+            return
+    report(label)
+
+
+def _write_config(work: Path, name: str, config: dict) -> Path:
+    path = work / name
+    path.write_text(json.dumps(config) + '\n')
+    return path
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('--platform', default='linux/arm64')
@@ -282,6 +333,7 @@ def main(argv: list[str]) -> int:
         case_redirect_negatives(addon, work)
         case_deny_patterns_apply_to_learned(addon, work)
         case_unlisted_is_denied(addon, work)
+        case_agy_profile(arguments.platform, work)
     if failures:
         print(f'installer-egress-addon: {len(failures)} case(s) failed', file=sys.stderr)
         return 1

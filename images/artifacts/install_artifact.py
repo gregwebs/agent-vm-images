@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
-"""Install one committed release-artifact pin into an image root (#96).
+"""Install one committed release-artifact pin into an image root (#96, #131).
 
-The installer is the only path that puts Node or the GitHub CLI into the image.
-It reads nothing but the pin, so an ordinary build cannot resolve a URL, a
-checksum or a version of its own: the pinned URL is the only place it fetches
+The installer is the only path that puts Node, the GitHub CLI or `agy` into the
+image. It reads nothing but the pin, so an ordinary build cannot resolve a URL,
+a checksum or a version of its own: the pinned URL is the only place it fetches
 from, the pinned digest is the only bytes it accepts, and there is no apt, npm,
 mirror or `latest` fallback to fall back to.
 
-Two orderings here are deliberate and load-bearing:
+Three orderings here are deliberate and load-bearing:
 
 * The reviewed evidence is checked before the payload is fetched. For Node that
   means the detached OpenPGP signature over `SHASUMS256.txt` against the
   committed release key, and the signed line for this archive must equal the
-  committed digest; only then is the tarball requested at all.
+  committed digest; for `agy`, whose upstream publishes no signature, it means
+  the two committed corroboration records (GitHub's release digests and Google's
+  updater manifest) must still agree with the pin; only then is the tarball
+  requested at all.
 * Nothing reaches the image until the archive has been preflighted, extracted
   into a private staging tree and published from there. A hostile member, a
-  duplicate path, an escaping link, a device node or a setuid bit stops the run
-  with the destination untouched.
+  duplicate path, an escaping link, a device node, a setuid bit, a second member
+  or a binary for another architecture stops the run with the destination
+  untouched.
+* `agy`'s archive carries exactly one prefixless binary that the image publishes
+  under another name, so the archive's shape is part of the pin and is checked
+  from the member metadata before any byte is decoded into staging.
 
 The GitHub CLI is the one artifact whose own verifier is the artifact: Sigstore
 needs `gh attestation verify`, so the *authoritative* verification is the
@@ -43,15 +50,14 @@ import artifact_pin
 from artifact_pin import Refusal
 
 DOWNLOAD_TIMEOUT_SECONDS = 300
-# A 64 MiB ceiling is absurdly generous for Node and absurd for anything else
-# this repository installs, so an unexpected payload size is a refusal. It is 64
-# rather than 32 because Node amd64 is already 31,029,996 B: a 32 MiB ceiling
-# leaves 3% headroom and would fail the next patch release.
+# The per-artifact archive ceiling lives in the pin model, so the pin-time writer
+# and the installer refuse the same oversized payload.
 MAX_EVIDENCE_BYTES = 1 << 20
-MAX_ARCHIVE_BYTES = 64 << 20
 # Every symlink chain is resolved through the archive's own links, so a bound is
 # the cycle detector: a real payload nests a handful of links, never this many.
 MAX_LINK_DEPTH = 16
+# An ELF header is 64 bytes; the fields checked are inside the first 20.
+ELF_HEADER_BYTES = 20
 
 
 def report_event(kind: str, detail: str) -> None:
@@ -307,6 +313,67 @@ def refuse_symlink_ancestors(staging: Path, target: Path) -> None:
             raise Refusal(f'the archive would write through the link {current.relative_to(staging)}')
 
 
+def check_members(pin: artifact_pin.Pin, members: list[tarfile.TarInfo]) -> None:
+    """The archive shape an artifact's identity includes.
+
+    Runs on the member metadata between `preflight` and `extract`, so a second
+    member, a directory where the reviewed binary should be, a different
+    permission mode or a decoded payload past its ceiling is refused before a byte
+    is written into staging.
+    """
+    expected = artifact_pin.EXACT_MEMBERS.get(pin.name)
+    if expected is None:
+        return
+    names = tuple(canonical_member(member) for member in members)
+    if names != expected:
+        raise Refusal(f'{pin.name}: the archive carries {list(names)}, the reviewed '
+                      f'archive carries {list(expected)}')
+    mode = artifact_pin.EXACT_MEMBER_MODES[pin.name]
+    ceiling = artifact_pin.MAX_MEMBER_BYTES[pin.name]
+    for member in members:
+        if not member.isfile():
+            raise Refusal(f'{pin.name}: {member.name} is not a regular file')
+        # `extract` publishes the member's own bits, so the reviewed mode is
+        # refused here rather than narrowed later: a group- or world-writable
+        # member would ship a binary every guest UID can replace.
+        if member.mode & 0o7777 != mode:
+            raise Refusal(f'{pin.name}: {member.name} is mode {member.mode & 0o7777:04o}, '
+                          f'the reviewed archive carries {mode:04o}')
+        if member.size > ceiling:
+            raise Refusal(f'{pin.name}: {member.name} decodes to {member.size} bytes, '
+                          f'past the {ceiling} byte ceiling')
+
+
+def check_elf(pin_name: str, published: str, header: bytes, machine: int,
+              platform: str) -> None:
+    """The architecture of one payload binary, from its own header.
+
+    A release asset whose digest and whose recorded corroboration are mutually
+    consistent can still be the other architecture's binary: `e_machine` is the
+    only thing that says otherwise. Shared with the pin-time writer, which reads
+    the header straight out of the archive instead of extracting it.
+    """
+    if len(header) != ELF_HEADER_BYTES or header[:4] != b'\x7fELF':
+        raise Refusal(f'{pin_name}: {published} is not an ELF binary')
+    if header[4] != 2 or header[5] != 1:
+        raise Refusal(f'{pin_name}: {published} is not a 64-bit little-endian ELF binary')
+    found = int.from_bytes(header[18:20], 'little')
+    if found != machine:
+        raise Refusal(f'{pin_name}: {published} is ELF machine {found}, the pin '
+                      f'selects {machine} for {platform}')
+
+
+def check_executable(pin: artifact_pin.Pin, platform: str, staging: Path) -> None:
+    """The published payload's architecture, checked before publication."""
+    machine = artifact_pin.ELF_MACHINES.get(pin.name, {}).get(platform)
+    if machine is None:
+        return
+    for member, published in pin.install.payload:
+        with (staging / member).open('rb') as handle:
+            header = handle.read(ELF_HEADER_BYTES)
+        check_elf(pin.name, published, header, machine, platform)
+
+
 def extract(members: list[tarfile.TarInfo], archive: tarfile.TarFile, staging: Path,
             prefix: str) -> None:
     """Files and directories first, links last: a symlink created before the
@@ -324,7 +391,13 @@ def extract(members: list[tarfile.TarInfo], archive: tarfile.TarFile, staging: P
             source = archive.extractfile(member)
             if source is None:
                 raise Refusal(f'the archive member is unreadable: {member.name}')
-            target.write_bytes(source.read())
+            # Streamed rather than read whole: agy's member decodes to 234 MB and a
+            # second copy of it is not worth the peak memory.
+            with target.open('wb') as handle:
+                shutil.copyfileobj(source, handle)
+            # The member's own bits are what publishes: for an EXACT_MEMBERS
+            # artifact `check_members` has already required exactly the reviewed
+            # mode, so there is no second mode value here that could drift from it.
             target.chmod(member.mode & 0o777)
         else:
             links.append(member)
@@ -362,7 +435,7 @@ def check_destination(root: Path, target: Path) -> None:
 
 
 def plan_publication(staging: Path, root: Path, destination: str,
-                     payload: tuple[str, ...]) -> list[tuple[str, Path, Path]]:
+                     payload: tuple[tuple[str, str], ...]) -> list[tuple[str, Path, Path]]:
     """The complete list of directories and files publication would create.
 
     Collecting it first is what makes the precheck possible: a conflict in the
@@ -379,11 +452,11 @@ def plan_publication(staging: Path, root: Path, destination: str,
             return
         plan.append(('leaf', staged, target))
 
-    for relative in payload:
-        staged = staging / relative
+    for member, published in payload:
+        staged = staging / member
         if not staged.exists() and not staged.is_symlink():
-            raise Refusal(f'the reviewed archive carries no {relative} to publish')
-        walk(staged, into / relative)
+            raise Refusal(f'the reviewed archive carries no {member} to publish')
+        walk(staged, into / published)
     for kind, _staged, target in plan:
         check_destination(root, target)
         if kind == 'dir':
@@ -481,15 +554,24 @@ def install(pin: artifact_pin.Pin, arch: str, root: Path, report) -> None:
             if archive.bundle is None or archive.bundle_digest is None:
                 raise Refusal(f'{pin.name}: the pin carries no attestation bundle')
             bundle = artifact_pin.check_evidence(pin, archive.bundle, archive.bundle_digest)
-        payload = fetch(archive.url, MAX_ARCHIVE_BYTES)
+        if isinstance(authentication, artifact_pin.HashOnly):
+            # No signature exists upstream: the build's only authority is the two
+            # committed channels, which must still agree with each other and the pin.
+            artifact_pin.check_corroboration(pin)
+            report_event('verify', 'corroboration')
+        payload = fetch(archive.url, artifact_pin.MAX_ARCHIVE_BYTES[pin.name])
         if artifact_pin.sha256(payload) != archive.digest:
             raise Refusal(f'{archive.filename} is {artifact_pin.sha256(payload)}, '
                           f'the pin says {archive.digest}')
+        if archive.sha512 is not None and artifact_pin.sha512(payload) != archive.sha512:
+            raise Refusal(f'{archive.filename} does not match the corroborated sha512')
         archive_file = scratch / archive.filename
         archive_file.write_bytes(payload)
         with tarfile.open(archive_file, 'r:' + ('xz' if archive.archive == 'tar.xz' else 'gz')) as tar:
             members = preflight(tar, archive.member_prefix)
+            check_members(pin, members)
             extract(members, tar, staging, archive.member_prefix)
+        check_executable(pin, platform, staging)
         if pin.bundled is not None:
             found = bundled_npm(staging)
             if found != pin.bundled['npm']:
@@ -532,7 +614,7 @@ def check_evidence_digests(pin: artifact_pin.Pin, authentication: artifact_pin.O
 def main(argv: list[str]) -> int:
     global EVENTS
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument('name', help='artifact name: node or gh')
+    parser.add_argument('name', help='artifact name: node, gh or agy')
     parser.add_argument('pin', help='the committed pin file')
     parser.add_argument('arch', help='target architecture: amd64 or arm64')
     parser.add_argument('--root', default='/', help='the image root to install into')

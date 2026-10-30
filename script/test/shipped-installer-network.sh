@@ -19,7 +19,7 @@
 #   --overrides   also run the committed exact alternate selection per tool
 #   --observe     capture mode: log every URL and forward it (builds the
 #                 allowlist; not an acceptance run)
-#   --tool TOOL   only codex|opencode|claude|opencode-plugins (repeatable)
+#   --tool TOOL   only codex|opencode|claude|agy|opencode-plugins (repeatable)
 #   --platform P  Docker platform (default: the host's)
 #   --self-test   hermetic: replay the request-log and `-`-placeholder stream
 #                 assertions against correct and defective streams. No Docker, no
@@ -99,6 +99,27 @@ assert_codex_request_log() { # $1 version, $2 marker, [$3 log file]
         fail "codex $version: a Sigstore bundle was downloaded at build time"
     fi
     echo "    request log: payload fetch only (no metadata, checksums or bundles)"
+}
+
+# agy's build fetches ONE url: the committed release asset for the architecture
+# under test. GitHub's tag API and Google's updater manifest are pin-time inputs,
+# so a line naming either -- or the manifest's GCS url -- is a defect, not a
+# tolerated redirect (ADR 0012).
+AGY_PAYLOAD_ALLOW='^ALLOW https://github\.com/google-antigravity/antigravity-cli/releases/download/'
+
+assert_agy_request_log() { # $1 version, $2 marker, [$3 log file]
+    local version=$1 marker=$2 log_file=${3:-$TMP/logs/egress.log} log count
+    log="$(tail -n "+$(( marker + 1 ))" "$log_file" 2>/dev/null || true)"
+    printf '%s\n' "$log" | grep -q "$AGY_PAYLOAD_ALLOW" ||
+        fail "agy $version: no payload request was allowed"
+    count="$(printf '%s\n' "$log" | grep -c "$AGY_PAYLOAD_ALLOW" || true)"
+    [ "$count" = 1 ] || fail "agy $version: $count payload requests, expected exactly one"
+    for channel in 'api\.github\.com' 'run\.app' 'storage\.googleapis\.com'; do
+        if printf '%s\n' "$log" | grep -q "$channel"; then
+            fail "agy $version: a pin-time channel ($channel) was contacted at build time"
+        fi
+    done
+    echo "    request log: one pinned payload fetch only (no tag API, no manifest)"
 }
 
 # Exactly one version record, and never the `-` placeholder row. Comparing the
@@ -195,6 +216,35 @@ run_stream_self_test() {
 
     stream_expect_ok 'the committed table explains its single codex selection' \
         check_codex_overrides_stream || status=1
+
+    local agy_release
+    agy_release="$(selection_for agy 2)"
+    [ -n "$agy_release" ] || { echo 'FAIL: no agy selection' >&2; return 1; }
+    {
+        printf 'ALLOW https://github.com/google-antigravity/antigravity-cli/releases/download/%s/agy_cli_linux_x64.tar.gz\n' "$agy_release"
+        printf 'LEARN https://release-assets.githubusercontent.com/x/agy.tar.gz?<redacted>\n'
+        printf 'ALLOW-LEARNED https://release-assets.githubusercontent.com/x/agy.tar.gz?<redacted>\n'
+    } >"$log"
+    stream_expect_ok 'agy request log: one pinned payload allow + learned CDN redirect' \
+        assert_agy_request_log "$agy_release" 0 "$log" || status=1
+    for defect in metadata manifest gcs; do
+        cp "$log" "$dir/agy-defect.log"
+        case "$defect" in
+            metadata) printf 'ALLOW https://api.github.com/repos/google-antigravity/antigravity-cli/releases/tags/%s\n' "$agy_release" >>"$dir/agy-defect.log" ;;
+            manifest) printf 'ALLOW https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_x64.json\n' >>"$dir/agy-defect.log" ;;
+            gcs) printf 'ALLOW https://storage.googleapis.com/antigravity-cli/agy.tar.gz\n' >>"$dir/agy-defect.log" ;;
+        esac
+        stream_expect_fail "agy request log rejects $defect" 'FAIL:' \
+            assert_agy_request_log "$agy_release" 0 "$dir/agy-defect.log" || status=1
+    done
+    cp "$log" "$dir/agy-twice.log"
+    printf 'ALLOW https://github.com/google-antigravity/antigravity-cli/releases/download/%s/agy_cli_linux_x64.tar.gz\n' "$agy_release" >>"$dir/agy-twice.log"
+    stream_expect_fail 'agy request log rejects a second payload request' 'exactly one' \
+        assert_agy_request_log "$agy_release" 0 "$dir/agy-twice.log" || status=1
+    : >"$dir/agy-empty.log"
+    stream_expect_fail 'agy request log rejects no payload request' \
+        'no payload request was allowed' \
+        assert_agy_request_log "$agy_release" 0 "$dir/agy-empty.log" || status=1
     rm -rf "$dir"
     [ "$status" -eq 0 ] || return 1
     echo '  the strict-egress stream assertions accept correct input and refuse each defect'
@@ -236,6 +286,31 @@ write_config() { # $1 = tool, $2 = version, $3 = out file
                 deny: ["/latest", "releases/latest", "releases/tags/latest",
                        "channel", "/install\\.sh$", "releases/download/latest",
                        "codex-package_SHA256SUMS", "\\.sigstore"]
+            }' >"$out"
+            ;;
+        agy)
+            # One network endpoint: the committed release's asset for the
+            # architecture under test. The tag API and the updater manifest are
+            # pin-time inputs, so they are not in the build's allowlist at all.
+            numeric="$(escape_re "$version")"
+            local agy_token
+            case "$arch" in
+                aarch64) agy_token=arm64 ;;
+                x86_64) agy_token=x64 ;;
+            esac
+            jq -n --arg v "$numeric" --arg t "$agy_token" '{
+                https_only: true,
+                # Only an already-allowed HTTPS response may hand over a target,
+                # and only on these two GitHub asset hosts.
+                learn_hosts: ["release-assets.githubusercontent.com",
+                              "objects.githubusercontent.com"],
+                allow: [
+                    {host: "github.com", method: "GET",
+                     path: ("^/google-antigravity/antigravity-cli/releases/download/" + $v
+                            + "/agy_cli_linux_" + $t + "\\.tar\\.gz$")}
+                ],
+                deny: ["/latest", "releases/latest", "releases/tags/", "run\\.app",
+                       "storage\\.googleapis\\.com", "_musl"]
             }' >"$out"
             ;;
         opencode-plugins)
@@ -308,7 +383,7 @@ if [ "${1:-}" = --emit-config ]; then
         *) echo "unsupported platform: ${emit_platform}" >&2; exit 2 ;;
     esac
     case "$emit_tool" in
-        codex | opencode | claude) ;;
+        codex | opencode | claude | agy) ;;
         *) echo "unknown tool: $emit_tool" >&2; exit 2 ;;
     esac
     write_config "$emit_tool" "$(selection_for "$emit_tool" 2)" /dev/stdout
@@ -389,7 +464,7 @@ CONTRACT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --platform "$platf
 [ -x "$CONTRACT/recipe-contract" ] || { echo "no recipe-contract in $CONTRACT" >&2; exit 1; }
 
 if [ "${#tools[@]}" -eq 0 ]; then
-    tools=(codex opencode claude opencode-plugins)
+    tools=(codex opencode claude agy opencode-plugins)
 fi
 
 for required in docker jq python3; do
@@ -483,11 +558,12 @@ docker network create "$NET_EXTERNAL" >/dev/null
 # native binary while the shipped recipe ships a newer one.
 assert_selection_defaults_match_dockerfiles() {
     local tool arg arg_default tsv_default
-    for tool in codex opencode claude; do
+    for tool in codex opencode claude agy; do
         case "$tool" in
             codex) arg=AGENT_VERSION_CODEX ;;
             opencode) arg=AGENT_VERSION_OPENCODE ;;
             claude) arg=AGENT_VERSION_CLAUDE ;;
+            agy) arg=AGENT_VERSION_AGY ;;
         esac
         arg_default="$(sed -n "s/^ARG ${arg}=//p" "$REPO_ROOT/images/standard/Dockerfile")"
         tsv_default="$(selection_for "$tool" 2)"
@@ -500,7 +576,12 @@ assert_selection_defaults_match_dockerfiles() {
         "$REPO_ROOT/images/tools/codex/pin.json")"
     [ "$pin_release" = "$(selection_for codex 2)" ] ||
         fail "the committed codex pin is '$pin_release' but selections.tsv says '$(selection_for codex 2)'"
-    echo "  selections.tsv defaults match the committed Dockerfile ARGs and the codex pin"
+    local agy_pin
+    agy_pin="$(python3 "$REPO_ROOT/images/artifacts/read-pin-version.py" \
+        "$REPO_ROOT/images/tools/agy/pin.json")"
+    [ "$agy_pin" = "$(selection_for agy 2)" ] ||
+        fail "the committed agy pin is '$agy_pin' but selections.tsv says '$(selection_for agy 2)'"
+    echo "  selections.tsv defaults match the committed Dockerfile ARGs, the codex pin and the agy pin"
 }
 assert_selection_defaults_match_dockerfiles
 
@@ -511,7 +592,7 @@ assert_selection_defaults_match_dockerfiles
 # requests (no network) and fails on any mismatch.
 run_allowlist_negatives() { # $1 tool, $2 version
     local tool="$1" version="$2" numeric sep adjacent cfg="$TMP/allow-$1-$2.json"
-    local cases="$TMP/allow-cases-$1-$2.tsv" oc_target cl_platform rc=0
+    local cases="$TMP/allow-cases-$1-$2.tsv" oc_target cl_platform agy_token agy_other rc=0
     write_config "$tool" "$version" "$cfg"
     : >"$cases"
     mkdir -p "$TMP/allowlog"
@@ -583,6 +664,36 @@ run_allowlist_negatives() { # $1 tool, $2 version
             printf '%s\t0\n' "http://github.com/openai/codex/releases/download/rust-v$numeric/$asset" \
                 "https://github.com:444/openai/codex/releases/download/rust-v$numeric/$asset" >>"$cases"
             printf '%s\t0\tPOST\n' "$release_url/$asset" >>"$cases" ;;
+        agy)
+            # One payload positive; negatives for both pin-time channels, the
+            # manifest's GCS url, the other architecture, a musl build, an
+            # adjacent version, a separator variant, a `v` prefix, an extra
+            # suffix, another repository, a query, plain HTTP and a port.
+            numeric="$version"
+            sep="${numeric//./\/}"
+            adjacent="${numeric%.*}.$(( ${numeric##*.} + 1 ))"
+            case "$arch" in
+                aarch64) agy_token=arm64; agy_other=x64 ;;
+                x86_64) agy_token=x64; agy_other=arm64 ;;
+            esac
+            local agy_url="https://github.com/google-antigravity/antigravity-cli/releases/download/$numeric"
+            printf '%s\t1\n' "$agy_url/agy_cli_linux_$agy_token.tar.gz" >>"$cases"
+            printf '%s\t0\n' \
+                "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/tags/$numeric" \
+                "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest" \
+                "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_$agy_token.json" \
+                "https://storage.googleapis.com/antigravity-cli/agy.tar.gz" \
+                "$agy_url/agy_cli_linux_$agy_other.tar.gz" \
+                "$agy_url/agy_cli_linux_${agy_token}_musl.tar.gz" \
+                "https://github.com/google-antigravity/antigravity-cli/releases/download/$adjacent/agy_cli_linux_$agy_token.tar.gz" \
+                "https://github.com/google-antigravity/antigravity-cli/releases/download/$sep/agy_cli_linux_$agy_token.tar.gz" \
+                "https://github.com/google-antigravity/antigravity-cli/releases/download/v$numeric/agy_cli_linux_$agy_token.tar.gz" \
+                "$agy_url/agy_cli_linux_$agy_token.tar.gz.extra" \
+                "https://github.com/attacker/repo/releases/download/$numeric/agy_cli_linux_$agy_token.tar.gz" \
+                "$agy_url/agy_cli_linux_$agy_token.tar.gz?sig=REVIEW-SIGNED-SECRET&token=REVIEW-TOKEN" >>"$cases"
+            printf '%s\t0\n' "http://github.com/google-antigravity/antigravity-cli/releases/download/$numeric/agy_cli_linux_$agy_token.tar.gz" \
+                "https://github.com:444/google-antigravity/antigravity-cli/releases/download/$numeric/agy_cli_linux_$agy_token.tar.gz" >>"$cases"
+            printf '%s\t0\tPOST\n' "$agy_url/agy_cli_linux_$agy_token.tar.gz" >>"$cases" ;;
         opencode)
             numeric="${version#v}"
             sep="${numeric//./\/}"
@@ -680,6 +791,7 @@ hook_for() { # $1 = tool
         codex) printf '%s\n' install-codex.sh ;;
         opencode) printf '%s\n' install-opencode.sh ;;
         claude) printf '%s\n' install-claude.sh ;;
+        agy) printf '%s\n' install-agy.sh ;;
         *) fail "unknown tool: $1" ;;
     esac
 }
@@ -689,6 +801,7 @@ version_var_for() { # $1 = tool
         codex) printf '%s\n' AGENT_VM_VERSION_CODEX ;;
         opencode) printf '%s\n' AGENT_VM_VERSION_OPENCODE ;;
         claude) printf '%s\n' AGENT_VM_VERSION_CLAUDE ;;
+        agy) printf '%s\n' AGENT_VM_VERSION_AGY ;;
         *) fail "unknown tool: $1" ;;
     esac
 }
@@ -719,6 +832,7 @@ report_script() { # $1 = tool
         codex) printf '%s\n' '/opt/agent/.local/bin/codex --version' ;;
         opencode) printf '%s\n' '/usr/local/bin/opencode --version' ;;
         claude) printf '%s\n' 'if [ -x /opt/agent/.local/bin/claude ]; then /opt/agent/.local/bin/claude --version; else find /opt/agent/.local/bin -name claude -type f -exec {} --version \; 2>/dev/null; fi' ;;
+        agy) printf '%s\n' '/usr/local/bin/agy --version' ;;
     esac
 }
 
@@ -739,6 +853,29 @@ run_one_combined() { # $1 = tool, $2 = version
         extra_env+=(-e "AGENT_VM_CODEX_SOURCE_DIR=/codex-source")
         extra_env+=(-e "TMPDIR=/tmp")
     fi
+    if [ "$tool" = agy ]; then
+        # The pin, its evidence and the shared installer travel read-only; the
+        # build receives no url, digest or version-derived expectation.
+        # The mount target is named after the artifact, not after the hook: the
+        # shared loader names a `pin.json` after its own directory.
+        extra_env+=(-v "$REPO_ROOT/images/tools/agy:/agy:ro")
+        extra_env+=(-v "$REPO_ROOT/images/artifacts:/artifact-source/artifacts:ro")
+        extra_env+=(-v "$REPO_ROOT/images/install-artifact.sh:/artifact-source/install-artifact.sh:ro")
+        extra_env+=(-e "AGENT_VM_AGY_SOURCE_DIR=/agy")
+        extra_env+=(-e "ARTIFACT_SOURCE_DIR=/artifact-source")
+        case "$arch" in
+            aarch64) extra_env+=(-e "AGENT_VM_AGY_ARCH=arm64") ;;
+            x86_64) extra_env+=(-e "AGENT_VM_AGY_ARCH=amd64") ;;
+        esac
+        extra_env+=(-e "TMPDIR=/tmp")
+    fi
+    # A vendor mount is added only for tools that have one: the daemon would
+    # create a missing host path, turning a typo into an empty directory.
+    local vendor_mounts=()
+    if [ -d "$REPO_ROOT/images/tools/$tool/vendor" ]; then
+        vendor_mounts=(-v "$REPO_ROOT/images/tools/$tool/vendor:/vendor:ro")
+        vendor_mounts+=(-e "AGENT_VM_VENDOR_DIR=/vendor")
+    fi
 
     write_config "$tool" "$version" "$cfg"
     marker="$(mark_log)"
@@ -749,14 +886,13 @@ run_one_combined() { # $1 = tool, $2 = version
     run_with_watchdog "$NETWORK_CONTAINER_WATCHDOG_SECONDS" \
         docker run --rm --name "$RUN_ID-inst-$RANDOM" --platform "$platform" --network "$NET_INTERNAL" \
         -v "$TMP/certs/mitmproxy-ca-cert.pem:/mitm/ca.pem:ro" \
-        -v "$REPO_ROOT/images/tools/$tool/vendor:/vendor:ro" \
+        ${vendor_mounts[@]+"${vendor_mounts[@]}"} \
         -v "$CONTRACT:/contract:ro" \
         -v "$REPO_ROOT/images/tools/$tool/$hook:/hook:ro" \
         -e "HTTP_PROXY=http://$PROXY:8080" -e "HTTPS_PROXY=http://$PROXY:8080" \
         -e "http_proxy=http://$PROXY:8080" -e "https_proxy=http://$PROXY:8080" \
         -e "ALL_PROXY=http://$PROXY:8080" -e "NO_PROXY=" \
         -e "AGENT_VM_CONTRACT_DIR=/contract" \
-        -e "AGENT_VM_VENDOR_DIR=/vendor" \
         -e "AGENT_VM_TRANSPORT_RECEIPT=/tmp/receipt" \
         -e "AGENT_VM_INSTALL_STATUS_DIR=/tmp/status" \
         -e "$var=$version" \
@@ -781,8 +917,17 @@ $(report_script "$tool")" >"$out" 2>&1
     fi
     [ "$run_status" -eq 0 ] || fail "$tool $version installer failed (exit $run_status)"
 
-    local report expect
+    local report expect whole
     report="$(sed -n '/^--- REPORT ---$/,$p' "$out" | tail -n +2 | head -n 1)"
+    if [ "$tool" = agy ]; then
+        # The version report is byte-exact: one line, no second line, no footer.
+        whole="$(sed -n '/^--- REPORT ---$/,$p' "$out" | tail -n +2)"
+        [ "$whole" = "$version" ] ||
+            fail "agy report is not exactly '$version': '$whole'"
+        echo "    report ok: $report"
+        assert_agy_request_log "$version" "$marker"
+        return 0
+    fi
     case "$tool" in
         codex) expect="codex-cli ${version#rust-v}" ;;
         opencode) expect="opencode $version" ;;

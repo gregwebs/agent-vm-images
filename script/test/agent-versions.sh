@@ -3,20 +3,22 @@
 # write tool that resolves each single-slot installer layer's current upstream
 # release and stages the reviewed exact default in its Dockerfile.
 #
-# No network and no repository writes: a fake `curl` (GitHub + the claude
-# channel) and a fake `npm` (OpenCode and Copilot dist-tags) answer from environment
-# variables, and every run targets a `--repo-root` fixture tree of four
-# Dockerfiles with one `ARG AGENT_VERSION_*=<old>` line each. The real `jq` is
-# used, since the JSON extraction is part of what is under test.
+# No network and no repository writes: a fake `curl` (GitHub, the claude channel
+# and Google's two agy updater manifests) and a fake `npm` (OpenCode and Copilot
+# dist-tags) answer from environment variables, and every run targets a
+# `--repo-root` fixture tree of Dockerfiles with one `ARG AGENT_VERSION_*=<old>`
+# line each. The real `jq` is used, since the JSON extraction is part of what is
+# under test.
 #
 # Since #97 a write run also stages and publishes the Codex payload closure (pin,
-# four evidence files, Dockerfile) as ONE transaction. The fixture repository
-# therefore carries a committed OLD closure and the suite replaces
-# `script/dev/pin-codex.py` with `fixtures/agent-versions/codex-writer.py`, which
-# loads the REAL writer and swaps only its two seams (streaming fetch and blob
-# verification). Everything else -- schema, evidence hashing, archive preflight,
-# the fixed destination list, the shared Python publisher and every status -- is
-# production code.
+# four evidence files, Dockerfile) as ONE transaction, and since #131 it publishes
+# agy's closure (pin, three evidence files, Dockerfile) as its own transaction
+# FIRST. The fixture repository therefore carries committed OLD closures for both
+# and replaces `script/dev/pin-codex.py` / `script/dev/pin-agy.py` with
+# `fixtures/agent-versions/{codex,agy}-writer.py`, which load the REAL writers and
+# swap only their seams (streaming fetch, blob verification). Everything else --
+# schema, evidence hashing, archive preflight, the fixed destination lists, the
+# shared Python publisher and every status -- is production code.
 
 set -euo pipefail
 
@@ -45,6 +47,10 @@ DEFAULT_CODEX_RELEASE='rust-v0.30.0'
 FIXTURE_OLD_OPENCODE='v2.2.2'
 FIXTURE_OLD_CLAUDE='1.0.99'
 FIXTURE_OLD_COPILOT='0.1.29'
+# agy is the one tool whose release is resolved from a manifest rather than a
+# tag; the committed fixture closure and the served one are one minor apart.
+FIXTURE_OLD_AGY='1.4.10'
+DEFAULT_AGY_RELEASE='1.4.11'
 
 STUB_BIN="$TEST_ROOT/bin"
 mkdir -p "$STUB_BIN"
@@ -85,6 +91,8 @@ printf '%s\n' "$*" >>"${STUB_LOG:-/dev/null}"
 case "$url" in
     *openai/codex*) printf '%s' "${STUB_CODEX-}" ;;
     *claude-code-releases/latest*) printf '%s' "${STUB_CLAUDE-}" ;;
+    */manifests/linux_amd64.json) printf '%s\n' "${STUB_AGY_AMD64-}" ;;
+    */manifests/linux_arm64.json) printf '%s\n' "${STUB_AGY_ARM64-}" ;;
     *) echo "stub curl: unexpected url: $url" >&2; exit 22 ;;
 esac
 SH
@@ -144,6 +152,20 @@ write_dockerfile() { # $1 = tool, remaining args = lines
     for line in "$@"; do printf '%s\n' "$line" >>"$dir/Dockerfile"; done
 }
 
+# One publisher run per release, built once by the owner suite and reused: the
+# fixture repository checks in the OLD closure and the transport serves the
+# published bytes of whichever release a case selects.
+AGY_FIXTURES="$TEST_ROOT/agy-fixtures"
+agy_fixture() { # $1 = version -> directory holding source/ (closure) and assets/
+    local directory="$AGY_FIXTURES/$1"
+    if [[ ! -d "$directory" ]]; then
+        python3 "$REPO_ROOT/script/test/pin-agy-maintenance.py" \
+            --write-fixture "$directory" --version "$1" >/dev/null ||
+            fail "cannot build the agy $1 fixture"
+    fi
+    printf '%s\n' "$directory"
+}
+
 reset_fixture() {
     FIXTURE_ROOT="$CASE/repo"
     rm -rf "$FIXTURE_ROOT"
@@ -152,6 +174,7 @@ reset_fixture() {
     write_dockerfile opencode "ARG AGENT_VERSION_OPENCODE=${FIXTURE_OLD_OPENCODE}"
     write_dockerfile claude "ARG AGENT_VERSION_CLAUDE=${FIXTURE_OLD_CLAUDE}"
     write_dockerfile copilot "ARG AGENT_VERSION_COPILOT=${FIXTURE_OLD_COPILOT}"
+    write_dockerfile agy "ARG AGENT_VERSION_AGY=${FIXTURE_OLD_AGY}"
     # shellcheck disable=SC2016 # literal Dockerfile interpolation
     printf 'LABEL org.agent-vm.version.pi="${AGENT_VERSION_PI:-0.87.1}"\n' >>"$FIXTURE_ROOT/images/standard/Dockerfile"
     mkdir -p "$FIXTURE_ROOT/images/pnpm" "$FIXTURE_ROOT/images/tools/dsh"
@@ -174,9 +197,20 @@ reset_fixture() {
     cp -R "$REPO_ROOT/images/artifacts" "$FIXTURE_ROOT/images/artifacts"
     cp "$REPO_ROOT/script/test/fixtures/agent-versions/codex-writer.py" \
         "$FIXTURE_ROOT/script/dev/pin-codex.py"
+    # agy: one committed OLD closure, the real writer behind the fixture adapter,
+    # and the shared modules both writers load from the repository under test.
+    AGY_COMMITTED="$(agy_fixture "$FIXTURE_OLD_AGY")/source/images/tools/agy"
+    mkdir -p "$FIXTURE_ROOT/images/tools/agy"
+    cp "$AGY_COMMITTED/pin.json" "$FIXTURE_ROOT/images/tools/agy/"
+    cp -R "$AGY_COMMITTED/evidence" "$FIXTURE_ROOT/images/tools/agy/"
+    cp "$REPO_ROOT/script/test/fixtures/agent-versions/agy-writer.py" \
+        "$FIXTURE_ROOT/script/dev/pin-agy.py"
     cp "$FIXTURE_ROOT/images/standard/Dockerfile" "$CASE/original"
     # shellcheck disable=SC2016 # literal Dockerfile interpolation
     printf 'LABEL org.agent-vm.version.codex="${AGENT_VERSION_CODEX}"\n' \
+        >>"$FIXTURE_ROOT/images/standard/Dockerfile"
+    # shellcheck disable=SC2016 # literal Dockerfile interpolation
+    printf 'LABEL org.agent-vm.version.agy="${AGENT_VERSION_AGY}"\n' \
         >>"$FIXTURE_ROOT/images/standard/Dockerfile"
     cp "$FIXTURE_ROOT/images/standard/Dockerfile" "$CASE/original"
 }
@@ -211,10 +245,29 @@ new_case() {
     : >"$CASE/stderr"
     SERVED_CODEX_RELEASE="$DEFAULT_CODEX_RELEASE"
     unset STUB_CODEX_INJECT STUB_CODEX_INJECT_AT STUB_CODEX_REFUSE_RESTORE \
-        STUB_CODEX_RECORD_ENOSPC STUB_CODEX_VERIFY STUB_CODEX_FAIL_KIND
+        STUB_CODEX_RECORD_ENOSPC STUB_CODEX_VERIFY STUB_CODEX_FAIL_KIND STUB_CODEX_STAGE_SNAPSHOT
+    unset STUB_AGY_INJECT STUB_AGY_INJECT_AT STUB_AGY_REFUSE_RESTORE STUB_AGY_RECORD_FETCHES \
+        STUB_AGY_FAIL_URL
+    STAGED_AGY_DEFAULT=""
+    SERVED_AGY_RELEASE="$FIXTURE_OLD_AGY"
     reset_fixture
     write_codex_assets "$SERVED_CODEX_RELEASE"
+    serve_agy "$SERVED_AGY_RELEASE"
     ARGS=(--write --repo-root "$FIXTURE_ROOT" --cosign "$STUB_BIN/cosign")
+}
+
+# The bytes the agy transport serves for the current case, copied per case so one
+# case can rewrite or delete one of them without touching the cached fixture.
+serve_agy() { # $1 = served version
+    local fixture
+    SERVED_AGY_RELEASE=$1
+    fixture="$(agy_fixture "$1")"
+    rm -rf "$CASE/agy-assets"
+    cp -R "$fixture/assets" "$CASE/agy-assets"
+    # The bumper reads the manifests through the stub curl; serving it the same
+    # documents the writer will corroborate keeps the two in step.
+    STUB_AGY_AMD64="$(cat "$CASE/agy-assets/linux_amd64.json")"
+    STUB_AGY_ARM64="$(cat "$CASE/agy-assets/linux_arm64.json")"
 }
 
 ARGS=()
@@ -231,6 +284,8 @@ run_agent_versions() {
         "STUB_OPENCODE=${STUB_OPENCODE-}" \
         "STUB_CLAUDE=${STUB_CLAUDE-}" \
         "STUB_COPILOT=${STUB_COPILOT-}" \
+        "STUB_AGY_AMD64=${STUB_AGY_AMD64-}" \
+        "STUB_AGY_ARM64=${STUB_AGY_ARM64-}" \
         "STUB_CURL_FAIL=${STUB_CURL_FAIL-}" \
         "STUB_NPM_FAIL=${STUB_NPM_FAIL-}" \
         "STUB_CP_FAIL_DEST=${STUB_CP_FAIL_DEST-}" \
@@ -242,6 +297,14 @@ run_agent_versions() {
         "FIXTURE_CODEX_REFUSE_RESTORE=${STUB_CODEX_REFUSE_RESTORE-}" \
         "FIXTURE_CODEX_RECORD_ENOSPC=${STUB_CODEX_RECORD_ENOSPC-}" \
         "FIXTURE_CODEX_FAIL_URL=${STUB_CODEX_FAIL_URL-}" \
+        "FIXTURE_CODEX_STAGE_SNAPSHOT=${STUB_CODEX_STAGE_SNAPSHOT-}" \
+        "FIXTURE_AGY_WRITER=$REPO_ROOT/script/dev/pin-agy.py" \
+        "FIXTURE_AGY_ASSETS=$CASE/agy-assets" \
+        "FIXTURE_AGY_INJECT=${STUB_AGY_INJECT:-none}" \
+        "FIXTURE_AGY_INJECT_AT=${STUB_AGY_INJECT_AT-}" \
+        "FIXTURE_AGY_REFUSE_RESTORE=${STUB_AGY_REFUSE_RESTORE-}" \
+        "FIXTURE_AGY_RECORD_FETCHES=${STUB_AGY_RECORD_FETCHES-}" \
+        "FIXTURE_AGY_FAIL_URL=${STUB_AGY_FAIL_URL-}" \
         "GH_TOKEN=${GH_TOKEN-}" \
         "GITHUB_ACTIONS=${GITHUB_ACTIONS-}" \
         "GITHUB_OUTPUT=${GITHUB_OUTPUT-}" \
@@ -317,20 +380,30 @@ assert_log_empty
 grep -q "^ARG AGENT_VERSION_CODEX=${FIXTURE_OLD_CODEX}$" "$FIXTURE_ROOT/images/standard/Dockerfile" \
     || fail "a refused CI run must not touch the Dockerfiles"
 
-# --- happy path: four staged exact ARG edits --------------------------------
+# --- happy path: five staged exact ARG edits and both closures published ----
 
 new_case happy
 GITHUB_OUTPUT="$CASE/github_output"
+# Every case starts from the committed agy release; a bump case selects a newer
+# one, because a publication that changes nothing prints `unchanged`.
+serve_agy "$DEFAULT_AGY_RELEASE"
+# The codex fixture records the Dockerfile it staged, so the ordering claim is
+# checked on the bytes Codex actually read.
+STUB_CODEX_STAGE_SNAPSHOT="$CASE/codex-staged-dockerfile"
 run_agent_versions
 [[ $RUN_STATUS -eq 0 ]] || fail "the happy path must succeed: $RUN_STDERR"
+assert_contains "$RUN_OUTPUT" "agy ${FIXTURE_OLD_AGY} -> ${DEFAULT_AGY_RELEASE}"
 assert_contains "$RUN_OUTPUT" "codex ${FIXTURE_OLD_CODEX} -> rust-v0.30.0"
 assert_contains "$RUN_OUTPUT" "opencode ${FIXTURE_OLD_OPENCODE} -> v2.2.3"
 assert_contains "$RUN_OUTPUT" "claude ${FIXTURE_OLD_CLAUDE} -> 1.0.100"
 assert_contains "$RUN_OUTPUT" "copilot ${FIXTURE_OLD_COPILOT} -> 0.1.30"
 assert_contains "$RUN_OUTPUT" "images/standard/Dockerfile"
-assert_contains "$RUN_OUTPUT" "images/standard/Dockerfile"
-assert_contains "$RUN_OUTPUT" "images/standard/Dockerfile"
-assert_contains "$RUN_OUTPUT" "images/standard/Dockerfile"
+assert_contains "$RUN_OUTPUT" "images/tools/agy/"
+# agy was published in its own transaction, so the report says so instead of
+# calling it a staged ARG edit.
+assert_contains "$RUN_OUTPUT" "Published closures"
+# agy moved, so the human-edited egress selection is named.
+assert_contains "$RUN_OUTPUT" "selections.tsv"
 # The old interface's machine-adoptable `tool=version` lines are gone.
 assert_not_contains "$RUN_OUTPUT" "codex="
 assert_not_contains "$RUN_OUTPUT" "opencode="
@@ -367,6 +440,33 @@ assert_all_args_unchanged() {
         || fail "claude Dockerfile changed on rejection"
     grep -q "^ARG AGENT_VERSION_COPILOT=${FIXTURE_OLD_COPILOT}$" "$FIXTURE_ROOT/images/standard/Dockerfile" \
         || fail "copilot Dockerfile changed on rejection"
+    assert_agy_unchanged
+}
+
+# The committed agy closure and its ARG default: a refused run must leave both
+# exactly as they were. The agy transaction publishes first, so this is what
+# proves a refusal happened before it rather than after.
+assert_agy_unchanged() {
+    local relative
+    for relative in pin.json evidence/release.json evidence/manifest-linux-amd64.json \
+        evidence/manifest-linux-arm64.json; do
+        cmp -s "$AGY_COMMITTED/$relative" "$FIXTURE_ROOT/images/tools/agy/$relative" ||
+            fail "a refused run changed images/tools/agy/$relative"
+    done
+    grep -q "^ARG AGENT_VERSION_AGY=${FIXTURE_OLD_AGY}$" "$FIXTURE_ROOT/images/standard/Dockerfile" \
+        || fail "a refused run changed the agy ARG"
+}
+
+# The agy closure a published release must leave behind: the same bytes the owner
+# fixture published, file for file.
+assert_agy_published() { # $1 = released version
+    local relative fixture
+    fixture="$(agy_fixture "$1")/source/images/tools/agy"
+    for relative in pin.json evidence/release.json evidence/manifest-linux-amd64.json \
+        evidence/manifest-linux-arm64.json; do
+        cmp -s "$fixture/$relative" "$FIXTURE_ROOT/images/tools/agy/$relative" ||
+            fail "the published agy closure differs from the reviewed $1 bytes: $relative"
+    done
 }
 assert_arg_rewritten codex rust-v0.30.0
 # One transaction published the pin, its four evidence files and the Dockerfile.
@@ -386,7 +486,17 @@ done
 assert_arg_rewritten opencode v2.2.3
 assert_arg_rewritten claude 1.0.100
 assert_arg_rewritten copilot 0.1.30
+assert_arg_rewritten agy "$DEFAULT_AGY_RELEASE"
 assert_not_contains "$(cat "$FIXTURE_ROOT/images/standard/Dockerfile")" "$FIXTURE_OLD_CODEX"
+assert_agy_published "$DEFAULT_AGY_RELEASE"
+# Ordering: the Dockerfile Codex staged already carried the released agy ARG, so
+# agy published before Codex read the file rather than alongside it.
+[[ -f "$CASE/codex-staged-dockerfile" ]] || fail 'the codex staging input was not recorded'
+grep -q "^ARG AGENT_VERSION_AGY=${DEFAULT_AGY_RELEASE}$" "$CASE/codex-staged-dockerfile" ||
+    fail "the Dockerfile Codex staged did not carry the released agy ARG: $(cat "$CASE/codex-staged-dockerfile")"
+grep -q "^ARG AGENT_VERSION_AGY=${FIXTURE_OLD_AGY}$" "$CASE/original" ||
+    fail 'the fixture did not start from the older agy release'
+echo '  ok: agy published before the Codex staging step read the Dockerfile'
 
 # --- the authentication token never appears in diagnostics ------------------
 
@@ -409,10 +519,13 @@ write_codex_assets "$SERVED_CODEX_RELEASE"
 run_agent_versions
 [[ $RUN_STATUS -eq 0 ]] || fail "a no-op run must succeed: $RUN_STDERR"
 assert_contains "$RUN_OUTPUT" "already current"
-assert_contains "$RUN_OUTPUT" "codex closure was still verified"
-cmp "$FIXTURE_ROOT/images/standard/Dockerfile" "$CASE/original"
-cmp "$FIXTURE_ROOT/images/tools/codex/pin.json" "$CASE/codex-committed/source/pin.json" ||
-    fail 'a repeat run must leave the committed pin byte-identical'
+assert_contains "$RUN_OUTPUT" "both closures were still verified"
+# agy did not move, so it is not reported as a bump, its directory is not listed
+# as changed, and the human-edited egress selection is not mentioned.
+assert_not_contains "$RUN_OUTPUT" "agy ${FIXTURE_OLD_AGY} ->"
+assert_not_contains "$RUN_OUTPUT" "Published closures"
+assert_not_contains "$RUN_OUTPUT" "images/tools/agy/"
+assert_not_contains "$RUN_OUTPUT" "selections.tsv"
 
 grep -q "^ARG AGENT_VERSION_CODEX=${FIXTURE_OLD_CODEX}$" "$FIXTURE_ROOT/images/standard/Dockerfile" \
     || fail "a no-op run must not touch the Dockerfiles"
@@ -647,6 +760,86 @@ run_agent_versions
 assert_status_fail
 assert_contains "$RUN_COMBINED" "opencode version lookup failed"
 
+# --- agy: the updater manifest is the only release feed ---------------------
+#
+# Google's per-architecture manifests are agy's whole version source. The happy
+# path above already ran them; these cases pin down what the bumper does with a
+# document it will not act on, and that nothing is written when it refuses.
+
+# The same manifest document on both architectures.
+agy_manifest_both() { # $1 = the raw JSON value of `version`
+    STUB_AGY_AMD64="$(printf '{"version":%s}' "$1")"
+    STUB_AGY_ARM64="$STUB_AGY_AMD64"
+}
+
+new_case agy-manifest-is-the-feed
+serve_agy "$DEFAULT_AGY_RELEASE"
+run_agent_versions
+[[ $RUN_STATUS -eq 0 ]] || fail "the agy happy path must succeed: $RUN_STDERR"
+assert_contains "$(cat "$CASE/log")" '/manifests/linux_amd64.json'
+assert_contains "$(cat "$CASE/log")" '/manifests/linux_arm64.json'
+assert_contains "$(cat "$CASE/log")" '/releases/latest'
+
+new_case agy-manifests-disagree
+# The two documents are compared on their version only: that is the field they
+# share, and a disagreement means there is no single release to pin.
+STUB_AGY_ARM64="$(printf '{"version":"%s"}' "$DEFAULT_AGY_RELEASE")"
+run_agent_versions
+assert_status_fail
+assert_contains "$RUN_COMBINED" "agy manifests disagree: amd64 names '${FIXTURE_OLD_AGY}', arm64 names '${DEFAULT_AGY_RELEASE}'"
+assert_all_args_unchanged
+
+new_case agy-manifest-garbage
+STUB_AGY_AMD64='<html><body>error</body></html>'
+STUB_AGY_ARM64='<html><body>error</body></html>'
+run_agent_versions
+assert_status_fail
+assert_contains "$RUN_COMBINED" "agy version lookup failed"
+assert_all_args_unchanged
+
+new_case agy-manifest-null
+# Both documents must carry the same refused value: a disagreement is reported
+# before anything reads the version itself.
+agy_manifest_both null
+run_agent_versions
+assert_status_fail
+assert_contains "$RUN_COMBINED" "agy version empty/null"
+assert_all_args_unchanged
+
+new_case agy-manifest-empty
+STUB_AGY_AMD64=''
+STUB_AGY_ARM64=''
+run_agent_versions
+assert_status_fail
+assert_contains "$RUN_COMBINED" "agy version empty/null"
+assert_all_args_unchanged
+
+new_case agy-manifest-multiline
+# Two JSON documents on the stream: jq prints both values, so the bumper sees a
+# version with a newline in it rather than one value.
+STUB_AGY_AMD64="$(printf '{"version":"1.4.11"}\n{"version":"1.4.12"}')"
+STUB_AGY_ARM64="$STUB_AGY_AMD64"
+run_agent_versions
+assert_status_fail
+assert_contains "$RUN_COMBINED" "agy version has unexpected characters"
+assert_all_args_unchanged
+
+new_case agy-manifest-v-prefix
+# The pin and the installer accept `X.Y.Z` only (artifact_pin.VERSION), so the
+# bumper must not stage a `v`-prefixed value the owning hook would refuse.
+agy_manifest_both '"v1.4.11"'
+run_agent_versions
+assert_status_fail
+assert_contains "$RUN_COMBINED" "agy version is not exact semver: 'v1.4.11'"
+assert_all_args_unchanged
+
+new_case agy-manifest-prerelease
+agy_manifest_both '"1.4.11-rc.1"'
+run_agent_versions
+assert_status_fail
+assert_contains "$RUN_COMBINED" "agy version is not exact semver: '1.4.11-rc.1'"
+assert_all_args_unchanged
+
 # --- Dockerfile guards: missing, duplicate and unwritable -------------------
 
 new_case duplicate-arg
@@ -816,6 +1009,17 @@ PROPOSAL_FILES=(
     "evidence/$EVIDENCE_BUNDLE"
 )
 
+# agy's closure: the five files one agy publication replaces, exactly as its owner
+# scratch holds them (`proposal/` + the repository-relative destination, which is
+# what `pin-agy.py` writes and what the retained proposal is inspected by).
+AGY_PROPOSAL_FILES=(
+    proposal/images/tools/agy/pin.json
+    proposal/images/standard/Dockerfile
+    proposal/images/tools/agy/evidence/release.json
+    proposal/images/tools/agy/evidence/manifest-linux-amd64.json
+    proposal/images/tools/agy/evidence/manifest-linux-arm64.json
+)
+
 # The proposal list above and the snapshot list below are two independent literals.
 # The inspection and its deletion mutants are both derived from the proposal list,
 # so an entry dropped from it would silently stop being checked by *either* -- the
@@ -838,18 +1042,46 @@ proposal_list_self_check() {
         [ "$matched" -eq 1 ] ||
             fail "the proposal list does not cover $relative"
     done
-    echo '  ok: the staged proposal list covers all six destinations'
+    echo '  ok: the codex staged proposal list covers all six destinations'
+}
+
+# agy's proposal is one literal (its owner keeps repository-relative paths under
+# `proposal/`), so what has to hold is that every entry names its own destination
+# and its own snapshot: a copy-pasted duplicate would silently stop being checked.
+agy_proposal_self_check() {
+    local proposal destinations count
+    [ "${#AGY_PROPOSAL_FILES[@]}" -eq 5 ] ||
+        fail "AGY_PROPOSAL_FILES has ${#AGY_PROPOSAL_FILES[@]} entries, expected 5"
+    destinations="$(for proposal in "${AGY_PROPOSAL_FILES[@]}"; do
+        agy_destination "$proposal"
+    done | sort -u | grep -c . || true)"
+    count="$(for proposal in "${AGY_PROPOSAL_FILES[@]}"; do
+        recovery_snapshot_name agy "$proposal"
+    done | sort -u | grep -c . || true)"
+    [ "$destinations" -eq 5 ] || fail "the agy proposal list names $destinations distinct destinations"
+    [ "$count" -eq 5 ] || fail "the agy proposal list names $count distinct snapshots"
+    echo '  ok: the agy staged proposal list covers all five destinations'
 }
 
 # What the staged Dockerfile must be: the fixture's committed Dockerfile with the
 # four single-slot ARG defaults it was staged for. Computed, never hard-coded, so a
 # changed fixture default cannot silently weaken the comparison.
+#
+# A partial-bump case sets STAGED_AGY_DEFAULT: agy publishes first, so the file the
+# Codex transaction reads is the committed one with the agy default already moved,
+# and a reference that ignored that would disagree with what the run staged.
+STAGED_AGY_DEFAULT=""
 staged_dockerfile_expected() { # $1 = out file
-    sed -e "s|^ARG AGENT_VERSION_CODEX=.*\$|ARG AGENT_VERSION_CODEX=${DEFAULT_CODEX_RELEASE}|" \
-        -e "s|^ARG AGENT_VERSION_OPENCODE=.*\$|ARG AGENT_VERSION_OPENCODE=v${DEFAULT_OPENCODE}|" \
-        -e "s|^ARG AGENT_VERSION_CLAUDE=.*\$|ARG AGENT_VERSION_CLAUDE=${DEFAULT_CLAUDE}|" \
-        -e "s|^ARG AGENT_VERSION_COPILOT=.*\$|ARG AGENT_VERSION_COPILOT=${DEFAULT_COPILOT}|" \
-        "$CASE/original" >"$1"
+    local expressions=(
+        -e "s|^ARG AGENT_VERSION_CODEX=.*\$|ARG AGENT_VERSION_CODEX=${DEFAULT_CODEX_RELEASE}|"
+        -e "s|^ARG AGENT_VERSION_OPENCODE=.*\$|ARG AGENT_VERSION_OPENCODE=v${DEFAULT_OPENCODE}|"
+        -e "s|^ARG AGENT_VERSION_CLAUDE=.*\$|ARG AGENT_VERSION_CLAUDE=${DEFAULT_CLAUDE}|"
+        -e "s|^ARG AGENT_VERSION_COPILOT=.*\$|ARG AGENT_VERSION_COPILOT=${DEFAULT_COPILOT}|"
+    )
+    if [ -n "$STAGED_AGY_DEFAULT" ]; then
+        expressions+=(-e "s|^ARG AGENT_VERSION_AGY=.*\$|ARG AGENT_VERSION_AGY=${STAGED_AGY_DEFAULT}|")
+    fi
+    sed "${expressions[@]}" "$CASE/original" >"$1"
 }
 
 # The proposal this case's staging step must produce, from an independent staging
@@ -872,21 +1104,94 @@ stage_reference_proposal() { # $1 = target directory
         fail "the reference proposal could not be staged (status $status)"
 }
 
+# agy's owner keeps its proposal under repository-relative paths inside a
+# `proposal/` subdirectory, so one destination is all a snapshot name needs.
+agy_destination() { # $1 = proposal/<repository path> -> <repository path>
+    printf '%s\n' "${1#proposal/}"
+}
+
+# agy's expected publication, from an independent writer run against a COPY of the
+# same fixture repository: the run under test never gets to publish (it is the one
+# that faults), so the bytes it would have written have to come from somewhere
+# else, and they have to come from the production writer rather than from a
+# hand-written expectation. The copy is why the original repository is untouched.
+agy_stage_reference() { # $1 = target directory
+    local target=$1 status=0
+    rm -rf "$target"
+    mkdir -p "$target"
+    cp -R "$FIXTURE_ROOT" "$target/repo"
+    # The fixture repository's `script/dev/pin-codex.py` is agy's transport too, so
+    # the codex adapter's own required environment has to be present here as well.
+    GITHUB_ACTIONS='' \
+        FIXTURE_AGY_WRITER="$REPO_ROOT/script/dev/pin-agy.py" \
+        FIXTURE_AGY_ASSETS="$CASE/agy-assets" \
+        FIXTURE_CODEX_WRITER="$REPO_ROOT/script/dev/pin-codex.py" \
+        TMPDIR="$CASE" \
+        python3 "$FIXTURE_ROOT/script/dev/pin-agy.py" --version "$SERVED_AGY_RELEASE" \
+        --repo-root "$target/repo" >"$target/stdout" 2>"$target/stderr" || status=$?
+    [ "$status" -eq 0 ] || {
+        cat "$target/stderr" >&2
+        fail "the agy reference proposal could not be published (status $status)"
+    }
+}
+
 # A status-3 run promises usable recovery material, not just a status code and a
 # message. Both printed absolute directories must still exist, the owner scratch
-# must still hold ALL SIX staged proposal files with exactly the bytes that were
-# staged, and every numbered backup must still carry the pre-publication bytes AND
-# mode of exactly one committed file, under a `.complete` marker. A cleanup
-# regression that deleted either directory used to leave the status/text
-# assertions green, and an incomplete proposal (the reviewer's missing x86_64
-# bundle) used to pass as well.
-proposal_list_self_check
+# must still hold EVERY staged proposal file with exactly the bytes staged, and
+# every numbered backup must still carry the pre-publication bytes AND mode of
+# exactly one committed file, under a `.complete` marker. A cleanup regression that
+# deleted either directory used to leave the status/text assertions green, and an
+# incomplete proposal (the reviewer's missing x86_64 bundle) used to pass as well.
+#
+# A profile names what the check is against: the files the owner scratch holds
+# (each owner chooses its own scratch layout), the expected bytes of each of them,
+# and how many numbered backups a complete set has. bash 3.2 (macOS) has no
+# `declare -n`, so a profile copies its list into the RECOVERY_* globals directly.
+recovery_profile() { # $1 = profile
+    case "$1" in
+        codex)
+            RECOVERY_PROPOSAL=("${PROPOSAL_FILES[@]}")
+            RECOVERY_BACKUPS=6
+            RECOVERY_DOCKERFILE="$CASE/staged-dockerfile"
+            RECOVERY_EVIDENCE="$CASE/codex-assets/source/evidence"
+            RECOVERY_PIN="$CASE/expected-proposal"
+            ;;
+        agy)
+            RECOVERY_PROPOSAL=("${AGY_PROPOSAL_FILES[@]}")
+            RECOVERY_BACKUPS=5
+            RECOVERY_DOCKERFILE="$CASE/agy-reference/repo/images/standard/Dockerfile"
+            RECOVERY_EVIDENCE="$CASE/agy-reference/repo/images/tools/agy/evidence"
+            RECOVERY_PIN="$CASE/agy-reference/repo/images/tools/agy"
+            ;;
+        *) fail "unknown recovery profile: $1" ;;
+    esac
+}
 
-verify_retained_recovery() { # $1 label, $2 snapshot dir, $3 owner override, $4 publisher override
-    local label=$1 snapshot=$2 publisher owner entry name matched count numbered relative \
-        expected
-    publisher="${4:-$(retained_publisher_dir)}"
-    owner="${3:-$(retained_owner_dir)}"
+# The snapshot name one owner-relative proposal entry is kept under: the closure's
+# repository destination, flattened.
+recovery_snapshot_name() { # $1 = profile, $2 = owner-relative proposal entry
+    local path=$2
+    case "$1" in
+        codex) path="images/tools/codex/$path" ;;
+        agy) path="$(agy_destination "$path")" ;;
+        *) fail "unknown recovery profile: $1" ;;
+    esac
+    case "$path" in
+        *Dockerfile) printf 'images_standard_Dockerfile\n' ;;
+        *) printf '%s\n' "$(printf '%s' "$path" | tr '/' '_')" ;;
+    esac
+}
+
+proposal_list_self_check
+agy_proposal_self_check
+
+verify_retained_recovery() { # $1 label, $2 profile, $3 snapshot dir, $4 owner override, $5 publisher override
+    local label=$1 profile=$2 snapshot=$3
+    local publisher owner entry name matched count numbered proposal expected
+    recovery_profile "$profile"
+    prepare_recovery_expectations "$profile"
+    publisher="${5:-$(retained_publisher_dir)}"
+    owner="${4:-$(retained_owner_dir)}"
     [ -n "$publisher" ] || fail "$label: no retained publisher directory in: $RUN_STDERR"
     [ -n "$owner" ] || fail "$label: no retained owner scratch in: $RUN_STDERR"
     case "$publisher" in
@@ -899,27 +1204,27 @@ verify_retained_recovery() { # $1 label, $2 snapshot dir, $3 owner override, $4 
     esac
     [ -d "$publisher" ] || fail "$label: the retained publisher directory is gone: $publisher"
     [ -d "$owner" ] || fail "$label: the retained owner scratch is gone: $owner"
-    staged_dockerfile_expected "$CASE/staged-dockerfile"
-    for relative in "${PROPOSAL_FILES[@]}"; do
-        case "$relative" in
-            Dockerfile) expected="$CASE/staged-dockerfile" ;;
-            evidence/*) expected="$CASE/codex-assets/source/$relative" ;;
-            *) expected="$CASE/expected-proposal/$relative" ;;
+    for proposal in "${RECOVERY_PROPOSAL[@]}"; do
+        case "$proposal" in
+            *Dockerfile) expected="$RECOVERY_DOCKERFILE" ;;
+            *evidence/*) expected="$RECOVERY_EVIDENCE/${proposal##*evidence/}" ;;
+            *) expected="$RECOVERY_PIN/${proposal##*/}" ;;
         esac
-        [ -f "$expected" ] || fail "$label: the case has no expected $relative: $expected"
-        [ -f "$owner/$relative" ] ||
-            fail "$label: the owner scratch lost $relative: $owner"
-        cmp -s "$owner/$relative" "$expected" ||
-            fail "$label: the owner scratch holds different bytes for $relative"
+        [ -f "$expected" ] || fail "$label: the case has no expected $proposal: $expected"
+        [ -f "$owner/$proposal" ] ||
+            fail "$label: the owner scratch lost $proposal: $owner"
+        cmp -s "$owner/$proposal" "$expected" ||
+            fail "$label: the owner scratch holds different bytes for $proposal"
     done
     [ -f "$publisher/backup/.complete" ] ||
         fail "$label: the retained backup has no .complete marker: $publisher"
     numbered="$(find "$publisher/backup" -maxdepth 1 -type f ! -name '.complete' | sort)"
     count=0
     for entry in $numbered; do count=$((count + 1)); done
-    [ "$count" -eq 6 ] ||
-        fail "$label: the retained backup has $count numbered copies, expected 6: $numbered"
-    for name in "${SNAPSHOT_FILES[@]}"; do
+    [ "$count" -eq "$RECOVERY_BACKUPS" ] ||
+        fail "$label: the retained backup has $count numbered copies, expected $RECOVERY_BACKUPS: $numbered"
+    for proposal in "${RECOVERY_PROPOSAL[@]}"; do
+        name="$(recovery_snapshot_name "$profile" "$proposal")"
         matched=0
         [ -f "$snapshot/$name" ] ||
             fail "$label: the snapshot is missing $name: $snapshot"
@@ -932,35 +1237,50 @@ verify_retained_recovery() { # $1 label, $2 snapshot dir, $3 owner override, $4 
         [ "$matched" -eq 1 ] ||
             fail "$label: $name has $matched retained backups matching its bytes and mode"
     done
-    echo "  ok: $label: both retained directories hold the six numbered backups (+ .complete) and all six staged proposal files"
+    echo "  ok: $label: both retained directories hold the $RECOVERY_BACKUPS numbered backups (+ .complete) and all ${#RECOVERY_PROPOSAL[@]} staged proposal files"
+}
+
+# Where each profile's expected bytes come from. codex computes the staged
+# Dockerfile from the fixture's committed one; agy needs a published reference
+# proposal, which its case must take BEFORE the run under test (that run leaves
+# the repository in the state the proposal was supposed to replace).
+prepare_recovery_expectations() { # $1 = profile
+    case "$1" in
+        codex) staged_dockerfile_expected "$RECOVERY_DOCKERFILE" ;;
+        agy)
+            [ -d "$CASE/agy-reference" ] ||
+                fail "the agy profile needs a reference proposal staged before the run"
+            ;;
+    esac
 }
 
 # The oracle's own control. A complete copy of the owner scratch passes; deleting
-# ANY ONE of the six staged files must fail it. The x86_64 bundle was the one the
-# old check omitted, so a proposal missing it used to pass. Nothing here touches
-# the directories the run actually retained.
-verify_recovery_oracle_mutants() { # $1 label, $2 snapshot dir
-    local label=$1 snapshot=$2 source copy status relative
+# ANY ONE of the staged files must fail it. The x86_64 bundle was the one the old
+# check omitted, so a proposal missing it used to pass. Nothing here touches the
+# directories the run actually retained.
+verify_recovery_oracle_mutants() { # $1 label, $2 profile, $3 snapshot dir
+    local label=$1 profile=$2 snapshot=$3 source copy status proposal
+    recovery_profile "$profile"
     source="$(retained_owner_dir)"
     copy="$CASE/owner-mutants"
     rm -rf "$copy"
     cp -R "$source" "$copy"
     status=0
-    ( verify_retained_recovery "$label control" "$snapshot" "$copy" ) >/dev/null 2>&1 ||
-        status=$?
+    ( verify_retained_recovery "$label control" "$profile" "$snapshot" "$copy" ) \
+        >/dev/null 2>&1 || status=$?
     [ "$status" -eq 0 ] ||
         fail "$label: the recovery oracle rejects a complete copy of the owner scratch"
-    for relative in "${PROPOSAL_FILES[@]}"; do
+    for proposal in "${RECOVERY_PROPOSAL[@]}"; do
         rm -rf "$copy"
         cp -R "$source" "$copy"
-        rm -f "$copy/$relative"
+        rm -f "$copy/$proposal"
         status=0
-        ( verify_retained_recovery "$label missing $relative" "$snapshot" "$copy" ) \
+        ( verify_retained_recovery "$label missing $proposal" "$profile" "$snapshot" "$copy" ) \
             >/dev/null 2>&1 || status=$?
         [ "$status" -ne 0 ] ||
-            fail "$label: the recovery oracle accepts a proposal with no $relative"
+            fail "$label: the recovery oracle accepts a proposal with no $proposal"
     done
-    echo "  ok: $label: deleting any one of the six staged proposal files fails the recovery oracle"
+    echo "  ok: $label: deleting any one of the ${#RECOVERY_PROPOSAL[@]} staged proposal files fails the recovery oracle"
 }
 
 new_case partial-publication
@@ -993,10 +1313,10 @@ run_agent_versions
 assert_contains "$RUN_STDERR" 'recovery material retained at /'
 assert_contains "$RUN_STDERR" 'pin-artifact: owner scratch retained at /'
 assert_not_contains "$RUN_OUTPUT" 'Staged version bumps:'
-verify_retained_recovery 'incomplete rollback' "$CASE/snapshot"
+verify_retained_recovery 'incomplete rollback' codex "$CASE/snapshot"
 # ...and the oracle itself must be able to fail: one deleted proposal file, the
 # x86_64 bundle included, has to be detected.
-verify_recovery_oracle_mutants 'incomplete rollback' "$CASE/snapshot"
+verify_recovery_oracle_mutants 'incomplete rollback' codex "$CASE/snapshot"
 
 new_case rollback-failure-record-enospc
 codex_snapshot "$CASE/snapshot"
@@ -1013,7 +1333,7 @@ assert_contains "$RUN_STDERR" 'could not write the recovery record'
 assert_contains "$RUN_STDERR" 'pin-artifact: owner scratch retained at /'
 assert_not_contains "$RUN_COMBINED" 'Traceback'
 assert_not_contains "$RUN_OUTPUT" 'Staged version bumps:'
-verify_retained_recovery 'unwritable recovery record' "$CASE/snapshot"
+verify_retained_recovery 'unwritable recovery record' codex "$CASE/snapshot"
 echo '  ok: an unwritable recovery record keeps status 3 and the recovery material'
 
 new_case signal-rollback-failure-record-enospc
@@ -1032,7 +1352,7 @@ assert_contains "$RUN_STDERR" 'no space left on device'
 assert_contains "$RUN_STDERR" 'pin-artifact: owner scratch retained at /'
 assert_contains "$RUN_STDERR" 'pin-artifact: recovery material retained at /'
 assert_not_contains "$RUN_COMBINED" 'Traceback'
-verify_retained_recovery 'signal plus unwritable recovery record' "$CASE/snapshot"
+verify_retained_recovery 'signal plus unwritable recovery record' codex "$CASE/snapshot"
 echo '  ok: a signal plus an unwritable recovery record exits 3 with its recovery material'
 
 # --- pin-side refusals never begin a publication --------------------------
@@ -1074,6 +1394,152 @@ assert_contains "$RUN_COMBINED" 'changed for the already-pinned'
 codex_compare_snapshot "$CASE/snapshot" 'same-release rewrite'
 echo '  ok: a same-release rewrite is refused and never re-pinned'
 
+# --- agy's own transaction: ordering, independence and recovery -----------
+
+# One file per agy closure destination, with its bytes AND its mode: a rollback
+# that restores bytes through a different mode has still changed the repository.
+agy_snapshot() { # $1 = directory
+    mkdir -p "$1"
+    local proposal destination name
+    for proposal in "${AGY_PROPOSAL_FILES[@]}"; do
+        destination="$(agy_destination "$proposal")"
+        name="$(recovery_snapshot_name agy "$proposal")"
+        cp "$FIXTURE_ROOT/$destination" "$1/$name"
+        chmod "$(file_mode "$FIXTURE_ROOT/$destination")" "$1/$name"
+    done
+}
+
+agy_compare_snapshot() { # $1 directory, $2 label
+    local proposal destination name
+    for proposal in "${AGY_PROPOSAL_FILES[@]}"; do
+        destination="$(agy_destination "$proposal")"
+        name="$(recovery_snapshot_name agy "$proposal")"
+        cmp -s "$1/$name" "$FIXTURE_ROOT/$destination" ||
+            fail "$2: $destination does not match the pre-publication snapshot"
+        [ "$(file_mode "$1/$name")" = "$(file_mode "$FIXTURE_ROOT/$destination")" ] ||
+            fail "$2: $destination mode changed"
+    done
+}
+
+# The Dockerfile the agy transaction alone must leave: the fixture's committed one
+# with the agy default released and every other single-slot default untouched.
+agy_dockerfile_expected() { # $1 = out file, $2 = released version
+    sed "s|^ARG AGENT_VERSION_AGY=.*\$|ARG AGENT_VERSION_AGY=${2}|" "$CASE/original" >"$1"
+}
+
+new_case agy-published-then-codex-fails
+# The two transactions are independent. agy published, so its closure and its ARG
+# default stay; Codex rolled back, so the Codex closure and the Codex default are
+# the committed ones and the run reports failure.
+serve_agy "$DEFAULT_AGY_RELEASE"
+agy_snapshot "$CASE/agy-snapshot"
+STUB_CODEX_INJECT=partial
+STUB_CODEX_INJECT_AT="$EVIDENCE_BUNDLE"
+run_agent_versions
+[[ $RUN_STATUS -eq 1 ]] || fail "a failed codex publication must exit 1, got $RUN_STATUS"
+assert_contains "$RUN_STDERR" 'pin-codex'
+# The agy half of the bump is already committed, so the failure names it and the
+# human edit the strict-egress audit will demand.
+assert_contains "$RUN_STDERR" "agy ${FIXTURE_OLD_AGY} -> ${DEFAULT_AGY_RELEASE} was already published (its own transaction); codex was not"
+assert_contains "$RUN_STDERR" "selections.tsv"
+assert_not_contains "$RUN_OUTPUT" 'Staged version bumps:'
+assert_agy_published "$DEFAULT_AGY_RELEASE"
+assert_codex_unchanged
+agy_dockerfile_expected "$CASE/agy-dockerfile" "$DEFAULT_AGY_RELEASE"
+cmp -s "$CASE/agy-dockerfile" "$FIXTURE_ROOT/images/standard/Dockerfile" ||
+    fail "the Dockerfile is not the agy publication with the committed Codex default: $(cat "$FIXTURE_ROOT/images/standard/Dockerfile")"
+echo '  ok: a failed Codex publication leaves the already-published agy closure in place'
+
+new_case agy-published-then-codex-rollback-fails
+# The third half of the same contract, and the one an operator reads while
+# recovering: agy published, then the Codex publication failed AND its rollback was
+# refused, so the Codex destinations are undecided. The report must not claim Codex
+# was not published — that contradicts the recovery warning printed above it — and
+# it must still name the landed agy half and the egress edit.
+serve_agy "$DEFAULT_AGY_RELEASE"
+agy_snapshot "$CASE/agy-snapshot"
+codex_snapshot "$CASE/snapshot"
+# agy publishes first, so the Dockerfile the Codex transaction replaces is the
+# committed one with the released agy default: the snapshot of the pre-publication
+# destination bytes and the staged-proposal reference both have to carry it.
+STAGED_AGY_DEFAULT="$DEFAULT_AGY_RELEASE"
+agy_dockerfile_expected "$CASE/snapshot/images_standard_Dockerfile" "$DEFAULT_AGY_RELEASE"
+stage_reference_proposal "$CASE/expected-proposal"
+STUB_CODEX_INJECT=partial
+STUB_CODEX_INJECT_AT="$EVIDENCE_BUNDLE"
+STUB_CODEX_REFUSE_RESTORE=1
+run_agent_versions
+[[ $RUN_STATUS -eq 3 ]] || fail "an incomplete Codex rollback must exit 3, got $RUN_STATUS"
+assert_contains "$RUN_STDERR" 'pin-artifact: restore incomplete'
+assert_contains "$RUN_STDERR" "agy ${FIXTURE_OLD_AGY} -> ${DEFAULT_AGY_RELEASE} was already published (its own transaction)"
+assert_contains "$RUN_STDERR" 'codex is undecided'
+assert_contains "$RUN_STDERR" 'stop and recover before further edits, builds or commits'
+# The undecided wording replaces the clean-failure claim rather than joining it.
+assert_not_contains "$RUN_COMBINED" 'codex was not'
+assert_contains "$RUN_STDERR" 'selections.tsv'
+assert_contains "$RUN_STDERR" 'recovery material retained at /'
+assert_contains "$RUN_STDERR" 'pin-artifact: owner scratch retained at /'
+assert_not_contains "$RUN_OUTPUT" 'Staged version bumps:'
+assert_agy_published "$DEFAULT_AGY_RELEASE"
+verify_retained_recovery 'agy published, Codex rollback incomplete' codex "$CASE/snapshot"
+echo '  ok: an incomplete Codex rollback after an agy bump reports Codex as undecided and keeps the recovery material'
+
+new_case agy-published-then-codex-staging-fails
+# The other half of the same contract: Codex staging can fail (a refusing
+# signature verifier) after agy has published, and the exit must still name the
+# agy bump and the selections.tsv edit.
+serve_agy "$DEFAULT_AGY_RELEASE"
+agy_snapshot "$CASE/agy-snapshot"
+STUB_CODEX_VERIFY=fail
+run_agent_versions
+assert_status_fail
+assert_contains "$RUN_STDERR" 'cosign refused'
+assert_contains "$RUN_STDERR" "agy ${FIXTURE_OLD_AGY} -> ${DEFAULT_AGY_RELEASE} was already published (its own transaction); codex was not"
+assert_contains "$RUN_STDERR" "selections.tsv"
+assert_agy_published "$DEFAULT_AGY_RELEASE"
+assert_codex_unchanged
+echo '  ok: a failed Codex staging names the already-published agy bump and the egress edit'
+
+new_case agy-publication-undecided
+# Status 3 at the owner level, driven through the bumper: the Codex transaction
+# must not even start, and both directories the agy writer printed must survive the
+# bumper's own EXIT trap with the complete proposal, backups and modes.
+serve_agy "$DEFAULT_AGY_RELEASE"
+agy_snapshot "$CASE/agy-snapshot"
+agy_stage_reference "$CASE/agy-reference"
+STUB_CODEX_STAGE_SNAPSHOT="$CASE/codex-staged-dockerfile"
+STUB_AGY_INJECT=partial
+STUB_AGY_INJECT_AT=manifest-linux-arm64.json
+STUB_AGY_REFUSE_RESTORE=1
+run_agent_versions
+[[ $RUN_STATUS -eq 3 ]] || fail "an undecided agy publication must exit 3, got $RUN_STATUS"
+assert_contains "$RUN_STDERR" 'agy publication is undecided'
+assert_contains "$RUN_STDERR" 'pin-agy: owner scratch retained at /'
+assert_contains "$RUN_STDERR" 'recovery material retained at /'
+assert_not_contains "$RUN_COMBINED" 'Traceback'
+assert_not_contains "$RUN_OUTPUT" 'Staged version bumps:'
+[[ ! -e "$CASE/codex-staged-dockerfile" ]] ||
+    fail 'the Codex transaction started after an undecided agy publication'
+verify_retained_recovery 'agy publication undecided' agy "$CASE/agy-snapshot"
+verify_recovery_oracle_mutants 'agy publication undecided' agy "$CASE/agy-snapshot"
+echo '  ok: an undecided agy publication retains both directories and stops before Codex'
+
+new_case agy-writer-failure-writes-nothing
+# The agy transaction is the first thing that can write, and its failure leaves the
+# whole fixture repository untouched: no closure byte, no ARG, no staging.
+serve_agy "$DEFAULT_AGY_RELEASE"
+agy_snapshot "$CASE/agy-snapshot"
+STUB_CODEX_STAGE_SNAPSHOT="$CASE/codex-staged-dockerfile"
+STUB_AGY_FAIL_URL='https://api.github.com/repos/google-antigravity/antigravity-cli/releases/tags/1.4.11'
+run_agent_versions
+assert_status_fail
+assert_contains "$RUN_COMBINED" 'cannot fetch'
+assert_not_contains "$RUN_OUTPUT" 'Staged version bumps:'
+[[ ! -e "$CASE/codex-staged-dockerfile" ]] || fail 'Codex was staged after an agy refusal'
+agy_compare_snapshot "$CASE/agy-snapshot" 'agy fetch failure'
+assert_codex_unchanged
+echo '  ok: an agy fetch failure writes nothing and never reaches the Codex stage'
+
 # --- offline --check ------------------------------------------------------
 
 new_case check-offline
@@ -1081,12 +1547,25 @@ ARGS=(--check --repo-root "$FIXTURE_ROOT")
 : >"$CASE/log"
 run_agent_versions
 [[ $RUN_STATUS -eq 0 ]] || fail "--check must succeed: $RUN_STDERR"
-assert_contains "$RUN_OUTPUT" 'Codex scope only'
+assert_contains "$RUN_OUTPUT" 'Codex and agy scope only'
 assert_contains "$RUN_OUTPUT" 'offline committed-input check'
+assert_contains "$RUN_OUTPUT" 'not a fresh corroboration'
 assert_contains "$RUN_OUTPUT" 'not a signature check'
 assert_log_empty
 cmp "$FIXTURE_ROOT/images/standard/Dockerfile" "$CASE/original"
-echo '  ok: --check is offline, writes nothing and states its scope'
+echo '  ok: --check is offline, covers both closures, writes nothing and states its scope'
+
+new_case check-refuses-mutated-agy-evidence
+# The agy check must actually run: a mutated evidence byte is its own refusal,
+# reported before the codex check ever starts.
+printf '{\n' >"$FIXTURE_ROOT/images/tools/agy/evidence/manifest-linux-arm64.json"
+ARGS=(--check --repo-root "$FIXTURE_ROOT")
+run_agent_versions
+assert_status_fail
+assert_contains "$RUN_COMBINED" 'manifest-linux-arm64.json is '
+assert_contains "$RUN_COMBINED" 'the pin says'
+assert_not_contains "$RUN_COMBINED" 'signature check'
+assert_log_empty
 
 new_case check-refuses-mutated-evidence
 printf '{\n' >"$FIXTURE_ROOT/images/tools/codex/evidence/codex-package_SHA256SUMS"
