@@ -1,36 +1,35 @@
 #!/usr/bin/env bash
-# Black-box contract tests for the build-only Pi installer
-# (images/tools/pi/install-pi.sh).
+# Contract tests for the build-only Pi installer (images/tools/pi/install-pi.sh).
 #
-# The installer now runs inside the recipe-contract envelope, so this harness
-# invokes the REAL run-install.sh (which owns the transport receipt and the
-# status record) with the REAL canonical recipe-contract helpers. `npm`, `curl`, `openssl`,
-# `tar` and `diff` are faked on PATH, so every failure policy -- transport-soft
-# only with a fresh classified receipt, integrity mismatch never soft-failable,
-# a count check that cannot read as success, no partial tree left behind -- is
-# exercised hermetically and fast. The lockfile parser (the `jq` selector) is the
-# REAL one, against a synthetic lock. The final section plants a real shadow
-# package in a real installed tree and uses the real `tar` and `diff` (RQ1).
+# Hermetic: no Docker, no registry, no real pnpm. Three fixtures carry the
+# behaviour this hook owns:
+#   * a recording fake manager that answers `--version`, `--help` (through the
+#     installed `.bin/pi` stub) and the frozen install;
+#   * a fake contract directory providing the four helpers the installer spawns,
+#     plus a `download.sh` that copies a local archive or fails classified;
+#   * AGENT_VM_PI_BYTES_CHECK, the installer's authorized checker seam, standing
+#     in for the real byte proof (which script/test/pi-installed-bytes.mjs owns).
+# Everything else is real: the shared capability module, the owning preparation
+# driver in its zero-manager equal mode, the archive extractor, and the installer
+# itself. The four inputs are the committed Pi project.
 #
-# The lock preparation step is stubbed here (a no-op script): prepare-lock.sh's
-# own behaviour is covered in script/test/pi-prepare-lock.sh, and these cases
-# are about the install/verify protocol.
-
+# Covered here: zero-manager preparation, the dispatch list generated from the
+# installed CLI's own `--help` and checked against the reviewed expectation,
+# hard manager/checksum/byte/expectation failures with the partial node_modules
+# removed, the curl-only soft branch under non-empty soft values 1 and 0, a stale
+# or non-download receipt staying hard, caller-parent preservation, cleanup of
+# every owned artifact, and the fact that no path here writes an installed record.
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
 INSTALLER="$REPO_ROOT/images/tools/pi/install-pi.sh"
-RUN_INSTALL="$REPO_ROOT/images/recipe-contract/run-install.sh"
-CONTRACT_DIR="$REPO_ROOT/images/recipe-contract"
-TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/pi-install-test.XXXXXX")"
+TEST_ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/pi-install-test.XXXXXX")" && pwd -P)"
+WORK_PARENT=""
+CASE=""
+RUN_STATUS=0
+RUN_OUTPUT=""
+RUN_ERROR=""
 trap 'rm -rf "$TEST_ROOT"' EXIT
-
-REAL_JQ="$(command -v jq || true)"
-[[ -n "$REAL_JQ" ]] || { echo "FAIL: jq is required" >&2; exit 1; }
-JQ_DIR="$(dirname "$REAL_JQ")"
-REAL_TIMEOUT="$(command -v timeout || true)"
-[[ -n "$REAL_TIMEOUT" ]] || { echo "FAIL: coreutils timeout is required" >&2; exit 1; }
-TIMEOUT_DIR="$(dirname "$REAL_TIMEOUT")"
 
 fail() {
     echo "FAIL: $*" >&2
@@ -38,432 +37,424 @@ fail() {
 }
 
 assert_contains() {
-    [[ "$1" == *"$2"* ]] || fail "expected output to contain: $2"
+    [[ "$1" == *"$2"* ]] || fail "expected [$2] in output, got [$1]"
 }
 
-CASE=""
-
-make_tool() {
-    local name="$1"
-    cat >"$CASE/bin/$name"
-    chmod +x "$CASE/bin/$name"
+assert_absent() {
+    [[ ! -e "$1" && ! -L "$1" ]] || fail "expected $1 to be absent"
 }
+
+[[ -d "$REPO_ROOT/images/tools/pi" ]] || fail "the committed Pi project is missing"
+REAL_JQ="$(command -v jq || true)"
+REAL_PYTHON="$(command -v python3 || true)"
+# The composed Go helper: the four-input case needs the REAL pinned-input check,
+# because a tampered pin file is exactly what that check owns.
+CONTRACT_CONTEXT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)"
+NATIVE_CONTRACT="$CONTRACT_CONTEXT/out"
+[[ -n "$REAL_JQ" ]] || fail 'jq is required'
+
+# One authenticated archive, built here so the SRI check and the real extractor
+# run against real bytes.
+make_archive() {
+    local destination=$1
+    local staging
+    staging="$(mktemp -d "$TEST_ROOT/archive.XXXXXX")"
+    mkdir -p "$staging/package"
+    printf '{"name":"@earendil-works/pi-ai","version":"1.4.0","license":"MIT"}\n' \
+        >"$staging/package/package.json"
+    printf 'export const fixture = 1;\n' >"$staging/package/index.js"
+    # Built by the committed helper: Python's tarfile, no host metadata (the
+    # real extractor refuses AppleDouble `._package` members, as it should).
+    "$REAL_PYTHON" "$REPO_ROOT/script/test/fixtures/pi-install/make-archive.py" \
+        @earendil-works/pi-ai 1.4.0 "$destination"
+    rm -rf "$staging"
+}
+
+ARCHIVE="$TEST_ROOT/pi-ai-1.4.0.tgz"
+make_archive "$ARCHIVE"
+ARCHIVE_SRI="sha512-$(openssl dgst -sha512 -binary "$ARCHIVE" | openssl base64 -A)"
 
 new_case() {
-    unset NPM_FAIL NPM_HARD CURL_FAIL FAKE_B64 DIFF_STATUS AGENT_INSTALL_SOFT_FAIL INTEGRITY
+    WORK_PARENT=""
+    CASE_CONTRACT=""
+    unset AGENT_INSTALL_SOFT_FAIL FAKE_MANAGER_VERSION FAKE_INSTALL_STATUS \
+        FAKE_DOWNLOAD_ARCHIVE FAKE_DOWNLOAD_FAIL FAKE_RECEIPT_LINE FAKE_CONTRACT_CHECK_FAIL \
+        FAKE_RUNTIME_CHECK_FAIL
     CASE="$TEST_ROOT/$1"
-    mkdir -p "$CASE/bin" "$CASE/prefix" "$CASE/home" "$CASE/work" "$CASE/status"
-    : >"$CASE/log"
-    # The lock-preparation step is exercised in pi-prepare-lock.sh; here it is a
-    # no-op so the fixture lock is exactly what the installer verifies.
-    printf '#!/bin/sh\nexit 0\n' >"$CASE/prepare-lock.sh"
+    mkdir -p "$CASE/root/pi" "$CASE/root/pnpm" "$CASE/root/install-status" \
+        "$CASE/root/contract" "$CASE/root/dispatch" "$CASE/answers" "$CASE/receipt"
+    cp "$REPO_ROOT"/images/tools/pi/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,pnpm-inputs.sha256} "$CASE/root/pi/"
+    cp "$REPO_ROOT/images/pnpm/pin.json" "$CASE/root/pnpm/pin.json"
+    : >"$CASE/receipt/download"
+    : >"$CASE/manager.log"
+    make_contract "$CASE/root/contract"
+    make_manager "$CASE/root/manager"
+    make_checker "$CASE/root/checker.mjs"
+    make_runtime_checker "$CASE/root/runtime-check.mjs"
+    : >"$CASE/order.log"
+    make_pi_stub "$CASE/pi-stub"
+    for version in 1.4.0 0.87.0; do
+        cp "$REPO_ROOT/images/tools/pi/dispatch/$version.txt" "$CASE/root/dispatch/$version.txt"
+    done
+}
 
-    make_tool npm <<'SH'
-#!/usr/bin/env bash
-printf 'npm <%s>\n' "$*" >>"$FAKE_LOG"
-case "${1:-}" in
-    ci)
-        if [[ "${NPM_HARD:-}" == 1 ]]; then
-            printf '{"error":{"code":"EINTEGRITY","summary":"integrity checksum failed","detail":""}}\n'
-            echo "npm error code EINTEGRITY" >&2
-            exit 1
-        fi
-        if [[ "${NPM_FAIL:-}" == 1 ]]; then
-            printf '{"error":{"code":"EAI_AGAIN","summary":"getaddrinfo EAI_AGAIN","detail":""}}\n'
-            echo "npm error code EAI_AGAIN" >&2
-            exit 1
-        fi
-        mkdir -p "$NESTED_DIR"
-        : >"$NESTED_DIR/.installed"
-        exit 0
-        ;;
-    *)
-        echo "stub npm: unhandled: $*" >&2
-        exit 3
-        ;;
-esac
-SH
-    make_tool curl <<'SH'
-#!/usr/bin/env bash
-printf 'curl <%s>\n' "$*" >>"$FAKE_LOG"
-[[ "${CURL_FAIL:-}" == 1 ]] && exit 7
-out=""
-prev=""
-for a in "$@"; do
-    [[ "$prev" == "-o" ]] && out="$a"
-    prev="$a"
-done
-: >"$out"
-SH
-    make_tool openssl <<'SH'
-#!/usr/bin/env bash
-# `dgst` reads its file argument (never stdin); `base64` reads the pipe from it.
+make_contract() {
+    local dir=$1
+    cat >"$dir/recipe-contract" <<'SH'
+#!/bin/sh
 case "$1" in
-    dgst) printf 'fake-digest' ;;
-    base64) cat >/dev/null; printf '%s' "${FAKE_B64:-AAAA}" ;;
+    pnpm-environment) exit 0 ;;
+    pnpm-lock)
+        shift
+        case "$1" in
+            check) [ -n "${FAKE_CONTRACT_CHECK_FAIL:-}" ] && { echo 'fixture: pins disagree' >&2; exit 1; }
+                   echo 1.4.0 ;;
+            graph) echo '{}' ;;
+        esac
+        exit 0 ;;
 esac
+exit 0
 SH
-    make_tool tar <<'SH'
-#!/usr/bin/env bash
-printf 'tar <%s>\n' "$*" >>"$FAKE_LOG"
-mkdir -p "${@: -1}/package"
-: >"${@: -1}/package/file"
+    chmod +x "$dir/recipe-contract"
+    cat >"$dir/run-pnpm.sh" <<'SH'
+#!/bin/sh
+[ "$#" -ge 3 ] && [ "$2" = -- ] || exit 2
+shift 2
+exec "$@"
 SH
-    make_tool diff <<'SH'
-#!/usr/bin/env bash
-printf 'diff <%s>\n' "$*" >>"$FAKE_LOG"
-exit "${DIFF_STATUS:-0}"
+    chmod +x "$dir/run-pnpm.sh"
+    cat >"$dir/run-report.sh" <<'SH'
+#!/bin/sh
+out=$2
+err=$3
+shift 3
+"$@" >"$out" 2>"$err"
 SH
+    chmod +x "$dir/run-report.sh"
+    # download.sh mirrors the real contract's classified shape: 75 plus a fresh
+    # `transport download CODE` receipt, or a byte-identical local archive.
+    cat >"$dir/download.sh" <<SH
+#!/bin/sh
+[ "\$#" -eq 2 ] || exit 2
+receipt="\${AGENT_VM_TRANSPORT_RECEIPT:-}"
+if [ -n "\${FAKE_DOWNLOAD_FAIL:-}" ]; then
+    printf '%s\n' "\${FAKE_RECEIPT_LINE-}" >"\$receipt"
+    exit 75
+fi
+cp "\${FAKE_DOWNLOAD_ARCHIVE:-$ARCHIVE}" "\$2"
+SH
+    chmod +x "$dir/download.sh"
 }
 
-# `$1` = number of sibling entries, `$2` = their integrity value.
-write_lock() {
-    local count="${1:-5}" integrity="${2-sha512-AAAA}" name emitted=0
-    {
-        printf '{\n  "name": "agent-vm-guest-pi",\n  "version": "0.0.0",\n  "lockfileVersion": 3,\n  "packages": {\n'
-        printf '    "": {"dependencies": {"@earendil-works/pi-coding-agent": "0.86.1"}},\n'
-        printf '    "node_modules/@earendil-works/pi-coding-agent": {"version": "0.86.1", "integrity": "sha512-PI"}'
-        for name in chord pi-agent-core pi-ai pi-telemetry pi-tui; do
-            [[ $emitted -lt $count ]] || break
-            printf ',\n    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/%s": {"version": "0.86.1", "resolved": "https://registry.example.test/%s.tgz", "integrity": "%s"}' \
-                "$name" "$name" "$integrity"
-            emitted=$((emitted + 1))
-        done
-        printf '\n  }\n}\n'
-    } >"$CASE/prefix/package-lock.json"
-    printf '{"dependencies": {"@earendil-works/pi-coding-agent": "0.86.1"}}\n' >"$CASE/prefix/package.json"
+make_manager() {
+    local path=$1
+    cat >"$path" <<SH
+#!/bin/sh
+printf '%s\n' "\$*" >>"$CASE/manager.log"
+case "\$1" in
+    --version) echo "\${FAKE_MANAGER_VERSION:-11.11.0}"; exit 0 ;;
+    install)
+        [ "\${FAKE_INSTALL_STATUS:-0}" -eq 0 ] || exit "\${FAKE_INSTALL_STATUS}"
+        mkdir -p "$CASE/root/pi/node_modules/.bin"
+        cp "$CASE/pi-stub" "$CASE/root/pi/node_modules/.bin/pi"
+        chmod 0755 "$CASE/root/pi/node_modules/.bin/pi"
+        exit 0 ;;
+esac
+exit 0
+SH
+    chmod +x "$path"
 }
 
-# Run the installer through the contract envelope against `$1` (default
-# `$CASE`) and print the merged output.
-installer_output() {
-    local case_dir="${1:-$CASE}"
-    env -i \
-        "PATH=$case_dir/bin:$TIMEOUT_DIR:$JQ_DIR:/usr/bin:/bin" \
-        "HOME=$case_dir/home" \
-        "FAKE_LOG=$case_dir/log" \
-        "AGENT_VM_CONTRACT_DIR=$CONTRACT_DIR" \
-        "AGENT_VM_PREPARE_LOCK=$case_dir/prepare-lock.sh" \
-        "AGENT_VM_INSTALL_STATUS_DIR=$case_dir/status" \
-        "AGENT_VM_PI_PREFIX=$case_dir/prefix" \
-        "AGENT_VM_PI_WORK_DIR=$case_dir/work" \
-        "NESTED_DIR=$case_dir/prefix/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works" \
-        "AGENT_INSTALL_SOFT_FAIL=${AGENT_INSTALL_SOFT_FAIL-}" \
-        "NPM_FAIL=${NPM_FAIL-}" \
-        "NPM_HARD=${NPM_HARD-}" \
-        "CURL_FAIL=${CURL_FAIL-}" \
-        "FAKE_B64=${FAKE_B64-AAAA}" \
-        "DIFF_STATUS=${DIFF_STATUS-0}" \
-        sh "$RUN_INSTALL" pi "$case_dir/status/pi" sh "$INSTALLER" 2>&1
+make_pi_stub() {
+    local path=$1
+    cat >"$path" <<SH
+#!/bin/sh
+printf 'help\n' >>"$CASE/order.log"
+cat <<'HELP'
+pi - AI coding assistant with read, bash, edit, write tools
+
+Commands:
+  pi install <source> [-l]     Install extension source and add to settings
+  pi remove <source> [-l]      Remove extension source from settings
+  pi uninstall <source> [-l]   Alias for remove
+  pi update [source|self|pi]   Update pi, extensions, or model catalogs
+  pi list                      List installed extensions from settings
+  pi config [-l]               Open TUI to enable/disable package resources
+  pi auth <command>            Print credentials or check provider readiness
+  pi mcp <command>             Check MCP servers, sign in to or out of OAuth servers
+  pi <command> --help          Show help for install/remove/uninstall/update/list/config/auth/mcp
+HELP
+SH
+    chmod 0755 "$path"
+}
+
+# The authorized seam for the byte proof: `inventory` prints the lock-derived
+# list, the three-operand form accepts an extraction the installer created.
+make_checker() {
+    local path=$1
+    cat >"$path" <<JS
+import fs from 'node:fs';
+import path from 'node:path';
+const args = process.argv.slice(2);
+if (args.length === 2 && args[0] === 'inventory') {
+  process.stdout.write(JSON.stringify({
+    platform: 'linux/arm64',
+    family: [{name: '@earendil-works/pi-ai', version: '1.4.0',
+              integrity: '$ARCHIVE_SRI',
+              tarball: 'https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-1.4.0.tgz'}],
+    providers: [],
+  }) + '\n');
+  process.exit(0);
+}
+if (args.length !== 3) {
+  process.stderr.write('fake checker: usage: PREFIX SIBLING EXTRACTED_PACKAGE\n');
+  process.exit(2);
+}
+fs.appendFileSync('$CASE/order.log', 'bytes\n');
+const [prefix, sibling, extraction] = args;
+if (sibling !== 'pi-ai') { process.stderr.write('fake checker: unexpected sibling ' + sibling + '\n'); process.exit(1); }
+if (!fs.lstatSync(path.join(extraction, 'package.json')).isFile()) {
+  process.stderr.write('fake checker: extraction has no package.json\n');
+  process.exit(1);
+}
+if (!fs.existsSync(path.join(prefix, 'node_modules/.bin/pi'))) {
+  process.stderr.write('fake checker: the prefix is not installed\n');
+  process.exit(1);
+}
+process.stdout.write('1/1 Pi sibling archives and installed bytes verified\n');
+JS
+}
+
+# The authorized seam for the mounted runtime proof: the real check-runtime.mjs
+# needs a cold N6 install, so the harness substitutes a recorder that also refuses
+# on demand. What is under test is that the installer runs it, in order, and that a
+# failure is hard.
+make_runtime_checker() {
+    local path=$1
+    cat >"$path" <<JS
+import fs from 'node:fs';
+const args = process.argv.slice(2);
+if (args.length !== 1) {
+  process.stderr.write('fake runtime checker: usage: PREFIX\n');
+  process.exit(2);
+}
+fs.appendFileSync('$CASE/order.log', 'runtime\n');
+const [prefix] = args;
+if (!fs.existsSync(prefix + '/node_modules/.bin/pi')) {
+  process.stderr.write('fake runtime checker: the prefix is not installed\n');
+  process.exit(1);
+}
+if (process.env.FAKE_RUNTIME_CHECK_FAIL === '1') {
+  process.stderr.write('check-runtime.mjs: root-command: fixture refusal\n');
+  process.exit(1);
+}
+process.stdout.write('pi runtime: {"fixture":true}\n');
+JS
 }
 
 run_installer() {
+    local -a env_args=(
+        "PATH=$PATH"
+        "HOME=$CASE/answers/home"
+        "AGENT_VM_PI_PREFIX=$CASE/root/pi"
+        "AGENT_VM_PI_SOURCE_DIR=$REPO_ROOT/images/tools/pi"
+        "AGENT_VM_PI_SHARED=$REPO_ROOT/images/tools/pnpm-project.py"
+        "AGENT_VM_CONTRACT_DIR=${CASE_CONTRACT:-$CASE/root/contract}"
+        "AGENT_VM_FIXTURE_ROOT=$CASE/root"
+        "AGENT_VM_FIXTURE_PNPM=$CASE/root/manager"
+        "AGENT_VM_PI_BYTES_CHECK=$CASE/root/checker.mjs"
+        "AGENT_VM_PI_RUNTIME_CHECK=$CASE/root/runtime-check.mjs"
+        "FAKE_RUNTIME_CHECK_FAIL=${FAKE_RUNTIME_CHECK_FAIL-}"
+        "AGENT_VM_PI_DISPATCH_DIR=$CASE/root/dispatch"
+        "AGENT_VM_PI_TARGET_PLATFORM=linux/arm64"
+        "AGENT_VM_TRANSPORT_RECEIPT=$CASE/receipt/download"
+        "AGENT_VM_INSTALL_STATUS_DIR=$CASE/root/install-status"
+        "FAKE_MANAGER_VERSION=${FAKE_MANAGER_VERSION-}"
+        "FAKE_INSTALL_STATUS=${FAKE_INSTALL_STATUS-0}"
+        "FAKE_DOWNLOAD_ARCHIVE=${FAKE_DOWNLOAD_ARCHIVE-$ARCHIVE}"
+        "FAKE_DOWNLOAD_FAIL=${FAKE_DOWNLOAD_FAIL-}"
+        "FAKE_RECEIPT_LINE=${FAKE_RECEIPT_LINE-}"
+        "AGENT_INSTALL_SOFT_FAIL=${AGENT_INSTALL_SOFT_FAIL-}"
+        "CASE=$CASE"
+    )
+    [[ -z "$WORK_PARENT" ]] || env_args+=("AGENT_VM_PI_WORK_DIR=$WORK_PARENT")
     set +e
-    RUN_OUTPUT="$(installer_output)"
+    env -i "${env_args[@]}" sh "$INSTALLER" >"$CASE/out" 2>"$CASE/err"
     RUN_STATUS=$?
     set -e
+    RUN_OUTPUT="$(cat "$CASE/out")"
+    RUN_ERROR="$(cat "$CASE/err")"
 }
 
-# --- npm ci: hard by default, soft only for a classified transport error -----
+require_hard() { # require_hard MESSAGE
+    [[ $RUN_STATUS -eq 1 ]] || fail "expected a hard failure, got $RUN_STATUS (out=$RUN_OUTPUT err=$RUN_ERROR)"
+    assert_contains "$RUN_ERROR" "$1"
+    assert_absent "$CASE/root/pi/node_modules"
+    assert_absent "$CASE/root/install-status/pi"
+    assert_absent "$CASE/root/install-status/pi-claude-bridge"
+}
 
-new_case npm-hard-failure
-write_lock
-NPM_FAIL=1
-run_installer
-[[ $RUN_STATUS -ne 0 ]] || fail "an npm ci failure must be a hard failure by default"
-assert_contains "$RUN_OUTPUT" "npm ci FAILED"
-assert_contains "$RUN_OUTPUT" "$CASE/prefix"
-
-new_case npm-soft-failure
-write_lock
-NPM_FAIL=1
-AGENT_INSTALL_SOFT_FAIL=1
-run_installer
-[[ $RUN_STATUS -eq 0 ]] || fail "soft classified npm failure must exit 0: $RUN_OUTPUT"
-assert_contains "$RUN_OUTPUT" "soft-fail mode"
-[[ ! -e "$CASE/prefix" ]] || fail "soft-failed npm left a partial tree behind"
-[[ "$(cat "$CASE/status/pi")" == "absent-transport EAI_AGAIN" ]] \
-    || fail "the absence record is wrong: $(cat "$CASE/status/pi" 2>/dev/null)"
-
-# An EINTEGRITY is NOT a transport error, so it is hard EVEN under soft-fail.
-new_case npm-integrity-hard
-write_lock
-NPM_HARD=1
-AGENT_INSTALL_SOFT_FAIL=1
-run_installer
-[[ $RUN_STATUS -ne 0 ]] || fail "an EINTEGRITY npm failure must be hard even under soft-fail"
-[[ ! -e "$CASE/status/pi" || "$(cat "$CASE/status/pi")" != absent-* ]] \
-    || fail "an integrity failure must not record a transport absence"
-
-# --- tarball fetch: same transport class ------------------------------------
-
-new_case fetch-soft-failure
-write_lock
-CURL_FAIL=1
-AGENT_INSTALL_SOFT_FAIL=1
-run_installer
-[[ $RUN_STATUS -eq 0 ]] || fail "soft transport fetch failure must exit 0: $RUN_OUTPUT"
-[[ ! -e "$CASE/prefix" ]] || fail "soft-failed fetch left a partial tree behind"
-[[ "$(cat "$CASE/status/pi")" == "absent-transport 7" ]] \
-    || fail "the fetch absence record is wrong: $(cat "$CASE/status/pi" 2>/dev/null)"
-
-new_case fetch-hard-failure
-write_lock
-CURL_FAIL=1
-run_installer
-[[ $RUN_STATUS -ne 0 ]] || fail "a fetch failure is a hard failure by default"
-assert_contains "$RUN_OUTPUT" "could not fetch"
-
-# --- integrity: NEVER soft-failable -----------------------------------------
-
-new_case integrity-mismatch
-write_lock 5 sha512-WRONG
-FAKE_B64=AAAA # the installer will compute sha512-AAAA
-AGENT_INSTALL_SOFT_FAIL=1
-run_installer
-[[ $RUN_STATUS -ne 0 ]] || fail "an integrity mismatch must fail even under soft-fail"
-assert_contains "$RUN_OUTPUT" "INTEGRITY MISMATCH"
-assert_contains "$RUN_OUTPUT" "sha512-WRONG"
-assert_contains "$RUN_OUTPUT" "sha512-AAAA"
-
-# --- installed tree diverging from the verified tarball ----------------------
-
-new_case diff-mismatch
-write_lock 5 sha512-AAAA
-FAKE_B64=AAAA
-DIFF_STATUS=1
-run_installer
-[[ $RUN_STATUS -ne 0 ]] || fail "a diff mismatch must be a hard failure"
-assert_contains "$RUN_OUTPUT" "differs from its verified tarball"
-
-# --- the selector cannot silently match fewer than five ----------------------
-
-new_case selector-count
-write_lock 4
-run_installer
-[[ $RUN_STATUS -ne 0 ]] || fail "a selector matching a count other than 0 or 5 must fail"
-assert_contains "$RUN_OUTPUT" "expected 0 or 5"
-
-# Pi 1.0.4+ ships no npm-shrinkwrap.json: its lock governs `npm ci` and carries
-# a hash for every entry, so zero sibling entries is a passing install.
-new_case no-shrinkwrap
-write_lock 0
-run_installer
-[[ $RUN_STATUS -eq 0 ]] || fail "a lock with no shrinkwrap siblings must succeed: $RUN_OUTPUT"
-assert_contains "$RUN_OUTPUT" "npm ci authenticated every tarball"
-
-# --- a null/empty integrity in the lock is refused before any fetch ----------
-
-new_case missing-integrity
-write_lock 5 ""
-run_installer
-[[ $RUN_STATUS -ne 0 ]] || fail "a sibling with no integrity must fail"
-assert_contains "$RUN_OUTPUT" "has no integrity"
-
-# --- happy path: 5/5 verified, prefix world-readable -------------------------
-
+# --- the positive path -------------------------------------------------------
 new_case happy
-write_lock 5 sha512-AAAA
-FAKE_B64=AAAA
+WORK_PARENT="$CASE/root/work-parent"
+mkdir -p "$WORK_PARENT"
+before="$(cd "$CASE/root/pi" && shasum -a 256 package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256 2>/dev/null || sha256sum package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256)"
 run_installer
-[[ $RUN_STATUS -eq 0 ]] || fail "the happy path must succeed: $RUN_OUTPUT"
-assert_contains "$RUN_OUTPUT" "5/5 shrinkwrap-only tarballs verified"
-[[ -z "$(find "$CASE/prefix" ! -perm -o+r -print -quit)" ]] \
-    || fail "the installed prefix is not world-readable (C7)"
+[[ $RUN_STATUS -eq 0 ]] || fail "the installer failed: $RUN_ERROR"
+assert_contains "$RUN_OUTPUT" 'installed pi 1.4.0 from the reviewed inputs'
+assert_contains "$RUN_OUTPUT" '1/1 Pi sibling archives and installed bytes verified'
+# Installed Pi code is the last thing that may run: the authenticated byte proof and
+# the runtime identity proof both precede the `--help` that executes the payload.
+[[ "$(tr '\n' ' ' <"$CASE/order.log")" == 'bytes runtime help ' ]] ||
+    fail "the installer ran the payload before its proofs: [$(tr '\n' ' ' <"$CASE/order.log")]"
+# Zero-manager preparation: the fake manager must not have run before the frozen
+# install, and the equal request must have published nothing.
+[[ "$(head -n 1 "$CASE/manager.log")" == --version* ]] ||
+    fail "preparation started a manager before the installer's own calls"
+[[ "$(cd "$CASE/root/pi" && shasum -a 256 package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256 2>/dev/null || sha256sum package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256)" == "$before" ]] ||
+    fail 'an equal install changed the reviewed inputs'
+# The dispatch list is data: one canonical sorted word per line, 0644.
+dispatch="$CASE/root/pi/agent-vm-subcommands"
+[[ -f "$dispatch" ]] || fail 'the installer did not publish the subcommand list'
+[[ "$(cat "$dispatch")" == "$(cat "$REPO_ROOT/images/tools/pi/dispatch/1.4.0.txt")" ]] ||
+    fail "the published subcommand list is [$(tr '\n' ' ' <"$dispatch")]"
+[[ "$(ls -l "$dispatch" | cut -c1-10)" == -rw-r--r-- ]] ||
+    fail "the subcommand list is not 0644: $(ls -l "$dispatch")"
+# The caller's work parent is preserved, and no owned artifact survives.
+[[ -d "$WORK_PARENT" ]] || fail "the caller's work parent was deleted"
+[[ -d "$CASE/root/pi/node_modules" ]] || fail 'the installed payload is missing'
+# No record: only the verifier publishes.
+assert_absent "$CASE/root/install-status/pi"
+assert_absent "$CASE/root/install-status/pi-claude-bridge"
 
-# --- RQ1: real-filesystem shadow-package regression --------------------------
-#
-# The cases above prove install-pi.sh's failure *policy* with a fake `diff`. The
-# B1 finding was that the verification's `diff -x node_modules` never looked at
-# the bytes that ship: a shadow package planted under a `node_modules` at any
-# depth was silently excluded. These cases plant a real shadow in a real
-# installed tree and use the REAL `tar` and `diff`, so the comparison under test
-# is the production one. `npm`, `curl` and `openssl` stay faked (no registry, no
-# network): npm's output is materialised directly, curl serves prebuilt tarballs,
-# and the fake openssl returns the integrity the lock commits.
-
-SIBLINGS=(chord pi-agent-core pi-ai pi-telemetry pi-tui)
-REAL_BASE="node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works"
-
-new_realcase() {
-    unset AGENT_INSTALL_SOFT_FAIL
-    CASE="$TEST_ROOT/real-$1"
-    rm -rf "$CASE"
-    mkdir -p "$CASE/bin" "$CASE/prefix" "$CASE/home" "$CASE/tarballs" "$CASE/src" "$CASE/work" "$CASE/status"
-    : >"$CASE/log"
-    printf '#!/bin/sh\nexit 0\n' >"$CASE/prepare-lock.sh"
-
-    local name
-    for name in "${SIBLINGS[@]}"; do
-        mkdir -p "$CASE/src/$name/package"
-        printf 'sibling %s\n' "$name" >"$CASE/src/$name/package/$name.js"
-        if [[ "$name" == pi-ai ]]; then
-            mkdir -p "$CASE/src/$name/package/dist"
-            printf 'pi-ai dist\n' >"$CASE/src/$name/package/dist/index.js"
-        fi
-        tar -czf "$CASE/tarballs/$name.tgz" -C "$CASE/src/$name" package
-        mkdir -p "$CASE/prefix/$REAL_BASE/$name"
-        printf 'sibling %s\n' "$name" >"$CASE/prefix/$REAL_BASE/$name/$name.js"
-        if [[ "$name" == pi-ai ]]; then
-            mkdir -p "$CASE/prefix/$REAL_BASE/$name/dist"
-            printf 'pi-ai dist\n' >"$CASE/prefix/$REAL_BASE/$name/dist/index.js"
-        fi
-    done
-    for name in agent-base https-proxy-agent; do
-        mkdir -p "$CASE/prefix/$REAL_BASE/pi-ai/node_modules/$name"
-        : >"$CASE/prefix/$REAL_BASE/pi-ai/node_modules/$name/index.js"
-    done
-
-    make_tool npm <<'SH'
-#!/usr/bin/env bash
-printf 'npm <%s>\n' "$*" >>"$FAKE_LOG"
-exit 0
-SH
-    make_tool curl <<'SH'
-#!/usr/bin/env bash
-out=""
-prev=""
-for a in "$@"; do
-    [[ "$prev" == "-o" ]] && out="$a"
-    prev="$a"
-done
-url="${@: -1}"
-cp "$CASE_TARBALLS/$(basename "$url")" "$out"
-SH
-    make_tool openssl <<'SH'
-#!/usr/bin/env bash
-case "$1" in
-    dgst) : ;;
-    base64) cat >/dev/null; printf '%s' AAAA ;;
-esac
-SH
-}
-
-write_real_lock() {
-    local name integrity=sha512-AAAA extra
-    {
-        printf '{\n  "name": "agent-vm-guest-pi",\n  "version": "0.0.0",\n  "lockfileVersion": 3,\n  "packages": {\n'
-        printf '    "": {"dependencies": {"@earendil-works/pi-coding-agent": "0.86.1"}},\n'
-        printf '    "node_modules/@earendil-works/pi-coding-agent": {"version": "0.86.1", "integrity": "sha512-PI"}'
-        for name in "${SIBLINGS[@]}"; do
-            printf ',\n    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/%s": {"version": "0.86.1", "resolved": "https://registry.example.test/%s.tgz", "integrity": "%s"}' \
-                "$name" "$name" "$integrity"
-        done
-        for name in agent-base https-proxy-agent; do
-            printf ',\n    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/node_modules/%s": {"version": "0.0.0", "resolved": "https://registry.example.test/%s.tgz", "integrity": "%s"}' \
-                "$name" "$name" "$integrity"
-        done
-        for extra in "$@"; do
-            printf ',\n    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/node_modules/%s": {"version": "0.0.0", "resolved": "https://registry.example.test/%s.tgz", "integrity": "%s"}' \
-                "$extra" "${extra##*/}" "$integrity"
-        done
-        printf '\n  }\n}\n'
-    } >"$CASE/prefix/package-lock.json"
-    printf '{"dependencies": {"@earendil-works/pi-coding-agent": "0.86.1"}}\n' >"$CASE/prefix/package.json"
-}
-
-# PATH deliberately omits any fake `tar`/`diff`: the real ones run.
-run_real_installer() {
-    set +e
-    RUN_OUTPUT="$(env -i \
-        "PATH=$CASE/bin:$TIMEOUT_DIR:$JQ_DIR:/usr/bin:/bin" \
-        "HOME=$CASE/home" \
-        "FAKE_LOG=$CASE/log" \
-        "CASE_TARBALLS=$CASE/tarballs" \
-        "AGENT_VM_CONTRACT_DIR=$CONTRACT_DIR" \
-        "AGENT_VM_PREPARE_LOCK=$CASE/prepare-lock.sh" \
-        "AGENT_VM_INSTALL_STATUS_DIR=$CASE/status" \
-        "AGENT_VM_PI_PREFIX=$CASE/prefix" \
-        "AGENT_VM_PI_WORK_DIR=$CASE/work" \
-        "AGENT_INSTALL_SOFT_FAIL=${AGENT_INSTALL_SOFT_FAIL-}" \
-        sh "$RUN_INSTALL" pi "$CASE/status/pi" sh "$INSTALLER" 2>&1)"
-    RUN_STATUS=$?
-    set -e
-}
-
-# (c) the legitimate tree passes, with real diff/tar and no basename exclusions.
-new_realcase legit
-write_real_lock
-run_real_installer
-[[ $RUN_STATUS -eq 0 ]] || fail "the legitimate tree must pass: $RUN_OUTPUT"
-assert_contains "$RUN_OUTPUT" "5/5 shrinkwrap-only tarballs verified"
-
-# (a) a shadow package one level below pi-ai's own node_modules.
-for soft in "" 1; do
-    new_realcase shadow-deep
-    write_real_lock
-    mkdir -p "$CASE/prefix/$REAL_BASE/pi-ai/node_modules/shadow"
-    : >"$CASE/prefix/$REAL_BASE/pi-ai/node_modules/shadow/index.js"
-    AGENT_INSTALL_SOFT_FAIL=$soft
-    run_real_installer
-    [[ $RUN_STATUS -ne 0 ]] || fail "a shadow under pi-ai/node_modules must fail (soft='${soft:-unset}')"
-    assert_contains "$RUN_OUTPUT" "differs from its verified tarball"
-done
-
-# (b) a shadow planted in a node_modules nested under pi-ai/dist.
-for soft in "" 1; do
-    new_realcase shadow-dist
-    write_real_lock
-    mkdir -p "$CASE/prefix/$REAL_BASE/pi-ai/dist/node_modules/agent-base"
-    printf 'SHADOWED-DEEP\n' >"$CASE/prefix/$REAL_BASE/pi-ai/dist/node_modules/agent-base/index.js"
-    AGENT_INSTALL_SOFT_FAIL=$soft
-    run_real_installer
-    [[ $RUN_STATUS -ne 0 ]] || fail "a shadow under pi-ai/dist/node_modules must fail (soft='${soft:-unset}')"
-    assert_contains "$RUN_OUTPUT" "differs from its verified tarball"
-done
-
-# (d) a lock declaring a dependency nested inside an already-declared one must
-# fold without the spurious "tarball already contains" error.
-new_realcase nested-declared
-write_real_lock agent-base/node_modules/deep-dep
-mkdir -p "$CASE/prefix/$REAL_BASE/pi-ai/node_modules/agent-base/node_modules/deep-dep"
-: >"$CASE/prefix/$REAL_BASE/pi-ai/node_modules/agent-base/node_modules/deep-dep/index.js"
-run_real_installer
-[[ $RUN_STATUS -eq 0 ]] \
-    || fail "a lock declaring a dep nested in another declared one must fold cleanly: $RUN_OUTPUT"
-assert_contains "$RUN_OUTPUT" "5/5 shrinkwrap-only tarballs verified"
-
-# ... while the genuine guard is intact: a verified tarball that itself ships a
-# lock-declared path is still a hard failure.
-new_realcase tarball-ships-declared
-write_real_lock
-mkdir -p "$CASE/src/pi-ai/package/node_modules/agent-base"
-: >"$CASE/src/pi-ai/package/node_modules/agent-base/index.js"
-tar -czf "$CASE/tarballs/pi-ai.tgz" -C "$CASE/src/pi-ai" package
-run_real_installer
-[[ $RUN_STATUS -ne 0 ]] || fail "a tarball shipping a lock-declared path must fail"
-assert_contains "$RUN_OUTPUT" "already contains"
-
-# --- scratch space: one directory per run ------------------------------------
-
-new_case work-dir-override
-write_lock 5 sha512-WRONG
-FAKE_B64=AAAA
+# --- hard failures -----------------------------------------------------------
+# A runtime identity proof that fails must stop the build before the payload runs:
+# no dispatch list, no executed CLI, and the partial prefix is removed.
+new_case runtime-identity
+FAKE_RUNTIME_CHECK_FAIL=1
+mkdir -p "$CASE/root/pi/node_modules"
 run_installer
-[[ $RUN_STATUS -ne 0 ]] || fail "the integrity mismatch must fail: $RUN_OUTPUT"
-[[ -s "$CASE/work/siblings.tsv" ]] \
-    || fail "the installer must write its selector output under AGENT_VM_PI_WORK_DIR"
+require_hard 'the installed Pi runtime failed its identity and N6 probes'
+assert_absent "$CASE/root/pi/agent-vm-subcommands"
+[[ "$(tr '\n' ' ' <"$CASE/order.log")" == 'bytes runtime ' ]] ||
+    fail "installed Pi code ran although its identity proof failed: [$(tr '\n' ' ' <"$CASE/order.log")]"
 
-new_case concurrent-a
-write_lock
-case_a="$CASE"
-new_case concurrent-b
-write_lock
-case_b="$CASE"
-set +e
-installer_output "$case_a" >"$case_a/out.log" 2>&1 & pid_a=$!
-installer_output "$case_b" >"$case_b/out.log" 2>&1 & pid_b=$!
-wait "$pid_a"; status_a=$?
-wait "$pid_b"; status_b=$?
-set -e
-[[ $status_a -eq 0 ]] || fail "concurrent run A must succeed: $(cat "$case_a/out.log")"
-[[ $status_b -eq 0 ]] || fail "concurrent run B must succeed: $(cat "$case_b/out.log")"
+new_case manager-identity
+FAKE_MANAGER_VERSION=11.10.0
+mkdir -p "$CASE/root/pi/node_modules"
+run_installer
+require_hard 'base manager is not the pinned 11.11.0'
 
-# --- the test seam cannot become the production default ----------------------
+new_case frozen-install
+FAKE_INSTALL_STATUS=1
+mkdir -p "$CASE/root/pi/node_modules/should-be-removed"
+run_installer
+require_hard 'frozen install failed'
 
-grep -Fq 'AGENT_VM_PI_PREFIX:-/opt/agent-vm/pi}' "$INSTALLER" \
-    || fail "production default install prefix is missing"
-grep -Fq 'AGENT_VM_PI_WORK_DIR:-/tmp/pi-verify}' "$INSTALLER" \
-    || fail "production default scratch directory is missing"
+new_case integrity
+FAKE_DOWNLOAD_ARCHIVE="$CASE/not-the-archive.tgz"
+printf 'different bytes\n' >"$FAKE_DOWNLOAD_ARCHIVE"
+FAKE_DOWNLOAD_FAIL=
+run_installer
+require_hard 'INTEGRITY MISMATCH'
 
-echo 'pi-install black-box tests passed'
+new_case integrity-soft-1
+AGENT_INSTALL_SOFT_FAIL=1
+printf 'different bytes\n' >"$CASE/not-the-archive.tgz"
+FAKE_DOWNLOAD_ARCHIVE="$CASE/not-the-archive.tgz"
+run_installer
+# A checksum mismatch can never soften, even with soft-fail set.
+require_hard 'INTEGRITY MISMATCH'
+assert_absent "$CASE/root/install-status/pi"
+
+new_case byte-proof
+# The real extractor runs, but the checker seam refuses: a byte failure is hard.
+cat >"$CASE/root/checker.mjs" <<'JS'
+import fs from 'node:fs';
+const args = process.argv.slice(2);
+if (args.length === 2 && args[0] === 'inventory') {
+  process.stdout.write(fs.readFileSync(process.env.CASE + '/inventory.json', 'utf8'));
+  process.exit(0);
+}
+process.stderr.write('check-installed-bytes.mjs: pi-ai dist/index.js does not match the authenticated archive bytes\n');
+process.exit(1);
+JS
+cat >"$CASE/inventory.json" <<JSON
+{"platform":"linux/arm64","family":[{"name":"@earendil-works/pi-ai","version":"1.4.0","integrity":"$ARCHIVE_SRI","tarball":"https://registry.npmjs.org/x.tgz"}],"providers":[]}
+JSON
+run_installer
+require_hard 'pi-ai dist/index.js does not match the authenticated archive bytes'
+
+new_case four-inputs
+# The real composed helper, so this is the actual pinned-input check.
+CASE_CONTRACT="$NATIVE_CONTRACT"
+printf 'tampered\n' >"$CASE/root/pi/pnpm-inputs.sha256"
+run_installer
+[[ $RUN_STATUS -eq 1 ]] || fail "tampered inputs must be hard (got $RUN_STATUS)"
+assert_contains "$RUN_ERROR" 'reviewed inputs failed pinned-input validation'
+[[ ! -s "$CASE/manager.log" ]] || fail 'tampered inputs reached the manager'
+
+new_case no-dispatch-expectation
+rm "$CASE/root/dispatch/1.4.0.txt"
+run_installer
+require_hard 'no reviewed dispatch expectation for Pi 1.4.0'
+
+new_case dispatch-drift
+# A Pi whose `--help` advertises a different set than the reviewed 1.4.0 list.
+sed -i.bak '/pi mcp /d' "$CASE/pi-stub" 2>/dev/null || true
+rm -f "$CASE/pi-stub.bak"
+run_installer
+require_hard 'the reviewed 1.4.0 list is'
+
+# --- the curl-only soft branch ----------------------------------------------
+for soft in 1 0; do
+    new_case "soft-$soft"
+    AGENT_INSTALL_SOFT_FAIL=$soft
+    FAKE_DOWNLOAD_FAIL=1
+    FAKE_RECEIPT_LINE='transport download 56'
+    run_installer
+    [[ $RUN_STATUS -eq 0 ]] ||
+        fail "soft=$soft must soften a classified download failure (got $RUN_STATUS: $RUN_ERROR)"
+    assert_absent "$CASE/root/pi"
+    assert_absent "$CASE/root/pi/node_modules"
+    assert_absent "$CASE/root/install-status/pi-claude-bridge"
+    [[ "$(cat "$CASE/root/install-status/pi")" == 'absent-transport 56' ]] ||
+        fail "soft=$soft wrote [$(cat "$CASE/root/install-status/pi")]"
+    assert_contains "$RUN_OUTPUT" 'soft-fail mode; image will ship without pi'
+done
+
+new_case soft-unset
+FAKE_DOWNLOAD_FAIL=1
+FAKE_RECEIPT_LINE='transport download 56'
+run_installer
+require_hard 'could not fetch'
+assert_absent "$CASE/root/install-status/pi"
+
+new_case soft-stale-npm-receipt
+# A transport line the download contract did not write (the retired npm
+# vocabulary) can never soften, and neither can a classified code with no
+# receipt.
+AGENT_INSTALL_SOFT_FAIL=1
+FAKE_DOWNLOAD_FAIL=1
+FAKE_RECEIPT_LINE='transport npm EAI_AGAIN'
+run_installer
+require_hard 'could not fetch'
+assert_absent "$CASE/root/install-status/pi"
+
+new_case soft-empty-receipt
+AGENT_INSTALL_SOFT_FAIL=1
+FAKE_DOWNLOAD_FAIL=1
+FAKE_RECEIPT_LINE=
+run_installer
+require_hard 'could not fetch'
+assert_absent "$CASE/root/install-status/pi"
+
+new_case soft-unclassified-code
+AGENT_INSTALL_SOFT_FAIL=1
+FAKE_DOWNLOAD_FAIL=1
+FAKE_RECEIPT_LINE='transport download not-a-code'
+run_installer
+require_hard 'could not fetch'
+assert_absent "$CASE/root/install-status/pi"
+
+echo 'pi-install contract tests passed'

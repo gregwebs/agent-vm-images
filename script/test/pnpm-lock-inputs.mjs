@@ -408,6 +408,42 @@ try {
     pins(prefix); run(["check", kind, prefix], 0);
   }
 
+  // Additive projection: hasBin/platform/optional are typed, emitted for every
+  // record, and platform lists keep their raw order and duplicates. The expected
+  // values here are hand-authored literals, not graph snapshots.
+  {
+    const prefix = copy();
+    edit(prefix, "pnpm-lock.yaml", l => {
+      l.packages[`${cordis}@4.0.2`].hasBin = true;
+      l.packages[`${cordis}@4.0.2`].optional = true;
+      l.packages[`${cordis}@4.0.2`].os = ["linux", "!darwin", "any", "!any", "linux"];
+      l.packages[`${cordis}@4.0.2`].cpu = ["arm64", "arm64"];
+      l.packages[`${cordis}@4.0.2`].libc = ["glibc"];
+      l.snapshots[`${cordis}@4.0.2`].optional = true;
+    });
+    pins(prefix);
+    const graph = graphOf(prefix);
+    const archive = graph.packages.find(pkg => pkg.id.name === cordis);
+    assert.deepEqual(archive.platform, {os:["linux","!darwin","any","!any","linux"],cpu:["arm64","arm64"],libc:["glibc"]});
+    assert.equal(archive.hasBin, true);
+    assert.equal(archive.optional, true);
+    assert.equal(graph.snapshots.find(snapshot => snapshot.id.key === `${cordis}@4.0.2`).optional, true);
+    const defaulted = graph.packages.find(pkg => pkg.id.name === root);
+    assert.deepEqual(defaulted.platform, {os:[],cpu:[],libc:[]});
+    assert.equal(defaulted.hasBin, false);
+    assert.equal(defaulted.optional, false);
+    assert.equal(graph.snapshots.find(snapshot => snapshot.id.key === `${root}@0.1.5-rc.2`).optional, false);
+  }
+  for (const [change, diagnostic] of [
+    [l => l.packages[`${cordis}@4.0.2`].hasBin = "true", /hasBin: expected boolean/],
+    [l => l.packages[`${cordis}@4.0.2`].optional = null, /optional: expected boolean/],
+    [l => l.packages[`${cordis}@4.0.2`].os = "linux", /platform.os: expected sequence/],
+    [l => l.packages[`${cordis}@4.0.2`].cpu = ["!!arm64"], /malformed platform token/],
+    [l => l.packages[`${cordis}@4.0.2`].libc = [" linux"], /malformed platform token/],
+    [l => l.packages[`${cordis}@4.0.2`].os = ["Linux"], /malformed platform token/],
+    [l => l.snapshots[`${cordis}@4.0.2`].optional = "true", /optional: expected boolean/],
+  ]) invalid(prefix => edit(prefix, "pnpm-lock.yaml", change), diagnostic);
+
   // Seeded deterministic scoped identity and harmless map-order permutations.
   let seed = 42;
   for (let index = 0; index < 16; index++) {

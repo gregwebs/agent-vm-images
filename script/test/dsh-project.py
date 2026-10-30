@@ -16,11 +16,32 @@ from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE = ROOT / 'images/tools/dsh/project.py'
-spec = importlib.util.spec_from_file_location('dsh_project', SOURCE)
-project = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = project
-spec.loader.exec_module(project)
+# The implementation moved to the shared module when Pi and the bridge joined the
+# same filesystem/manager boundary. dsh's behaviour is that module under the dsh
+# consumer, and `images/tools/dsh/project.py` is the adapter its scripts, imports
+# and Docker mounts still name.
+SOURCE = ROOT / 'images/tools/pnpm-project.py'
+ADAPTER = ROOT / 'images/tools/dsh/project.py'
+
+
+def load_module(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+project = load_module(SOURCE, 'pnpm_project')
+adapter = load_module(ADAPTER, 'dsh_project')
+
+
+def shared_cli(*args):
+    return [sys.executable, str(SOURCE), '--consumer', 'dsh', *args]
+
+
+def adapter_cli(*args):
+    return [sys.executable, str(ADAPTER), *args]
 
 
 def recipe_contract_helper():
@@ -280,9 +301,40 @@ class ProjectTests(unittest.TestCase):
         self.assertFalse(list(self.root.glob('dsh-*')))
 
     def test_usage_status(self):
-        result = subprocess.run([sys.executable, str(SOURCE), 'publish', str(self.stage)], capture_output=True)
-        self.assertEqual(result.returncode, 2)
-        self.assertEqual(result.stdout, b'')
+        # The shared CLI has no default consumer; the dsh adapter keeps dsh's old
+        # argv. Both report missing operands as usage status 2 and print nothing.
+        for argv in (shared_cli('publish', str(self.stage)),
+                     adapter_cli('publish', str(self.stage)),
+                     [sys.executable, str(SOURCE), 'publish', str(self.stage), str(self.prefix)]):
+            result = subprocess.run(argv, capture_output=True)
+            self.assertEqual(result.returncode, 2, argv)
+            self.assertEqual(result.stdout, b'')
+
+    def test_adapter_shares_the_implementation(self):
+        # One implementation, one set of capability types: a copied adapter would
+        # make `isinstance` checks and the rollback seams disagree.
+        for name in ('MutationAuthorization', 'RuntimeAuthorization', 'BootstrapAuthorization',
+                     'PublicationFailure', 'SignalFailure', 'ContractFailure', 'DSH', 'PRODUCTION'):
+            self.assertIs(getattr(adapter, name), getattr(project, name), name)
+        for name in ('publish', 'authorize_mutation', 'authorize_runtime', 'authorize_stage',
+                     'guard_environment', 'owned_scratch', 'cleanup_scratch', 'manager_argv',
+                     'remove_scratch', 'verify_base_distribution', 'main'):
+            self.assertIs(getattr(adapter, name), getattr(project, name), name)
+        self.assertIs(sys.modules['pnpm_project'], project)
+        # Real CLI parity: the same fixture authorizes to the same facts through
+        # the shared CLI and through dsh's adapter.
+        shared = subprocess.run(shared_cli('authorize', str(self.prefix)), capture_output=True)
+        legacy = subprocess.run(adapter_cli('authorize', str(self.prefix)), capture_output=True)
+        self.assertEqual(shared.returncode, 0, shared.stderr)
+        self.assertEqual(legacy.returncode, 0, legacy.stderr)
+        self.assertEqual(json.loads(shared.stdout), json.loads(legacy.stdout))
+        self.assertEqual(json.loads(legacy.stdout)['consumer'], 'dsh')
+        # The adapter's consumer is fixed: a caller cannot select another profile
+        # through dsh's argv.
+        refused = subprocess.run(adapter_cli('--consumer', 'pi', 'authorize', str(self.prefix)),
+                                 capture_output=True)
+        self.assertEqual(refused.returncode, 2)
+        self.assertEqual(refused.stdout, b'')
 
     def test_every_partial_write_is_rolled_back_inclusively(self):
         before = self.image()
@@ -334,7 +386,7 @@ class ProjectTests(unittest.TestCase):
                            ('NODE_TLS_REJECT_UNAUTHORIZED','0'), ('npm_config_registry','https://bad'),
                            ('PNPM_HOME','/bad'), ('COREPACK_HOME','/bad')]:
             with patch.dict(os.environ, {key:value}):
-                result = subprocess.run([sys.executable, str(SOURCE), 'guard', str(self.prefix)], capture_output=True)
+                result = subprocess.run(adapter_cli('guard', str(self.prefix)), capture_output=True)
                 self.assertEqual(result.returncode, 1, (key, result.stderr))
                 self.assertIn(key.encode() if key != 'NODE_TLS_REJECT_UNAUTHORIZED' else b'TLS', result.stderr)
         (self.prefix / '.npmrc').symlink_to(self.root / 'absent')
@@ -350,7 +402,7 @@ class ProjectTests(unittest.TestCase):
             env = {**os.environ, key:str(self.root / 'unreviewed-ca')}
             shared = subprocess.run([str(checker), 'pnpm-environment', str(self.prefix)], env=env, capture_output=True)
             self.assertEqual(shared.returncode, 0, (key, shared.stderr))
-            guarded = subprocess.run([sys.executable, str(SOURCE), 'guard', str(self.prefix)],
+            guarded = subprocess.run(adapter_cli('guard', str(self.prefix)),
                                      env=env, capture_output=True)
             self.assertEqual(guarded.returncode, 1, (key, guarded.stdout))
             self.assertIn(key.encode(), guarded.stderr)
@@ -398,7 +450,7 @@ class ProjectTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     project.guard_environment([self.prefix])
                 self.assertFalse(sentinel.exists(), 'unauthorized checker executed')
-                result = subprocess.run([sys.executable, str(SOURCE), 'guard', str(self.prefix)],
+                result = subprocess.run(adapter_cli('guard', str(self.prefix)),
                                         capture_output=True)
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertFalse(sentinel.exists(), 'the guard verb executed an unauthorized checker')
@@ -496,7 +548,7 @@ class ProjectTests(unittest.TestCase):
         new = [(self.stage / f).read_bytes() for f in project.INPUTS]
         interrupted = 0
         for attempt in range(8):
-            process = subprocess.Popen([sys.executable, str(SOURCE), 'publish', str(self.stage), str(self.prefix)],
+            process = subprocess.Popen(adapter_cli('publish', str(self.stage), str(self.prefix)),
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             time.sleep(0.05 + 0.05 * attempt)
             process.terminate()
@@ -563,7 +615,7 @@ class ProjectTests(unittest.TestCase):
         (base / 'opt/agent-vm/pnpm/bin').mkdir()
         # mkdtemp is 0700; a traversable fixture root is required by the audit.
         self.root.chmod(0o755)
-        reviewed = SOURCE.parents[2] / 'pnpm'
+        reviewed = ROOT / 'images/pnpm'
         source = self.root / 'source'
         shutil.rmtree(source, ignore_errors=True)
         source.mkdir()

@@ -124,6 +124,68 @@ func TestPnpmYAMLArgv(t *testing.T) {
 	}
 }
 
+func TestPnpmJSONArgv(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "value.json")
+	write := func(text string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"b":[1,true],"a":{"z":"\u00e9"}}`)
+	got := runNode(t, nil, "pnpm-json", path)
+	if got.status != 0 || string(got.stdout) != "{\"b\":[1,true],\"a\":{\"z\":\"é\"}}\n" {
+		t.Errorf("pnpm-json = %d %q", got.status, got.stdout)
+	}
+	for _, args := range [][]string{
+		{"pnpm-json"},
+		{"pnpm-json", ""},
+		{"pnpm-json", path, "extra"},
+	} {
+		usage := runNode(t, nil, args...)
+		if usage.status != 2 || string(usage.stderr) != "usage: recipe-contract pnpm-json FILE\n" {
+			t.Errorf("%v usage = %d %q", args, usage.status, usage.stderr)
+		}
+	}
+	for _, vector := range []struct {
+		name   string
+		source string
+		match  string
+	}{
+		{"duplicate", `{"a":1,"a":2}`, "Map keys must be unique"},
+		{"depth", strings.Repeat("[", 101) + "0" + strings.Repeat("]", 101), "depth100"},
+		{"truncated", `{"a":`, "unexpected"},
+		{"invalid-utf8", "{\"a\":\"\xff\"}", "The encoded data was not valid for encoding utf-8"},
+	} {
+		write(vector.source)
+		rejected := runNode(t, nil, "pnpm-json", path)
+		if rejected.status != 1 || !strings.HasPrefix(string(rejected.stderr), "pnpm-json: ") ||
+			!strings.Contains(string(rejected.stderr), vector.match) {
+			t.Errorf("%s = %d %q, want %q", vector.name, rejected.status, rejected.stderr, vector.match)
+		}
+		if len(rejected.stdout) != 0 {
+			t.Errorf("%s leaked stdout", vector.name)
+		}
+	}
+	large := filepath.Join(directory, "large.json")
+	if err := os.WriteFile(large, []byte(strings.Repeat(" ", 16<<20)+"{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if rejected := runNode(t, nil, "pnpm-json", large); rejected.status != 1 ||
+		!strings.Contains(string(rejected.stderr), "must be a regular file <=16 MiB") {
+		t.Errorf("size bound = %d %q", rejected.status, rejected.stderr)
+	}
+	// A JSON document that YAML would also accept still goes through the JSON
+	// grammar: duplicate keys, depth and the JSON error texts are shared with the
+	// lock reader, never a permissive JSON.parse.
+	status := Run([]string{"pnpm-json", path}, Environment{},
+		Streams{Out: failingWriter{}, Err: &recorder{}})
+	if status != 1 {
+		t.Fatalf("stdout failure status = %d", status)
+	}
+}
+
 func TestDshLockUpdateArgv(t *testing.T) {
 	before := nodeFixture(t)
 	for _, test := range []struct {

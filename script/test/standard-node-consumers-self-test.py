@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
-"""Scripted Docker/watchdog plumbing tests; never substitutes for native probes."""
+"""Scripted Docker/watchdog plumbing tests; never substitutes for native probes.
+
+Two scopes live here on purpose. The dsh and primitives blocks, and the Pi
+*comparator* vectors, the Pi argument grammar, the committed-input read and a
+bounded five-case subset of the Pi fake-Docker plumbing, run on every invocation.
+The other seventeen Pi fake-Docker cases are gated behind
+`AGENT_VM_PI_PLUMBING_SELF_TEST=1`: every case re-runs the whole Pi leg through the
+fake (tens of seconds each). Both lists are declared in `pi_tests` with what each
+case adds, and the ones the fake does not model -- it returns a chosen exit status
+for a Pi action instead of the document that would cause it -- are marked
+`scripted` there. Real Pi coverage is the focused container legs, which run the
+real manager and payload.
+"""
 import contextlib
 import errno
 import importlib.util
@@ -19,7 +31,134 @@ ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / 'script/test/standard-node-consumers.sh'
 BODY = '/source/script/test/fixtures/standard-node-consumers.sh'
 DSH_BODY = '/source/script/test/fixtures/standard-node-dsh.py'
+PI_BODY = '/source/script/test/fixtures/standard-node-pi.py'
+PI_ROOT = '@earendil-works/pi-coding-agent'
+PI_ROOT_SRI = 'sha512-ROOTARCHIVE'
+# The self-test's own family/dispatch tables: plumbing only. The real
+# vectors are authored in standard-node-pi.py from the authenticated archives.
+PI_SHAPES = {'1.4.0': {'members': ['pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp',
+                                   'pi-telemetry', 'pi-tui'],
+                       'direct': ['pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp', 'pi-tui'],
+                       'providers': ['marked@18.0.11', '@anthropic-ai/sdk@0.129.0'],
+                       'dispatch': ['auth', 'config', 'install', 'list', 'mcp', 'remove',
+                                    'uninstall', 'update']},
+             '0.87.0': {'members': ['chord', 'pi-agent-core', 'pi-ai', 'pi-telemetry', 'pi-tui'],
+                        'direct': ['chord', 'pi-agent-core', 'pi-ai', 'pi-tui'],
+                        'providers': ['marked@18.0.11', '@anthropic-ai/sdk@0.124.0',
+                                      'esbuild@0.25.10', 'yaml@2.8.1'],
+                        'dispatch': ['auth', 'config', 'install', 'list', 'remove',
+                                     'uninstall', 'update']}}
+PI_SEED = [
+    {'case': 'absent-binary', 'wrote': False},
+    {'case': 'fresh', 'pathToClaudeCodeExecutable': '/opt/agent/.local/bin/claude', 'wrote': True},
+    {'case': 'idempotent', 'identical': True}, {'case': 'preserved', 'identical': True},
+    {'case': 'invalid-json', 'identical': True}, {'case': 'scalar', 'identical': True},
+    {'case': 'array', 'identical': True}, {'case': 'provider-shape', 'identical': True},
+    {'case': 'mode', 'mode': '0o640',
+     'pathToClaudeCodeExecutable': '/opt/agent/.local/bin/claude'},
+    {'case': 'absent-state', 'wrote': False}]
+PI_MUTANTS = ['installed-byte-edit', 'installed-missing-file', 'installed-extra-file',
+              'installed-shadow-node-modules', 'extraction-byte-edit',
+              'extraction-missing-file', 'archive-owns-generated-path', 'bin-link-retarget',
+              'bin-link-missing', 'bin-target-mode-0644', 'bin-target-bytes',
+              'dependency-link-escape', 'dependency-link-noncanonical']
+PI_MUTANT_CODES = {'installed-byte-edit': 'byte-mismatch',
+                   'installed-missing-file': 'missing-path',
+                   'installed-extra-file': 'unexpected-path',
+                   'installed-shadow-node-modules': 'unexpected-path',
+                   'extraction-byte-edit': 'byte-mismatch',
+                   'extraction-missing-file': 'unexpected-path',
+                   'archive-owns-generated-path': 'archive-owns-generated-path',
+                   'bin-link-retarget': 'link-mismatch',
+                   'bin-link-missing': 'missing-generated',
+                   'bin-target-mode-0644': 'mode-mismatch',
+                   'bin-target-bytes': 'byte-mismatch',
+                   'dependency-link-escape': 'link-escape',
+                   'dependency-link-noncanonical': 'dependency-link'}
+
+
+def pi_lock(version):
+    shape = PI_SHAPES[version]
+    packages = {f'{PI_ROOT}@{version}': {'resolution': {'integrity': PI_ROOT_SRI}}}
+    snapshots = {}
+    providers = {}
+    for item in shape['providers']:
+        providers[item] = {'resolution': {'integrity': 'sha512-' + item}}
+    for member in shape['members']:
+        identity = f'@earendil-works/{member}@{version}'
+        packages[identity] = {'resolution': {'integrity': 'sha512-' + member}}
+        edges = {}
+        for provider in shape['providers']:
+            name, _, provider_version = provider.rpartition('@')
+            if (member == 'chord' and name == 'esbuild') or \
+               (member == 'pi-agent-core' and name in ('@anthropic-ai/sdk', 'yaml')) or \
+               (member == 'pi-ai' and name == '@anthropic-ai/sdk') or \
+               (member == 'pi-tui' and name == 'marked'):
+                edges[name] = provider_version
+        snapshots[identity] = {'dependencies': edges} if edges else {}
+    packages.update(providers)
+    for item in shape['providers']:
+        snapshots[item] = {}
+    root_edges = {f'@earendil-works/{member}': version for member in shape['direct']}
+    snapshots[f'{PI_ROOT}@{version}'] = {'dependencies': root_edges}
+    return {'lockfileVersion': '9.0',
+            'importers': {'.': {'dependencies': {PI_ROOT: {'specifier': version,
+                                                          'version': version}}}},
+            'packages': packages, 'snapshots': snapshots}
+
+
+def pi_shrinkwrap(version):
+    shape = PI_SHAPES[version]
+    packages = {'': {'name': PI_ROOT, 'version': version,
+                     'dependencies': {f'@earendil-works/{member}': '^' + version
+                                      for member in shape['direct']}}}
+    for member in shape['members']:
+        record = {'name': f'@earendil-works/{member}', 'version': version}
+        # The five historical sibling records carry no integrity.
+        if version == '1.4.0':
+            record['integrity'] = 'sha512-' + member
+        edges = {}
+        for provider in shape['providers']:
+            name, _, provider_version = provider.rpartition('@')
+            if (member == 'chord' and name == 'esbuild') or \
+               (member == 'pi-agent-core' and name in ('@anthropic-ai/sdk', 'yaml')) or \
+               (member == 'pi-ai' and name == '@anthropic-ai/sdk') or \
+               (member == 'pi-tui' and name == 'marked'):
+                edges[name] = '^' + provider_version
+        if edges:
+            record['dependencies'] = edges
+        packages['node_modules/@earendil-works/' + member] = record
+    for item in shape['providers']:
+        name, _, provider_version = item.rpartition('@')
+        packages['node_modules/' + name] = {'name': name, 'version': provider_version,
+                                            'integrity': 'sha512-' + item}
+    return {'name': PI_ROOT, 'version': version, 'lockfileVersion': 3, 'packages': packages}
+
+
+def pi_archive_plan(version):
+    shape = PI_SHAPES[version]
+    entries = [{'name': f'@earendil-works/{member}', 'version': version,
+                'integrity': 'sha512-' + member, 'tarball': 'https://registry.example/' + member,
+                'kind': 'member'} for member in shape['members']]
+    entries += [{'name': item.rpartition('@')[0], 'version': item.rpartition('@')[2],
+                 'integrity': 'sha512-' + item, 'tarball': 'https://registry.example/' + item,
+                 'kind': 'provider'} for item in shape['providers']]
+    return entries
 HASH = 'a' * 64
+
+
+def pi_fixture():
+    """The container-side Pi actions, imported so the fake answers with *its* model.
+
+    The fake used to hand back `entry: .../src/index.ts` for a manifest that has no
+    entry field, so the loader model could require a `main` the reviewed bridge does
+    not have and this self-test still passed while the real leg refused the payload.
+    """
+    spec = importlib.util.spec_from_file_location(
+        'pi_actions', ROOT / 'script/test/fixtures/standard-node-pi.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def fake_docker(args):
@@ -54,8 +193,19 @@ def fake_docker(args):
         output = name + '\n'
     elif key == 'start':
         if args[-1].endswith('-capacity'):
-            reserve = 100 if case == 'capacity' else 2000000
-            output = f'Filesystem 1024-blocks Used Available Capacity Mounted on\noverlay 4000000 1000 {reserve} 1% /\nvolume 4000000 1000 {reserve} 1% /fixtures\n'
+            # The Pi/bridge leg declares a larger install budget than the
+            # primitive probe, so the fake capacity has to clear it too -- and it
+            # must report exactly the mounts the created container asks for: the
+            # primitive probe measures `/` and `/fixtures`, the Pi/bridge legs
+            # measure `/` alone, and each harness requires its own row count.
+            reserve = 100 if case == 'capacity' else 8000000
+            created = next(command for command in reversed(state['commands'])
+                           if command[0] == 'create' and command[-2:] != []
+                           and command[command.index('--name') + 1] == args[-1])
+            mounts = [argument for argument in created if argument.startswith('/')]
+            rows = ''.join(f'{"overlay" if mount == "/" else "volume"} 4000000 1000 '
+                           f'{reserve} 1% {mount}\n' for mount in mounts)
+            output = 'Filesystem 1024-blocks Used Available Capacity Mounted on\n' + rows
             failure = case == 'capacity-start'
         elif '-a' in args:
             output = json.dumps({'device': 'wrong' if case == 'device-type' else 'character:1:3', 'verified': True})
@@ -69,7 +219,26 @@ def fake_docker(args):
     elif key == 'inspect':
         output = json.dumps({'remaining': {}} if case == 'attachments' else {})
     elif key == 'cp':
+        # `docker cp` runs in both directions: a fetch names a container *source*
+        # and a host destination, an upload the other way round. The fake has no
+        # container, so a fetch materializes fixture content at the destination and
+        # an upload remembers which host file the driver wrote.
         failure = case == 'copy'
+        if ':' in args[1] and ':' not in args[2]:
+            container_path = args[1].split(':', 1)[1]
+            if not failure and container_path == '/opt/pi-harness/lock.json':
+                Path(args[2]).write_text(json.dumps(pi_lock(state.get('pi_version', '1.4.0'))))
+            elif not failure and container_path.endswith('/npm-shrinkwrap.json'):
+                body = pi_shrinkwrap(state.get('pi_version', '1.4.0'))
+                if case in ('shrinkwrap-sri', 'shrinkwrap-edge'):
+                    first = 'node_modules/@earendil-works/pi-agent-core'
+                if case == 'shrinkwrap-sri':
+                    body['packages'][first]['integrity'] = 'sha512-NOTTHEAUTHENTICATEDONE'
+                if case == 'shrinkwrap-edge':
+                    body['packages'][first]['dependencies']['unreviewed-new-edge'] = '^1.0.0'
+                Path(args[2]).write_text(json.dumps(body))
+        elif not failure and ':' in args[2]:
+            state.setdefault('uploads', {})[args[2].split(':', 1)[1]] = args[1]
     elif args[:2] == ['network', 'create']:
         state['network'] = args[-1]
         output = args[-1]
@@ -82,6 +251,186 @@ def fake_docker(args):
         elif 'du' in args:
             assert '/root' not in args and '/runtime-homes' not in args, 'private HOMEs cannot be inventoried by restricted root'
             output = ('999999' if case == 'budget' else '24') + '\t/fixtures\n4\t/invocation\n'
+        elif PI_BODY in args:
+            command = args[args.index(PI_BODY) + 1:]
+            action = command[0]
+            version = state.get('pi_version', '1.4.0')
+            shape = PI_SHAPES[version]
+            if action == 'initialize':
+                state['pi_version'] = command[3]
+                state['bridge_version'] = command[4]
+                state['pi_binding'] = command[1:]
+                version = command[3]
+                shape = PI_SHAPES[version]
+                if case == 'missing-fixture':
+                    output = ''
+                else:
+                    output = json.dumps({'initialize': command[1], 'base': HASH, 'pin': HASH,
+                                         'launcher': HASH})
+                failure = case == 'initialize'
+            elif action == 'root-sri':
+                output = json.dumps({'rootSri': {'version': version, 'integrity': PI_ROOT_SRI,
+                                                 'tarball': 'https://registry.example/pi'}})
+                failure = case == 'root-sri'
+            elif action == 'selected-archive':
+                shrinkwrap = version != '1.4.0'
+                if case == 'no-shrinkwrap':
+                    shrinkwrap = False
+                output = json.dumps({'selectedArchive': {'version': version, 'integrity': PI_ROOT_SRI,
+                                                         'shrinkwrap': shrinkwrap, 'manifest': True,
+                                                         'root': '/opt/pi-harness/selected'}})
+            elif action == 'install-pi':
+                assert command[1] == version, (command[1], version)
+                output = (f'install-pi.sh: installed pi {version} from the reviewed inputs\n'
+                          f'{len(shape["members"])}/{len(shape["members"])} Pi sibling archives and '
+                          'installed bytes verified\n')
+                failure = case == 'install-pi'
+            elif action == 'graph':
+                output = json.dumps({'graph': {'lockfileVersion': '9.0',
+                                               'packages': len(pi_lock(version)['packages']),
+                                               'snapshots': len(pi_lock(version)['snapshots']),
+                                               'path': '/opt/pi-harness/lock.json'}})
+            elif action == 'archives':
+                # The action names a *container* path; the fake has no container,
+                # so it reads the host file the driver last `cp`-ed there.
+                uploaded = state.get('uploads', {}).get(command[1])
+                assert uploaded is not None, ('archives plan was never uploaded', command[1])
+                entries = json.loads(Path(uploaded).read_text())['archives']
+                output = '\n'.join(json.dumps({'archive': f'{entry["name"]}@{entry["version"]}',
+                                                'kind': entry['kind'],
+                                                'integrity': entry['integrity']})
+                                    for entry in entries)
+                failure = case == 'archives'
+            elif action == 'bytes':
+                count = len(shape['members'])
+                if case == 'fake-success':
+                    count -= 1
+                output = f'{count}/{len(shape["members"])} Pi sibling archives and installed bytes verified\n'
+                failure = case == 'bytes'
+            elif action == 'install-bridge':
+                output = ('install-pi-packages.sh: installed pi-claude-bridge '
+                          f'{state.get("bridge_version", "0.8.0")} from the reviewed inputs\n')
+                failure = case == 'install-bridge'
+            elif action == 'runtime':
+                runtime = {'shape': shape['members'], 'genai': '2.21.0', 'protobuf': '7.6.6',
+                           'platform': 'linux/arm64', 'command': 'dist/bundle/cli.js'}
+                if 'chord' in shape['members']:
+                    runtime['transform'] = 'let x = 1;'
+                    runtime['native'] = '0.25.10'
+                    runtime['nativePackage'] = '@esbuild/linux-arm64'
+                else:
+                    runtime['dependencies'] = ['quickjs-wasi@3.6.2', 'cross-spawn@7.0.6']
+                    runtime['esbuildOptionals'] = []
+                    if case == 'modern-legacy':
+                        runtime['transform'] = 'let x = 1;'
+                output = json.dumps({'runtime': runtime})
+                failure = case == 'runtime'
+            elif action == 'verify':
+                state['verify_calls'] = state.get('verify_calls', 0) + 1
+                record = {'status': 0, 'pi': 'installed', 'bridge': 'installed'}
+                if case == 'verify-fails':
+                    record = {'status': 1, 'pi': 'installed', 'bridge': 'pending'}
+                elif state['verify_calls'] == 2 and case != 'records-fail':
+                    record = {'status': 1, 'pi': 'installed', 'bridge': 'pending'}
+                elif case == 'records-fail' and state['verify_calls'] == 2:
+                    record = {'status': 1, 'pi': 'pending', 'bridge': 'pending'}
+                output = json.dumps({'verify': record})
+            elif action == 'resolution':
+                # The payload shapes, not the report the driver wants. The reviewed
+                # bridge is TypeScript source: no `main`/`module`/`exports`, and its
+                # entry named only by `pi.extensions`; the SDK is the opposite, and
+                # Node's resolver reads its `exports`/`main`. The entry paths come
+                # from the fixture's own model, so a model that starts requiring a
+                # manifest `main` fails the mandatory positive case instead of being
+                # papered over here. File *presence* is what the real leg proves; the
+                # fake has no container, so it reports the modelled entry as regular.
+                fixture = pi_fixture()
+                bridge_directory = '/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge'
+                sdk_directory = ('/opt/agent-vm/pi-packages/node_modules/'
+                                 '@anthropic-ai/claude-agent-sdk')
+                bridge_manifest = {'name': 'pi-claude-bridge',
+                                   'version': state.get('bridge_version', '0.8.0'),
+                                   'pi': {'extensions': ['./src/index.ts']}}
+                sdk_manifest = {'name': '@anthropic-ai/claude-agent-sdk', 'version': '0.3.281',
+                                'main': 'sdk.mjs', 'exports': {'.': {'default': './sdk.mjs'}}}
+                if case == 'bridge-entry-mismatch':
+                    bridge_manifest['pi'] = {'extensions': ['./dist/index.js']}
+                entries = {}
+                for name_, directory, manifest in (('bridge', bridge_directory, bridge_manifest),
+                                                   ('sdk', sdk_directory, sdk_manifest)):
+                    entry, inside = fixture.loaded_entry(Path(directory),
+                                                         fixture.entry_for(name_, manifest))
+                    entries[name_] = {'entry': str(entry), 'entryInside': inside}
+                competing = []
+                if case == 'competing-resolution':
+                    competing = [bridge_directory + '/node_modules/pi-claude-bridge']
+                output = json.dumps({'resolution': {
+                    'bridge': {'path': bridge_directory,
+                               'expected': bridge_directory,
+                               'resolvedFrom': '/opt/agent-vm/pi-packages',
+                               'version': bridge_manifest['version'],
+                               'entry': entries['bridge']['entry'],
+                               'entryRegular': True,
+                               'entryInside': entries['bridge']['entryInside'],
+                               'competing': competing},
+                    'sdk': {'path': sdk_directory, 'expected': sdk_directory,
+                            'resolvedFrom': bridge_directory, 'version': '0.3.281',
+                            'entry': entries['sdk']['entry'], 'entryRegular': True,
+                            'entryInside': entries['sdk']['entryInside'], 'competing': []}}})
+                failure = case == 'resolution'
+            elif action == 'registration':
+                # The harness's measured catalog is per measured (Pi, bridge) pair.
+                models = '14' if (version, state.get('bridge_version')) == ('1.4.0', '0.8.0') else '11'
+                if case == 'wrong-registration':
+                    models = '13'
+                record = {'status': 0, 'registered': [models], 'missing': 0, 'malformed': 0}
+                if case == 'ambiguous-registration':
+                    record = {'status': 0, 'registered': [models, models], 'missing': 0,
+                              'malformed': 0}
+                output = json.dumps({'registration': record})
+            elif action == 'read':
+                words = shape['dispatch']
+                text_body = '\n'.join(words) + '\n'
+                if case == 'wrong-dispatch' and command[1].endswith('agent-vm-subcommands'):
+                    text_body = '\n'.join(words[:-1]) + '\n'
+                output = json.dumps({'read': {'path': command[1], 'sha256': HASH,
+                                              'mode': '0o644', 'text': text_body}})
+            elif action == 'seed':
+                records = [dict(item) for item in PI_SEED]
+                if case == 'wrong-seed':
+                    records[2]['identical'] = False
+                output = '\n'.join(json.dumps({'seed': item}) for item in records)
+                output += '\n' + json.dumps({'seedRecords': records})
+            elif action == 'mutants':
+                lines = []
+                for name in PI_MUTANTS:
+                    code = PI_MUTANT_CODES[name]
+                    if case == 'wrong-mutant' and name == 'bin-link-retarget':
+                        code = 'byte-mismatch'
+                    lines.append(json.dumps({'mutant': {'mutant': name, 'status': 1, 'code': code,
+                                                        'diagnostic': f'check-installed-bytes.mjs: {code}: fixture',
+                                                        'expect': PI_MUTANT_CODES[name],
+                                                        'repairedStatus': 0}}))
+                lines.append(json.dumps({'mutants': PI_MUTANTS, 'count': len(PI_MUTANTS)}))
+                output = '\n'.join(lines)
+            elif action in ('break-bridge', 'repair-bridge'):
+                output = json.dumps({action.replace('-b', 'B'): 'ok'})
+                failure = case == action
+            elif action == 'probe':
+                if case == 'missing-fixture':
+                    output = ''
+                else:
+                    output = json.dumps({'piProbe': command[1], 'source': command[2],
+                                         'pi': command[3], 'bridge': command[4],
+                                         'pair': command[5] + ':' + command[6], 'caps': 'zero',
+                                         'offline': True, 'wrapper': 'regular-file',
+                                         'version': command[3]})
+            elif action == 'clean':
+                output = json.dumps({'clean': {'work': 'empty', 'records': 2}})
+                failure = case == 'clean'
+            else:
+                raise AssertionError('unhandled pi action: ' + repr(action))
+            failure = failure or case == action
         elif DSH_BODY in args:
             command = args[args.index(DSH_BODY) + 1:]
             action = command[0]
@@ -242,6 +591,19 @@ def dsh_action_tests(work):
     print('standard-node-consumers dsh self-test: owning actions/direct link PASS')
 
 
+# Per-subprocess bound for the fake-Docker legs. Each case re-runs a whole consumer
+# pipeline through the fake docker/python/go on PATH, so the unit of cost is the case,
+# not the fixture. Measured (2026-10-29): the full suite took 804 s here and the same
+# suite with the dsh subprocess cases skipped took 566 s, so the Pi leg's five
+# mandatory cases cost ~500 s of it (~100 s each on this host, against 71 s total for
+# the five on an unloaded one); a verification review saw the suite fail at 14 m 37 s
+# on a *dsh* case's old 45 s bound before the Pi cases ran. 300 s is ~3x the slowest
+# case measured anywhere and still bounds a hang. The bound is raised rather than
+# retried: a case needing two attempts is a case whose budget was wrong, and a retry
+# would hide the next real flake.
+CASE_TIMEOUT_SECONDS = 300
+
+
 def dsh_tests(work, environment):
     dsh_action_tests(work)
     cases = ['positive', 'driver', 'daemon-platform', 'image-platform', 'capacity',
@@ -254,7 +616,8 @@ def dsh_tests(work, environment):
         env = dict(environment, AVM_FAKE_CASE=case, AVM_FAKE_STATE=str(state_path))
         with tempfile.TemporaryFile() as output:
             result = subprocess.run(['bash', str(ENTRY), 'base:fixture', '--consumer', 'dsh',
-                                     '--platform', 'linux/arm64'], env=env, stdout=output, stderr=output, timeout=45)
+                                     '--platform', 'linux/arm64'], env=env, stdout=output,
+                                    stderr=output, timeout=CASE_TIMEOUT_SECONDS)
             output.seek(0)
             text = output.read().decode()
         assert (result.returncode == 0) == (case == 'positive'), (case, result.returncode, text)
@@ -309,7 +672,8 @@ def dsh_tests(work, environment):
         env = dict(environment, AVM_FAKE_CASE=case, AVM_FAKE_STATE=str(state_path), AGENT_VM_FIXTURE_ROOT=str(staged_root))
         with tempfile.TemporaryFile() as output:
             result = subprocess.run(['bash', str(ENTRY), 'base:fixture', '--consumer', 'dsh', *flags],
-                                    env=env, stdout=output, stderr=output, timeout=90)
+                                    env=env, stdout=output, stderr=output,
+                                    timeout=CASE_TIMEOUT_SECONDS)
             output.seek(0)
             text = output.read().decode()
         assert (result.returncode == 0) == (name != 'cordis-negative-failure'), (name, text)
@@ -351,7 +715,8 @@ def dsh_tests(work, environment):
     env = dict(environment, AVM_FAKE_CASE='positive', AVM_FAKE_STATE=str(state_path),
                AGENT_VM_CONTRACT_DIR=str(ROOT / 'images/recipe-contract'))
     result = subprocess.run(['bash', str(ENTRY), 'base:fixture', '--consumer', 'dsh', '--platform', 'linux/arm64'],
-                            env=env, capture_output=True, text=True, timeout=45)
+                            env=env, capture_output=True, text=True,
+                            timeout=CASE_TIMEOUT_SECONDS)
     assert result.returncode != 0, result.stdout
     assert 'no executable recipe-contract' in result.stdout + result.stderr, result.stdout + result.stderr
     print('standard-node-consumers dsh self-test: missing native helper FAILS without a rebuild PASS')
@@ -450,6 +815,306 @@ def native_composed():
                            capture_output=True, text=True)
     assert probe.returncode == 1 and probe.stderr.startswith('pnpm-lock: '), ('the helper is not executable', probe.stderr)
     return context
+
+
+def pi_comparator_tests():
+    """The independent shrinkwrap comparator, against the authenticated vectors.
+
+    The npm side is the *real* 0.87.0 tarball's `npm-shrinkwrap.json`, the pnpm
+    side is the real recorded `pnpm import` output of that shrinkwrap, and the
+    root SRI is the registry receipt both were authenticated with (all three are
+    committed Phase 0 evidence under `script/test/fixtures/pi-shrinkwrap-0.87.0`).
+    No shape is invented here: the comparator has to reproduce the reviewed
+    conversion, including its three representation normalisations, and every
+    mutation of the real lock has to fail. These vectors never import production
+    JS or a package manager.
+    """
+    spec = importlib.util.spec_from_file_location('pi_host', ROOT / 'script/test/standard-node-pi.py')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    fixtures = ROOT / 'script/test/fixtures/pi-shrinkwrap-0.87.0'
+    shrinkwrap = json.loads((fixtures / 'authenticated-shrinkwrap.json').read_text())
+    lock = json.loads((fixtures / 'result/parse-yaml.stdout').read_text())
+    receipts = json.loads((fixtures / 'resolutions.json').read_text())
+    root_sri = next(receipt['integrity'] for receipt in receipts
+                    if receipt['name'] == '@earendil-works/pi-coding-agent')
+    observed = module.compare_shrinkwrap(shrinkwrap, lock, root_sri)
+    assert observed == {'mergedOccurrences': ['agent-base@9.0.0'],
+                        'addedEdges': [('openai@6.40.0', 'ws')],
+                        'peerDeclarations': [('debug@4.4.3', 'supports-color')]}, observed
+
+    def fails(label, mutate, reason, root=root_sri):
+        broken = json.loads(json.dumps(lock))
+        mutate(broken)
+        try:
+            module.compare_shrinkwrap(shrinkwrap, broken, root)
+        except module.base.Failure as error:
+            assert reason in str(error), (label, reason, str(error))
+        else:
+            raise AssertionError('the comparator accepted ' + label)
+
+    def change_sri(target):
+        # `marked` carries an authenticated SRI; the five sibling records do not,
+        # so changing *their* prepared SRI is (correctly) not a fidelity failure.
+        target['packages']['marked@18.0.11']['resolution']['integrity'] = 'sha512-CHANGED'
+
+    def drop_edge(target):
+        for key in list(target['snapshots']):
+            if key.startswith('@earendil-works/pi-tui@0.87.0'):
+                target['snapshots'][key]['dependencies'].pop('marked')
+
+    def add_identity(target):
+        target['snapshots']['unreviewed-package@1.0.0'] = {}
+        target['packages']['unreviewed-package@1.0.0'] = {
+            'resolution': {'integrity': 'sha512-NEW'}}
+
+    def add_edge(target):
+        # An edge the authenticated graph does not declare, to an archive it does
+        # install: the identity multiset is untouched, so only the edge rule can
+        # catch it.
+        for key in list(target['snapshots']):
+            if key.startswith('@earendil-works/pi-tui@0.87.0'):
+                target['snapshots'][key]['dependencies']['cross-spawn'] = '7.0.6'
+
+    def retarget_context(target):
+        # The instance was resolved against `ws@8.21.0`. Moving that text to another
+        # installed package while every edge, SRI and declaration stays equal leaves
+        # the stripped identities identical, so only the context comparison can see
+        # it. Reproduced against the committed vectors before the check existed: the
+        # comparator returned the three reviewed normalisations and accepted.
+        name = '@earendil-works/pi-agent-core'
+        moved = name + '@0.87.0(debug@4.4.3)'
+        target['snapshots'][moved] = target['snapshots'].pop(name + '@0.87.0(ws@8.21.0)')
+        for body in target['snapshots'].values():
+            for field in ('dependencies', 'optionalDependencies'):
+                edges = body.get(field) or {}
+                if edges.get(name) == '0.87.0(ws@8.21.0)':
+                    edges[name] = '0.87.0(debug@4.4.3)'
+
+    fails('a retargeted peer context', retarget_context, 'which no authenticated record declares')
+    fails('a changed SRI', change_sri, 'prepared SRI')
+    fails('a dropped edge', drop_edge, 'drops the edge')
+    fails('an added identity', add_identity, 'identities changed')
+    fails('an added edge', add_edge, 'adds the edge')
+    fails('a wrong pre-run root SRI', lambda target: None, 'prepared root SRI',
+          root='sha512-NOTTHERECORDEDROOT')
+    # The merge is only tolerated because the review recorded it: with the
+    # allowance removed, the same real graph must fail.
+    saved = module.SHRINKWRAP_NORMALISATIONS['mergedOccurrences']
+    module.SHRINKWRAP_NORMALISATIONS['mergedOccurrences'] = {}
+    try:
+        module.compare_shrinkwrap(shrinkwrap, lock, root_sri)
+    except module.base.Failure as error:
+        assert 'not a reviewed normalisation' in str(error), str(error)
+    else:
+        raise AssertionError('an unreviewed occurrence merge was accepted')
+    finally:
+        module.SHRINKWRAP_NORMALISATIONS['mergedOccurrences'] = saved
+    print('standard-node-consumers pi self-test: shrinkwrap comparator PASS')
+
+
+def pi_tests(work, environment):
+    pi_comparator_tests()
+    # The harness reads the committed four inputs and nothing else, so a missing
+    # file is a failure here instead of a second input source.
+    for directory in (ROOT / 'images/tools/pi', ROOT / 'images/tools/pi/bridge'):
+        missing = [name for name in ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml',
+                                     'pnpm-inputs.sha256'] if not (directory / name).is_file()]
+        assert not missing, (directory, missing)
+    base_environment = environment
+    # The fake Docker answers the Pi leg with *content*: each action below gets the
+    # document the real driver then judges, so the driver's own decisions are what
+    # the case asserts -- the 6/6 byte proof, the authenticated import comparison,
+    # the registration scan, the seed idempotence, the published dispatch list, the
+    # two independent records and the evidence contract. `MANDATORY` is the bounded
+    # subset the default aggregate runs; it holds one case per primitive. `GATED`
+    # holds the rest: they need AGENT_VM_PI_PLUMBING_SELF_TEST=1 because each one
+    # re-runs the whole leg (tens of seconds), and the entry says what it adds. The
+    # `scripted` entries are the ones the fake does NOT model: it returns a chosen
+    # exit status for a Pi action instead of producing the document that would cause
+    # that status, so they prove only that the leg stops and names the action.
+    # Every case below fails on a fake success, on a missing fixture, or on a
+    # diagnostic that is not its own intended cause.
+    MANDATORY = [
+        ('positive', [], 'positive'),
+        ('fake-success', [], 'fake-success'),
+        ('missing-fixture', [], 'missing-fixture'),
+        ('shrinkwrap-edge', ['--version', '0.87.0'], 'shrinkwrap-edge'),
+        ('records-fail', [], 'records-fail'),
+    ]
+    GATED = [
+        # The same leg under a changed selection: the container is bound to 0.87.0.
+        ('changed', ['--version', '0.87.0'], 'positive'),
+        # The import route refuses an archive that is not the shrinkwrap route.
+        ('no-shrinkwrap', ['--version', '0.87.0'], 'no-shrinkwrap'),
+        # The registration scan's two refusals: a measured-count mismatch and an
+        # ambiguous (two-positive) notification.
+        ('wrong-registration', [], 'wrong-registration'),
+        ('ambiguous-registration', [], 'ambiguous-registration'),
+        # The mutant table must report its own diagnostic, not merely a status.
+        ('wrong-mutant', [], 'wrong-mutant'),
+        # The seed hook is idempotent only for the reviewed content.
+        ('wrong-seed', [], 'wrong-seed'),
+        # The published subcommand list is the reviewed one for the selection.
+        ('wrong-dispatch', ['--version', '0.87.0'], 'wrong-dispatch'),
+        # The completed SRI of a sibling is the authenticated one.
+        ('shrinkwrap-sri', ['--version', '0.87.0'], 'shrinkwrap-sri'),
+        # A modern selection must not run the legacy transform probe.
+        ('modern-legacy', [], 'modern-legacy'),
+        # The resolved bridge/SDK paths, and a competing ancestor copy of the bridge
+        # that would be loaded before the reviewed one.
+        ('competing-resolution', [], 'competing-resolution'),
+        # The bridge entry is the path the wrapper registers, not a manifest `main`:
+        # a payload whose own `pi.extensions` names a different file is refused. The
+        # no-entry-field shape itself (the reviewed bridge) is what every case above
+        # answers with, so a model that demanded a `main` fails the mandatory
+        # `positive` case -- the hole that let the real leg fail while this passed.
+        ('bridge-entry-mismatch', [], 'bridge-entry-mismatch'),
+        # scripted: verify-pi.sh's status.
+        ('verify-fails', [], 'verify-fails'),
+        # scripted: the four Pi actions below.
+        ('root-sri', [], 'root-sri'),
+        ('mutants', [], 'mutants'),
+        ('install-pi', [], 'install-pi'),
+        ('initialise-failure', [], 'initialize'),
+        # scripted: the layout oracle's status (the real oracle needs a real root).
+        ('layout', [], 'layout'),
+    ]
+    gated = os.environ.get('AGENT_VM_PI_PLUMBING_SELF_TEST') == '1'
+    selected = MANDATORY + (GATED if gated else [])
+
+    def hex_string(value, length):
+        return isinstance(value, str) and len(value) == length and all(c in '0123456789abcdef' for c in value)
+
+    for name, flags, case in selected:
+        state_path = work / ('pi-' + name + '.json')
+        state_path.write_text(json.dumps({'commands': [], 'containers': []}))
+        env = dict(base_environment, AVM_FAKE_CASE=case, AVM_FAKE_STATE=str(state_path))
+        with tempfile.TemporaryFile() as output:
+            result = subprocess.run(['bash', str(ENTRY), 'base:fixture', '--consumer', 'pi', *flags],
+                                    env=env, stdout=output, stderr=output,
+                                    timeout=CASE_TIMEOUT_SECONDS)
+            output.seek(0)
+            text_ = output.read().decode()
+        expected_pass = case == 'positive'
+        assert (result.returncode == 0) == expected_pass, (name, result.returncode, text_[-3000:])
+        state = json.loads(state_path.read_text())
+        assert not state['containers'], (name, state['containers'])
+        actions = [args[args.index(PI_BODY) + 1] for args in state['commands'] if PI_BODY in args]
+        if name == 'positive':
+            assert actions[:5] == ['initialize', 'root-sri', 'selected-archive', 'install-pi', 'graph'], actions
+            assert actions.index('root-sri') < actions.index('install-pi')
+            assert actions.index('selected-archive') < actions.index('install-pi')
+            for required in ('archives', 'bytes', 'install-bridge', 'runtime', 'verify', 'registration',
+                             'resolution', 'read', 'seed', 'mutants', 'clean'):
+                assert required in actions, (required, actions)
+            assert actions.count('verify') == 3, actions
+            assert actions.count('probe') == 4, actions
+            create = next(args for args in state['commands']
+                          if args[0] == 'create' and args[args.index('--name') + 1].endswith('-probe'))
+            assert '/runtime-homes:rw,mode=1777' in create and '/root:rw,mode=0770,uid=0,gid=23456' in create
+            assert create[create.index('--cap-drop') + 1] == 'ALL'
+            assert f'type=bind,src={ROOT / "target/fixture-helpers/linux-arm64"}/out,dst=/tmp/recipe-contract,readonly' in create, create
+            # Every harness invocation carries the image platform as an environment
+            # variable, never as a host default: the driver passes it, and a run that
+            # dropped it would probe whatever the host happened to be.
+            harness_execs = [args for args in state['commands'] if args[0] == 'exec' and PI_BODY in args]
+            assert harness_execs, state['commands']
+            for args in harness_execs:
+                assert args[:2] == ['exec', '-e'], args
+                assert args[2] == 'AGENT_VM_HARNESS_PLATFORM=linux/arm64', args
+            probes = [args for args in harness_execs if 'probe' in args]
+            assert [(args[args.index('--reuid') + 1], args[args.index('--regid') + 1])
+                    for args in probes] == [('12345', '23456'), ('0', '23456'), ('12345', '0'),
+                                            ('12345', '12345')]
+            for args in probes:
+                assert all(flag in args for flag in ['--bounding-set=-all', '--inh-caps=-all',
+                                                     '--ambient-caps=-all', '--clear-groups',
+                                                     '--no-new-privs'])
+            # Exactly the four reviewed inputs of each project are copied in, and
+            # nothing else from the checkout: the container's manager state is the
+            # committed graph, never a second input source.
+            copies = sorted(args[2].split(':', 1)[1] for args in state['commands']
+                            if args[0] == 'cp' and ':' in args[2] and args[1].startswith(str(ROOT)))
+            assert copies == sorted(f'{prefix}/{name_}'
+                                    for prefix in ('/opt/agent-vm/pi', '/opt/agent-vm/pi-packages')
+                                    for name_ in ('package.json', 'pnpm-lock.yaml',
+                                                  'pnpm-workspace.yaml', 'pnpm-inputs.sha256')), copies
+        if name == 'changed':
+            layout = [args for args in state['commands'] if args[0] == 'layout']
+            assert layout and layout[0][layout[0].index('--expect-version') + 1] == '0.87.0', layout
+            assert state['pi_version'] == '0.87.0'
+            # The binding is what the container was initialized with, not what the
+            # flag asked for: token, source commit, Pi version, bridge version.
+            assert state['pi_binding'][0].startswith('pnpm-primitives-'), state['pi_binding']
+            assert hex_string(state['pi_binding'][1], 40), state['pi_binding']
+            assert state['pi_binding'][2:] == ['0.87.0', '0.8.0'], state['pi_binding']
+        if name == 'fake-success':
+            assert ('did not report 6/6 Pi sibling archives and installed bytes verified'
+                    in text_), text_[-2000:]
+        if name == 'missing-fixture':
+            assert 'missing/ambiguous evidence: initialize' in text_, text_[-2000:]
+        if name == 'competing-resolution':
+            assert 'has another copy the loader could load' in text_, text_[-2000:]
+            assert ('/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/node_modules/'
+                    'pi-claude-bridge' in text_), text_[-2000:]
+        if name == 'bridge-entry-mismatch':
+            assert ("the bridge manifest declares the extension entries ['dist/index.js'] but the "
+                    'image registers src/index.ts' in text_), text_[-2000:]
+        if name == 'verify-fails':
+            assert 'verify-pi.sh failed; see the verification log' in text_, text_[-2000:]
+        if name == 'records-fail':
+            assert 'a bridge failure cost the independently installed Pi record' in text_, text_[-2000:]
+            assert '"pi": "pending"' in text_ and '"bridge": "pending"' in text_, text_[-2000:]
+        if name == 'no-shrinkwrap':
+            assert ('the selected archive carries no npm-shrinkwrap.json, so the authenticated '
+                    'import route cannot be the one exercised' in text_), text_[-2000:]
+        if name == 'wrong-registration':
+            # The measured catalog is bound to the (Pi, bridge) pair, so the
+            # diagnostic names both versions.
+            assert ('the bridge registered 13 models; the measured catalog for Pi 1.4.0 '
+                    'with bridge 0.8.0 is 14' in text_), text_[-2000:]
+        if name == 'ambiguous-registration':
+            assert 'registration is not one unambiguous positive' in text_, text_[-2000:]
+        if name == 'wrong-mutant':
+            assert 'is not the expected link-mismatch' in text_, text_[-2000:]
+        if name == 'wrong-seed':
+            assert 'seed idempotent: identical=False, reviewed True' in text_, text_[-2000:]
+        if name == 'wrong-dispatch':
+            assert 'is not the reviewed' in text_, text_[-2000:]
+            assert "'update'" in text_, text_[-2000:]
+        if name == 'shrinkwrap-sri':
+            assert ("prepared SRI 'sha512-pi-agent-core' is not the authenticated "
+                    "'sha512-NOTTHEAUTHENTICATEDONE'") in text_, text_[-2000:]
+        if name == 'shrinkwrap-edge':
+            # The fixture puts the unreviewed edge in the *authenticated* shrinkwrap,
+            # so preparation drops it. The opposite direction (an edge preparation
+            # adds) is the comparator table's `an added edge` case, which runs on
+            # every invocation above.
+            assert 'drops the edge unreviewed-new-edge' in text_, text_[-2000:]
+        if name == 'modern-legacy':
+            assert 'a modern selection ran the legacy transform probe' in text_, text_[-2000:]
+        if name == 'layout':
+            # The oracle's own refusal is not modelled (it needs a real image root),
+            # so the case proves the leg propagates the status and names the tool.
+            assert 'standard-node-layout.py' in text_ and "): status 1" in text_, text_[-2000:]
+        if name in ('root-sri', 'mutants', 'install-pi', 'initialise-failure'):
+            # scripted: the fake fails the action itself, so the claim is only that
+            # the leg stops there with that action named and no later action run.
+            action = 'initialize' if name == 'initialise-failure' else name
+            assert actions[-1] == action, (name, actions)
+            assert f'status 19: scripted failure: {action}' in text_, text_[-2000:]
+        print('standard-node-consumers pi self-test: ' + name + ' PASS')
+    if not gated:
+        print('standard-node-consumers pi self-test: gated cases SKIPPED '
+              '(set AGENT_VM_PI_PLUMBING_SELF_TEST=1): ' + ', '.join(entry[0] for entry in GATED))
+    for flags in [['--version', 'latest'], ['--version', '0.87.0', '--version', '1.4.0'],
+                  ['--bridge-version', 'nope'], ['--platform', 'linux/riscv64']]:
+        result = subprocess.run(['bash', str(ENTRY), 'base:fixture', '--consumer', 'pi', *flags],
+                                env=base_environment, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        assert result.returncode == 2, flags
+    print('standard-node-consumers pi self-test: arguments and committed inputs PASS')
 
 
 def main():
@@ -568,7 +1233,7 @@ def main():
             state_path.write_text(json.dumps({'commands': [], 'containers': [], 'volume': None, 'network': None}))
             env = dict(environment, AVM_FAKE_CASE=case, AVM_FAKE_STATE=str(state_path))
             result = subprocess.run(['bash', str(ENTRY), 'base:fixture', '--consumer', 'primitives', '--platform', 'linux/arm64'],
-                                    env=env, capture_output=True, text=True, timeout=40)
+                                    env=env, capture_output=True, text=True, timeout=150)
             child_failures = ['capacity-start', 'device-setup', 'acl-create', 'acl-readback', 'acl-remove', 'device-remove',
                               'create', 'copy', 'start', 'readiness', 'exec', 'disconnect', 'remove',
                               'volume-remove', 'network-remove', 'exec-and-cleanup']
@@ -615,9 +1280,10 @@ def main():
                      ['base', '--consumer', 'primitives', '--platform', 'linux/riscv64']]:
             result = subprocess.run(['bash', str(ENTRY), *args], env=environment, capture_output=True)
             assert result.returncode == 2
-        for consumer in ['pi', 'copilot']:
-            result = subprocess.run(['bash', str(ENTRY), 'base', '--consumer', consumer], env=environment, capture_output=True)
-            assert result.returncode == 2 and b'consumer not available in this slice' in result.stderr
+        result = subprocess.run(['bash', str(ENTRY), 'base', '--consumer', 'copilot'],
+                                env=environment, capture_output=True)
+        assert result.returncode == 2 and b'consumer not migrated to pnpm yet' in result.stderr
+        pi_tests(work, environment)
         sentinel = work / 'preloaded'
         preload = work / 'preload.cjs'
         preload.write_text(f'require("fs").writeFileSync({str(sentinel)!r}, "unsafe")')

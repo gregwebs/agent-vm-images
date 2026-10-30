@@ -155,6 +155,47 @@ func (p PeerDeclarations) Names() []PackageName {
 // Empty reports whether the package declares no peers.
 func (p PeerDeclarations) Empty() bool { return len(p.declarations) == 0 }
 
+// PlatformSelector is one parsed os/cpu/libc token. The raw token keeps the
+// valid list's order and duplicates: the reviewed metadata is retained, not
+// canonicalised.
+type PlatformSelector struct {
+	token   string
+	negated bool
+}
+
+// Token is the platform token without its negation.
+func (s PlatformSelector) Token() string { return s.token }
+
+// Negated reports the one permitted leading `!`.
+func (s PlatformSelector) Negated() bool { return s.negated }
+
+// String is the emitted selector text.
+func (s PlatformSelector) String() string {
+	if s.negated {
+		return "!" + s.token
+	}
+	return s.token
+}
+
+// SelectorList is one bounded os/cpu/libc list. The zero value is "unconstrained",
+// which is distinct from a list that names no matching token.
+type SelectorList struct{ selectors []PlatformSelector }
+
+// Selectors returns the parsed selectors in retained order.
+func (l SelectorList) Selectors() []PlatformSelector { return l.selectors }
+
+// Empty reports whether the list constrains nothing.
+func (l SelectorList) Empty() bool { return len(l.selectors) == 0 }
+
+// PlatformSelectors is the archive's `os`/`cpu`/`libc` triple. Absent axes are
+// empty lists, never a wildcard: a consumer must treat an empty list as
+// unconstrained and an all-negative list as its own case.
+type PlatformSelectors struct {
+	OS   SelectorList
+	CPU  SelectorList
+	LibC SelectorList
+}
+
 // Archive is one `packages` record.
 type Archive struct {
 	ID            PackageID
@@ -162,12 +203,16 @@ type Archive struct {
 	Tarball       string
 	Peers         PeerDeclarations
 	OptionalPeers []PackageName
+	HasBin        bool
+	Platform      PlatformSelectors
+	Optional      bool
 }
 
 // Snapshot is one `snapshots` record.
 type Snapshot struct {
-	ID    SnapshotID
-	Edges []Edge
+	ID       SnapshotID
+	Edges    []Edge
+	Optional bool
 }
 
 // Project is a validated locked project. It is only built by the readers, so a
@@ -178,10 +223,13 @@ type Project struct {
 	mode      readMode
 	manifest  document.Value
 	workspace document.Value
-	lock      document.Value
-	packages  []Archive
-	snapshots []Snapshot
-	importer  []Edge
+	// workspaceBytes are the exact bytes validateWorkspace parsed. The update
+	// comparison is byte-frozen on them, so it never re-reads a mutable path.
+	workspaceBytes []byte
+	lock           document.Value
+	packages       []Archive
+	snapshots      []Snapshot
+	importer       []Edge
 }
 
 // DshProject is a locked dsh project; peer-sensitive operations only accept this

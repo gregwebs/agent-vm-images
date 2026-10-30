@@ -29,17 +29,25 @@ timed() {
 # The audit step's host watchdog in build-local.yml is the outer bound, so the
 # audit must fail on its own measured wall-clock before it can consume it.
 #
-# PROVISIONAL: 4800s sits 6900 / 4800 = 1.44x under the 6900s watchdog, but no
-# native audit has recorded per-leg durations yet, so this bound is arithmetic,
-# not measurement. The local durations that exist describe a diagnostic stale
-# base, not this leg set. The first green native audit must replace it with the
-# sum in target/ci-logs/durations.txt plus that same 1.44x headroom. Never widen
-# it for convenience: an overrun means splitting the dsh legs into a second audit
-# step (with its own watchdog inside the same job, because images do not survive
-# a job change) and re-checking the 360-minute job total: 20 prerequisites + 20
-# capacity + 180 build + 120 audit + 10 upload = 350. No gate is ever dropped to
-# fit.
-AUDIT_BUDGET_SECONDS=4800
+# MEASURED: the first green native audit (run 40983540120, commit 02daa91) summed
+# every audit leg in target/ci-logs/durations.txt at 1728 s on linux/arm64 and
+# 1632 s on linux/amd64: both architectures, both images, the artifact, runtime
+# and record legs included (strict egress is a separate job and not in this sum).
+# The bound is that maximum plus the 1.44x headroom it always
+# carried: 1728 * 1.44 = 2488.3, rounded up to 2489 s, which sits 6900 / 2489 =
+# 2.77x under the 6900 s watchdog.
+#
+# The two numbers that used to be local estimates are now in the same measurement:
+# the focused Pi default leg is 63 s (arm64) and 60 s (amd64), the changed
+# selection 81 s / 77 s, and the Pi/bridge preparation-policy legs 3 s each, all
+# against a real base launcher rather than a diagnostic one.
+#
+# Never widen it for convenience: an overrun means splitting the consumer legs
+# into a second audit step (with its own watchdog inside the same job, because
+# images do not survive a job change) and re-checking the 360-minute job total: 20
+# prerequisites + 20 capacity + 180 build + 120 audit + 10 upload = 350. No gate
+# is ever dropped to fit.
+AUDIT_BUDGET_SECONDS=2489
 check_audit_budget() {
     local first_line=$1 measured
     measured=$(awk -v first="$first_line" 'NR > first {
@@ -81,6 +89,27 @@ case "$phase" in
         timed dsh-default bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer dsh --platform "$platform"
         timed dsh-changed bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer dsh --version 0.1.5-rc.1 --platform "$platform"
         timed dsh-policy bash script/test/standard-node-policy.sh agent-vm-base:local --consumer dsh --platform "$platform"
+        # Pi and the bridge: the focused consumer legs install both projects cold
+        # from the four inputs on the real base launcher, in the production tuple
+        # of a disposable container (nothing is published). Measured on a native
+        # linux/arm64 daemon: the default selection is 99 s including the archive
+        # downloads, the 13 real-layout mutants and the four offline numeric pairs.
+        #
+        # The changed-selection leg is RED as written: `prepare-project.py`
+        # converts a changed Pi by a range resolve instead of importing the
+        # selected archive's authenticated shrinkwrap, and the Go candidate
+        # comparator then rejects that resolve. It is kept wired so the failure is
+        # an audit failure here, with the harness' own evidence, rather than a
+        # missing gate; its ~7 s runtime today is a failing fast path, not a cost
+        # measure. Nothing on this leg may be relaxed to make it pass.
+        timed pi-default bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer pi --platform "$platform"
+        timed pi-changed bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer pi --version 0.87.0 --platform "$platform"
+        # Pi and the bridge inherit the base manager but own their preparation
+        # boundary: an equal request must start zero managers, and every ambient
+        # override, project npmrc or registry bypass must be refused before Node.
+        # Serial and bounded like every other leg here.
+        timed pi-policy bash script/test/standard-node-policy.sh agent-vm-base:local --consumer pi --platform "$platform"
+        timed bridge-policy bash script/test/standard-node-policy.sh agent-vm-base:local --consumer bridge --platform "$platform"
         # The ticket's real Cordis-removal negative: the same committed inputs with
         # the four reviewed overrides removed must be rejected (exact peers) or fail
         # at startup, and the run then installs the committed inputs and proves

@@ -47,6 +47,9 @@ jobs:
       # Every host watchdog is shorter than its own step bound (1200 -> 1150, 10800
       # -> 10600, 7200 -> 6900 = the audit bound minus 300), so the watchdog always
       # fires first and its termination still has margin before the step timeout.
+      # The audit step runs the consumer legs serially, including the Pi and bridge
+      # preparation-policy matrices; its internal provisional budget
+      # (AUDIT_BUDGET_SECONDS) must be replaced by the first measured green sum.
       - name: Native capacity and builder
         timeout-minutes: 20
         env:

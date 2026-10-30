@@ -116,7 +116,8 @@ def arguments(args):
         else:
             raise ValueError('duplicate option: ' + flag)
     if consumer != 'primitives':
-        raise ValueError('consumer not available in this slice' if consumer in ['dsh', 'pi', 'copilot'] else 'expected --consumer primitives')
+        raise ValueError('consumer not migrated to pnpm yet: copilot' if consumer == 'copilot'
+                         else 'expected --consumer primitives')
     if platform not in [None, 'linux/amd64', 'linux/arm64']:
         raise ValueError('expected native linux/amd64 or linux/arm64')
     return image, platform
@@ -484,9 +485,12 @@ class Invocation:
 
 
 def main(args):
-    if any(args[index:index + 2] == ['--consumer', 'dsh'] for index in range(len(args))):
-        import runpy
-        return runpy.run_path(str(Path(__file__).with_name('standard-node-dsh.py')))['main'](args)
+    # The focused consumers keep their own drivers; this module stays the one
+    # place that owns bounded-command accounting, evidence and cleanup.
+    for consumer, driver in (('dsh', 'standard-node-dsh.py'), ('pi', 'standard-node-pi.py')):
+        if any(args[index:index + 2] == ['--consumer', consumer] for index in range(len(args))):
+            import runpy
+            return runpy.run_path(str(Path(__file__).with_name(driver)))['main'](args)
     try:
         image, requested = arguments(args)
     except ValueError as error:

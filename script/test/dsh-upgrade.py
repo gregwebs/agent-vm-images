@@ -50,6 +50,10 @@ class Case:
         self.root.mkdir()
         for source in ['images/tools/dsh', 'images/pnpm', 'script/build']:
             shutil.copytree(ROOT / source, self.root / source, ignore=shutil.ignore_patterns('__pycache__'))
+        # The dsh sources are adapters over the shared project module: a scratch
+        # checkout has to carry both, exactly as the Docker mount topology does.
+        for shared in ('pnpm-project.py', 'pnpm-host-manager.py'):
+            shutil.copyfile(ROOT / 'images/tools' / shared, self.root / 'images/tools' / shared)
         for source in ['script/test/standard-node-consumers.sh', 'script/test/standard-node-consumers.py',
                        'script/test/standard-node-dsh.py', 'script/test/host-watchdog.py']:
             destination = self.root / source

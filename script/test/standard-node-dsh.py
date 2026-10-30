@@ -139,7 +139,12 @@ class Invocation(base.Invocation):
         self.command(self.native + '/recipe-contract', 'pnpm-lock', 'check', 'dsh', str(self.inputs))
         self.source = self.command('git', '-C', str(ROOT), 'rev-parse', 'HEAD').strip()
         files = [*(self.inputs / name for name in INPUTS), *(ROOT / 'images/pnpm').rglob('*'),
-                 *(ROOT / 'images/tools/dsh').glob('*'), *(ROOT / 'images/recipe-contract').rglob('*'),
+                 *(ROOT / 'images/tools/dsh').glob('*'),
+                 # dsh's helpers are adapters over these shared modules, so the
+                 # evidence records the bytes that actually implement the boundary.
+                 ROOT / 'images/tools/pnpm-project.py',
+                 ROOT / 'images/tools/pnpm-host-manager.py',
+                 *(ROOT / 'images/recipe-contract').rglob('*'),
                  *(ROOT / 'script/test').glob('standard-node-*.py'), ROOT / 'script/test/fixtures/standard-node-dsh.py',
                  ROOT / 'script/test/fixtures/dsh/oracle.mjs']
         hashes = {str(file): hashlib.sha256(file.read_bytes()).hexdigest() for file in files

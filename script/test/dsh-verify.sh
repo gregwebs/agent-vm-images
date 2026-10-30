@@ -138,6 +138,9 @@ stage() {
     mkdir -m 0755 "$CASE/checkout"
     mkdir -m 0755 "$CASE/checkout/tools"
     cp -R "$SOURCE_DIR" "$CASE/checkout/tools/dsh"
+    # dsh's project.py is an adapter over the shared module beside it; a copied
+    # checkout carries both, so the adapter's relative import resolves here too.
+    cp "$REPO_ROOT/images/tools/pnpm-project.py" "$CASE/checkout/tools/pnpm-project.py"
     cp -R "$CONTRACT_CONTEXT/out" "$CASE/checkout/recipe-contract"
     chmod -R a+rX "$CASE/checkout"
     CASE_SOURCE_DIR="$CASE/checkout/tools/dsh"

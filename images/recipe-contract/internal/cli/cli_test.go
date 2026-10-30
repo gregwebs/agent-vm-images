@@ -66,6 +66,9 @@ type childSpec struct {
 	env    []string
 	stdout streamTarget
 	stderr streamTarget
+	// extraFiles are passed as descriptors 3, 4, ... so a test can prove real
+	// descriptor inheritance instead of an in-process handle.
+	extraFiles []*os.File
 }
 
 func runChildProcess(t *testing.T, spec childSpec) result {
@@ -73,6 +76,7 @@ func runChildProcess(t *testing.T, spec childSpec) result {
 	command := exec.Command(os.Args[0], spec.args...)
 	command.Env = append([]string{processChildEnv + "=1"}, spec.env...)
 	command.Dir = spec.cwd
+	command.ExtraFiles = spec.extraFiles
 	var stdoutFile, stderrFile *os.File
 	var pipeWrite *os.File
 	switch spec.stdout {
@@ -424,7 +428,9 @@ func TestRecordsAndCwdIndependence(t *testing.T) {
 		return path
 	}
 	installed := write("record-installed", "installed\n")
-	transport := write("record-transport", "absent-transport ECONNRESET\n")
+	// A genuine curl transport code. The retired npm error codes (EAI_AGAIN,
+	// ECONNRESET, ...) are now unknown records, not a second vocabulary.
+	transport := write("record-transport", "absent-transport 56\n")
 	broken := write("record-broken", "absent-transport 99\n")
 	failingCwd := Environment{Environment: toolaccess.Environment{
 		WorkingDirectory: func() (toolaccess.PhysicalDirectory, error) {
@@ -435,7 +441,7 @@ func TestRecordsAndCwdIndependence(t *testing.T) {
 	if got := runInProcess(t, failingCwd, "install-status", "record", installed); got.status != 0 || string(got.stdout) != "installed\n" {
 		t.Fatalf("record with a failing cwd = %+v", got)
 	}
-	if got := runInProcess(t, failingCwd, "install-status", "code", transport); got.status != 0 || string(got.stdout) != "ECONNRESET\n" {
+	if got := runInProcess(t, failingCwd, "install-status", "code", transport); got.status != 0 || string(got.stdout) != "56\n" {
 		t.Fatalf("code with a failing cwd = %+v", got)
 	}
 	if got := runInProcess(t, failingCwd, "install-status", "code", installed); got.status != 1 || len(got.stdout) != 0 {
@@ -517,6 +523,7 @@ func runShellChild(t *testing.T, spec childSpec, script string) result {
 	command := exec.Command("sh", append([]string{"-c", script, binary}, spec.args...)...)
 	command.Env = append([]string{processChildEnv + "=1"}, spec.env...)
 	command.Dir = spec.cwd
+	command.ExtraFiles = spec.extraFiles
 	var stdoutBuffer, stderrBuffer bytes.Buffer
 	command.Stdout = &stdoutBuffer
 	command.Stderr = &stderrBuffer

@@ -14,7 +14,14 @@
       "peers": {
         "@deepseek-ai/cordis": "4.0.2"
       },
-      "optionalPeers": []
+      "optionalPeers": [],
+      "hasBin": false,
+      "platform": {
+        "os": [],
+        "cpu": [],
+        "libc": []
+      },
+      "optional": false
     },
     {
       "id": {
@@ -24,7 +31,14 @@
       "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
       "tarball": "https://registry.npmjs.org/@deepseek-ai/cordis/-/cordis-4.0.2.tgz",
       "peers": {},
-      "optionalPeers": []
+      "optionalPeers": [],
+      "hasBin": false,
+      "platform": {
+        "os": [],
+        "cpu": [],
+        "libc": []
+      },
+      "optional": false
     },
     {
       "id": {
@@ -34,7 +48,14 @@
       "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
       "tarball": "https://registry.npmjs.org/@deepseek-ai/dsh-sandbox-local/-/dsh-sandbox-local-1.0.0.tgz",
       "peers": {},
-      "optionalPeers": []
+      "optionalPeers": [],
+      "hasBin": false,
+      "platform": {
+        "os": [],
+        "cpu": [],
+        "libc": []
+      },
+      "optional": false
     },
     {
       "id": {
@@ -44,7 +65,14 @@
       "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
       "tarball": "https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-0.1.5-rc.2.tgz",
       "peers": {},
-      "optionalPeers": []
+      "optionalPeers": [],
+      "hasBin": false,
+      "platform": {
+        "os": [],
+        "cpu": [],
+        "libc": []
+      },
+      "optional": false
     }
   ],
   "snapshots": [
@@ -72,7 +100,8 @@
           "target": "@deepseek-ai/cordis@4.0.2",
           "optional": false
         }
-      ]
+      ],
+      "optional": false
     },
     {
       "id": {
@@ -83,7 +112,8 @@
         "peerContext": [],
         "key": "@deepseek-ai/cordis@4.0.2"
       },
-      "edges": []
+      "edges": [],
+      "optional": false
     },
     {
       "id": {
@@ -94,7 +124,8 @@
         "peerContext": [],
         "key": "@deepseek-ai/dsh-sandbox-local@1.0.0"
       },
-      "edges": []
+      "edges": [],
+      "optional": false
     },
     {
       "id": {
@@ -116,7 +147,8 @@
           "target": "@deepseek-ai/dsh-sandbox-local@1.0.0",
           "optional": false
         }
-      ]
+      ],
+      "optional": false
     }
   ],
   "importer": [

@@ -133,6 +133,39 @@ def fake_docker(args):
                                  'manager': '11.11.0' if case != 'manager' else '12.9.1',
                                  'readonly': True})
             failure = case == 'readiness'
+        elif command[0] == 'python3' and 'prepare-policy' in command:
+            consumer = command[command.index('prepare-policy') + 1]
+            selection = command[command.index('prepare-policy') + 2]
+            assert 'AGENT_VM_FIXTURE_ROOT=/work/fixtures' in args, args
+            records = []
+            for name, expectation in DRIVER_MODULE.PREPARE_CASES.items():
+                record = {'case': name, 'consumer': consumer, 'selection': selection,
+                          'status': expectation['status'],
+                          'managerCalls': expectation['managerCalls'],
+                          'inputsUnchanged': True, 'nodeModules': False,
+                          'statusRecord': False,
+                          'diagnostic': expectation['reason'] or ''}
+                if case == 'prepare-equal-called' and name == 'equal':
+                    record['managerCalls'] = True
+                if case == 'prepare-inputs-changed' and name == 'equal':
+                    record['inputsUnchanged'] = False
+                if case == 'prepare-record-written' and name == 'equal':
+                    record['statusRecord'] = True
+                if case == 'prepare-partial-payload' and name == 'changed':
+                    record['nodeModules'] = True
+                if case == 'prepare-guard-succeeded' and name == 'node-options':
+                    record['status'] = 0
+                if case == 'prepare-wrong-consumer' and name == 'equal':
+                    record['consumer'] = 'dsh'
+                if case == 'prepare-wrong-diagnostic' and name == 'node-options':
+                    record['diagnostic'] = 'rejected for an unrelated reason'
+                records.append(record)
+            if case == 'prepare-missing':
+                records = records[1:]
+            state.setdefault('prepares', []).append(consumer)
+            output = ''.join(json.dumps(record) + '\n' for record in records)
+            if case == 'prepare-duplicate':
+                output = output + json.dumps(records[0]) + '\n'
         elif command[0] == 'python3' and 'run' in command:
             name, soft = command[command.index('run') + 1:]
             assert 'AGENT_VM_FIXTURE_ROOT=/work/fixtures' in args, args
@@ -153,6 +186,9 @@ def fake_docker(args):
                 signal_parent = True
         else:
             raise AssertionError('unhandled fake docker exec: ' + repr(args))
+    elif key == 'cp':
+        state.setdefault('copies', []).append(args)
+        output = ''
     elif key == 'ps':
         name = args[-1].removeprefix('name=^/').removesuffix('$')
         output = name + '\n' if name in state['containers'] else ''
@@ -321,12 +357,46 @@ def main():
             result, state = entry('usage', args)
             assert result.returncode == 2, (args, result.returncode, result.stderr)
             assert state['commands'] == [], (args, state['commands'])
-        for consumer in ('pi', 'bridge', 'copilot', 'unknown'):
+        for consumer in ('copilot', 'unknown'):
             result, state = entry('unmigrated', ['base', '--consumer', consumer])
             assert result.returncode == 2, (consumer, result.returncode)
             assert 'not migrated' in result.stderr or 'unknown consumer' in result.stderr
             assert state['commands'] == []
         print('standard-node-policy self-test: CLI parsing/subset PASS')
+
+        # Pi and the bridge: the preparation-policy matrix, driven by the
+        # authored expectation table in the driver and reported by the fake
+        # fixture. One case per consumer, then one rejection per mutation.
+        for consumer in ('pi', 'bridge'):
+            result, state = entry('prepare-' + consumer,
+                                  ['base:fixture', '--consumer', consumer,
+                                   '--platform', 'linux/arm64'])
+            assert result.returncode == 0, (consumer, result.returncode, result.stderr)
+            assert state['prepares'] == [consumer], state
+            assert not state['containers'] and state['volume'] is None, state
+            assert f'{consumer} preparation-policy matrix PASS' in result.stdout, result.stdout
+            creates = [args for args in state['commands'] if args[0] == 'create']
+            assert len(creates) == 1 and 'none' in creates[0], creates
+            # The contract must be mounted where the fixture reads it: the
+            # preparation cases run under the authorized fixture root, so theirs
+            # is that root's `contract` child, not the matrix path.
+            bind = [arg for arg in creates[0] if isinstance(arg, str) and arg.startswith('type=bind,src=')]
+            assert any('dst=/work/fixtures/contract,readonly' in arg for arg in bind), bind
+            # The four inputs travel to the fixture volume; nothing is installed.
+            copies = state['copies']
+            for name in DRIVER_MODULE.PREPARE_INPUTS:
+                assert any(copy[2].endswith(f'/{consumer}-inputs/{name}') for copy in copies), \
+                    (consumer, name, copies)
+        for case in ('prepare-equal-called', 'prepare-inputs-changed',
+                     'prepare-record-written', 'prepare-partial-payload',
+                     'prepare-guard-succeeded', 'prepare-wrong-consumer',
+                     'prepare-wrong-diagnostic', 'prepare-missing', 'prepare-duplicate'):
+            result, state = entry(case, ['base:fixture', '--consumer', 'pi',
+                                         '--platform', 'linux/arm64'], case=case)
+            assert result.returncode == 1, (case, result.returncode, result.stderr)
+            assert 'preparation-policy matrix PASS' not in result.stdout, (case, result.stdout)
+            assert not state['containers'] and state['volume'] is None, (case, state)
+        print('standard-node-policy self-test: pi/bridge preparation policy PASS')
 
         # Positive: default consumer runs the migrated set only, every scenario
         # under every soft value, and removes its container and volume.
@@ -343,6 +413,11 @@ def main():
         assert len(creates) == 1, creates
         assert '--network' in creates[0] and 'none' in creates[0]
         assert 'readonly' in ' '.join(creates[0])
+        # ... and at the path the fixture itself reads, taken from the fixture so
+        # the two cannot drift again.
+        bind = [arg for arg in creates[0] if isinstance(arg, str) and arg.startswith('type=bind,src=')]
+        assert any(f'dst={FIXTURE_MODULE.CONTRACT},readonly' in arg for arg in bind), \
+            (FIXTURE_MODULE.CONTRACT, bind)
         assert not any(args[0] == 'run' for args in state['commands']), 'host network used'
         print('standard-node-policy self-test: positive matrix + owned cleanup PASS')
 

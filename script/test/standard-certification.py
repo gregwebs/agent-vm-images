@@ -54,7 +54,9 @@ def run(ok, e=None,label='gate'):
 run(True,label='installed + all seven agent gates, inherited soft input cleared')
 assert (tmp/'calls').read_text().splitlines()==verifiers+['opencode-claude']
 for name in names:
- for data in [None,b'pending\n',b'absent-pi\n',b'absent-transport 60\n',b'installed',b'installed\ninstalled\n',b'installed\x00\n']:
+ # `absent-transport 60` is a genuine curl code and stays valid; the retired npm
+ # error codes authorise nothing after run-npm.sh was deleted.
+ for data in [None,b'pending\n',b'absent-pi\n',b'absent-transport 60\n',b'absent-transport EAI_AGAIN\n',b'absent-transport ECONNRESET\n',b'installed',b'installed\ninstalled\n',b'installed\x00\n']:
   p=records/name
   if data is None: p.unlink()
   else: p.write_bytes(data)

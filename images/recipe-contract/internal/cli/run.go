@@ -80,10 +80,16 @@ func (p *process) dispatch(args []string, env Environment) int {
 		return p.runToolAccess(args[1:], env.Environment)
 	case "pnpm-lock":
 		return p.runPnpmLock(args[1:])
+	case "pnpm-lock-candidate":
+		return p.runPnpmLockCandidate(args[1:])
+	case "pnpm-selection-update":
+		return p.runPnpmSelectionUpdate(args[1:])
 	case "pnpm-environment":
 		return p.runPnpmEnvironment(args[1:])
 	case "pnpm-yaml":
 		return p.runPnpmYAML(args[1:])
+	case "pnpm-json":
+		return p.runPnpmJSON(args[1:])
 	case "dsh-lock-update":
 		return p.runDshLockUpdate(args[1:])
 	case "dsh-cordis-overrides":

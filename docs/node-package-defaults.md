@@ -158,10 +158,38 @@ explicit in the owning subprocess and locked-resolution flags. Its workspace
 retains only `chokidar@4.0.3` as a reviewed trust exception; no age or script
 exception is granted. Host preparation follows the same policy. Retained graph
 records are frozen, while changed root-closure selections may replace
-transitives; runtime callers' documented escape routes above are unchanged. Pi,
-bridge and Copilot migration remains pending. The freeze rule is
-[ADR 0003](adr/0003-dsh-graph-freeze.md); the reviewed npm→pnpm delta is the
-[migration ledger](standard-pnpm-migration.md).
+transitives; runtime callers' documented escape routes above are unchanged. The
+freeze rule is [ADR 0003](adr/0003-dsh-graph-freeze.md); the reviewed npm→pnpm
+delta is the [migration ledger](standard-pnpm-migration.md).
+
+## Maintained Pi and bridge consumers
+
+Pi and the bridge install from the same four reviewed pnpm inputs with the same
+five explicit defaults, the same base launcher and the same hard-failure rule;
+their preparation boundary, selected-archive routes and family/byte expectations
+are [ADR 0011](adr/0011-pi-selected-shrinkwrap.md). Their preparation policy is
+proved by `script/test/standard-node-policy.py --consumer pi|bridge` on the real
+four inputs with a recorder shim as the only manager route, not by a real-manager
+matrix: the approved rule is **zero manager calls for an equal request**
+(`standard-node-policy.py` asserts `managerCalls: false` for `equal` and
+`equal-exact-selection`, and for every refused override), while a changed or
+refreshed request is required to fail when the authorized manager route cannot
+complete. The base's real-manager scenario matrix -- the dsh workspace's default
+selection, upgrade path and web/egress legs in
+[Default and overrides](#defaults-and-overrides) -- was **not** run for Pi or the
+bridge; those two are proved by the zero-manager rule and by their own refusal
+legs, and the injection refusals (`NODE_OPTIONS`, `NODE_PATH`, `BUN_OPTIONS`, a
+project `.npmrc`, `PNPM_CONFIG_REGISTRY`) are re-proved there.
+They add no age exception:
+Pi keeps only the reviewed `undici-types@6.21.0` trust exception the published
+graph needs, and the bridge has none. Neither grants `allowBuilds`; install
+scripts stay disabled, so the shipped lifecycle scripts (`@google/genai`'s
+literal no-op preinstall, `protobufjs`' postinstall warning, the legacy
+`chord`-context `esbuild` postinstall) never run, and a script that *does*
+produce a runtime artifact would be a review stop, not an approval.
+
+Copilot remains an npm install until PR 4 of #42; this document does not claim a
+repository-wide npm-free state.
 
 Product limitation for **using** the installed dsh: a **noexec TMPDIR is not
 supported by the dsh web surface**. `dsh web` with the default `live` reload
@@ -190,8 +218,9 @@ argv onto the installed bin and refuses other direct manager commands.
 The [bounded parser ADR](adr/0001-build-only-pnpm-graph-parser.md) documents
 build-only validation for image-owned install migrations. It never
 installs, resolves selections or weakens the five defaults. OpenCode keeps its
-byte-only checker; dsh adopted the graph parser in #51, while Pi/bridge/Copilot
-still use their current npm paths until their owning slices. The
-[failure ADR](adr/0002-pnpm-terminal-failure-boundary.md)
-records the evidence and acknowledgement gate for a proposed later bridge
-transport-contract narrowing; every current pnpm failure remains hard.
+byte-only checker; dsh adopted the graph parser in #51 and Pi plus the bridge
+follow it, while Copilot still uses its current npm path until PR 4 of #42. The
+[failure ADR](adr/0002-pnpm-terminal-failure-boundary.md) records the
+acknowledged bridge transport-contract narrowing: the degraded producer is
+removed, the receipt grammar accepts the download contract only, and every
+current pnpm failure remains hard.

@@ -416,6 +416,118 @@ def scenario(name, soft):
     return 0
 
 
+# --- Pi/bridge preparation policy ------------------------------------------
+# These cases need no registry: they prove the *owning boundary* of each project
+# on its real four inputs. The only manager route in the child environment is a
+# recorder shim inside the fixture root, so "the shim was never called" is an
+# observable fact about the equal/no-op path, and every bypass is refused before
+# the shim could run. The shim is a fake manager: it proves call policy and the
+# reviewed version assertion, never a registry or install outcome.
+PREPARE_INPUTS = ('package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-inputs.sha256')
+PREPARE_ROOTS = {'pi': 'images/tools/pi', 'bridge': 'images/tools/pi/bridge'}
+PREPARE_ROOTS_ENV = {'pi': 'AGENT_VM_PI', 'bridge': 'AGENT_VM_BRIDGE'}
+PREPARE_ROOT_DEPENDENCY = {'pi': '@earendil-works/pi-coding-agent', 'bridge': 'pi-claude-bridge'}
+# name, extra CLI arguments ('exact' is replaced by the committed selection),
+# child environment, project file to plant.
+PREPARE_CASES = (
+    ('equal', [''], {}, None),
+    ('equal-exact-selection', ['exact'], {}, None),
+    ('refresh-equal', ['exact', '--refresh-lock'], {}, None),
+    ('changed', ['0.0.1'], {}, None),
+    ('manager-mismatch', ['0.0.1'], {'SHIM_VERSION': '12.9.1'}, None),
+    ('node-options', [''], {'NODE_OPTIONS': '--require=/nonexistent/preload.cjs'}, None),
+    ('node-path', [''], {'NODE_PATH': '/nonexistent'}, None),
+    ('bun-options', [''], {'BUN_OPTIONS': '--preload=/nonexistent/preload.cjs'}, None),
+    ('npmrc', [''], {}, ('.npmrc', 'registry=https://evil.invalid/\n')),
+    ('registry-env', [''], {'PNPM_CONFIG_REGISTRY': 'https://evil.invalid/'}, None),
+)
+
+
+def prepare_shim(path, calls, version='11.11.0'):
+    """The one manager route the child can reach; records every invocation.
+
+    The version is baked into the script, not read from the environment: the
+    owning driver hands its manager child a closed environment, so a `--version`
+    answer the test wanted to inject through env would silently never arrive.
+    """
+    path.write_text('#!/bin/sh\n'
+                    f'printf \'%s\\n\' "$*" >>"{calls}"\n'
+                    f'if [ "$1" = --version ]; then printf \'%s\\n\' "{version}"; exit 0; fi\n'
+                    'exit 97\n')
+    path.chmod(0o755)
+
+
+def prepare_policy(consumer, selection):
+    """Run the authored preparation-policy cases and report only what happened."""
+    if consumer not in PREPARE_ROOTS:
+        raise Refused('unknown preparation-policy consumer: ' + consumer)
+    root = authorized_root()
+    source = SOURCE / PREPARE_ROOTS[consumer]
+    uploaded = Path('/work') / (consumer + '-inputs')
+    for name in PREPARE_INPUTS:
+        if not (uploaded / name).is_file():
+            raise Refused(f'{uploaded / name}: uploaded input is missing')
+    # The fixture root is also the authorized base-pin root (as in the focused
+    # dsh harness): the owning filesystem module reads `<root>/pnpm/pin.json`.
+    (root / 'pnpm').mkdir(exist_ok=True)
+    pin = root / 'pnpm/pin.json'
+    if not pin.is_file():
+        pin.write_bytes((SOURCE / 'images/pnpm/pin.json').read_bytes())
+    manifest = json.loads((uploaded / 'package.json').read_text())
+    committed = manifest['dependencies'][PREPARE_ROOT_DEPENDENCY[consumer]]
+    if selection != committed:
+        raise Refused(f'uploaded project selects {committed}, not the requested {selection}')
+    for name, arguments, extra, planted in PREPARE_CASES:
+        case_root = root / f'{consumer}-policy-{name}'
+        if case_root.exists():
+            raise Refused(f'{case_root}: case directory already exists')
+        prefix = case_root / 'prefix'
+        prefix.mkdir(parents=True)
+        for input_name in PREPARE_INPUTS:
+            (prefix / input_name).write_bytes((uploaded / input_name).read_bytes())
+        if planted:
+            (prefix / planted[0]).write_text(planted[1])
+        shims = case_root / 'shims'
+        shims.mkdir()
+        calls = case_root / 'manager-calls'
+        prepare_shim(shims / 'pnpm', calls, extra.pop('SHIM_VERSION', '11.11.0'))
+        for directory in ('home', 'work', 'status', 'tmp'):
+            (case_root / directory).mkdir()
+        # The interface always takes the version positional (empty means "keep
+        # the committed selection"); only the refresh flag follows it.
+        argv = [str(source / 'prepare-lock.sh'), str(prefix)]
+        argv += [committed if argument == 'exact' else argument for argument in arguments]
+        env = environment(
+            AGENT_VM_FIXTURE_ROOT=str(root), AGENT_VM_FIXTURE_PNPM=str(shims / 'pnpm'),
+            AGENT_VM_CONTRACT_DIR=str(root / 'contract'), PNPM_SOURCE_DIR=str(SOURCE / 'images/pnpm'),
+            AGENT_VM_PI_SOURCE_DIR=str(SOURCE / 'images/tools/pi'),
+            AGENT_VM_INSTALL_STATUS_DIR=str(case_root / 'status'),
+            HOME=str(case_root / 'home'), TMPDIR=str(case_root / 'tmp'),
+            XDG_CONFIG_HOME=str(case_root / 'home/config'), XDG_CACHE_HOME=str(case_root / 'home/cache'),
+            XDG_DATA_HOME=str(case_root / 'home/data'), XDG_STATE_HOME=str(case_root / 'home/state'),
+            **{PREPARE_ROOTS_ENV[consumer] + '_WORK_DIR': str(case_root / 'work')},
+            **extra)
+        before = {name: hashlib.sha256((prefix / name).read_bytes()).hexdigest()
+                  for name in PREPARE_INPUTS}
+        result = run(['sh', *argv], env=env, log=str(case_root / 'run'))
+        after = {name: hashlib.sha256((prefix / name).read_bytes()).hexdigest()
+                 for name in PREPARE_INPUTS}
+        diagnostic = bounded_read(str(case_root / 'run.err')) + bounded_read(str(case_root / 'run.out'))
+        record = {
+            'case': name,
+            'consumer': consumer,
+            'selection': committed,
+            'status': result.returncode,
+            'managerCalls': calls.is_file(),
+            'inputsUnchanged': before == after,
+            'nodeModules': any(prefix.rglob('node_modules')),
+            'statusRecord': any((case_root / 'status').iterdir()),
+            'diagnostic': ' '.join(diagnostic.split())[:400],
+        }
+        print(json.dumps(record, sort_keys=True))
+    return 0
+
+
 def main(argv):
     try:
         if argv[:1] == ['ready'] and len(argv) == 1:
@@ -424,6 +536,10 @@ def main(argv):
             return scenario(argv[1], argv[2])
         if argv[:1] == ['install'] and len(argv) == 2:
             return install(argv[1])
+        if argv[:1] == ['prepare-policy'] and len(argv) == 3:
+            if argv[1] not in PREPARE_ROOTS:
+                raise Refused('unknown preparation-policy consumer: ' + argv[1])
+            return prepare_policy(argv[1], argv[2])
         print(USAGE, file=sys.stderr)
         return 2
     except (Refused, OSError, KeyError, ValueError) as error:

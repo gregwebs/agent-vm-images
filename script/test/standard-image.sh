@@ -151,8 +151,12 @@ cleanup() {
     # retry reads the on-disk registration and covers an interrupted run (a
     # shell variable could not cross the command substitution the extraction
     # runs in). No docker call is made for the fake-only self-test.
-    if [ "$self_test" = false ] && [ -s "$TMP/dsh-extract.container" ]; then
-        docker rm -f "$(cat "$TMP/dsh-extract.container")" >/dev/null 2>&1 || true
+    if [ "$self_test" = false ]; then
+        for registration in dsh-extract.container migrated-extract.container; do
+            if [ -s "$TMP/$registration" ]; then
+                docker rm -f "$(cat "$TMP/$registration")" >/dev/null 2>&1 || true
+            fi
+        done
     fi
     [ "$self_test" = false ] || { rm -rf "$TMP"; return; }
     local cids
@@ -455,7 +459,10 @@ printf '=== T5 ===\n'
 t5_pi_seed=0
 /contract/recipe-contract tool-access pi /opt/agent-vm/seed.d/20-pi-claude-bridge || t5_pi_seed=$?
 t5_pi_content=0
-/contract/recipe-contract tool-access --content /opt/agent-vm/pi-extensions/guest-credential-warning.js /opt/agent-vm/pi-extensions/agent-vm-codex.js /opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts || t5_pi_content=$?
+# The published subcommand list is read (not executed) by the warning wrapper for
+# an arbitrary runtime UID, so it is a controlled *content* audit member: a
+# 0644 root-owned data file is the reviewed shape.
+/contract/recipe-contract tool-access --content /opt/agent-vm/pi-extensions/guest-credential-warning.js /opt/agent-vm/pi-extensions/agent-vm-codex.js /opt/agent-vm/pi/agent-vm-subcommands /opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts || t5_pi_content=$?
 t5rc=0
 [ "$t5_pi_seed" -eq 0 ] || t5rc=1
 [ "$t5_pi_content" -eq 0 ] || t5rc=1
@@ -478,17 +485,20 @@ EOS
 pi_audit_status_regression() {
     local fixture="$TMP/pi-audit-fixture" generated
     mkdir -p "$fixture/opt/agent-vm/seed.d" \
+        "$fixture/opt/agent-vm/pi" \
         "$fixture/opt/agent-vm/pi-extensions" \
         "$fixture/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src" \
         "$fixture/opt/agent-vm/install-status" "$fixture/bin"
     printf '#!/bin/sh\necho pi\n' >"$fixture/bin/pi"
     printf '#!/bin/sh\necho seed\n' >"$fixture/opt/agent-vm/seed.d/20-pi-claude-bridge"
+    printf 'compact\nsession\n' >"$fixture/opt/agent-vm/pi/agent-vm-subcommands"
     printf 'export default function () {}\n' >"$fixture/opt/agent-vm/pi-extensions/guest-credential-warning.js"
     printf 'export default function () {}\n' >"$fixture/opt/agent-vm/pi-extensions/agent-vm-codex.js"
     printf 'export const bridge = true\n' >"$fixture/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts"
     printf 'installed\n' >"$fixture/opt/agent-vm/install-status/pi"
     printf 'installed\n' >"$fixture/opt/agent-vm/install-status/pi-claude-bridge"
     chmod 0755 "$fixture/bin/pi" "$fixture/opt/agent-vm/seed.d/20-pi-claude-bridge"
+    chmod 0644 "$fixture/opt/agent-vm/pi/agent-vm-subcommands"
     chmod 0644 "$fixture/opt/agent-vm/pi-extensions/agent-vm-codex.js" \
         "$fixture/opt/agent-vm/pi-extensions/guest-credential-warning.js" \
         "$fixture/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts"
@@ -522,6 +532,11 @@ pi_audit_status_regression() {
     chmod 0700 "$fixture/opt/agent-vm/seed.d/20-pi-claude-bridge"
     expect_t5rc seed-hook-denied 1
     chmod 0755 "$fixture/opt/agent-vm/seed.d/20-pi-claude-bridge"
+    # The published dispatch data is a first-check member too: it is read by the
+    # wrapper for arbitrary UIDs, so denying it must fail the audit.
+    chmod 0600 "$fixture/opt/agent-vm/pi/agent-vm-subcommands"
+    expect_t5rc subcommands-denied 1
+    chmod 0644 "$fixture/opt/agent-vm/pi/agent-vm-subcommands"
     # The extension content check fails independently of a healthy first check.
     chmod 0600 "$fixture/opt/agent-vm/pi-extensions/guest-credential-warning.js"
     expect_t5rc content-denied 1
@@ -1351,7 +1366,7 @@ check_dsh_locks() { # $1 image
 }
 
 check_locks() {
-    local image=$1 project committed suffix pin file reason expected_pnpm
+    local image=$1 file reason expected_pnpm
     expected_pnpm=$(printf '%s\n' "$EXPECTED" | sed -n 's/^pnpm=//p')
     # pnpm is owned by the base pin, not by the dsh project. A different expected
     # pnpm contradicts the image contract and must fail; skipping the dsh checks
@@ -1363,17 +1378,10 @@ check_locks() {
     else
         fail "$reason"
     fi
-    for project in pi pi-packages; do
-        case "$project" in
-            pi) committed=images/tools/pi; suffix=pi; pin=$DEFAULT_PI ;;
-            pi-packages) committed=images/tools/pi/bridge; suffix=pi-claude-bridge; pin=$DEFAULT_BRIDGE ;;
-        esac
-        [ "$(printf '%s\n' "$EXPECTED" | sed -n "s/^$suffix=//p")" = "$pin" ] || continue
-        for file in package.json package-lock.json; do
-            image_file "$image" "/opt/agent-vm/$project/$file" "$TMP/extracted"
-            reason=$(assert_files_identical "$REPO_ROOT/$committed/$file" "$TMP/extracted" "$project $file drifted") || fail "$reason"
-        done
-    done
+    # Pi and the bridge are reviewed pnpm projects too: four inputs each, no npm
+    # project lock, and never "not selected, so not checked".
+    reason="$(check_migrated_projects "$image")" || fail "$reason"
+    [ -z "$reason" ] || echo "$reason"
     mkdir -p "$TMP/opencode-inputs"
     for file in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
         image_file "$image" "/opt/agent-vm/opencode-plugins/$file" "$TMP/opencode-inputs/$file"
@@ -1383,6 +1391,183 @@ check_locks() {
     done
     python3 "$REPO_ROOT/script/test/opencode-input-audit.py" "$TMP/opencode-inputs" "$(printf '%s\n' "$EXPECTED" | sed -n 's/^opencode-claude=//p')"
 
+}
+
+
+# --- one migrated Pi/bridge project ------------------------------------------
+# One file of a committed four-input project. The four are one unit, so the
+# committed directory is read as a whole; there is no second source.
+project_input_path() { # $1 committed dir, $2 file
+    local path="$REPO_ROOT/$1/$2"
+    [ -f "$path" ] || return 1
+    printf '%s' "$path"
+}
+
+# A path that must not exist in the image: absent, and not a symlink either. A
+# dangling link is a surviving reference and counts as present.
+image_path_absent() { # $1 image, $2 absolute path
+    local rc=0
+    run_with_watchdog "$RUNTIME_WATCHDOG_SECONDS" docker_run --rm --platform "$platform" \
+        --network none --entrypoint /bin/sh "$1" -c 'test ! -e "$1" && test ! -L "$1"' \
+        sh "$2" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 124 ] || fail "$1: timed out checking $2"
+    return "$rc"
+}
+
+# --- Pi/bridge installed-tree extraction ------------------------------------
+# `docker cp` preserves links (never -L) and a stopped container is only a mount
+# view of the image, so the oracle reads the shipped tree itself. The virtual
+# root mirrors the production paths the oracle hardcodes; nothing here reads the
+# host /opt. The registration is on disk for the same reason as dsh's: the
+# extraction runs inside a command substitution.
+migrated_extract_remove() { # $1 container name
+    local name="$1" rc=0
+    if [ -n "$name" ]; then
+        docker rm -f "$name" >/dev/null 2>&1 || rc=$?
+        [ "$rc" -ne 0 ] || rm -f "$TMP/migrated-extract.container"
+    fi
+    return 0
+}
+
+migrated_extract_image() { # $1 image, $2 label (pi|bridge), $3 image dir
+    local img="$1" label="$2" directory="$3" name="${RUN_ID}-${2}-extract-$$"
+    local root="$TMP/$2-image-root" file rc
+    rm -rf "$root"
+    printf '%s' "$name" >"$TMP/migrated-extract.container"
+    mkdir -p "$root/opt/agent-vm" "$root/usr/local/bin"
+    rc=0
+    run_with_watchdog "$RUNTIME_WATCHDOG_SECONDS" docker create --name "$name" \
+        --platform "$platform" --network none --entrypoint /usr/bin/true "$img" \
+        >"$TMP/$label-extract.log" 2>&1 || rc=$?
+    if [ "$rc" -eq 124 ]; then
+        migrated_extract_remove "$name"
+        printf 'the %s extraction container create timed out' "$label"
+        return 1
+    fi
+    if [ "$rc" -ne 0 ]; then
+        migrated_extract_remove "$name"
+        printf 'cannot create the %s extraction container' "$label"
+        return 1
+    fi
+    rc=0
+    docker cp "$name:$directory" "$root$directory" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        migrated_extract_remove "$name"
+        printf 'cannot extract the installed %s prefix' "$label"
+        return 1
+    fi
+    if [ "$label" = pi ]; then
+        rc=0
+        docker cp "$name:/usr/local/bin/pi" "$root/usr/local/bin/pi" >/dev/null 2>&1 || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            migrated_extract_remove "$name"
+            printf 'cannot extract the Pi warning wrapper'
+            return 1
+        fi
+    fi
+    migrated_extract_remove "$name"
+    return 0
+}
+
+# The same independent oracle dsh uses, reading the extracted tree. The caller
+# supplies the expectation; a changed selection is never certified from the
+# image's own label or from the production checker's output.
+migrated_layout_oracle() { # $1 consumer, $2 virtual image root, $3 expected
+    local consumer="$1" root="$2" expected="$3" err
+    err="$(mktemp "$TMP/layout-oracle.XXXXXX")"
+    if python3 "$REPO_ROOT/script/test/standard-node-layout.py" --consumer "$consumer" \
+        --root "$root" --platform "$platform" --expect-version "$expected" \
+        >"$TMP/layout-oracle-$consumer.json" 2>"$err"; then
+        return 0
+    fi
+    printf 'independent %s layout oracle failed: %s' "$consumer" "$(head -c 400 "$err")"
+    return 1
+}
+
+# The production graph CLI for a migrated project; opaque, never this harness.
+migrated_graph_check() { # $1 consumer kind, $2 extracted prefix
+    "$STATUS_VALIDATOR" pnpm-lock check "$1" "$2"
+}
+
+# One migrated project's extraction and comparison. The default/equal selection
+# must be byte-identical to the committed four inputs; a changed selection must
+# pass the production graph check with the CALLER's expectation. Both paths
+# reject an npm lock and a symlinked input.
+check_migrated_project() { # $1 image, $2 label, $3 image dir, $4 committed dir, $5 kind, $6 expected
+    local image="$1" label="$2" directory="$3" committed="$4" kind="$5"
+    local expected="$6" inputs="$TMP/$2-inputs" file source got reason
+    rm -rf "$inputs"
+    mkdir -p "$inputs"
+    for file in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
+        image_file "$image" "$directory/$file" "$inputs/$file"
+        if [ -L "$inputs/$file" ]; then
+            printf '%s input %s is a symlink' "$label" "$file"
+            return 1
+        fi
+        if [ ! -f "$inputs/$file" ]; then
+            printf '%s input %s is missing' "$label" "$file"
+            return 1
+        fi
+    done
+    # A surviving npm lock counts as present whether it is a file or a dangling
+    # link, in the extracted input set and in the installed prefix alike.
+    if [ -e "$inputs/package-lock.json" ] || [ -L "$inputs/package-lock.json" ]; then
+        printf 'the %s project carries an npm lock in its extracted inputs' "$label"
+        return 1
+    fi
+    if ! image_path_absent "$image" "$directory/package-lock.json"; then
+        printf 'the %s project carries an npm lock at %s/package-lock.json' "$label" "$directory"
+        return 1
+    fi
+    if [ "$expected" = "$(default_version "$kind")" ]; then
+        for file in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
+            source="$(project_input_path "$committed" "$file")" || {
+                printf 'the committed %s %s input is missing' "$label" "$file"
+                return 1
+            }
+            got=$(assert_files_identical "$source" "$inputs/$file" "$label $file drifted") || {
+                printf '%s' "$got"
+                return 1
+            }
+        done
+    else
+        got="$(migrated_graph_check "$kind" "$inputs")" || {
+            printf 'the extracted %s project does not pass the production graph check' "$label"
+            return 1
+        }
+        [ "$got" = "$expected" ] || {
+            printf 'the extracted %s project selects %s, not the expected %s' "$label" "$got" "$expected"
+            return 1
+        }
+    fi
+    echo "  $label: four inputs/no npm lock ok as $expected"
+    reason="$(migrated_extract_image "$image" "$label" "$directory")" || { printf '%s' "$reason"; return 1; }
+    if ! reason="$(migrated_layout_oracle "$kind" "$TMP/$label-image-root" "$expected")"; then
+        # The oracle normally names its own failure; a silent one still gets the
+        # diagnostic the caller must report.
+        printf '%s' "${reason:-independent $kind layout oracle failed}"
+        return 1
+    fi
+    echo "  $label: independent layout oracle passed ($platform)"
+}
+
+default_version() { # $1 consumer kind
+    case "$1" in
+        pi) printf '%s' "$DEFAULT_PI" ;;
+        bridge) printf '%s' "$DEFAULT_BRIDGE" ;;
+        *) printf '' ;;
+    esac
+}
+
+check_migrated_projects() { # $1 image
+    local image="$1" expected_pi expected_bridge
+    expected_pi=$(printf '%s\n' "$EXPECTED" | sed -n 's/^pi=//p')
+    expected_bridge=$(printf '%s\n' "$EXPECTED" | sed -n 's/^pi-claude-bridge=//p')
+    [ -n "$expected_pi" ] || { printf 'the Pi selection is missing from --expect'; return 1; }
+    [ -n "$expected_bridge" ] || { printf 'the bridge selection is missing from --expect'; return 1; }
+    check_migrated_project "$image" pi /opt/agent-vm/pi images/tools/pi pi "$expected_pi" || return 1
+    check_migrated_project "$image" bridge /opt/agent-vm/pi-packages images/tools/pi/bridge \
+        bridge "$expected_bridge" || return 1
 }
 
 # --- dsh extraction self-test (wiring controls, not runtime claims) ----------
@@ -1689,20 +1874,81 @@ oracle_wiring_self_test() {
     WIRE=$(printf '%s\n' "$dsh_wire" | sed "s/^ioracle_b64=.*/ioracle_b64=$(printf '{"version":"0.0.0"}\n' | blob)/")
     if ( audit_image img dsh ) >/dev/null 2>&1; then fail 'stale dsh oracle wire accepted'; fi
     image_file() {
-        local committed
+        local committed source name="${2##*/}"
         case "$2" in
             */opencode-plugins/*) committed=images/tools/opencode/plugins ;;
             */pi-packages/*) committed=images/tools/pi/bridge ;;
             */pi/*) committed=images/tools/pi ;;
         esac
-        if [ "$2" = "${DRIFT:-}" ]; then printf drift >"$3"; else cp "$REPO_ROOT/$committed/${2##*/}" "$3"; fi
+        source="$(project_input_path "$committed" "$name")" || {
+            printf 'the committed %s/%s input is missing\n' "$committed" "$name" >&2
+            return 1
+        }
+        if [ "${AVM_FAKE_INPUT_LINK:-}" = "$2" ]; then
+            ln -s /nonexistent "$3"
+            return 0
+        fi
+        if [ "$2" = "${DRIFT:-}" ]; then printf drift >"$3"; else cp "$source" "$3"; fi
+        if [ "${AVM_FAKE_NPM_LOCK:-}" = 1 ] && [ "$name" = package.json ]; then
+            : >"$(dirname "$3")/package-lock.json"
+        fi
     }
+    image_path_absent() { [ "${AVM_FAKE_IMAGE_NPM_LOCK:-}" != 1 ]; }
+    migrated_graph_check() {
+        printf 'migrated %s %s\n' "$1" "$2" >>"$TMP/migrated-seam"
+        printf '%s\n' "${MIGRATED_VERSION:-$DEFAULT_PI}"
+    }
+    # The oracle and the extraction are separate seams: the self-test proves the
+    # call graph and the caller's expectation, never runtime layout (the real
+    # oracle is exercised by its own 83 self-test vectors and by native CI).
+    migrated_extract_image() {
+        printf 'migrated-extract %s %s\n' "$2" "$3" >>"$TMP/migrated-seam"
+        mkdir -p "$TMP/$2-image-root"
+        return "${MIGRATED_EXTRACT_RC:-0}"
+    }
+    # The stale-oracle mutant names the consumer it breaks, so each consumer's
+    # rejection is exercised on its own run instead of always failing Pi first.
+    migrated_layout_oracle() {
+        printf 'migrated-oracle %s %s %s\n' "$1" "$2" "$3" >>"$TMP/migrated-seam"
+        [ "${MIGRATED_ORACLE_FAIL:-}" != "$1" ]
+    }
+    : >"$TMP/migrated-seam"
     check_locks img || fail 'healthy extracted lock wire rejected'
+    # Both consumer oracles run on their own extraction with the CALLER's
+    # expectation, never with the image label.
+    grep -q -F -x "migrated-oracle pi $TMP/pi-image-root $DEFAULT_PI" "$TMP/migrated-seam" ||
+        fail 'the Pi layout oracle did not run with the caller expectation'
+    grep -q -F -x "migrated-oracle bridge $TMP/bridge-image-root $DEFAULT_BRIDGE" "$TMP/migrated-seam" ||
+        fail 'the bridge layout oracle did not run with the caller expectation'
+    for consumer in pi bridge; do
+        # One capture: the rejection and its reason are the same run, and a
+        # failing substitution must not abort the suite before the case runs.
+        if reason="$(MIGRATED_ORACLE_FAIL=$consumer check_locks img 2>&1)"; then
+            fail "an independent $consumer layout failure was accepted"
+        fi
+        case "$reason" in
+            *"independent $consumer layout oracle failed"*) : ;;
+            *) fail "the $consumer oracle rejection lost its reason: $reason" ;;
+        esac
+        if ( MIGRATED_EXTRACT_RC=1; check_locks img ) >/dev/null 2>&1; then
+            fail "a failed $consumer extraction was accepted"
+        fi
+    done
+    # Both projects are extracted into their own input directories, so one check
+    # cannot stand in for the other.
+    for label in pi bridge; do
+        for file in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
+            [ -f "$TMP/$label-inputs/$file" ] ||
+                fail "the $label extraction left no $file"
+        done
+    done
+    cmp -s "$TMP/pi-inputs/pnpm-workspace.yaml" "$TMP/bridge-inputs/pnpm-workspace.yaml" &&
+        fail 'the two projects resolved to one workspace file'
     # Unselected data must stay unchanged and checked, including while dsh is
     # the changed selection: a Pi, bridge or OpenCode drift still fails.
     local drift
-    for drift in /opt/agent-vm/pi/package.json /opt/agent-vm/pi-packages/package-lock.json \
-        /opt/agent-vm/opencode-plugins/pnpm-lock.yaml; do
+    for drift in /opt/agent-vm/pi/package.json /opt/agent-vm/pi/pnpm-lock.yaml \
+        /opt/agent-vm/pi-packages/pnpm-inputs.sha256 /opt/agent-vm/opencode-plugins/pnpm-lock.yaml; do
         if ( DRIFT=$drift; check_locks img ) >/dev/null 2>&1; then
             fail "unselected data drift accepted ($drift)"
         fi
@@ -1711,6 +1957,45 @@ oracle_wiring_self_test() {
             fail "unselected data drift accepted with a changed dsh selection ($drift)"
         fi
     done
+    # A Pi npm lock, real or dangling, in the extracted inputs or in the image
+    # prefix is a surviving second lock format.
+    for mutation in AVM_FAKE_NPM_LOCK AVM_FAKE_IMAGE_NPM_LOCK; do
+        if ( export "$mutation"=1; check_locks img ) >/dev/null 2>&1; then
+            fail "$mutation was accepted"
+        fi
+    done
+    reason="$(AVM_FAKE_IMAGE_NPM_LOCK=1 check_locks img 2>&1)" &&
+        fail 'a surviving image npm lock was accepted'
+    case "$reason" in
+        *'carries an npm lock at /opt/agent-vm/pi/package-lock.json'*) : ;;
+        *) fail "the image npm lock rejection lost its reason: $reason" ;;
+    esac
+    reason="$(AVM_FAKE_INPUT_LINK=/opt/agent-vm/pi/pnpm-lock.yaml check_locks img 2>&1)" &&
+        fail 'a symlinked Pi input was accepted'
+    case "$reason" in
+        *'pi input pnpm-lock.yaml is a symlink') : ;;
+        *) fail "the symlinked Pi input rejection lost its reason: $reason" ;;
+    esac
+    # A changed Pi expectation uses the production graph check with the caller's
+    # version; a contradictory image selection fails instead of being skipped.
+    : >"$TMP/migrated-seam"
+    if ! ( EXPECTED=$(printf '%s\n' "$EXPECTED" | sed 's/^pi=.*/pi=0.87.0/'); MIGRATED_VERSION=0.87.0;
+        check_locks img ) >/dev/null; then
+        fail 'a healthy changed Pi extraction was rejected'
+    fi
+    grep -q -F -x "migrated pi $TMP/pi-inputs" "$TMP/migrated-seam" ||
+        fail 'the changed Pi path did not use the production graph check'
+    grep -q -F -x "migrated-oracle pi $TMP/pi-image-root $DEFAULT_PI" "$TMP/migrated-seam" &&
+        fail 'the changed Pi selection reached the oracle as the default'
+    grep -q -F -x "migrated-oracle pi $TMP/pi-image-root 0.87.0" "$TMP/migrated-seam" ||
+        fail 'the changed Pi selection did not reach the oracle'
+    reason="$(EXPECTED=$(printf '%s\n' "$EXPECTED" | sed 's/^pi=.*/pi=0.87.0/');
+        MIGRATED_VERSION=$DEFAULT_PI; check_locks img 2>&1)" &&
+        fail 'a Pi selection that contradicts --expect was accepted'
+    case "$reason" in
+        *"the extracted pi project selects $DEFAULT_PI, not the expected 0.87.0"*) : ;;
+        *) fail "the contradictory Pi selection rejection lost its reason: $reason" ;;
+    esac
     local AUDIT_RC=0
     run_with_watchdog() { return "$AUDIT_RC"; }
     audit_opencode_plugins img || fail 'plugin audit success was dropped'

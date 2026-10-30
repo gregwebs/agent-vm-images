@@ -93,11 +93,23 @@ func (p *process) runPnpmEnvironment(args []string) int {
 // runPnpmYAML is the syntax adapter the tests and fixtures use instead of a YAML
 // import: it prints the bounded parser's value as JSON and validates nothing.
 func (p *process) runPnpmYAML(args []string) int {
+	return p.syntaxAdapter(args, document.YAML, pnpmYAMLUsage, pnpmYAMLPrefix)
+}
+
+// runPnpmJSON is the strict JSON sibling of pnpm-yaml. It exists so an
+// authenticated manifest or shrinkwrap is read through the same duplicate-key,
+// depth, byte-bound and UTF-8 rules as the lock, instead of a permissive
+// JSON.parse in a build helper.
+func (p *process) runPnpmJSON(args []string) int {
+	return p.syntaxAdapter(args, document.JSON, pnpmJSONUsage, pnpmJSONPrefix)
+}
+
+func (p *process) syntaxAdapter(args []string, format document.Format, usage, prefix string) int {
 	if len(args) != 1 || args[0] == "" {
-		return p.nodeUsage(2, pnpmYAMLUsage)
+		return p.nodeUsage(2, usage)
 	}
-	return p.nodeCommand(pnpmYAMLPrefix, func() (string, error) {
-		value, err := document.ReadFile(args[0], document.YAML)
+	return p.nodeCommand(prefix, func() (string, error) {
+		value, err := document.ReadFile(args[0], format)
 		if err != nil {
 			return "", err
 		}

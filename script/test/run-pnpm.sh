@@ -90,3 +90,58 @@ if PATH="$work/bin:$PATH" sh "$ROOT/images/recipe-contract/run-pnpm.sh" "$work/r
     exit 1
 fi
 echo 'run-pnpm: hard failures, receipt isolation, capture failure, redaction, file writes and output bounds passed'
+# The production bound is 600s with a 5s SIGKILL escalation. The hermetic case
+# above asserts the arguments; this one proves the escalation actually terminates
+# a manager that ignores TERM, so a hung pnpm cannot hang a build. The fake
+# `timeout` keeps the helper's own arguments and shortens the durations.
+#
+# The real binaries are resolved before the PATH prefix takes effect: a
+# `PATH=$shim:$PATH REAL=$(command -v x)` assignment expands `command -v` with
+# the shim already in PATH, so the shim would exec itself forever. Every case is
+# additionally bounded so such a mistake fails instead of hanging.
+REAL_TIMEOUT=$(command -v timeout)
+REAL_MKTEMP=$(command -v mktemp)
+mkdir -p "$work/bin-kill"
+cat >"$work/bin-kill/timeout" <<'SH'
+#!/bin/sh
+[ "$1" = --kill-after=5 ] && [ "$2" = 600 ] || exit 91
+shift 2
+exec "$REAL_TIMEOUT" --kill-after=1 1 "$@"
+SH
+chmod +x "$work/bin-kill/timeout"
+cat >"$work/term-ignoring" <<'SH'
+#!/bin/sh
+trap '' TERM
+sleep 30
+SH
+chmod +x "$work/term-ignoring"
+start=$(date +%s)
+kill_status=0
+PATH="$work/bin-kill:$PATH" REAL_TIMEOUT="$REAL_TIMEOUT" timeout 20 \
+    sh "$ROOT/images/recipe-contract/run-pnpm.sh" "$work/kill-result" -- "$work/term-ignoring" \
+    >"$work/kill-log" 2>&1 || kill_status=$?
+elapsed=$(( $(date +%s) - start ))
+[ "$kill_status" -ne 0 ] || { echo 'a TERM-ignoring manager must not pass' >&2; exit 1; }
+[ "$kill_status" -ne 124 ] || { echo 'the escalation never terminated the manager' >&2; exit 1; }
+[ "$elapsed" -lt 15 ] || { echo "the manager bound must SIGKILL (took ${elapsed}s)" >&2; exit 1; }
+# A8/A7: the scratch cleanup trap must not re-parse a TMPDIR that contains shell
+# syntax. BSD mktemp ignores TMPDIR, so a shim reproduces GNU mktemp's honouring
+# of it; the marker proves no injected command ran.
+mkdir -p "$work/bin-tmpdir"
+cat >"$work/bin-tmpdir/mktemp" <<'SH'
+#!/bin/sh
+case "${1:-}" in
+    -d) shift; exec "$REAL_MKTEMP" -d "${TMPDIR:-/tmp}/tmp.XXXXXXXXXX" ;;
+    *) exec "$REAL_MKTEMP" "$@" ;;
+esac
+SH
+chmod +x "$work/bin-tmpdir/mktemp"
+evil="$work/tmp'; touch $work/MARKER; #"
+mkdir -p "$evil"
+tmpdir_status=0
+PATH="$work/bin-tmpdir:$PATH" TMPDIR="$evil" REAL_MKTEMP="$REAL_MKTEMP" timeout 20 \
+    sh "$ROOT/images/recipe-contract/run-pnpm.sh" "$work/tmpdir-result" -- "$work/manager" \
+    >"$work/tmpdir-log" 2>&1 || tmpdir_status=$?
+[ "$tmpdir_status" -eq 0 ] || { echo "a quote in TMPDIR must not fail the runner (status $tmpdir_status)" >&2; exit 1; }
+[ ! -e "$work/MARKER" ] || { echo 'a quote in TMPDIR injected into the cleanup trap' >&2; exit 1; }
+echo 'run-pnpm: TERM-ignoring manager is killed by the escalation; quote TMPDIR is inert'

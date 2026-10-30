@@ -34,6 +34,7 @@ CASE_BRIDGE_EXTENSION=""
 new_case() {
     CASE="$TEST_ROOT/$1"
     CASE_EXTRA_ENV=""
+    CASE_SUBCOMMANDS="$CASE/no-such-subcommands"
     CASE_CODEX_EXTENSION="$CASE/no-such-codex.js"
     # Default fixture: the bridge extension does not exist, so the wrapper must
     # skip it. The bridge cases below plant a readable file via
@@ -70,6 +71,7 @@ run_wrapper() {
         "AGENT_VM_PI_ENTRY=$CASE/fake-pi"
         "AGENT_VM_PI_BRIDGE_EXTENSION=$CASE_BRIDGE_EXTENSION"
         "AGENT_VM_PI_CODEX_EXTENSION=$CASE_CODEX_EXTENSION"
+        "AGENT_VM_PI_SUBCOMMANDS=$CASE_SUBCOMMANDS"
         "FAKE_LOG=$CASE/log"
         "CASE_STDIN=$CASE/stdin"
         "CASE_ENV=$CASE/env"
@@ -79,7 +81,7 @@ run_wrapper() {
         env_args+=("$CASE_EXTRA_ENV")
     fi
     set +e
-    env -i "${env_args[@]}" sh "$WRAPPER" "$@" </dev/null
+    env -i "${env_args[@]}" sh "$WRAPPER" "$@" </dev/null 2>"$CASE/stderr"
     RUN_STATUS=$?
     set -e
 }
@@ -314,6 +316,80 @@ printf 'hello from stdin\n' | env -i \
 [[ "$(cat "$CASE/stdin")" == 'hello from stdin' ]] \
     || fail "piped stdin did not reach the entry point"
 
+# --- the installer-generated dispatch list ----------------------------------
+# The selected subcommand set belongs to the installed Pi (0.87.0 has no `mcp`),
+# so it arrives as data. The wrapper accepts only a canonical, closed-vocabulary
+# list, dispatches exactly the words it selects, and keeps the mandatory-warning
+# path for a word the selected Pi does not have.
+new_case dispatch-legacy-list
+CASE_SUBCOMMANDS="$CASE/subcommands"
+printf 'auth\nconfig\ninstall\nlist\nremove\nuninstall\nupdate\n' >"$CASE_SUBCOMMANDS"
+run_wrapper list
+assert_argv_is list
+# `mcp` is NOT in this Pi's list, so it is a prompt: the mandatory extension is
+# injected and no subcommand path is taken.
+: >"$CASE/log"
+run_wrapper mcp
+assert_argv_is --extension "$MANDATORY_EXTENSION" mcp
+: >"$CASE/log"
+run_wrapper "mcp list"
+assert_argv_is --extension "$MANDATORY_EXTENSION" "mcp list"
+
+new_case dispatch-default-list
+CASE_SUBCOMMANDS="$CASE/subcommands"
+printf 'auth\nconfig\ninstall\nlist\nmcp\nremove\nuninstall\nupdate\n' >"$CASE_SUBCOMMANDS"
+run_wrapper mcp server
+assert_argv_is mcp server
+: >"$CASE/log"
+run_wrapper mcp
+assert_argv_is mcp
+
+new_case dispatch-absent-falls-back
+# No data file: the literal list (this build's own Pi) still dispatches.
+run_wrapper update
+assert_argv_is update
+: >"$CASE/log"
+run_wrapper mcp
+assert_argv_is mcp
+
+for malformed in unsorted duplicate unknown-word empty no-final-newline trailing-space; do
+    new_case "dispatch-malformed-$malformed"
+    CASE_SUBCOMMANDS="$CASE/subcommands"
+    case "$malformed" in
+        unsorted) printf 'list\nauth\n' >"$CASE_SUBCOMMANDS" ;;
+        duplicate) printf 'auth\nauth\n' >"$CASE_SUBCOMMANDS" ;;
+        unknown-word) printf 'auth\nevil\n' >"$CASE_SUBCOMMANDS" ;;
+        empty) : >"$CASE_SUBCOMMANDS" ;;
+        no-final-newline) printf 'auth\nlist' >"$CASE_SUBCOMMANDS" ;;
+        trailing-space) printf 'auth \nlist\n' >"$CASE_SUBCOMMANDS" ;;
+    esac
+    run_wrapper list
+    [[ $RUN_STATUS -eq 2 ]] || fail "$malformed list was not refused with status 2 (got $RUN_STATUS)"
+    [[ ! -s "$CASE/log" ]] || fail "$malformed list still reached the entry point"
+    if [[ $malformed == empty ]]; then
+        expected_diagnostic="pi: refusing the empty subcommand list at $CASE_SUBCOMMANDS"
+    else
+        expected_diagnostic="pi: refusing the malformed subcommand list at $CASE_SUBCOMMANDS"
+    fi
+    grep -Fq "$expected_diagnostic" "$CASE/stderr" \
+        || fail "the $malformed list did not report [$expected_diagnostic]"
+done
+
+new_case dispatch-symlinked
+CASE_SUBCOMMANDS="$CASE/subcommands"
+printf 'auth\n' >"$CASE/real-subcommands"
+ln -s "$CASE/real-subcommands" "$CASE_SUBCOMMANDS"
+run_wrapper auth
+[[ $RUN_STATUS -eq 2 ]] || fail 'a symlinked subcommand list was not refused'
+grep -Fq "pi: refusing the subcommand list at $CASE_SUBCOMMANDS (not a readable regular file)" "$CASE/stderr" \
+    || fail 'a symlinked subcommand list did not report its exact diagnostic'
+
+new_case dispatch-directory
+CASE_SUBCOMMANDS="$CASE/subcommands"
+mkdir "$CASE_SUBCOMMANDS"
+run_wrapper auth
+[[ $RUN_STATUS -eq 2 ]] || fail 'a directory subcommand list was not refused'
+
 # --- the test seam cannot become the production default ----------------------
 
 grep -Fq 'AGENT_VM_PI_ENTRY:-/opt/agent-vm/pi/node_modules/.bin/pi}"' "$WRAPPER" \
@@ -323,7 +399,11 @@ grep -Fq "MANDATORY_EXTENSION=$MANDATORY_EXTENSION" "$WRAPPER" \
 grep -Fq 'AGENT_VM_PI_BRIDGE_EXTENSION:-/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts}"' "$WRAPPER" \
     || fail "production bridge-extension path is missing"
 grep -Fq 'PI_SUBCOMMANDS="auth config install list mcp remove uninstall update"' "$WRAPPER" \
-    || fail "the subcommand allowlist literal changed (the image build checks drift against pi --help)"
+    || fail "the subcommand vocabulary literal changed (the image build checks drift against pi --help)"
+grep -Fq 'PI_SUBCOMMAND_VOCABULARY=$PI_SUBCOMMANDS' "$WRAPPER" \
+    || fail "the wrapper no longer restricts the data file to its closed vocabulary"
+grep -Fq 'AGENT_VM_PI_SUBCOMMANDS:-/opt/agent-vm/pi/agent-vm-subcommands}' "$WRAPPER" \
+    || fail "the production subcommand data path is missing"
 # The wrapper must not reintroduce a trust or telemetry default. Match the code
 # (not the prose above it, which deliberately names the flags it forwards).
 if grep -Fq 'PI_TELEMETRY:=' "$WRAPPER" || grep -Fq 'export PI_TELEMETRY' "$WRAPPER"; then

@@ -85,14 +85,23 @@ installer and the only reader of a pin in an image;
 ## Current pnpm ownership
 
 Base owns `images/pnpm/`, authenticated bootstrap and the pnpm selection label.
-dsh now owns its four pnpm inputs (`package.json`, `pnpm-lock.yaml`,
-`pnpm-workspace.yaml`, `pnpm-inputs.sha256`) and its build-only preparation,
-comparison, override-derivation, install and runtime-check helpers; it inherits
-the base launcher without a private pnpm package. Pi, bridge and Copilot retain
-their current npm paths pending their #42 slices. Historical transfer entries
-below are historical, not current install instructions. See
-[runtime defaults](node-package-defaults.md),
-[ADR 0003](adr/0003-dsh-graph-freeze.md) and the
+dsh, Pi and the Pi bridge own their four pnpm inputs (`package.json`,
+`pnpm-lock.yaml`, `pnpm-workspace.yaml`, `pnpm-inputs.sha256`) and their
+build-only preparation/comparison/install/runtime-check helpers; all three
+inherit the base launcher without a private pnpm package. Copilot retains its
+npm path until PR 4 of #42. The build-only Pi/bridge helpers are mounted
+read-only during the install and verify RUNs and never COPYed into the image:
+whole directories (`images/tools/pi/`), the shared filesystem module
+(`images/tools/pnpm-project.py`, `images/tools/pnpm-host-manager.py`), the pnpm
+sources and the composed `recipe-contract` directory. The new
+`images/tools/pi/prepare-project.py` is the single owning preparation driver for
+a changed or refreshed Pi/bridge selection, and the maintainer-only
+`script/dev/adopt-pi-bridge-pnpm.py` is the initial adoption driver that reads
+the fixed reviewed baseline git objects and never runs from an ordinary
+preparation. Historical transfer entries below are historical, not current
+install instructions. See [runtime defaults](node-package-defaults.md),
+[ADR 0003](adr/0003-dsh-graph-freeze.md),
+[ADR 0011](adr/0011-pi-selected-shrinkwrap.md) and the
 [migration ledger](standard-pnpm-migration.md).
 
 ## Selective migration manifest (historical)
@@ -103,7 +112,11 @@ READMEs may be adapted to their new owner):
 - `images/install-zellij.sh`
 - `images/recipe-contract/run-install.sh`
 - `images/recipe-contract/download.sh`
-- `images/recipe-contract/run-npm.sh`
+- `images/recipe-contract/run-npm.sh` — historical: deleted in #52 when Pi and
+  the bridge moved to the four pnpm inputs and the last two live callers left.
+  The classified-transport receipt vocabulary is download-only from then on;
+  the reviewed bytes remain in git history and no current helper, test or image
+  executes it
 - `images/recipe-contract/run-report.sh`
 - `images/recipe-contract/` — Go record/access predicates; see [ADR 0004](adr/0004-go-build-helpers.md)
 - `images/tools/dsh/install-dsh.sh`
@@ -120,13 +133,32 @@ READMEs may be adapted to their new owner):
 - `images/tools/pi/verify-pi.sh`
 - `images/tools/pi/prepare-lock.sh`
 - `images/tools/pi/pi.sh`
+- `images/tools/pi/import-shrinkwrap.mjs` — added in #52, build-only and mounted
+  read-only during install/verify; never copied into the image
+- `images/tools/pi/archive.py` — added in #52, build-only
+- `images/tools/pi/installed-graph.mjs` — added in #52, build-only
+- `images/tools/pi/prepare-project.py` — added in #52, build-only owning
+  preparation driver (candidate stage, route selection, comparison, pin,
+  frozen validation, four-input publication)
+- `images/tools/pi/check-installed-bytes.mjs`, `check-runtime.mjs` — added in
+  #52, build-only
+- `script/dev/adopt-pi-bridge-pnpm.py` — added in #52, maintainer-only initial
+  adoption from the fixed reviewed baseline; never a runtime or build caller
 - `images/tools/pi/seed-claude-bridge-config.sh`
 - `images/tools/pi/README.md`
-- `images/tools/pi/package.json`
-- `images/tools/pi/package-lock.json`
+- `images/tools/pi/package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`,
+  `pnpm-inputs.sha256` — the reviewed four pnpm inputs
+- `images/tools/pi/dispatch/{1.4.0,0.87.0}.txt` — reviewed per-selection
+  subcommand expectations used by the installer-generated dispatch data
+- `images/tools/pi/package-lock.json` — historical: removed in #52 when Pi moved
+  to the four pnpm inputs; the reviewed bytes remain in git history. No current
+  helper, test, image or upgrade reads it
 - `images/tools/pi/extensions/guest-credential-warning.js`
-- `images/tools/pi/bridge/package.json`
-- `images/tools/pi/bridge/package-lock.json`
+- `images/tools/pi/bridge/package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`,
+  `pnpm-inputs.sha256` — the reviewed four pnpm inputs
+- `images/tools/pi/bridge/package-lock.json` — historical: removed in #52 when
+  the bridge moved to the four pnpm inputs; the reviewed bytes remain in git
+  history
 - `images/tools/pi/bridge/prepare-lock.sh`
 - `images/tools/codex/install-codex.sh`
 - `images/tools/codex/verify-codex.sh`
@@ -486,9 +518,32 @@ dsh is now an image-owned pnpm project. Its owning sources are:
 
 - Reviewed inputs: `images/tools/dsh/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,pnpm-inputs.sha256}`.
 - Preparation, installation and verification: `images/tools/dsh/{prepare-lock.sh,install-dsh.sh,verify-dsh.sh}`.
-- Build-only helpers: `images/tools/dsh/{project.py,host-manager.py,check-runtime.mjs,probe-dsh.py}`.
-  `project.py` owns filesystem authorization and handled-failure four-file
-  publication and is not a lock parser; it authorizes the composed contract
+- Shared build-only boundary: `images/tools/pnpm-project.py` and
+  `images/tools/pnpm-host-manager.py`. The filesystem/manager/publication
+  implementation moved here when Pi and its bridge began sharing it, so one
+  security boundary serves all three consumers instead of three drifting copies.
+  A frozen consumer table (`dsh` `/opt/agent-vm/dsh`, `pi` `/opt/agent-vm/pi`,
+  `bridge` `/opt/agent-vm/pi-packages`) carries each production prefix, command,
+  scratch token and host-acquisition variable prefix; capabilities carry their
+  consumer, so scratch, cleanup, manager selection and publication derive policy
+  from the authorized object and never re-select it from an argument. The module
+  owns filesystem authorization and the handled-failure four-input publication
+  and is not a lock parser. `authorize_stage` is the separate bootstrap authority
+  for a first import: a private `0700` child of the consumer's scratch parent
+  (production) or of the invocation's authorized root (fixture), disjoint from
+  every production prefix, the contract directory, the reviewed pnpm sources, the
+  checkout, the base pin, the status destination and any caller-named source, and
+  it can only stage — never install, publish to the live prefix or write status.
+- dsh adapters: `images/tools/dsh/{project.py,host-manager.py}` load the shared
+  module through `sys.modules` (one instance, so capability types keep one
+  identity), re-export it unchanged and supply the dsh consumer. dsh's scripts,
+  `probe-dsh.py`, its imports and its Docker mounts keep naming the old paths; the
+  install and verify RUNs add one read-only mount of
+  `tools/pnpm-project.py` at `/tmp/pnpm-project.py`, which is where the adapter's
+  `../pnpm-project.py` resolves. The shared CLI requires
+  `--consumer dsh|pi|bridge`; the adapters reject the flag.
+- Other build-only dsh helpers: `images/tools/dsh/{check-runtime.mjs,probe-dsh.py}`.
+  The shared module authorizes the composed contract
   directory **before** anything in it is executed (the environment guard included)
   and accepts exactly these shapes: the production build mount
   `/tmp/recipe-contract` with a `/opt/agent-vm/dsh` prefix, a directory inside an
@@ -500,14 +555,19 @@ dsh is now an image-owned pnpm project. Its owning sources are:
   root it does not have). The graph reader, comparator, derivation and staging
   helpers are `recipe-contract` subcommands (`pnpm-lock`, `dsh-lock-update`,
   `dsh-cordis-overrides`, `dsh-upgrade-stage`) reaching
-  `images/recipe-contract/pnpmlock`; `host-manager.py` represents the authenticated
-  stock manager as argv for host maintenance (`project.py manager`). None of these
-  ship in the image.
+  `images/recipe-contract/pnpmlock`; `pnpm-host-manager.py` represents the
+  authenticated stock manager as argv for host maintenance (`pnpm-project.py
+  manager`), and production refuses its `{AGENT_VM_DSH,PI,BRIDGE}_PNPM_PACKAGE|_ARCHIVE|_NODE`
+  variables instead of accepting a host-selected manager. None of these ship in
+  the image.
 - Maintenance: `images/tools/dsh/upgrade-dsh.sh` (transactional four-input and
   central-Dockerfile publication, Cordis proposal/approval).
-- Tests: `script/test/{dsh-prepare-lock.sh,dsh-verify.sh,dsh-project.py,dsh-upgrade.py,upgrade-scripts.sh,standard-node-layout.py,standard-node-policy.sh,standard-node-policy.py,standard-node-policy-self-test.py,standard-node-consumers.sh,standard-node-consumers.py,standard-node-dsh.py}`,
+- Tests: `script/test/{dsh-prepare-lock.sh,dsh-verify.sh,dsh-project.py,pnpm-project.py,dsh-upgrade.py,upgrade-scripts.sh,standard-node-layout.py,standard-node-policy.sh,standard-node-policy.py,standard-node-policy-self-test.py,standard-node-consumers.sh,standard-node-consumers.py,standard-node-dsh.py}`,
   fixtures `script/test/fixtures/{dsh/*,standard-node-dsh.py,standard-node-policy.py}`
   and derivation/update lock fixtures under `script/test/fixtures/pnpm-lock/`.
+  `dsh-project.py` owns dsh's behaviour through the shared module and its adapter
+  parity; `pnpm-project.py` owns the consumer table, the bootstrap stage and the
+  transaction's absent-destination and mode behaviour.
 - Rules and evidence: [ADR 0003](adr/0003-dsh-graph-freeze.md) and the
   [migration ledger](standard-pnpm-migration.md).
 
@@ -523,7 +583,8 @@ the runtime probes.
 ## Bounded pnpm primitives (#42, PR 1)
 
 The `recipe-contract` helper (`pnpmlock`, `pnpmenv`, `dshupgrade`,
-`internal/document`) and its committed Go vendor closure
+`internal/document`, and issue #52's `internal/candidatestage`) and its committed
+Go vendor closure
 (`vendor/go.yaml.in/yaml/v3`) are build-only data validators, not runtime payloads.
 They replaced the Node `pnpm-lock.mjs` and its npm `vendor/yaml/` distribution in
 #75. The [parser ADR](adr/0001-build-only-pnpm-graph-parser.md) owns the
@@ -539,6 +600,13 @@ regenerated and cold-installed in their owning slices. Rust owns source/path
 boundaries and runs this CLI as a syntax adapter for the migrated dsh project;
 Node owns graph, vendor digest and mutation checks.
 See [contributor commands](../CONTRIBUTING.md#bounded-pnpm-primitives).
+
+Issue #52 adds two build-only subcommands under the same boundary:
+`pnpm-selection-update` (one comparator for every consumer kind) and
+`pnpm-lock-candidate`, which captures a private unpinned preparation candidate
+through an inherited descriptor. Neither is a runtime payload or a production
+prefix capability, and no consumer, lock or failure producer moves in that
+primitive commit.
 
 The [terminal-failure ADR](adr/0002-pnpm-terminal-failure-boundary.md) records why
 pnpm remains hard-only and the proposed bridge-only loss of degraded transport

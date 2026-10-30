@@ -66,7 +66,6 @@ func ReadDshProject(prefix Prefix) (*DshProject, error) {
 }
 
 func readProjectInputs(prefix Prefix, kind Kind, pins pinCheck, mode readMode) (*Project, error) {
-	root := kind.Root()
 	if pins == verifyPins {
 		if err := verifyPinnedInputs(prefix); err != nil {
 			return nil, err
@@ -81,10 +80,45 @@ func readProjectInputs(prefix Prefix, kind Kind, pins pinCheck, mode readMode) (
 			return nil, errorf("unreviewed input: %s", file)
 		}
 	}
-	manifest, err := document.ReadFile(filepath.Join(string(prefix), "package.json"), document.JSON)
+	return parseProjectInputs(fileAcquirer(prefix), prefix, kind, mode)
+}
+
+// documentSource is one parsed input together with the exact bytes it was parsed
+// from. Candidate digests come from these buffers, never from a second read.
+type documentSource struct {
+	source []byte
+	value  document.Value
+}
+
+// inputAcquirer reads and parses one of the three project inputs. The reviewed
+// path reads a bounded regular file; the candidate path may only return the
+// buffers it already captured.
+type inputAcquirer func(name string, format document.Format) (documentSource, error)
+
+func fileAcquirer(prefix Prefix) inputAcquirer {
+	return func(name string, format document.Format) (documentSource, error) {
+		source, err := nodefs.ReadBounded(filepath.Join(string(prefix), name))
+		if err != nil {
+			return documentSource{}, err
+		}
+		value, err := document.Parse(source, format)
+		if err != nil {
+			return documentSource{}, err
+		}
+		return documentSource{source: source, value: value}, nil
+	}
+}
+
+// parseProjectInputs applies the full consumer policy to acquired documents. It
+// is the one implementation both a reviewed Project and a private candidate go
+// through, so a candidate is never validated by a weaker rule set.
+func parseProjectInputs(acquire inputAcquirer, prefix Prefix, kind Kind, mode readMode) (*Project, error) {
+	root := kind.Root()
+	manifestDocument, err := acquire("package.json", document.JSON)
 	if err != nil {
 		return nil, err
 	}
+	manifest := manifestDocument.value
 	if _, err := recordOf(manifest); err != nil {
 		return nil, err
 	}
@@ -129,17 +163,19 @@ func readProjectInputs(prefix Prefix, kind Kind, pins pinCheck, mode readMode) (
 		return nil, err
 	}
 	selection := Selection{Kind: kind, Version: selected}
-	workspace, err := document.ReadFile(filepath.Join(string(prefix), "pnpm-workspace.yaml"), document.YAML)
+	workspaceDocument, err := acquire("pnpm-workspace.yaml", document.YAML)
 	if err != nil {
 		return nil, err
 	}
+	workspace := workspaceDocument.value
 	if err := validateWorkspace(workspace, kind, mode); err != nil {
 		return nil, err
 	}
-	lock, err := document.ReadFile(filepath.Join(string(prefix), "pnpm-lock.yaml"), document.YAML)
+	lockDocument, err := acquire("pnpm-lock.yaml", document.YAML)
 	if err != nil {
 		return nil, err
 	}
+	lock := lockDocument.value
 	if _, err := recordOf(lock); err != nil {
 		return nil, err
 	}
@@ -239,7 +275,8 @@ func readProjectInputs(prefix Prefix, kind Kind, pins pinCheck, mode readMode) (
 	}
 	project := &Project{
 		prefix: prefix, selection: selection, mode: mode,
-		manifest: manifest, workspace: workspace, lock: lock,
+		manifest: manifest, workspace: workspace, workspaceBytes: workspaceDocument.source,
+		lock:     lock,
 		packages: packages, snapshots: snapshots,
 		importer: []Edge{{Name: root, Target: rootID.Key}},
 	}
@@ -323,9 +360,22 @@ func readArchives(archives document.Value) ([]Archive, error) {
 		if err != nil {
 			return nil, err
 		}
+		hasBin, err := optionalBoolean(record.Get("hasBin"), archiveKey, "hasBin")
+		if err != nil {
+			return nil, err
+		}
+		optional, err := optionalBoolean(record.Get("optional"), archiveKey, "optional")
+		if err != nil {
+			return nil, err
+		}
+		platform, err := readPlatformSelectors(record, archiveKey)
+		if err != nil {
+			return nil, err
+		}
 		packages = append(packages, Archive{
 			ID: id.Package, Integrity: integrity, Tarball: tarball,
 			Peers: peers, OptionalPeers: optionalPeers,
+			HasBin: hasBin, Platform: platform, Optional: optional,
 		})
 	}
 	return packages, nil
@@ -405,10 +455,9 @@ func readSnapshots(snapshots document.Value, archives document.Value) ([]Snapsho
 		if err := checkKeys(entry, []string{"dependencies", "optionalDependencies", "transitivePeerDependencies", "optional"}, nil); err != nil {
 			return nil, err
 		}
-		if optional := entry.Get("optional"); !isUndefined(optional) {
-			if _, ok := optional.Bool(); !ok {
-				return nil, errorf("%s: optional: expected boolean, got %s", snapshotKey, optional.Describe())
-			}
+		optional, err := optionalBoolean(entry.Get("optional"), snapshotKey, "optional")
+		if err != nil {
+			return nil, err
 		}
 		if transitive := entry.Get("transitivePeerDependencies"); !isUndefined(transitive) {
 			if transitive.Kind() != document.Sequence {
@@ -451,7 +500,7 @@ func readSnapshots(snapshots document.Value, archives document.Value) ([]Snapsho
 			}
 		}
 		sortEdges(edges)
-		result = append(result, Snapshot{ID: id, Edges: edges})
+		result = append(result, Snapshot{ID: id, Edges: edges, Optional: optional})
 	}
 	return result, nil
 }
@@ -462,6 +511,73 @@ func emptyForNull(value document.Value) document.Value {
 		return mappingValue()
 	}
 	return value
+}
+
+// platformToken is the one accepted os/cpu/libc token grammar. A leading `!` has
+// already been consumed by the caller, so `!!x`, `!`, whitespace, paths and
+// upper-case spellings are all malformed rather than silently canonicalised.
+var platformToken = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
+
+// optionalBoolean reads an explicit boolean annotation. Missing means false;
+// every other kind, including null, is a policy stop: a resolved projection must
+// not infer optionality or bin presence from a non-boolean.
+func optionalBoolean(value document.Value, recordKey, field string) (bool, error) {
+	if isUndefined(value) {
+		return false, nil
+	}
+	boolean, ok := value.Bool()
+	if !ok {
+		return false, errorf("%s: %s: expected boolean, got %s", recordKey, field, value.Describe())
+	}
+	return boolean, nil
+}
+
+func readPlatformSelectors(record document.Value, archiveKey string) (PlatformSelectors, error) {
+	var selectors PlatformSelectors
+	for _, axis := range []struct {
+		name   string
+		target *SelectorList
+	}{
+		{"os", &selectors.OS},
+		{"cpu", &selectors.CPU},
+		{"libc", &selectors.LibC},
+	} {
+		value := record.Get(axis.name)
+		if isUndefined(value) {
+			continue
+		}
+		if value.Kind() != document.Sequence {
+			return PlatformSelectors{}, errorf("%s: platform.%s: expected sequence, got %s",
+				archiveKey, axis.name, value.Describe())
+		}
+		list := make([]PlatformSelector, 0, len(value.Items()))
+		for index, item := range value.Items() {
+			text, ok := item.Text()
+			if !ok {
+				return PlatformSelectors{}, errorf("%s: platform.%s[%d]: expected string, got %s",
+					archiveKey, axis.name, index, item.Describe())
+			}
+			selector, err := parsePlatformSelector(text.Display())
+			if err != nil {
+				return PlatformSelectors{}, errorf("%s: platform.%s[%d]: %v", archiveKey, axis.name, index, err)
+			}
+			list = append(list, selector)
+		}
+		*axis.target = SelectorList{selectors: list}
+	}
+	return selectors, nil
+}
+
+func parsePlatformSelector(text string) (PlatformSelector, error) {
+	selector := PlatformSelector{token: text}
+	if len(text) > 0 && text[0] == '!' {
+		selector.negated = true
+		selector.token = text[1:]
+	}
+	if !platformToken.MatchString(selector.token) {
+		return PlatformSelector{}, errorf("malformed platform token")
+	}
+	return selector, nil
 }
 
 func parseIntegrity(text string) (Integrity, error) {

@@ -2,6 +2,7 @@
 """Render maintained probe sources and committed input hashes into guest scratch."""
 import argparse
 import hashlib
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -31,14 +32,28 @@ INPUTS = {
         "/opt/agent-vm/dsh",
         ("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "pnpm-inputs.sha256"),
     ),
+    "pi": (
+        "/opt/agent-vm/pi",
+        ("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "pnpm-inputs.sha256"),
+    ),
+    "pi-packages": (
+        "/opt/agent-vm/pi-packages",
+        ("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "pnpm-inputs.sha256"),
+    ),
+}
+# The committed sources of each consumer's pinned inputs.
+SOURCES_OF_INPUTS = {
+    "opencode": "images/tools/opencode/plugins",
+    "dsh": "images/tools/dsh",
+    "pi": "images/tools/pi",
+    "pi-packages": "images/tools/pi/bridge",
 }
 
 
 def input_hashes():
-    sources = {"opencode": "images/tools/opencode/plugins", "dsh": "images/tools/dsh"}
     return {
         consumer: {
-            name: hashlib.sha256((ROOT / sources[consumer] / name).read_bytes()).hexdigest()
+            name: hashlib.sha256((ROOT / SOURCES_OF_INPUTS[consumer] / name).read_bytes()).hexdigest()
             for name in INPUTS[consumer][1]
         }
         for consumer in INPUTS
@@ -61,8 +76,12 @@ def render(template, sources, hashes):
         for name, digest in inputs.items():
             if name not in allowed or not re.fullmatch(r"[0-9a-f]{64}", digest):
                 raise ValueError("invalid committed-input hash")
+            # `-c -` with stdout dropped is the portable spelling: GNU coreutils
+            # and the BSD-derived `sha256sum` a host may carry both accept it,
+            # while `--check --status` is GNU-only. The exit status is the control,
+            # so dropping the OK lines weakens nothing.
             inserts.append(
-                f"printf '%s  %s\\n' '{digest}' '{prefix}/{name}' | sha256sum --check --status\n"
+                f"printf '%s  %s\\n' '{digest}' '{prefix}/{name}' | sha256sum -c - >/dev/null\n"
             )
     result = template.replace(MARKER, "".join(inserts))
     if len(result.encode()) >= 64 * 1024:
@@ -95,6 +114,8 @@ def self_test():
         {"opencode": {"package.json": "not-a-hash"}},
         {"dsh": {"unsafe'name": "a" * 64}},
         {"dsh": {"package-lock.json": "a" * 64}},
+        {"pi": {"package-lock.json": "a" * 64}},
+        {"pi-packages": {"pnpm-inputs.sha256": "not-a-hash"}},
         {"opencode": {"pnpm-inputs.sha256": "a" * 64}},
         {"unmigrated": {"package.json": "a" * 64}},
     ]
@@ -113,9 +134,14 @@ def self_test():
     # guest reads.
     probe = (ROOT / "script/test/fixtures/released-agent-probe.sh").read_text()
     layout = (ROOT / SOURCES["released-agent-dsh-layout.py"]).read_text()
-    assert "for project in dsh pi pi-packages" not in probe
     assert 'test ! -e /opt/agent-vm/dsh/package-lock.json' in probe
     assert 'test ! -L /opt/agent-vm/dsh/package-lock.json' in probe
+    # Pi and the bridge must be asserted as migrated projects, not as the retired
+    # npm pair: four inputs each, and no npm lock even as a dangling link.
+    assert 'for project in pi pi-packages' in probe
+    assert 'test ! -e "/opt/agent-vm/$project/package-lock.json"' in probe
+    assert 'test ! -L "/opt/agent-vm/$project/package-lock.json"' in probe
+    assert 'test -r "/opt/agent-vm/$project/package-lock.json"' not in probe
     assert "os.readlink(link) == target" in layout
     assert "os.path.samefile(link, target)" in layout
     assert "node_modules/@deepseek-ai/dsh/lib/bin.js" in layout
