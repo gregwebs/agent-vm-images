@@ -377,6 +377,11 @@ def main():
             assert f'{consumer} preparation-policy matrix PASS' in result.stdout, result.stdout
             creates = [args for args in state['commands'] if args[0] == 'create']
             assert len(creates) == 1 and 'none' in creates[0], creates
+            # The contract must be mounted where the fixture reads it: the
+            # preparation cases run under the authorized fixture root, so theirs
+            # is that root's `contract` child, not the matrix path.
+            bind = [arg for arg in creates[0] if isinstance(arg, str) and arg.startswith('type=bind,src=')]
+            assert any('dst=/work/fixtures/contract,readonly' in arg for arg in bind), bind
             # The four inputs travel to the fixture volume; nothing is installed.
             copies = state['copies']
             for name in DRIVER_MODULE.PREPARE_INPUTS:
@@ -408,6 +413,11 @@ def main():
         assert len(creates) == 1, creates
         assert '--network' in creates[0] and 'none' in creates[0]
         assert 'readonly' in ' '.join(creates[0])
+        # ... and at the path the fixture itself reads, taken from the fixture so
+        # the two cannot drift again.
+        bind = [arg for arg in creates[0] if isinstance(arg, str) and arg.startswith('type=bind,src=')]
+        assert any(f'dst={FIXTURE_MODULE.CONTRACT},readonly' in arg for arg in bind), \
+            (FIXTURE_MODULE.CONTRACT, bind)
         assert not any(args[0] == 'run' for args in state['commands']), 'host network used'
         print('standard-node-policy self-test: positive matrix + owned cleanup PASS')
 

@@ -361,11 +361,12 @@ class Invocation:
         name = self.create(self.token + '-policy', '--platform', platform, '--network', 'none',
                            '--cap-drop', 'ALL',
                            '--mount', f'type=bind,src={ROOT},dst=/source,readonly',
-                           # The owning filesystem module authorizes the contract
-                           # directory as a child of the fixture root, so it is
-                           # mounted there (exactly like the dsh harness) rather
-                           # than at an unrelated absolute path.
-                           '--mount', f'type=bind,src={self.contract / "out"},dst=/work/fixtures/contract,readonly',
+                           # The fake-registry matrix reads the composed helper from
+                           # `/contract`; only the preparation cases run under the
+                           # authorized fixture root and mount it as that root's
+                           # child. Each path is owned by its fixture and asserted
+                           # by the self-test.
+                           '--mount', f'type=bind,src={self.contract / "out"},dst=/contract,readonly',
                            '--mount', f'type=volume,src={self.volume},dst=/work',
                            self.image, 'sleep', 'infinity')
         self.docker('start', name)
