@@ -21,6 +21,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+. "$REPO_ROOT/script/test/file-mode.sh"
 SCRIPT="$REPO_ROOT/script/build/agent-versions.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/agent-versions-test.XXXXXX")"
 TEST_ROOT="$(cd "$TEST_ROOT" && pwd -P)"
@@ -680,24 +681,6 @@ assert_contains "$RUN_COMBINED" "missing Dockerfile"
 
 EVIDENCE_BUNDLE='codex-package-aarch64-unknown-linux-musl.tar.gz.sigstore'
 
-# The permission mode of one path, as `chmod` accepts it. Each `stat` dialect is
-# captured and status-checked SEPARATELY: GNU `stat -f` prints filesystem data
-# before it fails, so `stat -f ... || stat -c ...` inside ONE command substitution
-# produced a multi-line, invalid mode and took the whole suite down at
-# partial-publication. Only a successful capture is ever printed.
-file_mode() { # $1 = path
-    local mode
-    if mode="$(stat -c '%a' "$1" 2>/dev/null)" && [ -n "$mode" ]; then
-        printf '%s\n' "$mode"
-        return 0
-    fi
-    if mode="$(stat -f '%Lp' "$1" 2>/dev/null)" && [ -n "$mode" ]; then
-        printf '%s\n' "$mode"
-        return 0
-    fi
-    fail "cannot read the mode of $1 with stat -c or stat -f"
-}
-
 # The mode helper's own control, including the failure mode that broke the suite:
 # a GNU `stat` that prints a filesystem block for the format argument and THEN
 # fails must contribute nothing to the mode.
@@ -743,6 +726,29 @@ file_mode_self_check() {
     else
         echo '  ok: file_mode reads the BSD stat dialect (no GNU stat on PATH here)'
     fi
+
+    # Force the BSD command shape on every host so Linux also exercises the
+    # fallback. The shim delegates the mode lookup to whichever native stat is
+    # installed, preserving the real mode instead of returning a fixture value.
+    fake="$dir/bin/stat"
+    cat >"$fake" <<'SH'
+#!/bin/sh
+case "${1:-}" in
+    -c|--format) exit 1 ;;
+    -f)
+        [ "${2:-}" = '%Lp' ] || exit 1
+        if "$REAL_STAT" -c '%a' "$3" >/dev/null 2>&1; then
+            exec "$REAL_STAT" -c '%a' "$3"
+        fi
+        exec "$REAL_STAT" -f '%Lp' "$3"
+        ;;
+esac
+exec "$REAL_STAT" "$@"
+SH
+    chmod 0755 "$fake"
+    mode="$(PATH="$dir/bin:$PATH" REAL_STAT="$real_stat" file_mode "$dir/probe")"
+    [ "$mode" = 640 ] || fail "file_mode returned '$mode' through the BSD stat interface"
+    echo '  ok: file_mode reads the BSD stat interface on every host'
     echo '  ok: file_mode returns one octal mode that chmod accepts'
 }
 
