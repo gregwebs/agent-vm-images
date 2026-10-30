@@ -18,7 +18,7 @@ export AGENT_VM_CONTRACT_DIR AGENT_VM_INSTALL_STATUS_DIR PNPM_SOURCE_DIR
 tools="${AGENT_VM_TOOL_SOURCE_DIR:-/tmp/standard-tools}"
 
 require_installed() {
-    for name in dsh pi pi-claude-bridge codex opencode claude copilot opencode-claude; do
+    for name in dsh pi pi-claude-bridge codex opencode claude copilot agy opencode-claude; do
         if record=$("$AGENT_VM_CONTRACT_DIR/recipe-contract" install-status record "$AGENT_VM_INSTALL_STATUS_DIR/$name"); then
             if [ "$record" = installed ]; then continue; fi
         fi
@@ -37,13 +37,14 @@ check_path_identity() {
         "${AGENT_VM_CODEX_PREFIX:-/opt/agent}/.local/bin/codex" \
         "${AGENT_VM_OPENCODE_PREFIX:-/opt/agent}/.opencode/bin/opencode" \
         "${AGENT_VM_CLAUDE_PREFIX:-/opt/agent}/.local/bin/claude" \
-        "${AGENT_VM_PI_WRAPPER:-/usr/local/bin/pi}"
+        "${AGENT_VM_PI_WRAPPER:-/usr/local/bin/pi}" \
+        "${AGENT_VM_AGY_BIN:-/usr/local/bin/agy}"
 }
 
 require_installed
 check_path_identity
 sh "$PNPM_SOURCE_DIR/verify-pnpm.sh"
-for tool in dsh pi codex opencode claude copilot; do
+for tool in dsh pi codex opencode claude copilot agy; do
     sh "$tools/$tool/verify-$tool.sh"
 done
 AGENT_VM_OPENCODE_SOURCE_DIR="$tools/opencode"

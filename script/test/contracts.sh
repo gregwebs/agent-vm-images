@@ -92,6 +92,11 @@ if [ "$guard_only" = false ]; then
     # cosign and the two native architecture rows are the evidence phase's work,
     # never this aggregate.
     python3 script/test/codex-pins.py
+    # The committed agy pin (#131) is hash-only: the owner writer's two-channel
+    # corroboration, latest-only refusal and five-file transaction, plus the
+    # hook/verifier pair that gates the layer. Both are hermetic; the real
+    # pin and the finished image are the evidence phase's work.
+    python3 script/test/pin-agy-maintenance.py
     # The restricted-egress gate's stream assertions and its addon policy are the
     # parts a native run cannot check cheaply: the allow-list log shape, the `-`
     # placeholder row, and whether a learned redirect target keeps the HTTPS/port/
@@ -109,7 +114,7 @@ if [ "$guard_only" = false ]; then
     # compiler; both suites refuse any other toolchain.
     python3 script/test/gopls-closure-pins.py --go-root "$selected_goroot"
     python3 script/test/gopls-closure-maintenance.py --go-root "$selected_goroot"
-    for suite in agent-versions apt-sources claude-installer codex-installer copilot-installer copilot-verify \
+    for suite in agent-versions apt-sources agy-installer claude-installer codex-installer copilot-installer copilot-verify \
         opencode-installer opencode-pnpm-prepare-lock opencode-pnpm-install opencode-pnpm-upgrade \
         opencode-plugins-verify run-pnpm dsh-prepare-lock dsh-verify pi-install pi-bridge-install \
         pi-prepare-lock pi-verify pi-wrapper shipped-installer-contracts tool-access \

@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "name": "agy",
+  "kind": "release-archive",
+  "version": "1.4.11",
+  "upstream": {
+    "project": "https://github.com/google-antigravity/antigravity-cli",
+    "release": "1.4.11"
+  },
+  "install": {
+    "destination": "/usr/local",
+    "payload": [
+      {
+        "member": "antigravity",
+        "path": "bin/agy"
+      }
+    ],
+    "links": []
+  },
+  "platforms": {
+    "linux/amd64": {
+      "url": "https://github.com/google-antigravity/antigravity-cli/releases/download/1.4.11/agy_cli_linux_x64.tar.gz",
+      "archive": "tar.gz",
+      "member_prefix": "",
+      "sha256": "d17c426977326361f3d81f3ea22820e967164285923de020247e460dcb9d15c3",
+      "sha512": "2935601efa745ed6e314d32b415c71f44d9d455f0e6a2583372584be5a9074c28154cf81d5eec65b4416579453a3b3b05d3abe4d4f176754d5ef93a84af6cf28"
+    },
+    "linux/arm64": {
+      "url": "https://github.com/google-antigravity/antigravity-cli/releases/download/1.4.11/agy_cli_linux_arm64.tar.gz",
+      "archive": "tar.gz",
+      "member_prefix": "",
+      "sha256": "debb2c056e387be63fdf86d48dfcc99ed1f523e51c5067abd119d78bd36e8a18",
+      "sha512": "a5f80d76ea95b3973f4daab6f7ffd88f1cfd9c7f7f70dda951ba74b2e7309a53f64d2224a0db39c949c4b74f7c56a16a3ab04fa4b8fed6a45d7486b2692a4e25"
+    }
+  },
+  "authentication": {
+    "method": "hash-only",
+    "release": {
+      "url": "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/tags/1.4.11",
+      "path": "evidence/release.json",
+      "sha256": "2075746b7de860f6613941b4418edb6714b8ee615e3cc3f76feed7adb029cc6a"
+    },
+    "manifests": {
+      "linux/amd64": {
+        "url": "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json",
+        "path": "evidence/manifest-linux-amd64.json",
+        "sha256": "f8f1ba23281e8319eab3cd800b2a54b3a9c31352568935d79775cce583419366"
+      },
+      "linux/arm64": {
+        "url": "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_arm64.json",
+        "path": "evidence/manifest-linux-arm64.json",
+        "sha256": "db82f673ed0afba59949bf13f61aa395889aafecaeb768846a4439f92c649090"
+      }
+    },
+    "verified_on": "2026-10-30",
+    "reason": "Google publishes no signature or attestation for these assets and the GitHub release is mutable and uploaded by an individual account. The pin is hash-only: at pin time the downloaded bytes had to equal both GitHub's asset digest and the sha512 in Google's updater manifest, which names only the latest release. The build re-checks the committed evidence against the pin and accepts only the committed digests. See ADR 0012."
+  }
+}

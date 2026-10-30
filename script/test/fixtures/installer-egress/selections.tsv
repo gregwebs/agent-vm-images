@@ -6,9 +6,10 @@
 # `script/build/agent-versions.sh --write` / the lock bump tools, then the
 # tests, then commit -- never by a test fetching the current latest.
 #
-# codex has no alternate: its payloads are bound by a committed content pin, so an
-# arbitrary exact version is not installable and a second unshipped pin closure
-# would be a second truth. `-` means "one committed selection, no alternate".
+# codex and agy have no alternate: their payloads are bound by a committed content
+# pin, so an arbitrary exact version is not installable and a second unshipped pin
+# closure would be a second truth. `-` means "one committed selection, no alternate".
 codex	rust-v0.159.3	-
+agy	1.4.11	-
 opencode	v2.0.29	v2.0.28
 claude	2.1.286	2.1.285

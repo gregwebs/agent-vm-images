@@ -225,10 +225,10 @@ merging. Policy and the exact exception language: [image input policy](docs/imag
 
 ## Selection ownership and maintenance
 
-`images/standard/Dockerfile` owns eight selection labels; base owns pnpm via
+`images/standard/Dockerfile` owns nine selection labels; base owns pnpm via
 `images/pnpm/pin.json` and a mirrored literal base label. Its deprecated standard
 AGENT_VERSION_PNPM is a compatibility assertion only (empty/equal accepted).
-Four exact nonempty installer defaults reference ARGs; dsh, Pi, bridge and OpenCode-plugin
+Five exact nonempty installer defaults reference ARGs; dsh, Pi, bridge and OpenCode-plugin
 empty/equal slots reuse committed manifest/lock bytes. Literal label fallbacks
 mirror manifests. Labels record selection, not health. Unrelated slots/locks
 must not change when one owner is bumped.
@@ -276,9 +276,13 @@ See [base pnpm maintenance](images/pnpm/README.md) and
 `AGENT_VERSION_PNPM` accept only empty or the reviewed base pin, never an
 independent version or dist-tag; see [dsh maintenance](#dsh-maintenance-and-graph-freeze).
 
-The bumper resolves/validates all four upstream values before co-editing one
-scratch Dockerfile. Explicit developer latest queries are permitted; the bumper
-refuses GitHub Actions. Builds consume committed selections and never call bump
+The bumper resolves/validates all five upstream values (codex, opencode, claude,
+copilot, agy) before staging anything, then publishes in two ordered transactions:
+agy's closure and ARG first, then Codex's closure with the four staged ARG edits
+(agy first so its likeliest failure leaves every file untouched; a Codex failure
+after it leaves the agy bump committed, and the bumper's error output says which
+half landed). Explicit developer latest queries are permitted; the bumper refuses
+GitHub Actions. Builds consume committed selections and never call bump
 scripts. Lock upgrades retain dsh graph-freeze review (retained records and
 sandbox reachability, not npm locations).
 
@@ -373,6 +377,53 @@ including removal of originally absent paths. Status 1 means restored failure;
 scratch directory and print its absolute recovery path. Stop and recover from
 those backups before further edits/builds/commits. Never delete recovery material
 as routine cleanup or mistake a failed operation for a successful bump.
+
+### agy hash-only pin
+
+The standard image's seventh agent, Google's Antigravity CLI, has **no upstream
+signature, attestation or immutable release**. Read
+[ADR 0012](docs/adr/0012-agy-hash-only-artifact-pin.md) and the
+[policy](docs/image-input-policy.md#the-agy-hash-only-artifact) before changing
+it; it is the weakest trust guarantee in this repository and it is deliberate.
+
+```bash
+python3 script/dev/pin-agy.py --check     # offline: evidence hashes, ARG/label, not a fresh corroboration
+python3 script/dev/pin-agy.py --version 1.4.11
+bash script/build/agent-versions.sh --check   # agy then Codex, through the bumper
+bash script/build/agent-versions.sh --write --cosign /abs/cosign
+```
+
+- The pin (`images/tools/agy/pin.json`) commits both architectures' URLs and
+  SHA-256 **and** SHA-512, plus the release metadata and both updater manifests by
+  SHA-256. `images/tools/agy/` is **not** a base input: nothing in
+  `images/base-inputs.sha256` covers it.
+- Only `script/dev/pin-agy.py` writes it. It accepts an archive only when the
+  downloaded bytes equal **both** GitHub's asset digest and Google's manifest
+  `sha512`, which is the whole authentication story: one publisher controls both
+  channels. Those SHA-256/SHA-512 comparisons are cryptographic *integrity*
+  checks; what is missing is publisher *authentication* — no signature,
+  attestation or independent identity is verified at build or pin time.
+- **Latest-only.** The manifest names one release, so the tool can only pin what it
+  currently names: an older `--version` is refused, not fetched, and a
+  same-release upstream rewrite is refused, never re-pinned. A repeat run keeps
+  the committed evidence bytes, so a download-count change is not a diff.
+- Write mode is one transaction through the shared publisher with the same
+  statuses: `0` published or unchanged, `1` restored failure, `2` usage, `3`
+  incomplete rollback (both directories printed absolutely — stop and recover),
+  `128+N` after a signal whose rollback succeeded. `script/test/agent-versions.sh`
+  opens both printed directories and checks all five proposed files, every
+  numbered backup's bytes and mode, and the `.complete` marker.
+- The bumper publishes agy **before** the Codex transaction, because the manifest
+  can move between resolution and pinning and because the Codex publication masks
+  the other single-slot ARGs but not `AGENT_VERSION_AGY`.
+- After a real bump a human must update the `agy` default in
+  `script/test/fixtures/installer-egress/selections.tsv` (the alternate column is
+  `-`: an arbitrary exact agy version is not installable). The tool does not edit
+  that file.
+- Native evidence: `bash script/test/shipped-installer-network.sh agent-vm-base:local
+  --platform linux/<arch> --tool agy` plus the standard-image audits on native amd64
+  **and** arm64. The build reaches one URL — the pinned release asset — and the
+  manifest host, tag API, GCS and `latest` paths are denied.
 
 Vendored updates require upstream snapshot + reviewed patch + byte-equivalence
 checks, provenance and license review. Zellij changes require independently
@@ -590,7 +641,7 @@ bash script/build/base-inputs.sh --check
 
 Rust guards retain lock/parser mutation checks and narrow source-presence checks;
 static strings do not certify actual installation. The real final-certification
-suite tests strict eight-record bytes and a genuine fixed-path Codex verifier
+suite tests strict nine-record bytes and a genuine fixed-path Codex verifier
 with a wrong-version PATH shadow that the final gate must reject.
 
 ## Expensive acceptance and CI
@@ -603,7 +654,7 @@ substitutes for full native amd64 and arm64 evidence.
 `standard-image.sh BASE STANDARD [--platform linux/ARCH] [--expect suffix=version …]`
 audits finished images, not builds. Expectations derive from committed sources,
 not labels. Exact overrides require independent `--expect`; labels and reports
-must agree. It checks eight records, exact wire reports, four numeric UID/GID
+must agree. It checks nine records, exact wire reports, four numeric UID/GID
 pairs, Pi warning/provider registration, committed unchanged locks, synthetic
 Claude/Pi seeds and disposable T5 negatives. Docker CMD does not run seeds
 implicitly. `pi-runtime.sh BASE STANDARD` retains deeper credential-free runtime
@@ -715,10 +766,10 @@ regenerate the lock. Empty/equal preparation validates committed YAML without a
 manager or registry call; frozen installation still verifies registry metadata.
 The hard-only runner never emits a transport receipt or retries with npm.
 
-Eight required agent records and seven agent verifiers exclude the separate
-base-pnpm identity/verification calls. Nine selection labels include base pnpm;
+Nine required agent records and eight agent verifiers exclude the separate
+base-pnpm identity/verification calls. Ten selection labels include base pnpm;
 the plugin manifest's packageManager field creates no additional selection.
-The four strict-egress profiles retain the native installers' narrower contracts;
+The five strict-egress profiles retain the native installers' narrower contracts;
 the plugin profile permits only eleven exact package documents and three exact
 tarballs, with HTTPS/443/GET/no query and no redirect learning. Both native full
 builds, the real launcher policy controls and all runtime/egress audits remain

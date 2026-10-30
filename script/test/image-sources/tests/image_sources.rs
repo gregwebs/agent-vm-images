@@ -1732,14 +1732,15 @@ fn edit_resolution_integrity(block: &str, integrity: &str) -> String {
 // Exact shipped version slots: ARGs, labels, recipe sources
 // ---------------------------------------------------------------------------
 
-const RECIPES: [&str; 6] = ["dsh", "pi", "codex", "opencode", "claude", "copilot"];
+const RECIPES: [&str; 7] = ["dsh", "pi", "codex", "opencode", "claude", "copilot", "agy"];
 
-/// Eight standard-owned selections; pnpm is inherited from base.
-const VERSION_SLOTS: [(&str, &str); 8] = [
+/// Nine standard-owned selections; pnpm is inherited from base.
+const VERSION_SLOTS: [(&str, &str); 9] = [
     ("codex", "AGENT_VERSION_CODEX"),
     ("opencode", "AGENT_VERSION_OPENCODE"),
     ("claude", "AGENT_VERSION_CLAUDE"),
     ("copilot", "AGENT_VERSION_COPILOT"),
+    ("agy", "AGENT_VERSION_AGY"),
     ("dsh", "AGENT_VERSION_DSH"),
     ("pi", "AGENT_VERSION_PI"),
     ("pi-claude-bridge", "AGENT_VERSION_PI_CLAUDE_BRIDGE"),
@@ -1951,7 +1952,7 @@ fn assert_exact_slot(value: &str, prefix: &str) {
 #[test]
 fn single_slot_recipes_pin_an_exact_default_and_reference_it_in_the_label() {
     let text = standard_dockerfile();
-    for (label, arg) in &VERSION_SLOTS[..4] {
+    for (label, arg) in &VERSION_SLOTS[..5] {
         let value = dockerfile_arg(&text, arg);
         match *label {
             "codex" => assert_exact_slot(&value, "rust-v"),
@@ -1959,6 +1960,11 @@ fn single_slot_recipes_pin_an_exact_default_and_reference_it_in_the_label() {
                 assert_exact_slot(&value, "v");
                 assert!(value.starts_with("v2."), "OpenCode major 2 only");
             }
+            // agy's release tag is the bare version, so the slot is X.Y.Z only.
+            "agy" => assert!(
+                is_exact_version(&value),
+                "the agy slot must be a bare exact X.Y.Z: {value:?}"
+            ),
             _ => assert_exact_slot(&value, ""),
         }
         assert_eq!(
@@ -2015,7 +2021,7 @@ fn every_shipped_version_label_is_present_exactly_once() {
     expected.sort();
     assert_eq!(
         seen, expected,
-        "the standard-owned version labels drifted from the eight-slot contract"
+        "the standard-owned version labels drifted from the nine-slot contract"
     );
 }
 
@@ -2273,6 +2279,8 @@ fn exact_image_install_hooks_exist() {
         "claude/vendor/install.sh",
         "copilot/install-copilot.sh",
         "copilot/verify-copilot.sh",
+        "agy/install-agy.sh",
+        "agy/verify-agy.sh",
         "dsh/install-dsh.sh",
         "dsh/verify-dsh.sh",
         "dsh/prepare-lock.sh",
@@ -4170,6 +4178,20 @@ const ARTIFACT_PINS: [(&str, &str); 2] = [
     ("node", "images/artifacts/node.json"),
     ("gh", "images/artifacts/gh.json"),
 ];
+/// Agent-owned artifacts keep their pin inside their own tool directory, outside
+/// the base roots, so a bump cannot change base identity (ADR 0012). They are
+/// kept apart from `ARTIFACT_PINS` because that list is tested against the base
+/// image's mounts, labels and input manifest.
+const AGENT_ARTIFACT_PINS: [(&str, &str); 1] = [("agy", "images/tools/agy/pin.json")];
+/// Google's updater manifest is agy's second corroboration channel; its GCS
+/// `url` field is never a download source.
+const AGY_MANIFEST_ORIGIN: &str =
+    "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/";
+const AGY_RELEASE_API: &str =
+    "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/tags/";
+const AGY_RELEASE_DOWNLOAD: &str =
+    "https://github.com/google-antigravity/antigravity-cli/releases/download/";
+const AGY_PAYLOAD: [(&str, &str); 1] = [("antigravity", "bin/agy")];
 /// The reviewed Node release key: one primary key from `nodejs/release-keys`,
 /// with the fingerprint the pin has to name.
 const NODE_RELEASE_KEY: &str = "node-release-key.asc";
@@ -4198,6 +4220,19 @@ struct ArtifactArchive {
     member_prefix: String,
     digest: String,
     bundle: Option<(String, String)>,
+    /// agy's second, independent hash: the sha512 Google's updater manifest
+    /// records for the same bytes. Only a hash-only pin carries one.
+    sha512: Option<String>,
+}
+
+/// One committed corroboration file: where it was published, where it is
+/// committed relative to the pin directory, and the digest of the committed
+/// bytes.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct EvidenceFile {
+    url: String,
+    path: String,
+    sha256: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4216,13 +4251,23 @@ enum ArtifactAuthentication {
         verified_on: String,
         evidence: Vec<String>,
     },
+    /// No upstream signature or attestation exists. The two committed upstream
+    /// records had to agree with the bytes at pin time; the build re-checks that
+    /// they still agree with each other and with the pin before it fetches.
+    HashOnly {
+        release: EvidenceFile,
+        manifests: BTreeMap<String, EvidenceFile>,
+        verified_on: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ArtifactPin {
     name: String,
     version: String,
-    payload: Vec<String>,
+    /// (archive member, published path) pairs: agy renames its one member,
+    /// node and gh publish the reviewed archive's own layout.
+    payload: Vec<(String, String)>,
     links: Vec<(String, String)>,
     /// The npm version the reviewed Node archive ships, recorded so the runtime
     /// evidence compares against a reviewed value instead of whatever the image
@@ -4238,6 +4283,8 @@ fn platform_token(name: &str, platform: &str) -> &'static str {
         ("node", "linux/arm64") => "linux-arm64",
         ("gh", "linux/amd64") => "linux_amd64",
         ("gh", "linux/arm64") => "linux_arm64",
+        ("agy", "linux/amd64") => "x64",
+        ("agy", "linux/arm64") => "arm64",
         _ => unreachable!("the pin names a supported artifact and platform"),
     }
 }
@@ -4245,7 +4292,18 @@ fn platform_token(name: &str, platform: &str) -> &'static str {
 fn artifact_filename(name: &str, version: &str, platform: &str) -> String {
     match name {
         "node" => format!("node-v{version}-{}.tar.xz", platform_token(name, platform)),
+        "agy" => format!("agy_cli_linux_{}.tar.gz", platform_token(name, platform)),
         _ => format!("gh_{version}_{}.tar.gz", platform_token(name, platform)),
+    }
+}
+
+/// The upstream tag a release is published under: Node and the GitHub CLI
+/// prefix it with `v`, agy's tag is the bare version.
+fn release_tag(name: &str, version: &str) -> String {
+    if name == "agy" {
+        version.to_owned()
+    } else {
+        format!("v{version}")
     }
 }
 
@@ -4255,8 +4313,59 @@ fn artifact_bundle_name(version: &str, platform: &str) -> String {
 
 fn parse_artifact_authentication(
     name: &str,
+    version: &str,
     value: &Value,
 ) -> Result<ArtifactAuthentication, String> {
+    if name == "agy" {
+        let members = exact(
+            value,
+            &["method", "release", "manifests", "verified_on", "reason"],
+            "agy authentication",
+        )?;
+        // The method is bound to the artifact name: hash-only is not a downgrade
+        // any other pin may select.
+        if text(&members["method"], "agy method")? != "hash-only" {
+            return Err("agy: authentication must be hash-only".into());
+        }
+        let release = evidence_file(
+            exact(
+                &members["release"],
+                &["url", "path", "sha256"],
+                "agy release evidence",
+            )?,
+            &format!("{AGY_RELEASE_API}{version}"),
+            "evidence/release.json",
+            "agy release evidence",
+        )?;
+        let entries = exact_platforms(
+            &members["manifests"],
+            &["url", "path", "sha256"],
+            "agy manifests",
+        )?;
+        let mut manifests = BTreeMap::new();
+        for (platform, entry) in PLATFORMS.iter().zip(entries) {
+            let arch = platform.trim_start_matches("linux/");
+            manifests.insert(
+                (*platform).to_owned(),
+                evidence_file(
+                    entry,
+                    &format!("{AGY_MANIFEST_ORIGIN}linux_{arch}.json"),
+                    &format!("evidence/manifest-{}.json", platform.replace('/', "-")),
+                    &format!("agy {platform} manifest"),
+                )?,
+            );
+        }
+        let verified_on = text(&members["verified_on"], "agy verified_on")?;
+        if !is_date(&verified_on) {
+            return Err("agy verified_on must be a date".into());
+        }
+        let _ = text(&members["reason"], "agy reason")?;
+        return Ok(ArtifactAuthentication::HashOnly {
+            release,
+            manifests,
+            verified_on,
+        });
+    }
     if name == "node" {
         let members = exact(
             value,
@@ -4404,6 +4513,41 @@ fn parse_artifact_authentication(
     })
 }
 
+/**
+ * One committed corroboration file. A build never requests these, so there is no
+ * fixture exception: the recorded origin has to be the upstream one and the
+ * committed path is fixed. The crate cannot hash, so this is the strongest
+ * binding available here: the required exact string is derived, not matched.
+ */
+fn evidence_file(
+    members: &serde_json::Map<String, Value>,
+    url: &str,
+    path: &str,
+    context: &str,
+) -> Result<EvidenceFile, String> {
+    let found_url = text(&members["url"], &format!("{context} url"))?;
+    if found_url != url {
+        return Err(format!(
+            "{context}: the url must be exactly {url}, got {found_url}"
+        ));
+    }
+    let found_path = text(&members["path"], &format!("{context} path"))?;
+    if found_path != path {
+        return Err(format!(
+            "{context}: the path must be {path}, got {found_path}"
+        ));
+    }
+    let sha256 = text(&members["sha256"], &format!("{context} sha256"))?;
+    if !is_lower_hex(&sha256, 64) {
+        return Err(format!("{context}: sha256 must be a lower-case SHA-256"));
+    }
+    Ok(EvidenceFile {
+        url: found_url,
+        path: found_path,
+        sha256,
+    })
+}
+
 fn parse_artifact_pin(name: &str, source: &str) -> Result<ArtifactPin, String> {
     let value = strict_json(source)?;
     let mut keys = vec![
@@ -4441,8 +4585,9 @@ fn parse_artifact_pin(name: &str, source: &str) -> Result<ArtifactPin, String> {
         "artifact upstream",
     )?;
     let _ = text(&upstream["project"], "artifact upstream project")?;
-    if text(&upstream["release"], "artifact upstream release")? != format!("v{version}") {
-        return Err("artifact upstream release must be v<version>".into());
+    let tag = release_tag(name, &version);
+    if text(&upstream["release"], "artifact upstream release")? != tag {
+        return Err(format!("artifact upstream release must be {tag}"));
     }
     let bundled = if name == "node" {
         let node = exact(&members["bundled"], &["npm"], "node bundled")?;
@@ -4468,11 +4613,34 @@ fn parse_artifact_pin(name: &str, source: &str) -> Result<ArtifactPin, String> {
     }
     let mut payload = Vec::new();
     for item in payload_entries {
-        let entry = text(item, "artifact payload entry")?;
-        if entry.starts_with('/') || entry.split('/').any(|part| part.is_empty() || part == "..") {
-            return Err(format!("artifact payload entry must be relative: {entry}"));
+        let pair = if name == "agy" {
+            let entry = exact(item, &["member", "path"], "artifact payload entry")?;
+            let member = text(&entry["member"], "artifact payload member")?;
+            let path = text(&entry["path"], "artifact payload path")?;
+            (member, path)
+        } else {
+            let entry = text(item, "artifact payload entry")?;
+            (entry.clone(), entry)
+        };
+        for value in [&pair.0, &pair.1] {
+            if value.starts_with('/')
+                || value.split('/').any(|part| part.is_empty() || part == "..")
+            {
+                return Err(format!("artifact payload entry must be relative: {value}"));
+            }
         }
-        payload.push(entry);
+        payload.push(pair);
+    }
+    if name == "agy" {
+        let expected: Vec<(String, String)> = AGY_PAYLOAD
+            .iter()
+            .map(|(member, path)| ((*member).to_owned(), (*path).to_owned()))
+            .collect();
+        if payload != expected {
+            return Err(format!(
+                "agy: payload must publish exactly {expected:?}, found {payload:?}"
+            ));
+        }
     }
     let mut links = Vec::new();
     for item in array(&install["links"], "artifact links")? {
@@ -4487,27 +4655,27 @@ fn parse_artifact_pin(name: &str, source: &str) -> Result<ArtifactPin, String> {
         }
         links.push((pair.remove(0), pair.remove(0)));
     }
-    let platform_keys: &[&str] = if name == "gh" {
-        &["url", "archive", "member_prefix", "sha256", "bundle"]
-    } else {
-        &["url", "archive", "member_prefix", "sha256"]
+    let platform_keys: &[&str] = match name {
+        "gh" => &["url", "archive", "member_prefix", "sha256", "bundle"],
+        "agy" => &["url", "archive", "member_prefix", "sha256", "sha512"],
+        _ => &["url", "archive", "member_prefix", "sha256"],
     };
     let entries = exact_platforms(&members["platforms"], platform_keys, "artifact platforms")?;
     let mut archives = BTreeMap::new();
     for (platform, entry) in PLATFORMS.iter().zip(entries) {
         let context = format!("{name} {platform}");
         let url = text(&entry["url"], &format!("{context} url"))?;
-        let origin = if name == "node" {
-            "https://nodejs.org/dist/"
-        } else {
-            "https://github.com/cli/cli/releases/download/"
+        let origin = match name {
+            "node" => "https://nodejs.org/dist/",
+            "agy" => AGY_RELEASE_DOWNLOAD,
+            _ => "https://github.com/cli/cli/releases/download/",
         };
         let expected = artifact_filename(name, &version, platform);
         // The expected URL is *computed*, not matched by prefix: `..` segments
         // (which GitHub resolves into another repository), a lookalike host, an
         // extra path segment or a query string must not be able to name bytes
         // that are not the reviewed release asset.
-        let canonical = format!("{origin}v{version}/{expected}");
+        let canonical = format!("{origin}{tag}/{expected}");
         if url != canonical {
             return Err(format!(
                 "{context}: url must be exactly {canonical}, found {url}"
@@ -4520,7 +4688,13 @@ fn parse_artifact_pin(name: &str, source: &str) -> Result<ArtifactPin, String> {
         if text(&entry["archive"], &format!("{context} archive"))? != kind {
             return Err(format!("{context}: archive must be {kind}"));
         }
-        let prefix = format!("{}/", &expected[..expected.len() - suffix.len()]);
+        // agy's archive is prefixless; node and gh carry one top-level directory
+        // named after the file.
+        let prefix = if name == "agy" {
+            String::new()
+        } else {
+            format!("{}/", &expected[..expected.len() - suffix.len()])
+        };
         if text(&entry["member_prefix"], &format!("{context} member_prefix"))? != prefix {
             return Err(format!("{context}: member_prefix must be {prefix}"));
         }
@@ -4528,6 +4702,15 @@ fn parse_artifact_pin(name: &str, source: &str) -> Result<ArtifactPin, String> {
         if !is_lower_hex(&digest, 64) {
             return Err(format!("{context}: sha256 must be a lower-case SHA-256"));
         }
+        let sha512 = if name == "agy" {
+            let second = text(&entry["sha512"], &format!("{context} sha512"))?;
+            if !is_lower_hex(&second, 128) {
+                return Err(format!("{context}: sha512 must be a lower-case SHA-512"));
+            }
+            Some(second)
+        } else {
+            None
+        };
         let bundle = if name == "gh" {
             let bundle = exact(
                 &entry["bundle"],
@@ -4557,17 +4740,18 @@ fn parse_artifact_pin(name: &str, source: &str) -> Result<ArtifactPin, String> {
                 member_prefix: prefix,
                 digest,
                 bundle,
+                sha512,
             },
         );
     }
     Ok(ArtifactPin {
         name: name.to_owned(),
-        version,
+        version: version.clone(),
         payload,
         links,
         bundled,
         archives,
-        authentication: parse_artifact_authentication(name, &members["authentication"])?,
+        authentication: parse_artifact_authentication(name, &version, &members["authentication"])?,
     })
 }
 
@@ -4583,6 +4767,16 @@ fn artifact_evidence_paths(pin: &ArtifactPin) -> Vec<String> {
                 if let Some((bundle, _)) = &archive.bundle {
                     paths.push(bundle.clone());
                 }
+            }
+        }
+        // Pin-directory-relative, like the other arms: agy's three corroboration
+        // files are the only thing binding the bytes this artifact can name.
+        ArtifactAuthentication::HashOnly {
+            release, manifests, ..
+        } => {
+            paths.push(release.path.clone());
+            for evidence in manifests.values() {
+                paths.push(evidence.path.clone());
             }
         }
     }
@@ -5750,6 +5944,11 @@ fn artifact_pins_select_exact_identities_for_both_platforms() {
                     assert!(members.contains_key("dsseEnvelope"), "{bundle}");
                 }
             }
+            // No wildcard: a fourth variant must fail to compile here too, so the
+            // base list keeps proving that node and gh cannot be downgraded.
+            ArtifactAuthentication::HashOnly { .. } => panic!(
+                "{name}: a base artifact cannot be hash-only; only agy, outside ARTIFACT_PINS, is"
+            ),
         }
         assert_eq!(
             label_value(
@@ -5766,8 +5965,9 @@ fn artifact_pins_select_exact_identities_for_both_platforms() {
                 "the pinned interpreter path /usr/bin/node must stay a link to the artifact"
             );
             for entry in ["bin", "lib", "share"] {
+                let entry = entry.to_owned();
                 assert!(
-                    pin.payload.contains(&entry.to_owned()),
+                    pin.payload.contains(&(entry.clone(), entry.clone())),
                     "the node payload is the whole reviewed archive, {entry} included"
                 );
             }
@@ -6064,6 +6264,535 @@ fn the_base_recipe_installs_the_pinned_artifacts_through_the_installer() {
             "accepted a recipe mutation: {label}"
         );
     }
+}
+
+// --- agy: the hash-only agent artifact (#131) -------------------------------
+//
+// agy has no upstream signature or attestation, so the committed pin plus the
+// two committed upstream records are the whole authority. The gate re-derives
+// what it can without hashing: the canonical URL from the bare tag, the
+// prefixless single member, the sha512 assertion, the three evidence paths, and
+// a recipe that only ever hands an exact pinned version to the shared installer.
+
+/// The agy recipe's one install RUN, or why the recipe does not describe one.
+fn agy_install_run(text: &str) -> Result<String, String> {
+    let runs: Vec<String> = dockerfile_instructions(text)
+        .into_iter()
+        .filter(|instruction| {
+            instruction.starts_with("RUN ") && instruction.contains("sh /tmp/install-agy.sh")
+        })
+        .collect();
+    if runs.len() != 1 {
+        return Err(format!(
+            "the agy layer must install in exactly one RUN, found {}",
+            runs.len()
+        ));
+    }
+    Ok(runs.into_iter().next().expect("one run"))
+}
+
+fn check_agy_recipe(text: &str) -> Result<(), String> {
+    let (name, path) = AGENT_ARTIFACT_PINS[0];
+    let pin = parse_artifact_pin(name, &read_text(path))?;
+    let arg = format!("ARG AGENT_VERSION_AGY={}", pin.version);
+    let args: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("ARG AGENT_VERSION_AGY="))
+        .collect();
+    if args != [arg.as_str()] {
+        return Err(format!("exactly one {arg} is required, found {args:?}"));
+    }
+    let mut labels = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("LABEL org.agent-vm.version.agy="));
+    if labels.next() != Some("LABEL org.agent-vm.version.agy=\"${AGENT_VERSION_AGY}\"")
+        || labels.next().is_some()
+    {
+        return Err("exactly one label must reference AGENT_VERSION_AGY".into());
+    }
+    let mut switches = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("ENV AGY_CLI_DISABLE_AUTO_UPDATE="));
+    if switches.next() != Some("ENV AGY_CLI_DISABLE_AUTO_UPDATE=1") || switches.next().is_some() {
+        return Err("exactly one ENV AGY_CLI_DISABLE_AUTO_UPDATE=1 is required".into());
+    }
+    let run = agy_install_run(text)?;
+    let mounts = leading_mount_specs(&run);
+    if !mounts.iter().any(|spec| {
+        mount_field(spec, "from").as_deref() == Some("recipe-contract-bin")
+            && mount_field(spec, "target").as_deref() == Some("/tmp/recipe-contract")
+            && mount_flag(spec, "ro")
+    }) {
+        return Err("the agy RUN must mount the composed helper directory read-only".into());
+    }
+    for (source, target) in [
+        ("tools/agy", "/tmp/agy"),
+        ("tools/agy/install-agy.sh", "/tmp/install-agy.sh"),
+        (
+            "install-artifact.sh",
+            "/tmp/artifact-source/install-artifact.sh",
+        ),
+        ("artifacts", "/tmp/artifact-source/artifacts"),
+    ] {
+        let spec = mounts
+            .iter()
+            .find(|spec| mount_field(spec, "source").as_deref() == Some(source))
+            .ok_or_else(|| format!("the agy RUN does not mount {source}"))?;
+        if mount_field(spec, "target").as_deref() != Some(target) {
+            return Err(format!("{source} must be mounted at {target}"));
+        }
+        if !mount_flag(spec, "ro") {
+            return Err(format!("{source} must be a read-only mount"));
+        }
+    }
+    // `artifact_pin.load` names a `pin.json` after the directory that holds it, so
+    // the mount target is part of the pin's identity: a directory called
+    // `agy-source` makes the loader refuse the committed pin.
+    let pin_mount = mounts
+        .iter()
+        .find(|spec| mount_field(spec, "source").as_deref() == Some("tools/agy"))
+        .expect("the agy RUN mounts the pin directory");
+    let pin_target = mount_field(pin_mount, "target").unwrap_or_default();
+    if pin_target.rsplit('/').next() != Some("agy") {
+        return Err(format!(
+            "the pin directory must be mounted at a directory named agy, not {pin_target}"
+        ));
+    }
+    for needle in [
+        "AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract",
+        "AGENT_VM_AGY_SOURCE_DIR=/tmp/agy",
+        "ARTIFACT_SOURCE_DIR=/tmp/artifact-source",
+        "AGENT_VM_AGY_ARCH=\"${TARGETARCH}\"",
+        "AGENT_VM_VERSION_AGY=\"${AGENT_VERSION_AGY}\"",
+        "AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status",
+        "run-install.sh agy /opt/agent-vm/install-status/agy sh /tmp/install-agy.sh",
+    ] {
+        if !run.contains(needle) {
+            return Err(format!("the agy RUN must carry {needle}"));
+        }
+    }
+    // An inherited soft-fail must never soften this layer, and the version and
+    // digest must stay the pin's: a literal would let the ARG disagree.
+    if !run.contains("AGENT_INSTALL_SOFT_FAIL= ") {
+        return Err("the agy RUN must clear AGENT_INSTALL_SOFT_FAIL".into());
+    }
+    for forbidden in [
+        "AGENT_VM_AGY_URL",
+        "AGENT_VM_AGY_DIGEST",
+        "latest",
+        "run.app",
+        "storage.googleapis.com",
+    ] {
+        if text.contains(forbidden) {
+            return Err(format!(
+                "the standard recipe must not choose agy bytes at build time: {forbidden}"
+            ));
+        }
+    }
+    let certification = dockerfile_instructions(text)
+        .into_iter()
+        .find(|instruction| instruction.contains("sh /tmp/verify-standard.sh"))
+        .ok_or("the standard recipe has no final gate")?;
+    if !certification.contains("AGENT_VM_VERSION_AGY=\"${AGENT_VERSION_AGY}\"") {
+        return Err("the final gate must receive AGENT_VM_VERSION_AGY from the ARG".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn agy_recipe_installs_through_the_shared_installer() {
+    let text = standard_dockerfile();
+    check_agy_recipe(&text).expect("the standard recipe installs agy through the installer");
+    let (name, path) = AGENT_ARTIFACT_PINS[0];
+    let pin = parse_artifact_pin(name, &read_text(path)).unwrap();
+    // The last occurrence is the certification RUN: install, verify, certify.
+    let version_env = "AGENT_VM_VERSION_AGY=\"${AGENT_VERSION_AGY}\" \\\n";
+    let mut certification_dropped = text.clone();
+    let at = certification_dropped
+        .rfind(version_env)
+        .expect("the final gate passes the agy version");
+    certification_dropped.replace_range(at..at + version_env.len(), "");
+    let pin_directory_mount = "    --mount=type=bind,source=tools/agy,target=/tmp/agy,ro \\\n";
+    let hook_mount =
+        "    --mount=type=bind,source=tools/agy/install-agy.sh,target=/tmp/install-agy.sh,ro \\\n";
+    let installer_mount = "    --mount=type=bind,source=install-artifact.sh,target=/tmp/artifact-source/install-artifact.sh,ro \\\n";
+    let mutations: Vec<(&str, String)> = vec![
+        (
+            "arg pinned to a floating tag",
+            text.replace(
+                &format!("ARG AGENT_VERSION_AGY={}", pin.version),
+                "ARG AGENT_VERSION_AGY=latest",
+            ),
+        ),
+        (
+            "arg dropped",
+            text.replace(&format!("ARG AGENT_VERSION_AGY={}\n", pin.version), ""),
+        ),
+        (
+            "label detached from the arg",
+            text.replace(
+                "LABEL org.agent-vm.version.agy=\"${AGENT_VERSION_AGY}\"",
+                "LABEL org.agent-vm.version.agy=\"1.4.11\"",
+            ),
+        ),
+        (
+            "auto-update switch removed",
+            text.replace("ENV AGY_CLI_DISABLE_AUTO_UPDATE=1\n", ""),
+        ),
+        ("pin mount removed", text.replace(pin_directory_mount, "")),
+        (
+            "hook mount writable",
+            text.replace(hook_mount, &hook_mount.replace(",ro", "")),
+        ),
+        ("installer mount removed", text.replace(installer_mount, "")),
+        (
+            "architecture fixed at build-authoring time",
+            text.replace(
+                "AGENT_VM_AGY_ARCH=\"${TARGETARCH}\"",
+                "AGENT_VM_AGY_ARCH=\"amd64\"",
+            ),
+        ),
+        (
+            "soft failure admitted",
+            text.replace(
+                "AGENT_INSTALL_SOFT_FAIL= \\\n",
+                "AGENT_INSTALL_SOFT_FAIL=1 \\\n",
+            ),
+        ),
+        (
+            "version passed as a literal",
+            text.replace(version_env, "AGENT_VM_VERSION_AGY=\"1.4.11\" \\\n"),
+        ),
+        (
+            "installer bypassed",
+            text.replace(
+                "sh /tmp/recipe-contract/run-install.sh agy /opt/agent-vm/install-status/agy sh /tmp/install-agy.sh",
+                "sh /tmp/install-agy.sh",
+            ),
+        ),
+        (
+            "record written elsewhere",
+            text.replace(
+                "run-install.sh agy /opt/agent-vm/install-status/agy",
+                "run-install.sh agy /tmp/agy-status",
+            ),
+        ),
+        ("final gate does not receive the version", certification_dropped),
+        (
+            "build-time url choice introduced",
+            format!("{text}ENV AGENT_VM_AGY_URL=https://example.invalid/agy\n"),
+        ),
+    ];
+    for (label, edited) in mutations {
+        assert_ne!(
+            edited, text,
+            "the agy recipe mutation did not apply: {label}"
+        );
+        assert!(
+            check_agy_recipe(&edited).is_err(),
+            "accepted an agy recipe mutation: {label}"
+        );
+    }
+}
+
+#[test]
+fn agy_hook_checks_the_pin_before_installing() {
+    let hook = read_text("images/tools/agy/install-agy.sh");
+    let pinned = hook
+        .find("read-pin-version.py")
+        .expect("the hook reads the committed pin's version");
+    let install = hook
+        .find("install-artifact.sh")
+        .expect("the hook hands the install to the shared installer");
+    assert!(
+        pinned < install,
+        "the hook must refuse an unpinned version before anything is installed"
+    );
+    for forbidden in ["latest", "curl", "wget"] {
+        assert!(
+            !hook.contains(forbidden),
+            "the agy hook must not resolve or fetch upstream itself: {forbidden}"
+        );
+    }
+}
+
+/// The pin directory of one artifact pin, e.g. `images/tools/agy`.
+fn pin_directory(path: &str) -> &str {
+    path.rsplit_once('/')
+        .map(|(directory, _)| directory)
+        .expect("a pin path has a directory")
+}
+
+#[test]
+fn agy_pin_selects_corroborated_identities() {
+    let base_inputs = base_input_manifest_paths();
+    for (name, path) in AGENT_ARTIFACT_PINS {
+        let pin = parse_artifact_pin(name, &read_text(path))
+            .unwrap_or_else(|error| panic!("{path}: {error}"));
+        assert_eq!(pin.name, "agy");
+        assert!(
+            is_exact_version(&pin.version),
+            "{path}: an exact X.Y.Z version"
+        );
+        assert_eq!(
+            pin.archives.keys().map(String::as_str).collect::<Vec<_>>(),
+            PLATFORMS.to_vec(),
+            "{path}: exactly the two supported platforms"
+        );
+        assert_eq!(
+            pin.payload,
+            AGY_PAYLOAD
+                .iter()
+                .map(|(member, published)| ((*member).to_owned(), (*published).to_owned()))
+                .collect::<Vec<_>>(),
+            "{path}: one prefixless member published as bin/agy"
+        );
+        assert!(pin.links.is_empty(), "{path}: agy publishes no links");
+        for (platform, archive) in &pin.archives {
+            assert_eq!(archive.member_prefix, "", "{path}: {platform} prefixless");
+            assert_eq!(archive.archive, "tar.gz", "{path}: {platform} archive kind");
+            assert!(
+                archive.url.contains(platform_token(name, platform)),
+                "{path}: {platform} url must name its architecture"
+            );
+            assert!(
+                is_lower_hex(&archive.digest, 64),
+                "{path}: {platform} digest"
+            );
+            let sha512 = archive
+                .sha512
+                .as_deref()
+                .unwrap_or_else(|| panic!("{path}: {platform} must carry the manifest's sha512"));
+            assert!(
+                is_lower_hex(sha512, 128),
+                "{path}: {platform} sha512 must be a lower-case SHA-512"
+            );
+        }
+        let ArtifactAuthentication::HashOnly {
+            release,
+            manifests,
+            verified_on,
+        } = &pin.authentication
+        else {
+            panic!("{path}: agy has no upstream signature, so the pin must be hash-only");
+        };
+        assert!(is_date(verified_on), "{path}: verified_on");
+        let directory = pin_directory(path);
+        // The committed GitHub release document names the pin's tag and, per
+        // architecture, exactly the digest the pin selects.
+        let release_value = strict_json(&read_text(&format!("{directory}/{}", release.path)))
+            .unwrap_or_else(|error| panic!("{}: {error}", release.path));
+        let document = object(&release_value, "release evidence").unwrap();
+        assert_eq!(
+            text(&document["tag_name"], "release tag").unwrap(),
+            pin.version,
+            "the committed release evidence must describe the pinned tag"
+        );
+        assert_eq!(
+            document["draft"],
+            Value::Bool(false),
+            "a draft release is not a reviewed selection"
+        );
+        let assets = array(&document["assets"], "release assets").unwrap();
+        for (platform, archive) in &pin.archives {
+            let filename = artifact_filename(name, &pin.version, platform);
+            let digest = assets
+                .iter()
+                .filter_map(|asset| object(asset, "release asset").ok())
+                .find(|asset| asset.get("name").and_then(Value::as_str) == Some(&filename))
+                .and_then(|asset| asset.get("digest"))
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!("the release evidence must name {filename} with its digest")
+                });
+            assert_eq!(
+                text(&digest, "release asset digest").unwrap(),
+                format!("sha256:{}", archive.digest),
+                "{platform}: the documented digest must be the pin's sha256"
+            );
+        }
+        // Each updater manifest is checked against its own architecture only: the
+        // two manifests necessarily differ in url and sha512.
+        for (platform, archive) in &pin.archives {
+            let evidence = &manifests[platform];
+            let value = strict_json(&read_text(&format!("{directory}/{}", evidence.path)))
+                .unwrap_or_else(|error| panic!("{}: {error}", evidence.path));
+            let members = exact(&value, &["version", "url", "sha512"], "committed manifest")
+                .unwrap_or_else(|error| panic!("{}: {error}", evidence.path));
+            assert_eq!(
+                text(&members["version"], "manifest version").unwrap(),
+                pin.version,
+                "{platform}: the committed manifest must describe the pinned version"
+            );
+            assert_eq!(
+                text(&members["sha512"], "manifest sha512").unwrap(),
+                archive.sha512.clone().expect("agy pins a sha512"),
+                "{platform}: the committed manifest must corroborate the pin's archive"
+            );
+            assert!(
+                text(&members["url"], "manifest url")
+                    .unwrap()
+                    .starts_with("https://"),
+                "{platform}: the manifest's own url is recorded, never fetched"
+            );
+        }
+        // The pin and its evidence are an agent selection, not base inputs: a
+        // bump must not change base identity (ADR 0012).
+        for evidence in artifact_evidence_paths(&pin) {
+            let listed = format!("tools/agy/{evidence}");
+            assert!(
+                !base_inputs.contains(&listed),
+                "{listed} must not be a base input"
+            );
+            assert!(!read_text(&format!("images/{listed}")).is_empty());
+        }
+    }
+}
+
+#[test]
+fn agy_pin_mutations_are_refused() {
+    let (name, path) = AGENT_ARTIFACT_PINS[0];
+    let source = read_text(path);
+    let pin = parse_artifact_pin(name, &source).unwrap();
+    let version = pin.version.clone();
+    let amd64 = pin.archives["linux/amd64"].clone();
+    let url = amd64.url.clone();
+    let filename = url
+        .rsplit('/')
+        .next()
+        .expect("a url names a file")
+        .to_owned();
+    let sha512 = amd64.sha512.clone().expect("agy pins a sha512");
+    let asset = format!("/download/{version}/{filename}");
+    let rows: Vec<(&str, String, String, &str)> = vec![
+        (
+            "unknown field",
+            "\"kind\":".to_owned(),
+            "\"sort\":".to_owned(),
+            "expected exactly",
+        ),
+        (
+            "v-prefixed release",
+            format!("\"release\": \"{version}\""),
+            format!("\"release\": \"v{version}\""),
+            "upstream release must be",
+        ),
+        (
+            "v-prefixed tag in the url",
+            asset.clone(),
+            format!("/download/v{version}/{filename}"),
+            "url must be exactly",
+        ),
+        (
+            "musl asset",
+            filename.clone(),
+            filename.replace("_x64", "_musl"),
+            "url must be exactly",
+        ),
+        (
+            "another repository",
+            "google-antigravity/antigravity-cli/releases/download".to_owned(),
+            "attacker/repo/releases/download".to_owned(),
+            "url must be exactly",
+        ),
+        (
+            "traversal in the url",
+            asset.clone(),
+            format!("/download/{version}/../{filename}"),
+            "url must be exactly",
+        ),
+        (
+            "query string in the url",
+            format!("\"url\": \"{url}\""),
+            format!("\"url\": \"{url}?raw=1\""),
+            "url must be exactly",
+        ),
+        (
+            "other architecture in the url",
+            filename.clone(),
+            filename.replace("_x64", "_arm64"),
+            "url must be exactly",
+        ),
+        (
+            "member prefix that no filename derives from",
+            "\"member_prefix\": \"\"".to_owned(),
+            "\"member_prefix\": \"x/\"".to_owned(),
+            "member_prefix must be",
+        ),
+        (
+            "payload member renamed",
+            "\"member\": \"antigravity\"".to_owned(),
+            "\"member\": \"agy\"".to_owned(),
+            "payload must publish",
+        ),
+        (
+            "payload path renamed",
+            "\"path\": \"bin/agy\"".to_owned(),
+            "\"path\": \"bin/antigravity\"".to_owned(),
+            "payload must publish",
+        ),
+        (
+            "sha512 deleted",
+            format!(",\n      \"sha512\": \"{sha512}\""),
+            String::new(),
+            "expected exactly",
+        ),
+        (
+            "upper-case sha512",
+            sha512.clone(),
+            sha512.to_uppercase(),
+            "sha512 must be a lower-case SHA-512",
+        ),
+        (
+            "method downgraded to a signature kind",
+            "\"method\": \"hash-only\"".to_owned(),
+            "\"method\": \"openpgp-signed-manifest\"".to_owned(),
+            "agy: authentication must be hash-only",
+        ),
+        (
+            "method deleted",
+            "\"method\": \"hash-only\",\n".to_owned(),
+            String::new(),
+            "expected exactly",
+        ),
+        (
+            "release evidence host",
+            "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/tags/"
+                .to_owned(),
+            "https://api.github.com/repos/attacker/antigravity-cli/releases/tags/".to_owned(),
+            "the url must be exactly",
+        ),
+        (
+            "updater manifest host",
+            "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/"
+                .to_owned(),
+            "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app.evil/manifests/"
+                .to_owned(),
+            "the url must be exactly",
+        ),
+        (
+            "evidence path renamed",
+            "\"path\": \"evidence/release.json\"".to_owned(),
+            "\"path\": \"evidence/release-2.json\"".to_owned(),
+            "the path must be",
+        ),
+    ];
+    let mut applied = 0;
+    for (label, from, to, needle) in rows {
+        let edited = source.replacen(&from, &to, 1);
+        assert_ne!(edited, source, "{name}: {label}: mutation did not apply");
+        let error = parse_artifact_pin(name, &edited)
+            .expect_err(&format!("{name}: accepted a pin mutation: {label}"));
+        assert!(
+            error.contains(needle),
+            "{name}: {label}: the refusal does not name the rule ({needle}): {error}"
+        );
+        applied += 1;
+    }
+    assert!(applied >= 16, "{name}: the mutation table stays broad");
 }
 
 fn edited_recipe(

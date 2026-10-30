@@ -16,7 +16,7 @@ from contract_context import native_contract_directory  # noqa: E402  (path firs
 tmp=Path(tempfile.mkdtemp(prefix='gate.', dir='/tmp')); tmp.chmod(0o755)
 atexit.register(shutil.rmtree, tmp)
 records=tmp/'records'; records.mkdir(); tools=tmp/'tools'; commands=tmp/'bin'; commands.mkdir()
-names=['dsh','pi','pi-claude-bridge','codex','opencode','claude','copilot','opencode-claude']; verifiers=['dsh','pi','codex','opencode','claude','copilot']
+names=['dsh','pi','pi-claude-bridge','codex','opencode','claude','copilot','agy','opencode-claude']; verifiers=['dsh','pi','codex','opencode','claude','copilot','agy']
 def writeexe(p,s): p.parent.mkdir(parents=True,exist_ok=True); p.write_text(s); p.chmod(0o755)
 # Native fixtures are copied or appended byte-for-byte; variable paths/versions
 # travel as environment data instead of being interpolated into program bodies.
@@ -27,7 +27,7 @@ for name in names: (records/name).write_text('installed\n')
 for tool in verifiers:
  writeexe(tools/tool/f'verify-{tool}.sh',f'#!/bin/sh\nset -eu\ntest -z "$AGENT_INSTALL_SOFT_FAIL"\nprintf "{tool}\\n" >> "$CALLS"\n')
 writeexe(tools/'opencode/verify-opencode-plugins.sh', '#!/bin/sh\nset -eu\nprintf "opencode-claude\\n" >> "$CALLS"\n')
-for name in ['codex','opencode','claude','pi']: writeexe(commands/name,'#!/bin/sh\nexit 0\n')
+for name in ['codex','opencode','claude','pi','agy']: writeexe(commands/name,'#!/bin/sh\nexit 0\n')
 # dsh is not installed by a package manager .bin wrapper: the image links
 # /usr/local/bin/dsh straight at the installed lib entrypoint, so the identity
 # tuple compares that target (and a same-version copy is a different file).
@@ -37,7 +37,7 @@ writeexe(dsh_target,'#!/usr/bin/env node\n')
 prefix=tmp/'prefix'
 for name,folder in [('codex','.local'),('claude','.local'),('opencode','.opencode')]:
  p=prefix/folder/'bin'/name; p.parent.mkdir(parents=True,exist_ok=True); p.symlink_to(commands/name)
-env=dict(os.environ,AGENT_VM_CONTRACT_DIR=str(native_contract_directory(r)),AGENT_VM_TOOL_SOURCE_DIR=str(tools),AGENT_VM_INSTALL_STATUS_DIR=str(records),AGENT_INSTALL_SOFT_FAIL='1',AGENT_VM_CODEX_PREFIX=str(prefix),AGENT_VM_OPENCODE_PREFIX=str(prefix),AGENT_VM_CLAUDE_PREFIX=str(prefix),AGENT_VM_DSH_PREFIX=str(dsh_prefix),AGENT_VM_PI_WRAPPER=str(commands/'pi'),CALLS=str(tmp/'calls'),PATH=str(commands)+':'+os.environ['PATH'],AGENT_VM_VERSION_CODEX='rust-v0.159.3')
+env=dict(os.environ,AGENT_VM_CONTRACT_DIR=str(native_contract_directory(r)),AGENT_VM_TOOL_SOURCE_DIR=str(tools),AGENT_VM_INSTALL_STATUS_DIR=str(records),AGENT_INSTALL_SOFT_FAIL='1',AGENT_VM_CODEX_PREFIX=str(prefix),AGENT_VM_OPENCODE_PREFIX=str(prefix),AGENT_VM_CLAUDE_PREFIX=str(prefix),AGENT_VM_DSH_PREFIX=str(dsh_prefix),AGENT_VM_PI_WRAPPER=str(commands/'pi'),AGENT_VM_AGY_BIN=str(commands/'agy'),CALLS=str(tmp/'calls'),PATH=str(commands)+':'+os.environ['PATH'],AGENT_VM_VERSION_CODEX='rust-v0.159.3')
 spec=importlib.util.spec_from_file_location('pnpm_fixture',r/'script/test/fixtures/pnpm/verifier-fixture.py')
 fixture_module=importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture_module)
 fixture=tmp/'pnpm-fixture'; fixture.mkdir()
@@ -51,7 +51,7 @@ def run(ok, e=None,label='gate'):
  count+=1
  print(f'{label}: expected {"pass" if ok else "nonzero"}, status={result.returncode}')
  return result
-run(True,label='installed + all seven agent gates, inherited soft input cleared')
+run(True,label='installed + all eight agent gates, inherited soft input cleared')
 assert (tmp/'calls').read_text().splitlines()==verifiers+['opencode-claude']
 for name in names:
  # `absent-transport 60` is a genuine curl code and stays valid; the retired npm
@@ -63,7 +63,7 @@ for name in names:
   run(False,label=f'{name} record {data!r}')
   p.write_text('installed\n')
 shadow=tmp/'shadow'; shadow.mkdir()
-for name in ['dsh','codex','opencode','claude','pi']:
+for name in ['dsh','codex','opencode','claude','pi','agy']:
  p=shadow/name; writeexe(p,'#!/bin/sh\nprintf "wrong-version\\n"\n')
  e=dict(env,PATH=str(shadow)+':'+env['PATH'])
  result=run(False,e,label=f'distinct readable {name} shadow'); assert str(p) in result.stderr

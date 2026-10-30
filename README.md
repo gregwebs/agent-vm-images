@@ -5,7 +5,7 @@ Editable Docker sources, independent of the agent-vm launcher:
 - **Base:** Debian 13, Bash, Node 22 (pinned release archive), GitHub CLI
   (pinned release archive), Python, Docker prerequisites, diagnostic
   utilities, zellij and pinned pnpm. No coding-agent CLI or fixed guest account.
-- **Standard:** the base plus dsh, Pi, Codex, OpenCode, Claude and Copilot;
+- **Standard:** the base plus dsh, Pi, Codex, OpenCode, Claude, Copilot and agy;
   inherited base pnpm and the Pi Claude bridge are also mandatory.
 - **Examples:** user-owned Dockerfiles built from the base or the released standard image; see [Examples](#examples).
 
@@ -55,7 +55,7 @@ docker build --builder "$BUILDER" --platform linux/arm64 \
 ```
 
 Use `linux/amd64` on x86-64 Linux. Both maintained recipes use **`images/` as
-context**, not a tool directory. The standard command installs all six agents
+context**, not a tool directory. The standard command installs all seven agents
 and fails if any required install, report, access check or final certification
 fails. Optional Claude LSP downloads are bounded and log failures explicitly.
 A failed rebuild leaves a previous successful Docker tag intact; that old tag
@@ -188,6 +188,7 @@ for agent commands: `bash -lc` can reset the image PATH through `/etc/profile`.
 - [Contributing and verification](CONTRIBUTING.md)
 - [Root-store advisory response](docs/ca-trust-response.md)
 - [Standard image releases](docs/standard-image-releases.md)
+- [The agy hash-only artifact pin](docs/adr/0012-agy-hash-only-artifact-pin.md)
 - [Installer security, locks and runtime payloads](images/tools/README.md)
 - [Layout, migration manifest and staged ownership](docs/image-source-ownership.md)
 

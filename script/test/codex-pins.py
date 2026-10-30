@@ -1881,7 +1881,7 @@ def case_transport(work: Path) -> None:
     label = 'transport_origin_refused'
     expect_refusal(label,
                    lambda: pin_codex.https_fetch('https://evil.example/x', output, 16),
-                   'not on a GitHub origin')
+                   'not on an approved origin')
 
     # --- the whole-request deadline -------------------------------------
     # A blocking read is what the old code could not interrupt: it checked the
@@ -2709,7 +2709,7 @@ def case_transport_sockets(work: Path) -> None:
                 pass
             raise pin_codex._Follow(newurl)
 
-    pin_codex._require_origin = lambda url: urllib.parse.urlsplit(url)
+    pin_codex._require_origin = lambda url, _origins: urllib.parse.urlsplit(url)
     try:
         label = 'transport_socket_follows_approved_redirect'
         pin_codex._GithubRedirects = PermissiveRedirect

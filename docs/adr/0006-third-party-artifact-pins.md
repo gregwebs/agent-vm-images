@@ -1,8 +1,11 @@
 # 0006: Third-party release artifacts come from committed pins
 
 Status: accepted for [#96](https://github.com/gregwebs/agent-vm-images/issues/96)
-(parent [#94](https://github.com/gregwebs/agent-vm-images/issues/94)). Evidence
-for the native rows lives in
+(parent [#94](https://github.com/gregwebs/agent-vm-images/issues/94)). Amended by
+[ADR 0012](0012-agy-hash-only-artifact-pin.md): a third artifact (`agy`) whose
+authentication is `hash-only`, whose pin lives outside `images/artifacts/` because
+it is an agent selection rather than a base input, and which needs per-artifact
+archive and member ceilings. Evidence for the native rows lives in
 [CONTRIBUTING](../../CONTRIBUTING.md#expensive-acceptance-and-ci) and the pull
 request that introduced this ADR.
 

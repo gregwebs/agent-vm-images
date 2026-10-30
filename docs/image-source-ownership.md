@@ -82,6 +82,30 @@ installer and the only reader of a pin in an image;
 [ADR 0006](adr/0006-third-party-artifact-pins.md) and the
 [image input policy](image-input-policy.md#pinned-third-party-release-artifacts).
 
+## Agent payload closures (#97, #131)
+
+Two agent selections are content pins rather than version ARGs alone.
+
+- **Codex** (`images/tools/codex/`): the pin, its four evidence files and the
+  vendored installer; `script/dev/pin-codex.py` is the only writer. See
+  [ADR 0009](adr/0009-codex-payload-pins.md).
+- **`agy`** (`images/tools/agy/`): the `hash-only` pin, its three evidence files,
+  the hand-written hook and verifier, and `ARG AGENT_VERSION_AGY`.
+  `script/dev/pin-agy.py` is the only writer of the generated files — the pin, the
+  three evidence files and the Dockerfile ARG — and the only place the two channels
+  are corroborated against **fresh** upstream bytes; the build re-checks the
+  committed evidence instead of fetching it. Nothing writes the hook or the
+  verifier. `images/tools/agy/` is **not** a base input — nothing in
+  `images/base-inputs.sha256` covers it — because it records an agent selection the
+  standard recipe owns, not a base input. See
+  [ADR 0012](adr/0012-agy-hash-only-artifact-pin.md).
+
+Each closure is published by its **own** transaction, and
+`script/build/agent-versions.sh --write` runs them in that order (agy first). They
+are not one atomic step: an agy bump that succeeds leaves the committed agy closure
+and its ARG in place even if the Codex transaction then fails, and the bumper's
+error output says which half landed.
+
 ## Current pnpm ownership
 
 Base owns `images/pnpm/`, authenticated bootstrap and the pnpm selection label.

@@ -256,12 +256,15 @@ class _GithubRedirects(urllib.request.HTTPRedirectHandler):
         raise _Follow(newurl)
 
 
-def _require_origin(url: str) -> urllib.parse.SplitResult:
+def _require_origin(url: str, origins: frozenset[str] = ORIGINS) -> urllib.parse.SplitResult:
+    """The URL's origin, or a refusal. `origins` is a keyword so an owner with a
+    different approved set (`script/dev/pin-agy.py`) reuses this transport without
+    a second copy of its bounds."""
     target = urllib.parse.urlsplit(url)
     if target.scheme != 'https':
         raise Refusal(f'{url} is not an HTTPS URL')
-    if target.hostname not in ORIGINS:
-        raise Refusal(f'{url} is not on a GitHub origin')
+    if target.hostname not in origins:
+        raise Refusal(f'{url} is not on an approved origin')
     if target.username or target.password or target.port not in (None, 443):
         raise Refusal(f'{url} carries credentials or a non-default port')
     if target.query or target.fragment:
@@ -298,7 +301,8 @@ def _read_chunk(response, size: int) -> bytes:
     return response.read(size)
 
 
-def https_fetch(url: str, output: Path, limit: int) -> None:
+def https_fetch(url: str, output: Path, limit: int, *,
+                origins: frozenset[str] = ORIGINS) -> None:
     """Stream one exact URL to `output` under a total deadline and a byte ceiling.
 
     The budget is enforced twice over: the independent watchdog can interrupt a
@@ -309,12 +313,13 @@ def https_fetch(url: str, output: Path, limit: int) -> None:
     the budget is spent is a refusal, not a small file.
     """
     with _RequestWatchdog(FETCH_TIMEOUT_SECONDS):
-        _fetch_under_deadline(url, output, limit)
+        _fetch_under_deadline(url, output, limit, origins)
 
 
-def _fetch_under_deadline(url: str, output: Path, limit: int) -> None:
+def _fetch_under_deadline(url: str, output: Path, limit: int,
+                          origins: frozenset[str]) -> None:
     deadline = _Deadline(FETCH_TIMEOUT_SECONDS)
-    target = _require_origin(url)
+    target = _require_origin(url, origins)
     headers = {}
     if target.hostname == 'api.github.com':
         headers['Accept'] = 'application/vnd.github+json'

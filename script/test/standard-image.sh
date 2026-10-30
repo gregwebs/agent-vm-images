@@ -203,6 +203,7 @@ recipe_keys() { # $1 recipe -> label suffixes
         opencode-claude) printf '%s\n' opencode-claude ;;
         claude) printf '%s\n' claude ;;
         copilot) printf '%s\n' copilot ;;
+        agy) printf '%s\n' agy ;;
         dsh) printf '%s\n' dsh pnpm ;;
         pi) printf '%s\n' pi pi-claude-bridge ;;
         *) fail "unknown recipe: $1" ;;
@@ -216,6 +217,7 @@ suffix_arg() { # $1 label suffix -> build ARG name
         opencode-claude) printf '%s\n' AGENT_VERSION_OPENCODE_CLAUDE ;;
         claude) printf '%s\n' AGENT_VERSION_CLAUDE ;;
         copilot) printf '%s\n' AGENT_VERSION_COPILOT ;;
+        agy) printf '%s\n' AGENT_VERSION_AGY ;;
         dsh) printf '%s\n' AGENT_VERSION_DSH ;;
         pnpm) printf '%s\n' AGENT_VERSION_PNPM ;;
         pi) printf '%s\n' AGENT_VERSION_PI ;;
@@ -229,6 +231,7 @@ DEFAULT_CODEX=$(committed_arg AGENT_VERSION_CODEX)
 DEFAULT_OPENCODE=$(committed_arg AGENT_VERSION_OPENCODE)
 DEFAULT_CLAUDE=$(committed_arg AGENT_VERSION_CLAUDE)
 DEFAULT_COPILOT=$(committed_arg AGENT_VERSION_COPILOT)
+DEFAULT_AGY=$(committed_arg AGENT_VERSION_AGY)
 DEFAULT_DSH=$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$REPO_ROOT/images/tools/dsh/package.json")
 DEFAULT_PNPM=$(jq -r '.version' "$REPO_ROOT/images/pnpm/pin.json")
 DEFAULT_PI=$(jq -r '.dependencies["@earendil-works/pi-coding-agent"]' "$REPO_ROOT/images/tools/pi/package.json")
@@ -242,6 +245,7 @@ default_selection() { # $1 recipe -> newline-separated suffix=value
         opencode-claude) printf '%s\n' "opencode-claude=$DEFAULT_OPENCODE_CLAUDE" ;;
         claude) printf '%s\n' "claude=$DEFAULT_CLAUDE" ;;
         copilot) printf '%s\n' "copilot=$DEFAULT_COPILOT" ;;
+        agy) printf '%s\n' "agy=$DEFAULT_AGY" ;;
         dsh) printf '%s\n' "dsh=$DEFAULT_DSH" "pnpm=$DEFAULT_PNPM" ;;
         pi) printf '%s\n' "pi=$DEFAULT_PI" "pi-claude-bridge=$DEFAULT_BRIDGE" ;;
         *) fail "unknown recipe: $1" ;;
@@ -269,11 +273,11 @@ assert_expected_selection() { # $1 image, $2 newline-separated suffix=value
 assert_selection_label_sets() { # base standard artifact-mode
     local want base_want
     base_want=$(for suffix in gh node pnpm; do echo "org.agent-vm.version.$suffix"; done | sort)
-    want=$(for suffix in codex opencode claude copilot dsh gh node pnpm pi pi-claude-bridge opencode-claude; do echo "org.agent-vm.version.$suffix"; done | sort)
+    want=$(for suffix in codex opencode claude copilot agy dsh gh node pnpm pi pi-claude-bridge opencode-claude; do echo "org.agent-vm.version.$suffix"; done | sort)
     if [ "$3" = false ]; then
         [ "$(version_keys "$1")" = "$base_want" ] || { echo 'base must own exactly the node, gh and pnpm selections' >&2; return 1; }
     fi
-    [ "$(version_keys "$2")" = "$want" ] || { echo 'standard must have exactly eleven selection labels' >&2; return 1; }
+    [ "$(version_keys "$2")" = "$want" ] || { echo 'standard must have exactly twelve selection labels' >&2; return 1; }
 }
 
 # assert_recipe_labels IMG RECIPE [EXPECTED_LABELS_FILE] [STRICT]
@@ -385,6 +389,28 @@ printf '=== T5 ===\n'
 printf 't5rc=%s\n' "$?"
 printf '=== STATUS ===\n'
 printf 'status_b64=%s\n' "$(b64file /opt/agent-vm/install-status/copilot)"
+EOS
+            ;;
+        agy)
+            # agy's report contract is byte-exact, so the audit also records the
+            # binary's owner, the absence of an `antigravity` name and the
+            # auto-update switch: none of the three appears in a version string.
+            cat <<'EOS'
+printf '=== RUN ===\n'
+timeout --kill-after=5s 60 agy --version >/tmp/o 2>/tmp/e
+printf 'rc0=%s\n' "$?"
+printf 'report_b64=%s\n' "$(b64file /tmp/o)"
+printf 'stderr_b64=%s\n' "$(b64file /tmp/e)"
+printf '=== T5 ===\n'
+/contract/recipe-contract tool-access agy
+printf 't5rc=%s\n' "$?"
+printf '=== SHAPE ===\n'
+printf 'owner=%s\n' "$(stat -c %u:%g /usr/local/bin/agy)"
+printf 'mode=%s\n' "$(stat -c %a /usr/local/bin/agy)"
+printf 'alias=%s\n' "$(command -v antigravity || echo none)"
+printf 'autoupdate=%s\n' "${AGY_CLI_DISABLE_AUTO_UPDATE:-unset}"
+printf '=== STATUS ===\n'
+printf 'status_b64=%s\n' "$(b64file /opt/agent-vm/install-status/agy)"
 EOS
             ;;
         dsh)
@@ -603,8 +629,59 @@ check_stderr() {
     python3 "$REPO_ROOT/script/test/standard-image-check-stderr.py" "$1" "$2"
 }
 
+# agy_report CONTAINER_OUTPUT SELECTED -- agy's contract is byte-exact: exactly
+# `<version>\n` on stdout and nothing at all on stderr. `exact_report` also
+# accepts a missing final newline and `check_stderr` tolerates printable
+# diagnostics; both would certify a report the owning gate rejects.
+agy_report() { # $1 output, $2 selected version
+    local out="$1" want="$2" file
+    printf '%s\n' "$out" | grep -q '^stderr_b64=' ||
+        { printf 'agy stderr capture missing'; return 1; }
+    file="$TMP/report-agy-stderr.$$"
+    decode_b64 "$(kv "$out" stderr_b64)" "$file" ||
+        { printf 'agy stderr capture missing'; return 1; }
+    if [ -s "$file" ]; then
+        printf 'agy wrote to stderr: %s' "$(tr -d '\0' <"$file" | head -c 200)"
+        return 1
+    fi
+    file="$TMP/report-agy.$$"
+    decode_b64 "$(kv "$out" report_b64)" "$file" ||
+        { printf 'agy report is missing'; return 1; }
+    printf '%s\n' "$want" >"$TMP/report-agy-want.$$"
+    cmp -s "$file" "$TMP/report-agy-want.$$" || {
+        printf 'agy report is not exactly "%s\\n": %s' \
+            "$want" "$(tr -d '\0' <"$file" | head -c 200)"
+        return 1
+    }
+    return 0
+}
+
+# check_agy_shape CONTAINER_OUTPUT -- the binary is root-owned and mode 0755
+# (any-UID access, and every guest UID runs it, so neither another owner nor a
+# group/world-writable bit is acceptable), no `antigravity` name is published, and
+# the self-update switch is still set. The archive's member mode is what the
+# installer copies, so this is the one place that observes the mode an archive
+# bumped the pin to.
+check_agy_shape() { # $1 output
+    local out="$1" got
+    got="$(kv "$out" owner)"
+    [ "$got" = 0:0 ] || { printf 'agy binary owner is %s, want 0:0' "${got:-missing}"; return 1; }
+    got="$(kv "$out" mode)"
+    [ "$got" = 755 ] || { printf 'agy binary mode is %s, want 755' "${got:-missing}"; return 1; }
+    got="$(kv "$out" alias)"
+    [ "$got" = none ] || { printf 'agy publishes an antigravity name: %s' "${got:-missing}"; return 1; }
+    got="$(kv "$out" autoupdate)"
+    [ "$got" = 1 ] ||
+        { printf 'AGY_CLI_DISABLE_AUTO_UPDATE is %s, want 1' "${got:-missing}"; return 1; }
+    return 0
+}
+
 check_report() { # $1 recipe, $2 label0 value, $3 label1 value, $4 output
     local recipe="$1" v0="$2" v1="$3" out="$4" expected file
+    if [ "$recipe" = agy ]; then
+        agy_report "$out" "$v0"
+        return
+    fi
     file="$TMP/report-stderr.$$"
     decode_b64 "$(kv "$out" stderr_b64)" "$file" || { printf 'stderr capture missing'; return 1; }
     check_stderr "$recipe" "$file" || { printf '%s version report has contradictory stderr' "$recipe"; return 1; }
@@ -813,7 +890,7 @@ oracle_self_test() {
         version_keys() {
             case "$1" in
                 fixture-base) for suffix in gh node pnpm; do echo "org.agent-vm.version.$suffix"; done | sort ;;
-                fixture-standard) for suffix in codex opencode claude copilot dsh gh node pnpm pi pi-claude-bridge opencode-claude; do echo "org.agent-vm.version.$suffix"; done | sort ;;
+                fixture-standard) for suffix in codex opencode claude copilot agy dsh gh node pnpm pi pi-claude-bridge opencode-claude; do echo "org.agent-vm.version.$suffix"; done | sort ;;
                 *) echo 'unexpected base query in artifact mode' >&2; return 1 ;;
             esac
         }
@@ -843,6 +920,53 @@ oracle_self_test() {
     reason="$(check_report dsh 0.1.5-rc.2 11.11.0 "$(printf 'report_b64=%s\nreport1_b64=%s\nrc1=0\n' \
         "$(printf '0.1.5-rc.2\n' | blob)" "$(printf '11.10.0\n' | blob)")")" &&
         fail "self-test: a wrong pnpm report was accepted"
+
+    # agy's report is byte-exact with empty stderr. exact_report also accepts a
+    # missing final newline and check_stderr tolerates printable diagnostics, so
+    # both are seeded here as rejections.
+    local agy_healthy agy_bad
+    agy_healthy=$(printf 'rc0=0\nreport_b64=%s\nstderr_b64=%s\n' \
+        "$(printf '1.4.11\n' | blob)" "$(printf '' | blob)")
+    check_report agy 1.4.11 "" "$agy_healthy" >/dev/null ||
+        fail 'self-test: an exact agy report was rejected'
+    for agy_bad in 'report_b64='"$(printf '1.4.10\n' | blob)" \
+        'report_b64='"$(printf '1.4.11' | blob)" \
+        'report_b64='"$(printf '1.4.11\nextra\n' | blob)" \
+        'report_b64='"$(printf '1.4.11\n\n' | blob)"; do
+        reason="$(check_report agy 1.4.11 "" "$(printf 'rc0=0\nstderr_b64=%s\n%s\n' \
+            "$(printf '' | blob)" "$agy_bad")")" &&
+            fail "self-test: an agy report ($agy_bad) was accepted"
+        [ -n "$reason" ] || fail 'self-test: an agy report rejection needs a reason'
+    done
+    reason="$(check_report agy 1.4.11 "" "$(printf 'rc0=0\nreport_b64=%s\nstderr_b64=%s\n' \
+        "$(printf '1.4.11\n' | blob)" "$(printf 'warning: x\n' | blob)")")" &&
+        fail 'self-test: printable agy stderr was accepted'
+    [ -n "$reason" ] || fail 'self-test: agy stderr rejection needs a reason'
+    reason="$(check_report agy 1.4.11 "" "rc0=0
+report_b64=$(printf '1.4.11\n' | blob)")" &&
+        fail 'self-test: a missing agy stderr capture was accepted'
+    # Control: an existing single-line agent still tolerates a missing final
+    # newline; only agy's owning gate is byte-exact.
+    check_report pi 1.4.0 "" "rc0=0
+report_b64=$(printf '1.4.0' | blob)
+stderr_b64=$(printf '' | blob)" >/dev/null ||
+        fail 'self-test: the pi control report without a final newline was rejected'
+
+    check_agy_shape $'owner=0:0\nmode=755\nalias=none\nautoupdate=1' >/dev/null ||
+        fail 'self-test: the healthy agy shape was rejected'
+    local agy_shape
+    for agy_shape in $'owner=12345:23456\nmode=755\nalias=none\nautoupdate=1' \
+        $'owner=0:0\nmode=777\nalias=none\nautoupdate=1' \
+        $'owner=0:0\nmode=775\nalias=none\nautoupdate=1' \
+        $'owner=0:0\nmode=705\nalias=none\nautoupdate=1' \
+        $'owner=0:0\nalias=none\nautoupdate=1' \
+        $'owner=0:0\nmode=755\nalias=/usr/local/bin/antigravity\nautoupdate=1' \
+        $'owner=0:0\nmode=755\nalias=none\nautoupdate=0' \
+        $'owner=0:0\nmode=755\nalias=none'; do
+        reason="$(check_agy_shape "$agy_shape")" &&
+            fail "self-test: an agy shape ($agy_shape) was accepted"
+        [ -n "$reason" ] || fail 'self-test: an agy shape rejection needs a reason'
+    done
 
     check_status codex "status_b64=$(sblob installed)" >/dev/null ||
         fail "self-test: an installed codex status was rejected"
@@ -993,6 +1117,7 @@ audit_image() { # $1 image, $2 recipe, $3 strict-label-exactness (default 1)
         opencode) k0=opencode ;;
         claude) k0=claude ;;
         copilot) k0=copilot ;;
+        agy) k0=agy ;;
         dsh) k0=dsh; k1=pnpm ;;
         pi) k0=pi; k1=pi-claude-bridge ;;
         *) fail "unknown recipe: $recipe" ;;
@@ -1011,6 +1136,10 @@ audit_image() { # $1 image, $2 recipe, $3 strict-label-exactness (default 1)
             fail "$recipe ($uid) report mismatch: $reason"
         reason="$(check_status "$recipe" "$out")" ||
             fail "$recipe ($uid) $reason"
+        if [ "$recipe" = agy ]; then
+            # Owner, alias and switch are not version proof: audit them per UID.
+            reason="$(check_agy_shape "$out")" || fail "agy ($uid) $reason"
+        fi
         if [ "$recipe" = pi ]; then
             # The behavioral probe must run under a numeric uid too: metadata
             # and a stale `installed` record are not proof a working extension.
@@ -1194,7 +1323,7 @@ t5_negatives() {
 # --- chain -------------------------------------------------------------------
 
 # Validate selections independently of image labels; overrides audit, never install.
-EXPECTED=$(for tool in codex opencode claude copilot dsh pi opencode-claude; do default_selection "$tool"; done)
+EXPECTED=$(for tool in codex opencode claude copilot agy dsh pi opencode-claude; do default_selection "$tool"; done)
 for entry in ${expect_overrides[@]+"${expect_overrides[@]}"}; do
     suffix=${entry%%=*}; value=${entry#*=}
     [ "$entry" != "$suffix" ] || fail 'expect requires suffix=version'
@@ -1815,6 +1944,7 @@ oracle_wiring_self_test() {
             *version.opencode) printf '%s\n' "$DEFAULT_OPENCODE" ;;
             *version.claude) printf '%s\n' "$DEFAULT_CLAUDE" ;;
             *version.copilot) printf '%s\n' "$DEFAULT_COPILOT" ;;
+            *version.agy) printf '%s\n' "$DEFAULT_AGY" ;;
             *version.dsh) printf '%s\n' "$DEFAULT_DSH" ;;
             *version.pnpm) printf '%s\n' "$DEFAULT_PNPM" ;;
             *version.pi) printf '%s\n' "$DEFAULT_PI" ;;
@@ -1844,6 +1974,19 @@ oracle_wiring_self_test() {
     if ( audit_image img codex ) >/dev/null 2>&1; then fail 'nonzero report wire accepted'; fi
     WIRE=$(printf '%s\n' "$healthy" | sed "s/^report_b64=.*/report_b64=$(printf 'codex-cli 0.0.1\n' | blob)/")
     if ( audit_image img codex ) >/dev/null 2>&1; then fail 'stale selection wire accepted'; fi
+    local agy_wire
+    agy_wire=$(printf 'rc0=0\nt5rc=0\nreport_b64=%s\nstderr_b64=%s\nowner=0:0\nmode=755\nalias=none\nautoupdate=1\nstatus_b64=%s\n' \
+        "$(printf '%s\n' "$DEFAULT_AGY" | blob)" "$(printf '' | blob)" "$(sblob installed)")
+    WIRE=$agy_wire
+    audit_image img agy >/dev/null || fail 'healthy agy wire rejected'
+    WIRE=$(printf '%s\n' "$agy_wire" | sed 's/^mode=755/mode=777/')
+    if ( audit_image img agy ) >/dev/null 2>&1; then fail 'agy world-writable mode wire accepted'; fi
+    WIRE=$(printf '%s\n' "$agy_wire" | sed 's|^alias=none|alias=/usr/local/bin/antigravity|')
+    if ( audit_image img agy ) >/dev/null 2>&1; then fail 'agy antigravity alias wire accepted'; fi
+    WIRE=$(printf '%s\n' "$agy_wire" | sed 's/^autoupdate=1/autoupdate=unset/')
+    if ( audit_image img agy ) >/dev/null 2>&1; then fail 'agy self-update switch wire accepted'; fi
+    WIRE=$(printf '%s\n' "$agy_wire" | sed "s/^report_b64=.*/report_b64=$(printf '%s' "$DEFAULT_AGY" | blob)/")
+    if ( audit_image img agy ) >/dev/null 2>&1; then fail 'agy report without a final newline accepted'; fi
     WIRE=$healthy
     # shellcheck disable=SC2030,SC2031 # mutation intentionally confined to child
     if ( EXPECTED=$(printf '%s\n' "$EXPECTED" | sed 's/^codex=.*/codex=rust-v0.0.1/'); audit_image img codex ) >/dev/null 2>&1; then fail 'ignored explicit selection accepted'; fi
@@ -2031,11 +2174,11 @@ bash --version >/dev/null; node --version; python3 --version; zellij --version
 test -f /usr/local/bin/pnpm; test ! -L /usr/local/bin/pnpm
 test "$(readlink /usr/local/bin/pnx)" = pnpm; test "$(readlink /usr/local/bin/pnpx)" = pnpm
 test "$(pnpm --version)" = 11.11.0
-for tool in dsh pi codex opencode claude copilot; do if command -v "$tool"; then exit 1; fi; done
+for tool in dsh pi codex opencode claude copilot agy; do if command -v "$tool"; then exit 1; fi; done
 test ! -e /usr/local/bin/pi; test ! -e /opt/agent-vm/pi; test ! -e /opt/agent-vm/pi-extensions' || fail 'base coding-agent absence/pnpm checks failed'
 fi
 run_with_watchdog 180 docker_run --rm --platform "$platform" --network none "$STANDARD_IMAGE" bash -c 'set -euo pipefail; bash --version >/dev/null; node --version; python3 --version; zellij --version' || fail 'base facilities lost'
-for tool in codex opencode claude copilot dsh pi; do audit_image "$STANDARD_IMAGE" "$tool" 0; done
+for tool in codex opencode claude copilot agy dsh pi; do audit_image "$STANDARD_IMAGE" "$tool" 0; done
 check_locks "$STANDARD_IMAGE"
 audit_opencode_plugins "$STANDARD_IMAGE"
 bash "$REPO_ROOT/script/test/seed-hooks.sh" "$STANDARD_IMAGE"
@@ -2048,7 +2191,8 @@ else
             --user "$pair" --tmpfs /home/probe:rw,exec,mode=1777 -e HOME=/home/probe \
             --entrypoint bash "$STANDARD_IMAGE" -c "$probe" released-agent-probe \
             "${pair%:*}" "${pair#*:}" "$DEFAULT_CODEX" "$DEFAULT_OPENCODE" "$DEFAULT_CLAUDE" \
-            "$DEFAULT_COPILOT" "$DEFAULT_DSH" "$DEFAULT_PNPM" "$DEFAULT_PI" "$DEFAULT_BRIDGE" "$DEFAULT_OPENCODE_CLAUDE"
+            "$DEFAULT_COPILOT" "$DEFAULT_DSH" "$DEFAULT_PNPM" "$DEFAULT_PI" "$DEFAULT_BRIDGE" "$DEFAULT_OPENCODE_CLAUDE" \
+            "$DEFAULT_AGY"
     done
 fi
 echo 'finished standard image acceptance passed'

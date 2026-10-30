@@ -4,7 +4,7 @@
 Selection labels and readable files are not proof. The first existing PATH
 candidate wins even when it is a broken symlink or unusable, so a bad shadow is
 never skipped in favour of a good later entry. Invoked by verify-standard.sh
-with the five exact targets in dsh, codex, opencode, claude, pi order.
+with the six exact targets in dsh, codex, opencode, claude, pi, agy order.
 """
 from __future__ import annotations
 
@@ -12,7 +12,13 @@ import os
 import stat
 import sys
 
-for name, verified in zip(("dsh", "codex", "opencode", "claude", "pi"), sys.argv[1:]):
+names = ("dsh", "codex", "opencode", "claude", "pi", "agy")
+# zip() would silently ignore a missing target, leaving that command unchecked.
+if len(sys.argv) - 1 != len(names):
+    print(f"verify-standard.sh: expected {len(names)} targets, got {len(sys.argv) - 1}", file=sys.stderr)
+    sys.exit(1)
+
+for name, verified in zip(names, sys.argv[1:]):
     candidate = next(
         (os.path.join(directory, name)
          for directory in os.environ.get("PATH", "").split(os.pathsep)
