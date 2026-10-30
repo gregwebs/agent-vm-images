@@ -29,22 +29,25 @@ timed() {
 # The audit step's host watchdog in build-local.yml is the outer bound, so the
 # audit must fail on its own measured wall-clock before it can consume it.
 #
-# PROVISIONAL: 4800s sits 6900 / 4800 = 1.44x under the 6900s watchdog, but no
-# native audit has recorded the complete per-leg sum yet, so this bound is
-# arithmetic plus the legs whose durations exist, not measurement. The one new
-# measured number is the focused Pi default leg: 99 s on a native linux/arm64
-# daemon (diagnostic local base, including both cold installs, the archive
-# downloads, 13 real-layout mutants and four offline numeric pairs). The
-# changed-selection leg fails in ~7 s today, which is not a cost measure. The
-# Pi/bridge preparation-policy legs were measured locally at roughly a minute
-# each including container setup. The first green native audit must replace this
-# bound with the sum in target/ci-logs/durations.txt plus that same 1.44x
-# headroom. Never widen it for convenience: an overrun means splitting the
-# consumer legs into a second audit step (with its own watchdog inside the same
-# job, because images do not survive a job change) and re-checking the 360-minute
-# job total: 20 prerequisites + 20 capacity + 180 build + 120 audit + 10 upload =
-# 350. No gate is ever dropped to fit.
-AUDIT_BUDGET_SECONDS=4800
+# MEASURED: the first green native audit (run 40983540120, commit 02daa91) summed
+# every audit leg in target/ci-logs/durations.txt at 1728 s on linux/arm64 and
+# 1632 s on linux/amd64: both architectures, both images, the artifact, runtime
+# and record legs included (strict egress is a separate job and not in this sum).
+# The bound is that maximum plus the 1.44x headroom it always
+# carried: 1728 * 1.44 = 2488.3, rounded up to 2489 s, which sits 6900 / 2489 =
+# 2.77x under the 6900 s watchdog.
+#
+# The two numbers that used to be local estimates are now in the same measurement:
+# the focused Pi default leg is 63 s (arm64) and 60 s (amd64), the changed
+# selection 81 s / 77 s, and the Pi/bridge preparation-policy legs 3 s each, all
+# against a real base launcher rather than a diagnostic one.
+#
+# Never widen it for convenience: an overrun means splitting the consumer legs
+# into a second audit step (with its own watchdog inside the same job, because
+# images do not survive a job change) and re-checking the 360-minute job total: 20
+# prerequisites + 20 capacity + 180 build + 120 audit + 10 upload = 350. No gate
+# is ever dropped to fit.
+AUDIT_BUDGET_SECONDS=2489
 check_audit_budget() {
     local first_line=$1 measured
     measured=$(awk -v first="$first_line" 'NR > first {
