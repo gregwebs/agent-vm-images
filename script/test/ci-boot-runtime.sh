@@ -2,6 +2,7 @@
 # Offline pin/linkage controls; fixture hashes change, production has no bypass.
 set -euo pipefail
 ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+. "$ROOT/script/test/file-mode.sh"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/tree/script/release" "$work/fixtures"
@@ -30,9 +31,32 @@ cat > "$work/bin/ldd" <<'SH'
 printf '%s\n' "${FAKE_LDD:-libc.so.6 => /lib/libc.so.6}"
 exit "${FAKE_LDD_STATUS:-0}"
 SH
+# Exercise the BSD stat command shape even on GNU hosts. The shim asks the
+# installed stat implementation for the actual mode after forcing -c to fail.
+REAL_STAT="$(command -v stat)"
+export REAL_STAT
+cat > "$work/bin/stat" <<'SH'
+#!/bin/sh
+case "${1:-}" in
+    -c|--format) exit 1 ;;
+    -f)
+        [ "${2:-}" = '%Lp' ] || exit 1
+        if [ "${MODE_OVERRIDE_FOR:-}" = "$3" ]; then
+            printf '%s\n' "$MODE_OVERRIDE_VALUE"
+            exit 0
+        fi
+        if "$REAL_STAT" -c '%a' "$3" >/dev/null 2>&1; then
+            exec "$REAL_STAT" -c '%a' "$3"
+        fi
+        exec "$REAL_STAT" -f '%Lp' "$3"
+        ;;
+esac
+exec "$REAL_STAT" "$@"
+SH
 chmod +x "$work/bin/"*
 export PATH="$work/bin:$PATH"
 fail() { echo "runtime regression: $*" >&2; exit 1; }
+msb_mode_is_755() { [ "$(file_mode "$1")" = 755 ]; }
 for number in 1 2 3 4 5 6 7 8; do
     case_dir="$work/case-$number"
     mkdir -p "$case_dir/tmp"
@@ -70,7 +94,7 @@ for number in 1 2 3 4 5 6 7 8; do
             echo "dir=$dir"
         } > "$case_dir/expected"
         cmp "$case_dir/expected" "$case_dir/out" || fail 'output declaration'
-        [ "$(stat -c %a "$dir/bin/msb")" = 755 ] || fail 'msb mode'
+        msb_mode_is_755 "$dir/bin/msb" || fail 'msb mode'
         printf '%s\n' \
             'https://github.com/superradcompany/microsandbox/releases/download/v0.7.7/msb-linux-x86_64' \
             'https://github.com/superradcompany/microsandbox/releases/download/v0.7.7/libkrunfw-linux-x86_64.so' \
@@ -95,4 +119,12 @@ for number in 1 2 3 4 5 6 7 8; do
     fi
     echo "runtime case $number passed"
 done
+mkdir -p "$work/mutant/bin"
+printf '#!/bin/sh\n' > "$work/mutant/bin/msb"
+chmod 0644 "$work/mutant/bin/msb"
+if MODE_OVERRIDE_FOR="$work/mutant/bin/msb" MODE_OVERRIDE_VALUE=644 \
+    msb_mode_is_755 "$work/mutant/bin/msb"; then
+    fail 'msb mode guard accepted 0644'
+fi
+echo 'ci boot runtime rejected an msb with mode 644'
 echo 'ci boot runtime controls passed'
