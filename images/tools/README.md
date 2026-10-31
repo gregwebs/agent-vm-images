@@ -129,9 +129,12 @@ dsh is an image-owned pnpm project: `package.json`, `pnpm-lock.yaml`,
 plugin management finds that launcher through ordinary PATH. The dsh root has no
 pnpm dependency or private pnpm executable. Its isolated layout uses private
 hoist for sandbox resolution, four reviewed exact Cordis overrides and only the
-`chokidar@4.0.3` trust exception. Installation is frozen, production-only,
-scripts disabled, with a disposable external store; `node_modules/.pnpm` is
-runtime payload.
+`chokidar@4.0.3` trust exception. Those overrides are also the exact-peer
+oracle's instrument: each pinned Cordis family must resolve to exactly that
+version and to nothing else in the graph before it counts as exact, rather than
+being read off a peer declaration upstream may write as a range or a dependency.
+Installation is frozen, production-only, scripts disabled, with a disposable
+external store; `node_modules/.pnpm` is runtime payload.
 
 The filesystem/manager/publication boundary is not dsh-specific: it lives in
 `images/tools/pnpm-project.py` (with `images/tools/pnpm-host-manager.py` for host

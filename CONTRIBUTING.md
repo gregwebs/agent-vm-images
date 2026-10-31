@@ -522,7 +522,11 @@ fully transitive-frozen. Read [ADR 0003](docs/adr/0003-dsh-graph-freeze.md) and
 the [migration ledger](docs/standard-pnpm-migration.md).
 
 Cordis overrides are derived without the old map before any final resolution. A
-changed map stops an ordinary upgrade. Use
+changed map stops an ordinary upgrade. They are also what keeps the exact-peer
+oracle meaningful when upstream stops declaring the Cordis family exactly: each
+reviewed selector must be honoured by the resolved graph — one instance, at the
+pinned version — and only then is that family counted as exact. A family the graph
+resolves elsewhere, twice, or not at all is refused. Use
 `bash images/tools/dsh/upgrade-dsh.sh VERSION --propose-cordis-overrides /tmp/dsh-cordis.json`,
 review the exact requirements/delta, then
 `bash images/tools/dsh/upgrade-dsh.sh VERSION --cordis-overrides /tmp/dsh-cordis.json`.

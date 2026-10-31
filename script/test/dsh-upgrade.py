@@ -460,6 +460,15 @@ def main():
         assert case.run(['--cordis-overrides', str(proposal)], 'final-drift') == 1, case.output
         assert 'requirement drift' in case.output
         case.unchanged()
+        # A published graph that resolves a family the unchanged reviewed map pins
+        # to another version is refused as well: the overrides must be honoured, not
+        # merely recorded.
+        case = Case(root, 'family-drift', fast_gate=True)
+        proposal = case.root / 'reviewed.json'
+        proposal.write_text(json.dumps(OVERRIDES))
+        assert case.run(['--cordis-overrides', str(proposal)], 'family-drift') == 1, case.output
+        assert 'override 1.1.4, got @deepseek-ai/cordis-plugin-timer@1.1.5' in case.output, case.output
+        case.unchanged()
         # Each forward failure includes the partially written destination. Every
         # restore position is then independently made to fail; later restores continue.
         for index in range(5):

@@ -100,10 +100,15 @@ dependency edges grant reachability), so they cannot hide a changed record.
 The exact-peer oracle is **per context**, never "a satisfying version is
 installed somewhere": for every snapshot, every exact peer declaration must be
 satisfied by that snapshot's own edge target, and an absent peer is allowed only
-when the declaration is marked optional. The committed graph reports 243 exact
-declarations (229 `@deepseek-ai/cordis`), 0 unsatisfied and 0 optional missing;
-those counts are recomputed output, never constants. Globally finding
-`cordis@4.0.2` is not evidence that a plugin's context uses it.
+when the declaration is marked optional. A *range* declaration is a compatibility
+constraint, not a pin, so it is neither counted nor verified; what makes a Cordis
+family exact when upstream writes it that way is the reviewed override map
+verified against the resolved graph (see
+[Amended by dsh 0.2.x Cordis families](#amended-by-dsh-02x-cordis-families-2026-10-31)).
+The committed graph reports 243 exact declarations (229 `@deepseek-ai/cordis`), 0
+unsatisfied and 0 optional missing, plus four honoured Cordis selectors in
+`cordisExact`; those counts are recomputed output, never constants. Globally
+finding `cordis@4.0.2` is not evidence that a plugin's context uses it.
 
 ## The accepted relaxation
 
@@ -193,3 +198,56 @@ and expected diagnostic and now drives the comparator out of process. The refres
 comparison's raw-record equality keeps UTF-16 code units losslessly, so an unpaired
 surrogate in a free-text manifest field is still a difference (see ADR 0001
 § Amended by #75, D8).
+
+## Amended by dsh 0.2.x Cordis families (2026-10-31)
+
+Rules 1–7, the freezes and the closed selector set are unchanged. What changes is
+where the exact-peer oracle reads Cordis exactness from. dsh 0.1.x carries the
+`@deepseek-ai/cordis*` families as **exact peer** declarations made by its
+sub-packages, and that is where the committed graph's `cordisExact` count of 229
+came from. dsh 0.2.x has **no `peerDependencies` at all**: the families are plain
+`dependencies` written as ranges (`~4.0.5`), and the sub-packages declare the
+cordis peers as ranges too. A walk over declarations therefore counted **zero**
+exact Cordis rows and `checkExactPeers` refused the graph with
+`dsh must cover declared exact Cordis peers`, even though the reviewed override
+map pinned every family exactly.
+
+**What it accepts.** For each selector `s` in the closed `selectorOrder`, when the
+reviewed override map in `pnpm-workspace.yaml` carries a version for `s`, the
+resolved graph must contain `s.Peer()` at exactly that version *and at no other
+version*; the family then counts toward `cordisExact`. The check is a verification,
+not an assertion: a family that the graph resolves at another version, at two
+versions, or not at all is reported `Unsatisfied` as
+`<family>: override <version>, got <resolved identities or "missing">` and the
+graph is refused. A family the reviewed map does not pin (or a graph with no
+reviewed map) contributes nothing here, so the count is only ever evidence a
+reviewer can check.
+
+**Why the family and not the declaration.** Upstream may express a Cordis family
+as an exact peer (0.1.x), a range peer, or a plain dependency, and any package in
+the closure may be the one that declares it. Reading exactness off a declaration
+therefore ties the oracle to upstream's packaging style. Reading it off the
+resolved graph ties it to the repository's own instrument — four
+`@deepseek-ai/dsh>@deepseek-ai/cordis*` selectors, derived without the old map,
+reviewed as exact requirements and published transactionally by
+`images/tools/dsh/upgrade-dsh.sh`. The selector set is closed: an unknown
+selector is an unexpected key, not a new override.
+
+**What it does not change.** `exact` still counts only verified declarations; a
+declaration written as a range stays an unverified compatibility constraint and is
+never counted, so the committed 0.1.5-rc.2 graph still reports `exact` 243 and the
+`243 exact peers satisfied` lines in the ledger stay true. `cordisExact` widens to
+"Cordis families controlled exactly and verified": for that graph it reports 233
+(229 declared rows plus the four honoured selectors) instead of 229. No freeze in
+`compare.go` (rule 4 and the workspace byte/header freezes) is relaxed, the
+selector set is not widened, and the published JSON keys (`exact`,
+`totalOptionalMissing`, `cordisExact`, `unsatisfied`) are untouched.
+
+**What it still refuses.** `cordisExact` zero still refuses with
+`dsh must cover declared exact Cordis peers`. Since a locked dsh project must
+carry the complete reviewed map (the workspace policy refuses an absent one), that
+guard is now reachable only on a non-locked graph — the tentative and report reads
+— so it is defence in depth and is tested directly rather than through the CLI.
+The bounded mini fixtures resolve every family their reviewed map pins, because a
+map that pins a family the graph does not carry is a stale decision record and is
+refused as such.

@@ -97,7 +97,7 @@ dsh is one pnpm project of four files, all four published transactionally:
 | File | Owns |
 |---|---|
 | `package.json` | the one exact `@deepseek-ai/dsh` selection; `packageManager: pnpm@11.11.0` is an assertion, not a second selection |
-| `pnpm-workspace.yaml` | the reviewed settings, four exact Cordis override selectors and the single `chokidar@4.0.3` trust exception |
+| `pnpm-workspace.yaml` | the reviewed settings, four exact Cordis override selectors (the exactness instrument when upstream expresses a Cordis family as a range or a plain dependency, see [ADR 0003](adr/0003-dsh-graph-freeze.md#amended-by-dsh-02x-cordis-families-2026-10-31)) and the single `chokidar@4.0.3` trust exception |
 | `pnpm-lock.yaml` | the resolved graph this ledger reviews |
 | `pnpm-inputs.sha256` | the reviewed bytes of the three files above |
 
@@ -168,7 +168,11 @@ declarations, snapshots and reason.
 
 The exact-peer oracle is per snapshot, never "a satisfying version exists
 somewhere": 243 exact peer declarations, 229 of them `@deepseek-ai/cordis`, 0
-unsatisfied, 0 optional peers missing. The 62 rows whose provider is named only
+unsatisfied, 0 optional peers missing; `cordisExact` reports 233, those 229
+declarations plus the four Cordis families the reviewed overrides control and the
+resolved graph honours (see [ADR 0003](adr/0003-dsh-graph-freeze.md#amended-by-dsh-02x-cordis-families-2026-10-31)). A declaration written as a
+range is never counted — it is a compatibility constraint. The 62 rows whose
+provider is named only
 through the opaque 32-hex context suffix are resolved through the dependency edge
 target — see [ADR 0003](adr/0003-dsh-graph-freeze.md) for why the hash is an
 identity and never reconstructed. All 243 rows are in the linked JSON.
