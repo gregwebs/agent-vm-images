@@ -82,13 +82,21 @@ installer and the only reader of a pin in an image;
 [ADR 0006](adr/0006-third-party-artifact-pins.md) and the
 [image input policy](image-input-policy.md#pinned-third-party-release-artifacts).
 
-## Agent payload closures (#97, #131)
+## Agent payload closures (#97, #98, #131)
 
-Two agent selections are content pins rather than version ARGs alone.
+Three agent selections are content pins rather than version ARGs alone.
 
 - **Codex** (`images/tools/codex/`): the pin, its four evidence files and the
   vendored installer; `script/dev/pin-codex.py` is the only writer. See
   [ADR 0009](adr/0009-codex-payload-pins.md).
+- **Claude** (`images/tools/claude/`): the pin, its two evidence files (the signed
+  manifest and its detached signature), the **hand-committed** release key,
+  `claude_pin.py`, the three hooks (`install-claude.sh`, `setup-claude.sh`,
+  `verify-claude.sh`) and the vendored installer. `script/dev/pin-claude.py` is the
+  only writer of the generated files — the pin, both evidence files and the
+  Dockerfile ARG. Nothing writes the key, the hooks or `claude_pin.py`: a key
+  change is a reviewed diff, never a tool output. `images/tools/claude/` is **not**
+  a base input. See [ADR 0013](adr/0013-claude-native-payload-pin.md).
 - **`agy`** (`images/tools/agy/`): the `hash-only` pin, its three evidence files,
   the hand-written hook and verifier, and `ARG AGENT_VERSION_AGY`.
   `script/dev/pin-agy.py` is the only writer of the generated files — the pin, the
@@ -101,10 +109,13 @@ Two agent selections are content pins rather than version ARGs alone.
   [ADR 0012](adr/0012-agy-hash-only-artifact-pin.md).
 
 Each closure is published by its **own** transaction, and
-`script/build/agent-versions.sh --write` runs them in that order (agy first). They
-are not one atomic step: an agy bump that succeeds leaves the committed agy closure
-and its ARG in place even if the Codex transaction then fails, and the bumper's
-error output says which half landed.
+`script/build/agent-versions.sh --write` runs them in the order agy → Claude →
+Codex. They are not one atomic step: a bump that succeeds leaves the committed
+closure and its ARG in place even if a later transaction then fails, and the
+bumper's error output says which closures landed. Claude runs before Codex because
+Codex stages from the Dockerfile Claude has already published, and the Codex
+publication refuses a staged Claude ARG difference: Claude has its own owner
+transaction, so no Codex proposal may carry a Claude edit.
 
 ## Current pnpm ownership
 
@@ -195,8 +206,14 @@ READMEs may be adapted to their new owner):
 - `images/tools/opencode/install-opencode.sh`
 - `images/tools/opencode/verify-opencode.sh`
 - `images/tools/claude/install-claude.sh`
+- `images/tools/claude/setup-claude.sh`
 - `images/tools/claude/verify-claude.sh`
 - `images/tools/claude/seed-claude-plugins.sh`
+- `images/tools/claude/pin.json`
+- `images/tools/claude/claude_pin.py`
+- `images/tools/claude/claude-code-release-key.asc`
+- `images/tools/claude/evidence/manifest.json`
+- `images/tools/claude/evidence/manifest.json.sig`
 - `images/tools/copilot/install-copilot.sh`
 - `images/tools/copilot/verify-copilot.sh`
 - `images/tools/copilot/README.md`

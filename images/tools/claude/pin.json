@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "name": "claude",
+  "kind": "claude-native-release",
+  "version": "2.1.286",
+  "manifest": {
+    "url": "https://downloads.claude.ai/claude-code-releases/2.1.286/manifest.json",
+    "path": "evidence/manifest.json",
+    "sha256": "c84e2bef8910fdec338c5e198192fc02d574182f71e57f2c262519541c697523"
+  },
+  "signature": {
+    "url": "https://downloads.claude.ai/claude-code-releases/2.1.286/manifest.json.sig",
+    "path": "evidence/manifest.json.sig",
+    "sha256": "b0c7db2f8f7e185cc57a0bf0f6ed448359a7db095c3133773126275e3e911d22"
+  },
+  "key": {
+    "url": "https://downloads.claude.ai/keys/claude-code.asc",
+    "path": "claude-code-release-key.asc",
+    "fingerprint": "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE",
+    "sha256": "bd70a5e4a268002704024ceba7f8446024114e94f3f0bdd11c23a9e592be81c6"
+  },
+  "platforms": {
+    "linux/amd64": {
+      "manifest_platform": "linux-x64",
+      "url": "https://downloads.claude.ai/claude-code-releases/2.1.286/linux-x64/claude",
+      "sha256": "fe503f65c6289d59c23e5b21ae44f03583f997dd33a2cbfc75ab4f96fb8fc73f",
+      "size": 241667256
+    },
+    "linux/arm64": {
+      "manifest_platform": "linux-arm64",
+      "url": "https://downloads.claude.ai/claude-code-releases/2.1.286/linux-arm64/claude",
+      "sha256": "0292fa22ac2fd43e16be9d0e511ddd8347280d6e0ebaca744ef5b27e05d8d0f8",
+      "size": 241033208
+    }
+  },
+  "authentication": {
+    "method": "openpgp-signed-manifest",
+    "verified_on": "2026-10-30",
+    "reason": "The manifest is the selection authority: the build verifies the detached OpenPGP signature over the committed manifest.json with the committed release key, requires the pinned primary fingerprint, and refuses unless the signed checksum and size for the platform equal the committed ones before the executable is fetched. The executable is placed in the native layout and `claude install` runs only with no network, so the native installer's own downloads never happen. See ADR 0013."
+  }
+}

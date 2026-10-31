@@ -72,8 +72,12 @@ REDIRECT_ORIGINS = frozenset({'release-assets.githubusercontent.com',
                               'objects.githubusercontent.com'})
 # The single-slot ARG defaults this owner does not own. They are masked before
 # and after the staged Dockerfile so the Codex transaction cannot carry somebody
-# else's edit into a commit.
-UNOWNED_ARGS = ('AGENT_VERSION_OPENCODE', 'AGENT_VERSION_CLAUDE', 'AGENT_VERSION_COPILOT')
+# else's edit into a commit. Claude is deliberately *not* in this list: it has its
+# own owner transaction (`script/dev/pin-claude.py`, ADR 0013), so an unmasked
+# Claude ARG difference in a staged Codex proposal is a refusal rather than a
+# masked no-op (`script/test/codex-pins.py`). Adding it here would silently
+# restore a second writer of that closure.
+UNOWNED_ARGS = ('AGENT_VERSION_OPENCODE', 'AGENT_VERSION_COPILOT')
 
 
 class Refusal(Exception):

@@ -277,14 +277,17 @@ See [base pnpm maintenance](images/pnpm/README.md) and
 independent version or dist-tag; see [dsh maintenance](#dsh-maintenance-and-graph-freeze).
 
 The bumper resolves/validates all five upstream values (codex, opencode, claude,
-copilot, agy) before staging anything, then publishes in two ordered transactions:
-agy's closure and ARG first, then Codex's closure with the four staged ARG edits
-(agy first so its likeliest failure leaves every file untouched; a Codex failure
-after it leaves the agy bump committed, and the bumper's error output says which
-half landed). Explicit developer latest queries are permitted; the bumper refuses
-GitHub Actions. Builds consume committed selections and never call bump
-scripts. Lock upgrades retain dsh graph-freeze review (retained records and
-sandbox reachability, not npm locations).
+copilot, agy) before staging anything, then publishes in three ordered
+transactions: agy's closure and ARG first, then Claude's closure and ARG, then
+Codex's closure with the three remaining staged ARG edits. agy goes first because
+its likeliest failure then leaves every file untouched. Claude goes before Codex
+because Codex stages from the Dockerfile Claude has already published and refuses
+a staged Claude ARG difference. A failure after a closure has landed leaves it
+committed, and the bumper's error output names every closure that landed and the
+`selections.tsv` edit each one needs. Explicit developer latest queries are
+permitted; the bumper refuses GitHub Actions. Builds consume committed selections
+and never call bump scripts. Lock upgrades retain dsh graph-freeze review
+(retained records and sandbox reachability, not npm locations).
 
 Pi and the bridge publish **four** pnpm inputs plus the one central label per
 bump, in one transaction each, and they run **sequentially** (Pi, then bridge,
@@ -424,6 +427,72 @@ bash script/build/agent-versions.sh --write --cosign /abs/cosign
   --platform linux/<arch> --tool agy` plus the standard-image audits on native amd64
   **and** arm64. The build reaches one URL — the pinned release asset — and the
   manifest host, tag API, GCS and `latest` paths are denied.
+
+### Claude native payload pin
+
+The standard image's Claude Code install is a **committed payload closure** whose
+native installer runs offline. Read
+[ADR 0013](docs/adr/0013-claude-native-payload-pin.md) and the
+[policy](docs/image-input-policy.md#claude-native-payload) before changing it.
+
+```bash
+python3 script/dev/pin-claude.py --check      # offline: evidence hashes, signature, signer policy, ARG/label
+python3 script/dev/pin-claude.py --version 2.1.286
+bash script/build/agent-versions.sh --check   # agy, Claude, then Codex
+bash script/build/agent-versions.sh --write --cosign /abs/cosign
+bash script/test/shipped-installer-network.sh agent-vm-base:local --platform linux/<arch> --tool claude
+```
+
+- `gpg` (with `gpgconf`) is a maintainer prerequisite, and `/tmp` must be
+  writable: every verification uses a private 0700 `GNUPGHOME` under `/tmp`,
+  whatever `TMPDIR` is. A deep temp path would otherwise break `gpg-agent`'s
+  socket.
+- Every **initial** request the writer makes is on `downloads.claude.ai`
+  (manifest, signature, published key, both executables). The shared owner
+  transport may follow a redirect only to
+  `release-assets.githubusercontent.com` or `objects.githubusercontent.com`, and
+  a redirect cannot change what is adopted: the manifest and signature only count
+  when the committed key verifies them, the published key only when it is
+  byte-identical to the committed one, and an executable only when its SHA-256
+  and size equal the signed manifest. The build's egress gate denies every
+  redirect and learns nothing.
+- The release key `images/tools/claude/claude-code-release-key.asc` is committed
+  **by hand**. The writer refuses a published key that differs from it, with
+  `the published release key changed`.
+- A same-release upstream rewrite (manifest, signature or an executable digest)
+  is refused, never re-pinned; a repeat run prints `unchanged`.
+- Write mode is one transaction through the shared publisher with the usual
+  statuses: `0` published or unchanged, `1` restored failure, `2` usage, `3`
+  incomplete rollback (both directories printed absolutely — stop and recover),
+  `128+N` after a signal whose rollback succeeded. A successful run prints the
+  field-by-field payload delta first.
+- After a real bump a human must update the `claude` default in
+  `script/test/fixtures/installer-egress/selections.tsv` (the alternate column is
+  `-`: an arbitrary exact Claude version is not installable). The tool does not
+  edit that file.
+- Native evidence: `bash script/test/shipped-installer-network.sh agent-vm-base:local
+  --platform linux/<arch> --tool claude` (one `ALLOW` line, plus the
+  real-network `DENY` control) and the standard-image audits on native amd64
+  **and** arm64.
+
+**Key rotation (manual; not supported by the writer in this release).**
+
+1. When the writer refuses with `the published release key changed`, nothing has
+   been written and the committed closure still verifies. Builds are unaffected.
+2. Do **not** replace `claude-code-release-key.asc` in place, even together with
+   `REVIEWED_SIGNER_FINGERPRINT` and the Rust `CLAUDE_SIGNER`. The committed pin
+   records the old key's `sha256` and fingerprint, so its verification — every
+   build of that commit, `--check`, and the writer's own committed-state step —
+   would refuse, and the writer would stay unusable.
+3. Verify the new key out of band (the fingerprint published at
+   <https://code.claude.com/docs/en/setup> and any Anthropic announcement) and
+   record the evidence in a new issue.
+4. Adoption is a separate reviewed change that adds a rotation path: the writer
+   verifies the committed closure against the key **it** names, verifies the
+   proposal against the new key, and publishes the new key, the pin, both evidence
+   files, the ARG and both constants in one transaction whose delta prints both
+   fingerprints. Until that exists, a release signed only by a new key cannot be
+   adopted.
 
 Vendored updates require upstream snapshot + reviewed patch + byte-equivalence
 checks, provenance and license review. Zellij changes require independently

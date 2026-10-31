@@ -2344,6 +2344,37 @@ def case_writer_process(work: Path) -> None:
     else:
         report(label)
 
+    # Claude has its own owner transaction (#98), so a Codex proposal must not be
+    # able to carry a Claude ARG edit: the staged Dockerfile is published whole.
+    label = 'publish_stage_refuses_a_claude_arg_change'
+    repo = FixtureRepo(work / 'repo-publish-claude-arg')
+    staged, _calls = _stage(repo, work / 'stage-publish-claude-arg', fixture,
+                            Verifier())
+    stage_dir = work / 'publish-claude-arg'
+    pin_codex.write_stage(stage_dir, staged)
+    staged_dockerfile = stage_dir / 'Dockerfile'
+    text = staged_dockerfile.read_text()
+    marker = 'ARG AGENT_VERSION_CLAUDE=2.1.286'
+    if text.count(marker) != 1:
+        fail(label, f'the staged Dockerfile does not carry one claude ARG: {text!r}')
+    else:
+        staged_dockerfile.write_text(
+            text.replace(marker, 'ARG AGENT_VERSION_CLAUDE=9.9.9'))
+        if staged_dockerfile.read_text() == text:
+            fail(label, 'the Claude ARG mutation changed nothing')
+        before_repo = repo.snapshot()
+        status, stderr = _run_writer(
+            ['--publish-stage', str(stage_dir), '--repo-root', str(repo.root)],
+            work / 'tmp-publish-claude-arg')
+        if status != 1:
+            fail(label, f'exit {status}: {stderr}')
+        elif 'changes more than the single-slot version defaults' not in stderr:
+            fail(label, stderr)
+        elif repo.snapshot() != before_repo:
+            fail(label, 'a refused Claude ARG proposal changed the repository')
+        else:
+            report(label)
+
     label = 'probe_cosign_is_read_only'
     repo = FixtureRepo(work / 'repo-probe')
     before_repo = repo.snapshot()

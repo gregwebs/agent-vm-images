@@ -127,6 +127,17 @@ def payload_for(config: dict) -> str:
     raise SystemExit('the codex allowlist has no github.com rule')
 
 
+def claude_payload(config: dict) -> str:
+    """The one URL the claude config allows, read off the config itself."""
+    rules = config.get('allow') or []
+    if len(rules) != 1:
+        raise SystemExit(f'the claude allowlist must have exactly one rule, '
+                         f'found {len(rules)}')
+    rule = rules[0]
+    path = rule['path'].replace('^', '').replace('$', '')
+    return 'https://' + rule['host'] + path.replace('\\.', '.')
+
+
 def gate_config(platform: str, tool: str = 'codex') -> dict:
     finished = subprocess.run(['bash', str(GATE), '--emit-config', tool,
                                '--platform', platform],
@@ -301,6 +312,85 @@ def case_agy_profile(platform: str, work: Path) -> None:
     report(label)
 
 
+def case_claude_profile(platform: str, work: Path) -> None:
+    """claude's whole build egress is one committed payload.
+
+    The signed manifest, its detached signature and the release key are committed
+    evidence read offline, and the native step runs with no network, so none of
+    them is in the allowlist at all. `downloads.claude.ai` answers the asset
+    directly, so no redirect is learned and every redirect is denied (ADR 0013).
+    """
+    label = 'claude_profile'
+    config = gate_config(platform, 'claude')
+    problems = []
+    if config.get('https_only') is not True:
+        problems.append('not https_only')
+    if config.get('learn_redirects') is not False:
+        problems.append(f'learn_redirects {config.get("learn_redirects")!r}')
+    if config.get('deny_redirects') is not True:
+        problems.append(f'deny_redirects {config.get("deny_redirects")!r}')
+    if 'learn_hosts' in config:
+        problems.append(f'learn_hosts {config.get("learn_hosts")!r} is route learning')
+    rules = config.get('allow') or []
+    if len(rules) != 1:
+        problems.append(f'{len(rules)} allow rules')
+    else:
+        rule = rules[0]
+        if rule.get('host') != 'downloads.claude.ai' or rule.get('method') != 'GET':
+            problems.append(f'the allow rule is {rule!r}')
+    payload = claude_payload(config)
+    if '/claude-code-releases/' not in payload or '/claude' != payload[-7:] \
+            or '/manifest' in payload:
+        problems.append(f'the allowed path is not the payload: {payload}')
+    if problems:
+        fail(label, '; '.join(problems))
+        return
+    log = work / 'claude.log'
+    scenario = load_addon(_write_config(work, 'claude-config.json', config), log)
+    allowed = StubFlow(payload)
+    scenario.request(allowed)
+    if allowed.response is not None:
+        fail(label, f'the pinned payload was refused with {allowed.response.status_code}')
+        return
+    release = payload.rsplit('/', 2)[0]
+    token = payload.rsplit('/', 2)[1]
+    other = 'linux-arm64' if token == 'linux-x64' else 'linux-x64'
+    negatives = [
+        ('manifest', f'{release}/manifest.json'),
+        ('signature', f'{release}/manifest.json.sig'),
+        ('zst_manifest', f'{release}/manifest.zst.json'),
+        ('raw_sig', f'{release}/manifest.json.raw-sig.json'),
+        ('zst_payload', f'{release}/{token}/claude.zst'),
+        ('key', 'https://downloads.claude.ai/keys/claude-code.asc'),
+        ('other_arch', f'{release}/{other}/claude'),
+        ('musl', f'{release}/{token}-musl/claude'),
+        ('npm', 'https://registry.npmjs.org/@anthropic-ai/claude-code'),
+        ('telemetry', 'https://api.anthropic.com/api/event_logging/v2/batch'),
+    ]
+    for name, url in negatives:
+        denied = StubFlow(url)
+        scenario.request(denied)
+        if denied.response is None or denied.response.status_code != 403:
+            fail(f'{label}/{name}', f'accepted {url}')
+            return
+    # A redirect on the allowed response is a route change, not a target to learn.
+    redirect = StubFlow(payload)
+    redirect.redirect('https://release-assets.githubusercontent.com/x/claude')
+    scenario.request(redirect)
+    scenario.response(redirect)
+    text = (work / 'claude.log').read_text()
+    if redirect.response is None or redirect.response.status_code != 403:
+        fail(f'{label}/redirect', 'an allowed response with a redirect was not blocked')
+        return
+    if 'DENY redirect' not in text:
+        fail(f'{label}/redirect', f'no redirect refusal was logged: {text!r}')
+        return
+    if 'LEARN' in text:
+        fail(f'{label}/redirect', f'a redirect target was learned: {text!r}')
+        return
+    report(label)
+
+
 def _write_config(work: Path, name: str, config: dict) -> Path:
     path = work / name
     path.write_text(json.dumps(config) + '\n')
@@ -334,6 +424,7 @@ def main(argv: list[str]) -> int:
         case_deny_patterns_apply_to_learned(addon, work)
         case_unlisted_is_denied(addon, work)
         case_agy_profile(arguments.platform, work)
+        case_claude_profile(arguments.platform, work)
     if failures:
         print(f'installer-egress-addon: {len(failures)} case(s) failed', file=sys.stderr)
         return 1

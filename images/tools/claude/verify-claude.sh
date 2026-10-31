@@ -1,13 +1,15 @@
 #!/bin/sh
 # Build-time gate for the claude layer. Bind-mounted, never COPYed.
 #
-# Reached after install-claude.sh: a hard failure already aborted the build, and
-# a softened transport failure exited 0 having left an `absent-transport CODE`
-# record and no command. The gate accepts that degraded state ONLY when the
-# record is present; otherwise a missing command is a hard failure regardless of
-# AGENT_INSTALL_SOFT_FAIL. On a real install it runs a bounded, status-checked
-# `claude --version`, requires the exact `<version> (Claude Code)` report, audits
-# T5, and only then records `installed` (selection labels are not health).
+# Reached after install-claude.sh and the offline native setup: a hard failure
+# already aborted the build, and a softened transport failure exited 0 having left
+# an `absent-transport CODE` record and no command. The gate accepts that degraded
+# state ONLY when the record is present; otherwise a missing command is a hard
+# failure regardless of AGENT_INSTALL_SOFT_FAIL. On a real install it first
+# re-verifies the committed payload, the native layout and the native state file
+# without executing anything, then runs a bounded, status-checked `claude
+# --version`, requires the exact `<version> (Claude Code)` report, audits T5, and
+# only then records `installed` (selection labels are not health).
 set -eu
 
 CONTRACT="${AGENT_VM_CONTRACT_DIR:-/tmp/recipe-contract}"
@@ -18,6 +20,25 @@ claude_bin="$prefix/.local/bin/claude"
 want="${AGENT_VM_VERSION_CLAUDE:?verify-claude.sh needs AGENT_VM_VERSION_CLAUDE}"
 status_dir="${AGENT_VM_INSTALL_STATUS_DIR:-/opt/agent-vm/install-status}"
 status="$status_dir/claude"
+
+# The committed closure lives in the claude source directory. Production mounts it
+# beside this hook; the explicit seam is what keeps a hook-only mount from silently
+# pinning nothing.
+if [ -n "${AGENT_VM_CLAUDE_SOURCE_DIR:-}" ]; then
+    pin_dir="$AGENT_VM_CLAUDE_SOURCE_DIR"
+else
+    case "$0" in
+        */*) pin_dir="${0%/*}" ;;
+        *) pin_dir="." ;;
+    esac
+fi
+[ -r "$pin_dir/pin.json" ] && [ -r "$pin_dir/claude_pin.py" ] || {
+    echo "  claude: no committed Claude pin at $pin_dir" >&2
+    exit 1
+}
+# AGENT_VM_CLAUDE_EXPECTED_OWNER exists because the black-box suite cannot create a
+# root-owned file; production never sets it (same rule as verify-agy.sh).
+expected_owner="${AGENT_VM_CLAUDE_EXPECTED_OWNER:-0:0}"
 
 # Path state via lstat: only a genuinely nonexistent command may be waved away
 # by an absence record. A dangling symlink, a present-but-unusable file or a
@@ -34,6 +55,26 @@ if [ "$bin_state" -eq 0 ]; then
 fi
 if [ "$bin_state" -eq 2 ]; then
     echo "  claude: cannot stat $claude_bin (permission/loop) -- hard failure" >&2
+    exit 1
+fi
+
+# The payload and its layout are checked before the binary is executed, so a
+# replaced or retargeted payload cannot pass by printing a good version line.
+case "$(uname -m)" in
+    x86_64|amd64) platform="linux-x64" ;;
+    arm64|aarch64) platform="linux-arm64" ;;
+    *)
+        echo "  claude: unsupported architecture $(uname -m)" >&2
+        exit 1
+        ;;
+esac
+if ! python3 "$pin_dir/claude_pin.py" installed --pin-dir "$pin_dir" --version "$want" \
+    --platform "$platform" --prefix "$prefix" --owner "$expected_owner"; then
+    echo "  claude: the installed payload or layout does not match the committed pin" >&2
+    exit 1
+fi
+if ! python3 "$pin_dir/claude_pin.py" native-state --prefix "$prefix"; then
+    echo "  claude: the native state does not match what the image requires" >&2
     exit 1
 fi
 

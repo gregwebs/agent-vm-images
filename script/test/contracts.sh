@@ -97,6 +97,11 @@ if [ "$guard_only" = false ]; then
     # hook/verifier pair that gates the layer. Both are hermetic; the real
     # pin and the finished image are the evidence phase's work.
     python3 script/test/pin-agy-maintenance.py
+    # The committed Claude payload closure (#98): the offline pin/evidence/
+    # signature/layout/preflight table, the owner writer's staging rules and the
+    # real-transport redirect policy. The hook/vendor pair is in its own suites
+    # below; the real pin and the finished image are the evidence phase's work.
+    python3 script/test/claude-pins.py
     # The restricted-egress gate's stream assertions and its addon policy are the
     # parts a native run cannot check cheaply: the allow-list log shape, the `-`
     # placeholder row, and whether a learned redirect target keeps the HTTPS/port/
