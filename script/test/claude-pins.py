@@ -2125,7 +2125,15 @@ def writer_reason() -> str:
     spec = importlib.util.spec_from_file_location(
         'pin_claude_for_reason', ROOT / 'script' / 'dev' / 'pin-claude.py')
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Dataclasses resolve their defining module through sys.modules, which
+    # module_from_spec does not populate: Python 3.12 raises AttributeError where
+    # 3.13 tolerates the omission, and the runner's python3 is 3.12.
+    sys.modules['pin_claude_for_reason'] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop('pin_claude_for_reason', None)
+        raise
     return module.CLAUDE_REASON
 
 
