@@ -1540,8 +1540,15 @@ class FixtureRepo:
                 for path in sorted(self.root.rglob('*')) if path.is_file()}
 
     def environment(self, extra: Mapping[str, str] | None = None) -> dict:
+        # Every case here stands in for a maintainer host: the writer refuses
+        # `GITHUB_ACTIONS=true` by design, and the run this suite is normally part of
+        # (contracts.sh) happens on a runner, so inheriting the runner's own marker
+        # would make the write-mode cases fail for the right reason and hide the
+        # behaviour they mean to test. The CI refusal has its own case below, which
+        # sets the marker explicitly.
         environment = {key: value for key, value in os.environ.items()
-                       if not key.startswith('FIXTURE_CLAUDE_')}
+                       if not key.startswith('FIXTURE_CLAUDE_')
+                       and key != 'GITHUB_ACTIONS'}
         environment.update({
             'FIXTURE_CLAUDE_WRITER': str(ROOT / 'script' / 'dev' / 'pin-claude.py'),
             'FIXTURE_CLAUDE_ASSETS': str(self.assets),
