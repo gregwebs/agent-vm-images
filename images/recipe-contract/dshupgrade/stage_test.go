@@ -1,6 +1,10 @@
 package dshupgrade
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,8 +129,27 @@ func TestStageFinalRequiresReviewedMap(t *testing.T) {
 	if text, ok := cordis.Text(); !ok || text.Display() != "4.0.3" {
 		t.Errorf("overrides = %s", workspace.Get("overrides").Describe())
 	}
-	if _, err := os.Stat(filepath.Join(work, "final", "pnpm-lock.yaml")); err != nil {
-		t.Errorf("the final stage did not copy the lock: %v", err)
+	if _, err := os.Stat(filepath.Join(work, "final", "pnpm-lock.yaml")); !os.IsNotExist(err) {
+		t.Errorf("the final stage staged a lock: %v", err)
+	}
+	committedWorkspace, err := os.ReadFile(filepath.Join(before, "pnpm-workspace.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvedMap, err := pnpmlock.ReadOverrideMap(approved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewritten, err := pnpmlock.WorkspaceWithOverrides(committedWorkspace, approvedMap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged, err := os.ReadFile(filepath.Join(work, "final", "pnpm-workspace.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(staged, rewritten) {
+		t.Errorf("the final workspace is not the reviewed rewrite:\n%s", staged)
 	}
 }
 
@@ -330,6 +353,15 @@ func stageCommittedDsh(t *testing.T) StageRequest {
 	if err := StageFinal(request); err != nil {
 		t.Fatal(err)
 	}
+	// The final stage no longer carries a lock, so this is the manager's
+	// resolution: here, the committed graph it re-resolved to.
+	committed, err := os.ReadFile(filepath.Join(string(before), "pnpm-lock.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(request.Stage, "pnpm-lock.yaml"), committed, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return request
 }
 
@@ -403,6 +435,200 @@ func TestProofInvalidUTF8Rejected(t *testing.T) {
 	}
 	_, err := readProof(file)
 	if err == nil || !strings.Contains(err.Error(), "invalid UTF-8") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// readGraphFile and writeGraphFile edit the JSON-formatted graph fixtures as
+// decoded objects, so a test states the shape it changed without a hand-written
+// string. Map keys marshal in sorted order, which for the four selectors is also
+// the selector order the workspace encoder emits.
+func readGraphFile(t *testing.T, path string) map[string]any {
+	t.Helper()
+	source, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(source, &value); err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	return value
+}
+
+func writeGraphFile(t *testing.T, path string, value map[string]any) {
+	t.Helper()
+	body, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(body, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func objectIn(t *testing.T, parent map[string]any, key string) map[string]any {
+	t.Helper()
+	value, ok := parent[key].(map[string]any)
+	if !ok {
+		t.Fatalf("%s is not an object", key)
+	}
+	return value
+}
+
+// repin writes the digest list directly, the way the independent oracle does.
+func repin(t *testing.T, prefix string) {
+	t.Helper()
+	body := &strings.Builder{}
+	for _, file := range pnpmlock.PinnedInputs {
+		payload, err := os.ReadFile(filepath.Join(prefix, file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(body, "%x  %s\n", sha256.Sum256(payload), file)
+	}
+	if err := os.WriteFile(filepath.Join(prefix, "pnpm-inputs.sha256"), []byte(body.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// reviewedMapBefore is the committed side of a reviewed-map upgrade: the
+// derivation fixture with a complete committed map and the effective declaration
+// edges that map is verified against (script/test/dsh-upgrade.py:73-89). The
+// unmodified fixture is not a valid *before*: it has no overrides and a locked
+// project must carry the complete map.
+func reviewedMapBefore(t *testing.T) string {
+	t.Helper()
+	before := copyFixture(t, "derivation")
+	overrides := map[string]any{
+		"@deepseek-ai/dsh>@deepseek-ai/cordis":                "4.0.2",
+		"@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-loader":  "1.0.3",
+		"@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-timer":   "1.1.4",
+		"@deepseek-ai/dsh>@deepseek-ai/cordis-plugin-include": "1.0.7",
+	}
+	workspace := readGraphFile(t, filepath.Join(before, "pnpm-workspace.yaml"))
+	workspace["overrides"] = overrides
+	writeGraphFile(t, filepath.Join(before, "pnpm-workspace.yaml"), workspace)
+	lock := readGraphFile(t, filepath.Join(before, "pnpm-lock.yaml"))
+	lock["overrides"] = overrides
+	objectIn(t, objectIn(t, lock, "snapshots"), "declarations@1.0.0")["dependencies"] = map[string]any{
+		"@deepseek-ai/cordis":                "4.0.2",
+		"@deepseek-ai/cordis-plugin-loader":  "1.0.3(@deepseek-ai/cordis@4.0.2)",
+		"@deepseek-ai/cordis-plugin-timer":   "1.1.4",
+		"@deepseek-ai/cordis-plugin-include": "1.0.7",
+	}
+	writeGraphFile(t, filepath.Join(before, "pnpm-lock.yaml"), lock)
+	repin(t, before)
+	return before
+}
+
+const timerFamily = "@deepseek-ai/cordis-plugin-timer"
+
+// stageReviewedMap stages one changed-map upgrade whose reviewed timer is 1.1.5.
+// `upstream` is what the registry did since review; it applies to the tentative
+// resolution and the final one alike, because both resolve from the manifest.
+func stageReviewedMap(t *testing.T, upstream func(lock map[string]any)) StageRequest {
+	t.Helper()
+	before := reviewedMapBefore(t)
+	beforePrefix := pnpmlock.Prefix(before)
+	work := t.TempDir()
+	tentative := filepath.Join(work, "tentative")
+	if err := StageTentative(StageRequest{Before: beforePrefix, Stage: tentative, Argument: "0.1.5-rc.2"}); err != nil {
+		t.Fatal(err)
+	}
+	graph := readGraphFile(t, filepath.Join(before, "pnpm-lock.yaml"))
+	for _, field := range []string{"packages", "snapshots"} {
+		records := objectIn(t, graph, field)
+		records[timerFamily+"@1.1.5"] = records[timerFamily+"@1.1.4"]
+		delete(records, timerFamily+"@1.1.4")
+	}
+	objectIn(t, objectIn(t, graph, "snapshots"), "@deepseek-ai/dsh@0.1.5-rc.2")["dependencies"].(map[string]any)[timerFamily] = "1.1.5"
+	objectIn(t, objectIn(t, graph, "snapshots"), "declarations@1.0.0")["dependencies"].(map[string]any)[timerFamily] = "1.1.5"
+	if upstream != nil {
+		upstream(graph)
+	}
+	delete(graph, "overrides")
+	writeGraphFile(t, filepath.Join(tentative, "pnpm-lock.yaml"), graph)
+	derivation, err := Derive(DeriveRequest{Tentative: pnpmlock.Prefix(tentative), Before: &beforePrefix})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if derived, ok := derivation.Overrides.Get(pnpmlock.SelectorTimer); !ok || derived.String() != "1.1.5" {
+		t.Fatalf("derived timer = %v, %v", derived, ok)
+	}
+	proofPath := filepath.Join(work, "proof.json")
+	if err := os.WriteFile(proofPath, derivation.AppendJS(nil), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	approved := filepath.Join(work, "approved.json")
+	payload := append(derivation.Overrides.Value().AppendJSIndent(nil, "  "), '\n')
+	if err := os.WriteFile(approved, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := StageRequest{
+		Before: beforePrefix, Stage: filepath.Join(work, "final"), Argument: proofPath,
+		Extra: approved, ExtraSet: true,
+	}
+	if err := StageFinal(request); err != nil {
+		t.Fatal(err)
+	}
+	// The final resolution: the same graph the tentative one produced, re-staged
+	// with the reviewed map the manager honoured.
+	resolved := readGraphFile(t, filepath.Join(tentative, "pnpm-lock.yaml"))
+	overrides := map[string]any{}
+	for _, item := range derivation.Overrides.Entries() {
+		overrides[item.Selector.String()] = item.Version.String()
+	}
+	resolved["overrides"] = overrides
+	writeGraphFile(t, filepath.Join(request.Stage, "pnpm-lock.yaml"), resolved)
+	return request
+}
+
+func noUpstream(map[string]any) {}
+
+func checkFinalError(t *testing.T, request StageRequest) error {
+	t.Helper()
+	_, err := CheckFinal(request)
+	return err
+}
+
+// TestCheckFinalReviewedMapAccepts is the baseline for the two failure cases
+// below: the reviewed-map path must accept a graph that keeps every rule.
+func TestCheckFinalReviewedMapAccepts(t *testing.T) {
+	if err := checkFinalError(t, stageReviewedMap(t, noUpstream)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCheckFinalReviewedMapDropsRetainedIdentity is the ticket's case (a) on the
+// reviewed-map path: an identity leaves the graph by being replaced, which the
+// closure rules allow. It is a plain replacement, not an adoption of moved
+// metadata: `leaf@1.0.0` is dropped, not retained with a new record, because a
+// retained record whose metadata moved is refused (the freeze below).
+func TestCheckFinalReviewedMapDropsRetainedIdentity(t *testing.T) {
+	dropLeaf := func(lock map[string]any) {
+		for _, field := range []string{"packages", "snapshots"} {
+			records := objectIn(t, lock, field)
+			records["leaf@1.0.1"] = records["leaf@1.0.0"]
+			delete(records, "leaf@1.0.0")
+		}
+		edges := objectIn(t, objectIn(t, objectIn(t, lock, "snapshots"), "@deepseek-ai/dsh@0.1.5-rc.2"), "dependencies")
+		edges["leaf"] = "1.0.1"
+	}
+	if err := checkFinalError(t, stageReviewedMap(t, dropLeaf)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCheckFinalReviewedMapKeepsArchiveFreeze is F4 at unit level: before #134
+// this path published a retained record whose metadata had moved, because it ran
+// no comparison at all.
+func TestCheckFinalReviewedMapKeepsArchiveFreeze(t *testing.T) {
+	retain := func(lock map[string]any) {
+		objectIn(t, objectIn(t, lock, "packages"), "shared@1.0.0")["deprecated"] = "fixture upstream notice"
+	}
+	err := checkFinalError(t, stageReviewedMap(t, retain))
+	if err == nil || err.Error() != "retained archive changed: shared@1.0.0" {
 		t.Fatalf("got %v", err)
 	}
 }

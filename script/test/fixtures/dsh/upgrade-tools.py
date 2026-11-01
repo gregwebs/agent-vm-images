@@ -69,9 +69,11 @@ def manager(args):
         graph[field]['@deepseek-ai/dsh@' + version] = graph[field].pop('@deepseek-ai/dsh@' + old)
     workspace = json.loads(subprocess.check_output(
         [os.environ['AGENT_VM_CONTRACT_DIR'] + '/recipe-contract', 'pnpm-yaml', 'pnpm-workspace.yaml'], text=True))
+    # No resolution is seeded with the committed lock: the manifest and the
+    # reviewed workspace are its only inputs (ADR 0003 § Amended by #134).
+    assert not Path('pnpm-lock.yaml').exists(), 'resolution seeded with the committed lock'
     tentative = 'overrides' not in workspace
     if tentative:
-        assert not Path('pnpm-lock.yaml').exists(), 'tentative graph seeded with old overrides'
         graph.pop('overrides', None)
     else:
         graph['overrides'] = workspace['overrides']
@@ -121,6 +123,15 @@ def manager(args):
             if snapshot.get('dependencies', {}).get(family) == '1.1.4':
                 snapshot['dependencies'][family] = '1.1.5'
         graph['snapshots']['@deepseek-ai/dsh@' + version]['dependencies'][family] = '1.1.6'
+    # What the registry did since review; applies to every resolution, because
+    # both resolve from the manifest and neither is seeded with the old lock.
+    upstream = os.environ.get('DSH_TEST_UPSTREAM', '')
+    if upstream == 'deprecated-retained':
+        graph['packages']['leaf@1.0.0']['deprecated'] = 'fixture upstream notice'
+    if upstream == 'deprecated-dropped':
+        for field in ['packages', 'snapshots']:
+            graph[field]['leaf@1.0.1'] = graph[field].pop('leaf@1.0.0')
+        graph['snapshots']['@deepseek-ai/dsh@' + version]['dependencies']['leaf'] = '1.0.1'
     if not tentative:
         if mode == 'integrity': del graph['packages']['leaf@1.0.0']['resolution']['integrity']
         if mode == 'sandbox':
@@ -129,6 +140,8 @@ def manager(args):
             del graph['snapshots']['@deepseek-ai/dsh@' + version]['dependencies']['@deepseek-ai/dsh-sandbox-local']
         if mode == 'effective-peer':
             graph['snapshots']['declarations@1.0.0']['dependencies']['@deepseek-ai/cordis'] = '4.0.3'
+        if mode == 'orphan':
+            graph['packages']['orphan@1.0.0'] = {'resolution': {'integrity': 'sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=='}}
     Path('pnpm-lock.yaml').write_text(json.dumps(graph, indent=2) + '\n')
     return 0
 

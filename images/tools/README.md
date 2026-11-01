@@ -26,7 +26,7 @@ Node 22, base-owned pnpm, fetch/diagnostic facilities, explicit optional trust a
 | claude | AGENT_VERSION_CLAUDE | 2.1.286 / SEMVER |
 | copilot | AGENT_VERSION_COPILOT | 1.0.90 / SEMVER |
 | agy | AGENT_VERSION_AGY | 1.4.11 / X.Y.Z (pin-selected, see [ADR 0012](../../docs/adr/0012-agy-hash-only-artifact-pin.md)) |
-| dsh | AGENT_VERSION_DSH | manifest 0.1.5-rc.2 / SEMVER |
+| dsh | AGENT_VERSION_DSH | manifest 0.2.1-rc.5 / SEMVER |
 | pnpm (inherited base) | AGENT_VERSION_PNPM (compatibility only) | base pin.json 11.11.0 / SEMVER |
 | pi | AGENT_VERSION_PI | manifest 1.4.0 / SEMVER |
 | opencode-claude | AGENT_VERSION_OPENCODE_CLAUDE | plugin manifest 1.4.1 / SEMVER |
@@ -163,9 +163,14 @@ preserving retained records. See the
 [graph-freeze ADR](../../docs/adr/0003-dsh-graph-freeze.md) and
 [migration evidence](../../docs/standard-pnpm-migration.md).
 
-Installation disables lifecycle scripts, so no reviewed script ever runs; the
-inspection evidence in the ledger shows they would only fetch prebuilds, restore
-mode bits or write metadata. The dsh gate checks nonempty
+Installation disables lifecycle scripts (`--ignore-scripts` on every
+preparation and install argv), so no package script ever runs. The ledger's
+inspection of the *migration* graph showed the then-selected identities would
+only fetch prebuilds, restore mode bits or write metadata; that inspection is as
+of `c33ab9b` and was not repeated for the `0.2.1-rc.5` identities (`koffi@3.1.1`,
+`@google/genai@2.21.0`, `dsh-subprocess-local@0.2.1-rc.5`), whose safety rests on
+`--ignore-scripts` plus the arm64 runtime probes rather than on an inspected
+payload. The dsh gate checks nonempty
 exact output: `import.meta.main` is undefined on Node older than 22.19, where dsh
 can exit 0 printing nothing. Exit status alone would certify a broken CLI. No community OAuth/subscription plugins or new host credential readers are
 baked in, with one named exception: **`@openchamber/opencode-claude` only**.

@@ -103,9 +103,11 @@ case $verb in
             echo 'stub pnpm: resolution failed' >&2
             exit 7
         fi
-        [ -f pnpm-lock.yaml ] || { echo 'stub pnpm: the committed lock was not staged' >&2; exit 6; }
-        staged=$(jq -r '.importers["."].dependencies["@deepseek-ai/dsh"].version // empty' pnpm-lock.yaml)
-        printf 'staged-lock-version=%s\n' "$staged" >>"${STUB_STAGE_LOG:-/dev/null}"
+        if [ -f pnpm-lock.yaml ]; then
+            printf 'seed=%s\n' "$(jq -r '.importers["."].dependencies["@deepseek-ai/dsh"].version // empty' pnpm-lock.yaml)" >>"${STUB_STAGE_LOG:-/dev/null}"
+        else
+            printf 'seed=none\n' >>"${STUB_STAGE_LOG:-/dev/null}"
+        fi
         [ -n "${STUB_RESULT:-}" ] || { echo 'stub pnpm: STUB_RESULT unset' >&2; exit 4; }
         cp "$STUB_RESULT/package.json" "$STUB_RESULT/pnpm-lock.yaml" .
         if [ "${STUB_MUTATE_PREFIX:-0}" = 1 ]; then
@@ -186,6 +188,7 @@ new_case() {
     mkdir -p "$CASE" "$CALLER_HOME/.config/pnpm" "$CASE/result"
     : >"$CASE/manager.log"
     : >"$CASE/manager-env.log"
+    : >"$CASE/stage.log"
     # A caller HOME that carries its own npm/pnpm configuration must be accepted:
     # the manager always runs with a private HOME/XDG.
     printf 'registry=https://caller.invalid\n' >"$CALLER_HOME/.npmrc"
@@ -223,6 +226,18 @@ $now"
 
 manager_log() {
     cat "$CASE/manager.log"
+}
+
+# The resolver seed is the single resolution's own record: the staged lock's dsh
+# selection when one was staged, `none` when the resolution started without it.
+assert_seed() { # $1 the stage.log the single resolution must have written
+    [[ "$(cat "$CASE/stage.log")" == "$1" ]] || fail "resolver seed: expected '$1', got '$(cat "$CASE/stage.log")'"
+}
+
+rewrite_prefix_lock() { # $1 jq filter on the committed lock; re-pins the prefix
+    jq "$1" "$PREFIX/pnpm-lock.yaml" >"$CASE/lock"
+    mv "$CASE/lock" "$PREFIX/pnpm-lock.yaml"
+    (cd "$PREFIX" && sha256sum package.json pnpm-lock.yaml pnpm-workspace.yaml) >"$PREFIX/pnpm-inputs.sha256"
 }
 
 assert_manager_calls() {
@@ -352,6 +367,14 @@ write_result() { # $1 source fixture, $2 (optional) jq filter on the lock
     local source=$1 filter=${2:-.}
     cp "$FIXTURES/$source/package.json" "$CASE/result/package.json"
     jq "$filter" "$FIXTURES/$source/pnpm-lock.yaml" >"$CASE/result/pnpm-lock.yaml"
+    STUB_RESULT="$CASE/result"
+}
+
+# A resolution that reproduces the committed graph with one upstream change: the
+# manager keeps every locked version and records today's registry metadata.
+write_result_from_prefix() { # $1 jq filter on the committed lock
+    cp "$PREFIX/package.json" "$CASE/result/package.json"
+    jq "$1" "$PREFIX/pnpm-lock.yaml" >"$CASE/result/pnpm-lock.yaml"
     STUB_RESULT="$CASE/result"
 }
 
@@ -517,6 +540,12 @@ for hook in .npmrc pnpmfile.cjs .pnpmfile.mjs; do
 done
 
 # --- changed selection: exactly one version and one resolution --------------
+# A changed selection is a refresh: it stages the changed manifest and nothing
+# else, so the resolver cannot keep a retained version *or* its current upstream
+# metadata, and the comparison is a refresh. Before this rule the image build and
+# the CI changed leg seeded the lock and compared strictly, so a retained record
+# upstream had annotated made every candidate fail (`0.1.5-rc.1`: peer mixing;
+# `0.2.1-rc.4`: `retained snapshot changed`).
 new_case changed
 write_result tiny-dsh-previous
 before=$(hash_prefix)
@@ -528,6 +557,12 @@ assert_contains 'published four dsh inputs for 0.1.5-rc.1'
 [[ "$(manager_log | wc -l | tr -d ' ')" -eq 2 ]] || fail "exactly two manager calls expected: $(manager_log)"
 assert_resolution_flags
 [[ "$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$PREFIX/package.json")" == '0.1.5-rc.1' ]] || fail 'manifest selection did not change'
+assert_seed 'seed=none'
+# The comparison mode must match how the graph was produced: a changed selection
+# is compared as a refresh, because it re-resolved unseeded. A `no-refresh`
+# comparison here would refuse the retained snapshots the resolution is now free
+# to move, which is the failure this rule exists to remove.
+assert_contains 'dsh lock update: refresh 0.1.5-rc.2 -> 0.1.5-rc.1'
 [[ "$(cat "$PREFIX/pnpm-inputs.sha256")" == "$(cd "$PREFIX" && sha256sum package.json pnpm-lock.yaml pnpm-workspace.yaml)" ]] ||
     fail 'published pins do not describe the published bytes'
 [[ "$(cd "$PREFIX" && sha256sum pnpm-lock.yaml)" == "$(cd "$FIXTURES/tiny-dsh-previous" && sha256sum pnpm-lock.yaml)" ]] ||
@@ -535,6 +570,27 @@ assert_resolution_flags
 grep -q '^PNPM_CONFIG_MINIMUM_RELEASE_AGE=1440$' "$CASE/manager-env.log" || fail 'policy default missing in the manager environment'
 grep -q "^PNPM_CONFIG_TRUST_POLICY=no-downgrade$" "$CASE/manager-env.log" || fail 'trust policy missing'
 [[ ! -e "$PREFIX/node_modules" ]] || fail 'lock-only preparation created node_modules'
+assert_no_scratch
+
+# A changed selection may move a non-root edge inside a retained snapshot. The
+# resolver re-resolved without the lock, so that move is the resolution's own
+# result, not a record admitted from the old graph; the strict snapshot freeze
+# refused it (`retained snapshot changed`) and no candidate could pass. The same
+# resolution must still be refused when it moves a retained *archive* -- rule 4
+# does not relax -- which `refresh-retains-changed-metadata` covers.
+new_case changed-moves-retained-snapshot
+rewrite_prefix_lock '.packages["leaf@1.0.0"] = {"resolution":{"integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}
+    | .snapshots["leaf@1.0.0"] = {}
+    | .snapshots["@deepseek-ai/cordis-plugin-loader@1.0.3(@deepseek-ai/cordis@4.0.2)"].dependencies.leaf = "1.0.0"'
+write_result tiny-dsh-previous '.packages["leaf@1.0.1"] = {"resolution":{"integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}
+    | .snapshots["leaf@1.0.1"] = {}
+    | .snapshots["@deepseek-ai/cordis-plugin-loader@1.0.3(@deepseek-ai/cordis@4.0.2)"].dependencies.leaf = "1.0.1"'
+run_prepare 0.1.5-rc.1 ''
+assert_success
+assert_seed 'seed=none'
+assert_contains 'dsh lock update: refresh 0.1.5-rc.2 -> 0.1.5-rc.1'
+[[ "$(jq -r '.snapshots["@deepseek-ai/cordis-plugin-loader@1.0.3(@deepseek-ai/cordis@4.0.2)"].dependencies.leaf' "$PREFIX/pnpm-lock.yaml")" == '1.0.1' ]] ||
+    fail 'the moved retained-snapshot edge was not published'
 assert_no_scratch
 
 # A changed selection whose result violates structure, peers, integrity or the
@@ -551,7 +607,7 @@ reject_result() { # $1 description, $2 jq filter, $3 expected diagnostic
     assert_no_scratch
 }
 reject_result bad-sri '.packages["@deepseek-ai/cordis@4.0.2"].resolution.integrity = "sha512-SHORT"' 'full sha512 required'
-reject_result orphan '.packages["orphan@1.0.0"] = {"resolution":{"integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}' 'orphan'
+reject_result orphan '.packages["orphan@1.0.0"] = {"resolution":{"integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}' 'orphan archive'
 reject_result no-sandbox 'del(.packages["@deepseek-ai/dsh-sandbox-local@1.0.0"]) | del(.snapshots["@deepseek-ai/dsh-sandbox-local@1.0.0"]) | del(.snapshots["@deepseek-ai/dsh@0.1.5-rc.1"].dependencies["@deepseek-ai/dsh-sandbox-local"])' 'sandbox'
 reject_result peer-wrong '.snapshots["@deepseek-ai/cordis-plugin-loader@1.0.3(@deepseek-ai/cordis@4.0.2)"].dependencies["@deepseek-ai/cordis"] = "9.9.9"' 'dangling snapshot edge'
 reject_result private-pnpm '.packages["pnpm@11.11.0"] = {"resolution":{"integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}} | .snapshots["pnpm@11.11.0"] = {} | .snapshots["@deepseek-ai/dsh@0.1.5-rc.1"].dependencies.pnpm = "11.11.0"' 'cannot own pnpm'
@@ -593,7 +649,48 @@ write_result tiny-dsh '.packages["leaf@1.0.0"] = {"resolution":{"integrity":"sha
 run_prepare '' '' --refresh-lock
 assert_success
 assert_contains 'refresh 0.1.5-rc.2 -> 0.1.5-rc.2'
+assert_seed 'seed=none'
 [[ -n "$(jq -r '.packages["leaf@1.0.0"] // empty' "$PREFIX/pnpm-lock.yaml")" ]] || fail 'refresh did not publish the re-resolved graph'
+
+# A refresh with a changed selection resolves from the manifest and the reviewed
+# workspace: no lock is staged, so the resolver cannot keep a retained version.
+new_case refresh-changed-selection
+write_result tiny-dsh-previous
+run_prepare 0.1.5-rc.1 '' --refresh-lock
+assert_success
+assert_contains 'refresh 0.1.5-rc.2 -> 0.1.5-rc.1'
+assert_seed 'seed=none'
+[[ "$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$PREFIX/package.json")" == '0.1.5-rc.1' ]] || fail 'manifest selection did not change'
+
+# A retained package whose upstream metadata moved leaves the graph only by being
+# replaced: the new resolution selects leaf@1.0.1 and the old closure loses 1.0.0.
+new_case refresh-drops-changed-metadata
+rewrite_prefix_lock '.packages["leaf@1.0.0"] = {"resolution":{"integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}
+    | .snapshots["leaf@1.0.0"] = {}
+    | .snapshots["@deepseek-ai/dsh@0.1.5-rc.2"].dependencies.leaf = "1.0.0"'
+write_result tiny-dsh '.packages["leaf@1.0.1"] = {"resolution":{"integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}
+    | .snapshots["leaf@1.0.1"] = {}
+    | .snapshots["@deepseek-ai/dsh@0.1.5-rc.2"].dependencies.leaf = "1.0.1"'
+run_prepare '' '' --refresh-lock
+assert_success
+assert_seed 'seed=none'
+[[ -n "$(jq -r '.packages["leaf@1.0.1"] // empty' "$PREFIX/pnpm-lock.yaml")" ]] || fail 'the refresh did not adopt the replacement'
+[[ -z "$(jq -r '.packages["leaf@1.0.0"] // empty' "$PREFIX/pnpm-lock.yaml")" ]] || fail 'the deprecated record survived the refresh'
+[[ "$(jq '[.. | objects | select(has("deprecated"))] | length' "$PREFIX/pnpm-lock.yaml")" == 0 ]] || fail 'the refresh published deprecated metadata'
+
+# The same resolution that retains the record is refused: a seed can only carry
+# the moved metadata forward, and rule 4 does not absorb it.
+new_case refresh-retains-changed-metadata
+rewrite_prefix_lock '.packages["leaf@1.0.0"] = {"resolution":{"integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}
+    | .snapshots["leaf@1.0.0"] = {}
+    | .snapshots["@deepseek-ai/dsh@0.1.5-rc.2"].dependencies.leaf = "1.0.0"'
+before=$(hash_prefix)
+write_result_from_prefix '.packages["leaf@1.0.0"].deprecated = "upstream notice"'
+run_prepare '' '' --refresh-lock
+assert_failure
+assert_contains 'retained archive changed: leaf@1.0.0'
+assert_prefix_unchanged "$before"
+assert_no_scratch
 
 # --- N2: a developer upgrade of a host checkout ----------------------------
 # A checkout is not a fixture. The contract directory is the checkout's own
@@ -642,6 +739,7 @@ write_result tiny-dsh
 run_prepare_host '' '' --refresh-lock
 assert_success
 assert_contains 'refresh 0.1.5-rc.2 -> 0.1.5-rc.2'
+assert_seed 'seed=none'
 [[ -n "$(manager_log)" ]] || fail 'the host-checkout refresh started no manager'
 
 new_case refresh-orphan
@@ -650,6 +748,7 @@ before=$(hash_prefix)
 run_prepare '' '' --refresh-lock
 assert_failure
 assert_contains 'orphan archive'
+assert_seed 'seed=none'
 assert_prefix_unchanged "$before"
 
 # A committed input whose bytes no longer match its own pins is never re-pinned by

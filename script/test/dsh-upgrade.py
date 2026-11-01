@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -113,7 +114,7 @@ class Case:
         self.log = self.root / 'events.jsonl'
         self.state = self.root / 'docker.json'
         self.env = {key: value for key, value in os.environ.items() if not key.lower().startswith(('npm_config_', 'pnpm_config_', 'corepack_'))
-                    and key not in ['NODE_OPTIONS', 'NODE_PATH', 'BUN_OPTIONS', 'NODE_EXTRA_CA_CERTS', 'AGENT_VM_DSH_PNPM_PACKAGE', 'AGENT_VM_FIXTURE_BASE_PNPM']}
+                    and key not in ['NODE_OPTIONS', 'NODE_PATH', 'BUN_OPTIONS', 'NODE_EXTRA_CA_CERTS', 'AGENT_VM_DSH_PNPM_PACKAGE', 'AGENT_VM_FIXTURE_BASE_PNPM', 'DSH_TEST_UPSTREAM']}
         self.env.update(PATH=str(self.tools) + os.pathsep + os.environ['PATH'], TMPDIR=str(self.root),
                         AGENT_VM_FIXTURE_ROOT=str(self.root), AGENT_VM_FIXTURE_PNPM=str(self.tools / 'pnpm-fixture'),
                         AGENT_VM_CONTRACT_DIR=str(self.native_contract),
@@ -121,10 +122,11 @@ class Case:
                         DSH_TEST_REPO=str(ROOT), DSH_TEST_GRAPH=str(self.graph), DSH_TEST_LOG=str(self.log),
                         DSH_TEST_TARGETS=json.dumps(list(map(str, self.targets))), AVM_FAKE_STATE=str(self.state))
 
-    def run(self, args=(), mode='', gate='positive', publish='', rollback=''):
+    def run(self, args=(), mode='', gate='positive', publish='', rollback='', upstream=''):
         self.log.write_text('')
         self.state.write_text(json.dumps({'commands': [], 'containers': [], 'volume': None, 'network': None}))
-        env = dict(self.env, DSH_TEST_MODE=mode, AVM_FAKE_CASE=gate, DSH_TEST_PUBLISH=str(publish), DSH_TEST_ROLLBACK=str(rollback))
+        env = dict(self.env, DSH_TEST_MODE=mode, AVM_FAKE_CASE=gate, DSH_TEST_PUBLISH=str(publish),
+                   DSH_TEST_ROLLBACK=str(rollback), DSH_TEST_UPSTREAM=upstream)
         with tempfile.TemporaryFile() as output:
             result = subprocess.run(['/bin/bash', str(self.prefix / 'upgrade-dsh.sh'), *args], env=env, stdout=output, stderr=output, timeout=70)
             output.seek(0)
@@ -257,6 +259,19 @@ class Case:
     def unchanged(self):
         assert [target.read_bytes() for target in self.targets] == self.before, self.output
 
+    def dockerfile_with_label(self, version):
+        """The original Dockerfile with exactly its dsh label fallback set to `version`.
+
+        The fixture copies the live Dockerfile but seeds its own project at the
+        fixture selection, so the published fallback is a rewrite of whatever the
+        live file currently carries. Deriving it from the original bytes keeps the
+        whole-file equality below: a second edit anywhere still fails.
+        """
+        original = self.before[-1]
+        fallback = re.compile(rb'\$\{AGENT_VERSION_DSH:-[^}]*\}')
+        assert len(fallback.findall(original)) == 1, 'the live Dockerfile carries exactly one dsh label fallback'
+        return fallback.sub(('${AGENT_VERSION_DSH:-' + version + '}').encode(), original)
+
     def clean(self):
         state = json.loads(self.state.read_text())
         assert not state['containers'] and not state['volume'], state
@@ -275,7 +290,7 @@ def main():
             assert json.loads(case.targets[0].read_text())['dependencies']['@deepseek-ai/dsh'] == selected
             assert '${AGENT_VERSION_DSH:-' + selected + '}' in case.targets[-1].read_text()
             assert 'org.agent-vm.version.pnpm=' not in case.targets[-1].read_text()
-            assert case.targets[-1].read_bytes() == case.before[-1].replace(b'${AGENT_VERSION_DSH:-0.1.5-rc.2}', ('${AGENT_VERSION_DSH:-' + selected + '}').encode())
+            assert case.targets[-1].read_bytes() == case.dockerfile_with_label(selected)
             assert (case.root / 'images/pnpm/pin.json').read_bytes() == (ROOT / 'images/pnpm/pin.json').read_bytes()
             events = case.events
             managers = [event['value'] for event in events if event['kind'] == 'pnpm']
@@ -469,6 +484,52 @@ def main():
         assert case.run(['--cordis-overrides', str(proposal)], 'family-drift') == 1, case.output
         assert 'override 1.1.4, got @deepseek-ai/cordis-plugin-timer@1.1.5' in case.output, case.output
         case.unchanged()
+        # A refresh re-resolves from the manifest and the reviewed workspace, so an
+        # upstream fix replaces a deprecated record instead of restating it.
+        case = Case(root, 'refresh-drops-changed-metadata', fast_gate=True)
+        assert case.run([], upstream='deprecated-dropped') == 0, case.output
+        published = json.loads(case.targets[1].read_text())
+        assert 'leaf@1.0.1' in published['packages'], case.output
+        assert 'leaf@1.0.0' not in published['packages'], case.output
+        assert not any(record.get('deprecated') for record in published['packages'].values()), case.output
+        case.clean()
+        # Retaining the record is refused: rule 4 does not absorb new metadata.
+        case = Case(root, 'refresh-retains-changed-metadata', fast_gate=True)
+        assert case.run([], upstream='deprecated-retained') == 1, case.output
+        assert 'retained archive changed: leaf@1.0.0' in case.output, case.output
+        case.unchanged(); case.clean()
+        # The reviewed-map path runs the same comparison: before #134 it published
+        # this graph with no freeze at all.
+        case = Case(root, 'reviewed-map-retains-changed-metadata', fast_gate=True)
+        proposal = case.root / 'reviewed.json'
+        proposal.write_text(json.dumps(expected))
+        assert case.run(['--cordis-overrides', str(proposal)], 'changed-map',
+                        upstream='deprecated-retained') == 1, case.output
+        assert 'retained archive changed: leaf@1.0.0' in case.output, case.output
+        assert not any(e['kind'] == 'docker' for e in case.events)
+        case.unchanged(); case.clean()
+        # A changed selection with a changed map completes with no resolver seed:
+        # the unchanged-map half is the `exact` case above, through prepare-lock.sh.
+        case = Case(root, 'changed-selection-reviewed-map', fast_gate=True)
+        proposal = case.root / 'reviewed.json'
+        proposal.write_text(json.dumps(expected))
+        assert case.run(['0.1.5-rc.1', '--cordis-overrides', str(proposal)], 'changed-map',
+                        upstream='deprecated-dropped') == 0, case.output
+        assert json.loads(case.targets[0].read_text())['dependencies']['@deepseek-ai/dsh'] == '0.1.5-rc.1', case.output
+        workspace = json.loads(subprocess.check_output(
+            [str(case.native_contract / 'recipe-contract'), 'pnpm-yaml', str(case.targets[2])], text=True))
+        assert workspace['overrides'][timer] == '1.1.5', workspace['overrides']
+        published = json.loads(case.targets[1].read_text())
+        assert 'leaf@1.0.1' in published['packages'] and 'leaf@1.0.0' not in published['packages'], case.output
+        assert '${AGENT_VERSION_DSH:-0.1.5-rc.1}' in case.targets[-1].read_text(), case.output
+        case.clean()
+        # An unreachable addition fails on the refresh path too. The assertion
+        # names the rule ('orphan archive'), not the fixture key it mentions.
+        case = Case(root, 'refresh-orphan', fast_gate=True)
+        assert case.run([], 'orphan') == 1, case.output
+        assert 'orphan archive' in case.output, case.output
+        case.unchanged(); case.clean()
+        print('dsh upgrade: unseeded refresh drops, retains and re-selects PASS')
         # Each forward failure includes the partially written destination. Every
         # restore position is then independently made to fail; later restores continue.
         for index in range(5):

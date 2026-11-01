@@ -9,7 +9,8 @@ consumers; the **machine record**
 ([`standard-pnpm-migration.json`](standard-pnpm-migration.json)) is the generated
 **dsh slice only**. The Pi/bridge projection is written out by hand in the
 "Pi and the bridge" section below and is deliberately not in the JSON: its
-generator reads exactly the dsh baseline lock and the committed dsh inputs.
+generator reads exactly the dsh baseline lock and the dsh four inputs **at the
+migration source commit `c33ab9b`**, not their current bytes.
 [ADR 0003](adr/0003-dsh-graph-freeze.md) owns the dsh freeze rule,
 [ADR 0011](adr/0011-pi-selected-shrinkwrap.md) owns Pi's selected-archive routes
 and family/bin expectations, [ADR 0001](adr/0001-build-only-pnpm-graph-parser.md)
@@ -22,8 +23,20 @@ migration.
 ## Pi and the bridge: reviewed baselines and deltas (#52)
 
 The JSON record below is the generated dsh slice: it is derived from exactly the
-dsh baseline lock and the committed dsh four inputs, and `--check` keeps it
-byte-tied to them. The Pi/bridge rows are **not** in it: the generator emits the
+dsh baseline lock and the dsh four inputs as they were at the migration source
+commit `c33ab9b`, and `--check` keeps it byte-tied to those historical bytes. It
+is therefore a record of the migration, not of today's selection: it no longer
+detects live-selection drift, and a later adoption of the same consumer is a
+review event rather than a ledger refresh. Today's four inputs are validated
+separately, by the gates that actually read them — the committed-graph guards in
+`script/test/image-sources/tests/image_sources.rs` (`read_graph` on
+`MigratedProject::committed("dsh", …)` runs `pnpm-lock check` on the committed
+prefix, and `every_dsh_locked_package_carries_integrity` is the root/archive SRI
+guard), Go's `TestCommittedDshCheckFinal`, and `install-dsh.sh` at build time.
+`bash script/build/base-inputs.sh --check` proves only that these inputs are not
+base inputs. The fixture suites (`pnpm-lock-inputs.mjs`, `dsh-verify.sh`,
+`dsh-prepare-lock.sh`) run `check` on their own fixtures, not on this project. The
+Pi/bridge rows are **not** in it: the generator emits the
 dsh slice only, there is no consumer table behind it, and a Pi/bridge projection
 would need its own recorded measurements (manager transcripts and script payload
 hashes) rather than a section appended here. This section records those rows from
@@ -114,6 +127,7 @@ tag/commit are in `manager`.
 ## Graph delta
 
 ```text
+AS OF THE MIGRATION SOURCE COMMIT c33ab9b (selection 0.1.5-rc.2)
 BEFORE (npm, one hoisted tree)          AFTER (pnpm, one root, isolated)
 package-lock.json                      pnpm-lock.yaml
 588 locations, 569 identities          565 archives = 565 snapshots (peer-context keys)
@@ -122,6 +136,12 @@ package-lock.json                      pnpm-lock.yaml
   cordis 4.0.4 + 4.0.2, loader           cordis 4.0.2, loader 1.0.3,
     1.0.5 + 1.0.3, timer 1.1.6 + 1.1.4     timer 1.1.4, include 1.0.7
 ```
+
+The committed project has since been adopted to another selection, so every
+number in this block is a statement about `c33ab9b`. No current-graph count is
+repeated here: [ADR 0003](adr/0003-dsh-graph-freeze.md#peer-context-identity-rules)
+is the one place the current numbers live, beside the command that recomputes
+them (`recipe-contract pnpm-lock peers|graph dsh images/tools/dsh`).
 
 The JSON block linked below carries every row and, for every delta row, the
 reason derived from that row. The prose here only states what to look for:
@@ -167,11 +187,15 @@ declarations, snapshots and reason.
 ## Peer context and sandbox
 
 The exact-peer oracle is per snapshot, never "a satisfying version exists
-somewhere": 243 exact peer declarations, 229 of them `@deepseek-ai/cordis`, 0
+somewhere". On the migration graph at `c33ab9b` (the rows in the linked JSON):
+243 exact peer declarations, 229 of them `@deepseek-ai/cordis`, 0
 unsatisfied, 0 optional peers missing; `cordisExact` reports 233, those 229
 declarations plus the four Cordis families the reviewed overrides control and the
 resolved graph honours (see [ADR 0003](adr/0003-dsh-graph-freeze.md#amended-by-dsh-02x-cordis-families-2026-10-31)). A declaration written as a
-range is never counted — it is a compatibility constraint. The 62 rows whose
+range is never counted — it is a compatibility constraint. The same report for
+the current committed graph is in
+[ADR 0003](adr/0003-dsh-graph-freeze.md#peer-context-identity-rules), the one
+place those counts live. The 62 rows whose
 provider is named only
 through the opaque 32-hex context suffix are resolved through the dependency edge
 target — see [ADR 0003](adr/0003-dsh-graph-freeze.md) for why the hash is an
@@ -179,7 +203,9 @@ identity and never reconstructed. All 243 rows are in the linked JSON.
 `graph.opaquePeerContexts` counts snapshots, not hashes: **59** snapshots have a
 peer context that is exactly one opaque hash, those carry **57** distinct
 hashes, and **102** snapshot keys mention one of them (the key text renders a hash
-in more positions than the parsed peer context records).
+in more positions than the parsed peer context records). The current graph's three
+fields, and its root key, are in
+[ADR 0003](adr/0003-dsh-graph-freeze.md#peer-context-identity-rules).
 
 One `dsh-sandbox-local` snapshot is retained, with two canonical owners
 (`dsh-base`, `dsh-sdk-minimal`) reaching the same full peer-context key. That is
@@ -189,10 +215,13 @@ the installed-tree check and the independent layout oracle.
 ## Scripts stay disabled
 
 `ignoreScripts: true` is explicit on preparation and installation, and the
-workspace grants no `allowBuilds` entry. Seven script-bearing or prebuilt
-identities were inspected instead of executed; each row in `scripts` records the
-script map, the script-file hashes, the shipped payload and the runtime
-discriminator that proves the prebuild is real:
+workspace grants no `allowBuilds` entry.
+
+**The inspection below is as of the migration source commit `c33ab9b` (selection
+0.1.5-rc.2), and it was not repeated for the 0.2.1-rc.5 adoption.** Seven
+script-bearing or prebuilt identities were inspected instead of executed; each row
+in `scripts` records the script map, the script-file hashes, the shipped payload
+and the runtime discriminator that proves the prebuild is real:
 
 - `node-pty@1.2.0-beta.15` — `install`/`postinstall` only check or prune prebuilds;
   the tarball ships `prebuilds/linux-{arm64,x64}/pty.node` and a real PTY
@@ -212,19 +241,52 @@ discriminator that proves the prebuild is real:
 A missing prebuild fails the gate; no script approval is added and no npm
 fallback exists.
 
+**What the inspection does not cover today.** The committed `0.2.1-rc.5` lock no
+longer carries these identities: it selects `koffi@3.1.1` with its
+`@koromix/koffi-*@3.1.1` platform packages (the inspected pair was `3.3.1`),
+`@google/genai@2.21.0` and
+`@deepseek-ai/dsh-subprocess-local@0.2.1-rc.5`. Those script payloads were **not
+re-inspected**, so they are not evidence for the shipped bytes. What still covers
+them is the enforcement plus the runtime probe:
+
+- every preparation and installation argv carries `--ignore-scripts`
+  (`prepare-lock.sh:189`, `install-dsh.sh:144`), and
+  `PNPM_CONFIG_IGNORE_SCRIPTS=true` is pinned in the ledger's policy measurement,
+  so no lifecycle script of any identity can run at build or install time;
+- the focused native arm64 consumer run built and used the real payloads
+  (`target/ci-logs/pnpm-primitives-3e40a88c63534dc6b8dba3b5be5cafe1`): the koffi
+  FFI call, the node-pty spawn, the protobuf roundtrip and the `@google/genai`
+  import all pass against the shipped bytes, and the subprocess-local launch goes
+  through the same node-pty payload.
+
+A full inspection of the rc.5 scripts is an adoption-delta review item, not a
+claim this ledger makes.
+
 ## Changed selections
 
 The default/equal path is byte-frozen: with empty or equal slots preparation
-starts **zero** manager processes and compares all four files, and a real equal
-copy comparison reproduces `243 exact peers satisfied` (see `integration`).
-`0.1.5-rc.1` is the reviewed **changed** candidate: preparation resolves it under
-the same unchanged workspace, publishes build-local pins and validates the exact
-update rules. Its native ready/web/subprocess run is a separate mandatory leg and
-is not claimed below.
+starts **zero** manager processes and compares all four files, and at the
+migration source commit `c33ab9b` a real equal copy comparison reproduced the
+recorded `243 exact peers satisfied` (see `integration`; the current graph's
+exact-peer counts are in
+[ADR 0003](adr/0003-dsh-graph-freeze.md#peer-context-identity-rules)).
+`0.1.5-rc.1` was the reviewed **changed** candidate of the migration, and it is
+no longer a candidate: since the `0.2.1-rc.5` adoption that leg cannot pass at any
+comparison mode. Its `0.1.5-rc.x` sub-packages declare exact
+`@deepseek-ai/cordis: 4.0.2` peers while the reviewed map pins `4.0.5`, so
+preparation refuses at `pnpm-lock pin` with
+`peer @deepseek-ai/cordis wanted 4.0.2, got @deepseek-ai/cordis@4.0.5` (190 rows)
+and publishes nothing. The leg now names `0.2.1-rc.4`, the nearest release in the
+adopted Cordis family, and a changed selection re-resolves without the lock and is
+compared as a refresh (ADR 0003 § Amended by #134), so the retained-snapshot
+freeze no longer turns upstream drift into a red leg. The exact-peer oracle, the
+workspace map and the harness are unchanged.
 
 A changed selection is policy-enforced, **not fully transitive-frozen**: retained
 records keep their bytes, but identities reachable in dsh's own closure may be
-replaced or removed. That is the accepted relaxation, argued and limited in
+replaced or removed, and a retained snapshot's non-root edges may move because the
+resolution that produced them started without the lock. That is the accepted
+relaxation, argued and limited in
 [ADR 0003](adr/0003-dsh-graph-freeze.md); it is not a licence to change the
 workspace, the settings, an override selector or a record outside that closure.
 
@@ -285,19 +347,35 @@ every dsh edge row with its derived reason, all per-context dsh peer rows and th
 inspected script excerpts. It carries `"consumer": "dsh"` and, in `notClaimed`, the
 statement that it holds no Pi or bridge projection. The Pi/bridge rows are the
 hand-written section above. It is **generated**, not hand-written, from exactly two
-reviewable inputs — the
-baseline npm lock at commit `6c51509` (read through `git show`, so the deleted
-file still needs no copy) and the committed
-`images/tools/dsh/{package.json,pnpm-workspace.yaml,pnpm-lock.yaml}`:
+reviewable historical inputs — the baseline npm lock at commit `6c51509` and the
+dsh four inputs at the migration source commit `c33ab9b` (both read through
+`git show`, so a deleted or since-adopted file still needs no copy):
 
 ```bash
 node script/test/pnpm-migration-ledger.mjs           # rewrite the ledger
 node script/test/pnpm-migration-ledger.mjs --check   # drift gate: nonzero on any byte
 ```
 
+Both sides being historical is deliberate and is stated in the JSON's
+`provenance`: `graphSource` says every row and every reported hash comes out of
+`pnpmSourceSha`, so **the ledger no longer detects live-selection drift**, and
+`policySource` names the one thing that is still read from today's tree — the
+five preparation defaults, checked against the current scripts' argv. The
+reported hashes are re-derived from the `git show` bytes and the historical
+`pnpm-inputs.sha256` must agree with them, so `--check` fails if either the source
+bytes or the historical pin is inconsistent. Today's inputs are covered
+elsewhere, by the gates that read them: the committed-graph guards in
+`script/test/image-sources` (`read_graph` on `MigratedProject::committed`, plus
+`every_dsh_locked_package_carries_integrity` for the root and archive SRIs), Go's
+`TestCommittedDshCheckFinal`, and `install-dsh.sh` at build time.
+`bash script/build/base-inputs.sh --check` proves only that these inputs are not
+base inputs, and the fixture suites run `check` on fixtures. An adoption-delta
+review with an independently sourced root integrity stays a review item.
+
 `script/test/contracts.sh` runs the `--check` form, so a hand-edited or stale
-ledger fails contracts; the check reads the baseline commit object and fails
-loudly (never skips) when that object is unavailable. Recorded measurements that
-no input file contains — manager provenance, command transcripts and inspected
-script payloads — live in the generator's `RECORDED` block and are cited above.
-Do not edit the JSON by hand: change an input, or the generator.
+ledger fails contracts; the check reads both commit objects and fails loudly
+(never skips) when either is unavailable. Recorded measurements that no input
+file contains — manager provenance, command transcripts and inspected script
+payloads — live in the generator's `RECORDED` block and are cited above; they are
+historical transcripts, not evidence about any later release. Do not edit the
+JSON by hand: change an input, or the generator.

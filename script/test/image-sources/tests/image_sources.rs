@@ -47,6 +47,35 @@ fn dsh_pin() -> String {
         .to_string()
 }
 
+/// The `dsh-sandbox-local` version in the reviewed lock.
+///
+/// It happens to equal the dsh selection for the committed `0.2.1-rc.5` lock, and
+/// it did not for `0.1.5-rc.3`. That is a coincidence of this release, not a rule:
+/// the mutations that use it select a block by its header line and panic in
+/// `edit_yaml_block` when it stops matching, so a selection that moves the two
+/// apart fails loudly instead of silently editing another block.
+fn sandbox_pin() -> String {
+    dsh_pin()
+}
+
+/// Another canonical exact version, differing in its minor component. A
+/// stale-input control has to edit the reviewed bytes of whatever selection is
+/// committed, so the replacement is derived from that selection rather than
+/// repeating the literal a previous one happened to carry.
+fn other_exact_version(version: &str) -> String {
+    let (core, prerelease) = match version.split_once('-') {
+        Some((core, prerelease)) => (core, format!("-{prerelease}")),
+        None => (version, String::new()),
+    };
+    let mut components: Vec<String> = core.split('.').map(str::to_string).collect();
+    let minor = components
+        .get_mut(1)
+        .expect("a canonical version carries a minor");
+    let bumped: u64 = minor.parse().expect("a numeric minor component");
+    *minor = (bumped + 1).to_string();
+    format!("{}{}", components.join("."), prerelease)
+}
+
 /// The manifest-level pin of one migrated project: the manifest that declares
 /// it and the dependency key. The lock's answers come from the graph adapter, so
 /// no field here names an npm lock path.
@@ -1033,6 +1062,20 @@ fn rejected_dsh_mutation(label: &str, mutate: impl FnOnce(&ProjectFixture), expe
     );
 }
 
+/// The mirror of `rejected_dsh_mutation`: the same kind of edit, applied to an
+/// independent copy with independent pins, must leave a graph that validates. It
+/// is what makes a rejection attributable to the rule the case names rather than
+/// to the edit itself breaking the project.
+fn accepted_dsh_mutation(label: &str, mutate: impl FnOnce(&ProjectFixture)) -> GraphReport {
+    let source = MigratedProject::committed("dsh", "images/tools/dsh");
+    let fixture = ProjectFixture::copy(&source, label);
+    mutate(&fixture);
+    fixture.repin();
+    read_graph(&fixture.project).unwrap_or_else(|error| {
+        panic!("{label}: the mutated dsh project must validate, got {error:?}")
+    })
+}
+
 fn is_full_sha512(integrity: &str) -> bool {
     let Some(body) = integrity.strip_prefix("sha512-").map(str::as_bytes) else {
         return false;
@@ -1066,14 +1109,37 @@ fn edit_yaml_block(text: &str, header: &str, edit: impl FnOnce(&str) -> String) 
 fn dsh_graph_and_effective_peer_mutations_are_rejected() {
     let graph = read_graph(&MigratedProject::committed("dsh", "images/tools/dsh"))
         .expect("the reviewed dsh inputs form a valid graph");
-    let schemastery: Vec<&str> = graph
-        .packages_named("@deepseek-ai/schemastery")
+    // The wrong-peer case needs an exact declaration that demands a version this
+    // snapshot did not resolve, while another snapshot in the same graph did
+    // resolve it: the rejection must be the effective edge, never the absence of
+    // the wanted archive. This sdk declares zod as a range, and the peer oracle
+    // deliberately skips a range, so the case injects the exact declaration below.
+    // These are its unmutated facts, read from the committed graph itself.
+    let zod: Vec<&str> = graph
+        .packages_named("zod")
         .map(|entry| entry.version.as_str())
         .collect();
     assert_eq!(
-        schemastery,
-        ["3.18.2", "3.18.4"],
-        "the peer mutation needs the correct version to exist globally"
+        zod,
+        ["4.4.3", "4.6.7"],
+        "the peer mutation needs the other version to exist globally"
+    );
+    let protocols = graph
+        .package("@agentclientprotocol/sdk", "1.4.0")
+        .expect("the graph carries the sdk that declares the zod peer");
+    assert_eq!(
+        protocols.peers,
+        vec![("zod".to_string(), "^3.25.0 || ^4.0.0".to_string())],
+        "the injected exact declaration replaces this reviewed range"
+    );
+    assert!(
+        graph
+            .snapshot("@agentclientprotocol/sdk@1.4.0(zod@4.6.7)")
+            .expect("the sdk snapshot")
+            .edges
+            .iter()
+            .any(|edge| edge.name == "zod" && edge.target == "zod@4.6.7"),
+        "the snapshot's effective zod provider is 4.6.7, not the injected 4.4.3"
     );
 
     rejected_dsh_mutation(
@@ -1090,15 +1156,19 @@ fn dsh_graph_and_effective_peer_mutations_are_rejected() {
         "missing-integrity",
         |fixture| {
             fixture.rewrite("pnpm-lock.yaml", |text| {
-                edit_yaml_block(text, "  '@deepseek-ai/dsh@0.1.5-rc.2':\n", |block| {
-                    let mut lines: Vec<String> = block.lines().map(str::to_string).collect();
-                    let index = lines
-                        .iter()
-                        .position(|line| line.trim_start().starts_with("resolution:"))
-                        .expect("the archive declares a resolution");
-                    lines[index] = "    resolution: {}".to_string();
-                    lines.join("\n")
-                })
+                edit_yaml_block(
+                    text,
+                    &format!("  '@deepseek-ai/dsh@{}':\n", dsh_pin()),
+                    |block| {
+                        let mut lines: Vec<String> = block.lines().map(str::to_string).collect();
+                        let index = lines
+                            .iter()
+                            .position(|line| line.trim_start().starts_with("resolution:"))
+                            .expect("the archive declares a resolution");
+                        lines[index] = "    resolution: {}".to_string();
+                        lines.join("\n")
+                    },
+                )
             });
         },
         "missing key: integrity",
@@ -1110,8 +1180,8 @@ fn dsh_graph_and_effective_peer_mutations_are_rejected() {
             fixture.rewrite("pnpm-lock.yaml", |text| {
                 edit_yaml_block(
                     text,
-                    "  '@deepseek-ai/dsh-sandbox-local@0.1.5-rc.3':\n",
-                    |block| block.replacen("sha512-ma3IB1EervDxQvaZRi5VIozCb+qbWF89i6p8uRdBLpnJHzLcuI/AKI7S3Hkcvuy2JQEUmWTaiaq4Eil8GY9JNQ==", "sha512-short", 1),
+                    &format!("  '@deepseek-ai/dsh-sandbox-local@{}':\n", sandbox_pin()),
+                    |block| block.replacen("sha512-8LQa8REsIBtxNGgWdl80EbKe3aGOr/K/1rb/y28UwGQXtNm1kdnUoqwBOsEgkwNvGoSjeQ2rFh+hEZCum9DXOw==", "sha512-short", 1),
                 )
             });
         },
@@ -1122,20 +1192,12 @@ fn dsh_graph_and_effective_peer_mutations_are_rejected() {
         "wrong-effective-peer",
         |fixture| {
             fixture.rewrite("pnpm-lock.yaml", |text| {
-                edit_yaml_block(
-                    text,
-                    "  '@deepseek-ai/dsh-settings@0.1.5-rc.3':\n",
-                    |block| {
-                        block.replacen(
-                            "'@deepseek-ai/schemastery': 3.18.2",
-                            "'@deepseek-ai/schemastery': 3.18.4",
-                            1,
-                        )
-                    },
-                )
+                edit_yaml_block(text, "  '@agentclientprotocol/sdk@1.4.0':\n", |block| {
+                    block.replacen("zod: ^3.25.0 || ^4.0.0", "zod: 4.4.3", 1)
+                })
             });
         },
-        "peer @deepseek-ai/schemastery wanted 3.18.4, got @deepseek-ai/schemastery@3.18.2",
+        "peer zod wanted 4.4.3, got zod@4.6.7",
     );
 
     rejected_dsh_mutation(
@@ -1163,12 +1225,46 @@ fn dsh_graph_and_effective_peer_mutations_are_rejected() {
             fixture.rewrite("pnpm-lock.yaml", |text| {
                 edit_yaml_block(
                     text,
-                    "  '@deepseek-ai/dsh-sandbox-local@0.1.5-rc.3':\n",
+                    &format!("  '@deepseek-ai/dsh-sandbox-local@{}':\n", sandbox_pin()),
                     |_| String::new(),
                 )
             });
         },
         "dsh-sandbox-local",
+    );
+}
+
+/// The positive control for the wrong-effective-peer case above: the same injected
+/// exact declaration, naming the version the snapshot actually resolved, must
+/// validate. Without it the negative case could pass because the exact declaration
+/// itself is unprovable rather than because the provider is wrong. The probe in
+/// the #134 review ran exactly these two injections (`4.6.7` accepted, `4.4.3`
+/// refused); this test is what keeps that discriminating fact in the suite.
+#[test]
+fn the_effective_peer_control_accepts_the_effective_provider() {
+    let graph = accepted_dsh_mutation("effective-peer-control", |fixture| {
+        fixture.rewrite("pnpm-lock.yaml", |text| {
+            edit_yaml_block(text, "  '@agentclientprotocol/sdk@1.4.0':\n", |block| {
+                block.replacen("zod: ^3.25.0 || ^4.0.0", "zod: 4.6.7", 1)
+            })
+        });
+    });
+    let protocols = graph
+        .package("@agentclientprotocol/sdk", "1.4.0")
+        .expect("the sdk stays in the graph");
+    assert_eq!(
+        protocols.peers,
+        vec![("zod".to_string(), "4.6.7".to_string())],
+        "the control injects an exact declaration, which the peer oracle does not skip"
+    );
+    assert!(
+        graph
+            .snapshot("@agentclientprotocol/sdk@1.4.0(zod@4.6.7)")
+            .expect("the sdk snapshot")
+            .edges
+            .iter()
+            .any(|edge| edge.name == "zod" && edge.target == "zod@4.6.7"),
+        "the exact declaration is satisfied by the snapshot's own effective provider"
     );
 }
 
@@ -1234,14 +1330,15 @@ fn every_dsh_locked_package_carries_integrity() {
     let dsh = graph
         .package("@deepseek-ai/dsh", &dsh_pin())
         .expect("the graph carries the selected dsh root");
-    // Independently authored from the release metadata in the ticket, not from
-    // this graph's own output.
+    // Independently authored from the release metadata
+    // (`npm view @deepseek-ai/dsh@0.2.1-rc.5 dist.integrity dist.tarball`), not
+    // from this graph's own output.
     assert_eq!(
         dsh.integrity,
-        "sha512-8Xc8hCQHcIWRmTCVU/xZdp6/qMsWMeAd2ObChKDEsfhUPJFXx6H0lgeb1DxUMD86HZrrVN+1bCvn1ppjZ/fOxw=="
+        "sha512-WkyJZv4zl9sCAxSzRctGm58m0rilGqwR6pniBiLOz5CPDfHfDuAUicg0AAazXI7oj/Cph6/cjNTncA/rpLTXpw=="
     );
     assert_eq!(
-        dsh.tarball, "https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-0.1.5-rc.2.tgz",
+        dsh.tarball, "https://registry.npmjs.org/@deepseek-ai/dsh/-/dsh-0.2.1-rc.5.tgz",
         "only the canonical npmjs resolver is allowed"
     );
     assert!(
@@ -1275,8 +1372,8 @@ fn every_dsh_locked_package_carries_integrity() {
         .filter(|entry| entry.optional)
         .count();
     assert_eq!(
-        optional_snapshots, 70,
-        "the pinned lock annotates exactly 70 optional snapshots"
+        optional_snapshots, 78,
+        "the pinned lock annotates exactly 78 optional snapshots"
     );
     assert!(
         graph.packages.iter().all(|entry| !entry.optional),
@@ -2443,7 +2540,12 @@ fn image_source_guards_reject_mutations() {
         "stale-pin",
     );
     stale.rewrite("package.json", |text| {
-        text.replacen("\"0.1.5-rc.2\"", "\"0.1.5-rc.1\"", 1)
+        let quoted = |version: &str| format!("\"{version}\"");
+        text.replacen(
+            &quoted(&dsh_pin()),
+            &quoted(&other_exact_version(&dsh_pin())),
+            1,
+        )
     });
     let error = match read_graph(&stale.project) {
         Ok(_) => panic!("a stale dsh input pin must fail the graph gate"),

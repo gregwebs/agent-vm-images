@@ -534,6 +534,11 @@ try {
   assert.deepEqual(satisfiedSummary(peersOf(before)), updateVectors.peerSummary);
   assert.equal(compare(before, before, '').mode, 'equal');
   assert.equal(compare(before, before, '', true).mode, 'refresh');
+  // A refresh re-resolves, so the replaced package leaves the old closure instead
+  // of being retained with today's registry metadata.
+  const dropped = compare(...changedPair(), updateVectors.afterVersion, true);
+  assert.equal(dropped.mode, 'refresh');
+  assert.deepEqual(dropped.removedArchives, [`${root}@${updateVectors.beforeVersion}`, ...updateVectors.beforeOnly]);
   // The retired forged-project row is unrepresentable here (D14): the CLI never
   // accepts a project object, so there is no in-process graph to hand in.
   assert.throws(() => compare(before,after,'latest'), /semver/);
@@ -552,14 +557,22 @@ try {
   const broken = copy('update-after');
   fs.appendFileSync(path.join(broken, 'package.json'), ' ');
   for (const refresh of [false, true]) assert.throws(() => compare(before, broken, updateVectors.afterVersion, refresh), /pin/);
-  for (const field of updateVectors.retainedArchiveMutations) {
-    mutateAfter(l => {
+  function retainedArchiveMutation(field) {
+    return l => {
       const p = l.packages[`${cordis}@4.0.2`];
       if (field === 'integrity') p.resolution.integrity = 'sha512-AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
       else if (field === 'tarball') p.resolution.tarball = 'https://registry.npmjs.org/@deepseek-ai/cordis/-/cordis-4.0.2.tgz';
       else p[field] = ({engines:{node:'>=20'}, optional:true, peerDependencies:{other:'^1.0.0'}, peerDependenciesMeta:{other:{optional:true}}, os:['linux'], cpu:['arm64'], libc:['glibc'], deprecated:'old', hasBin:true})[field];
       if (field === 'peerDependenciesMeta') p.peerDependencies = {other:'^1.0.0'};
-    }, /retained archive/);
+    };
+  }
+  // Refresh relaxes retained snapshot selection only. A retained archive is npm's
+  // immutable name@version, so a changed SRI, tarball or metadata — including a new
+  // `deprecated` notice — is substitution in every mode.
+  for (const refresh of [false, true]) {
+    for (const field of updateVectors.retainedArchiveMutations) {
+      mutateAfter(retainedArchiveMutation(field), /retained archive/, refresh);
+    }
   }
   for (const field of updateVectors.retainedSnapshotMutations) {
     mutateAfter(l => { l.snapshots['shared@1.0.0'][field] = ({dependencies:{[cordis]:'4.0.2'}, optionalDependencies:{[cordis]:'4.0.2'},transitivePeerDependencies:['other'],optional:true})[field]; }, /retained snapshot/);
@@ -568,16 +581,6 @@ try {
   const refreshed = changedPair();
   edit(refreshed[1], 'pnpm-lock.yaml', l => l.snapshots['shared@1.0.0'].dependencies = {[cordis]:'4.0.2'}); pins(refreshed[1]);
   assert.equal(compare(...refreshed, updateVectors.afterVersion, true).mode, 'refresh');
-  // Refresh relaxes transitive snapshot selection only. A retained archive is npm's
-  // immutable name@version, so a changed SRI, tarball or metadata is substitution.
-  for (const field of ['integrity', 'tarball', 'engines']) {
-    mutateAfter(l => {
-      const p = l.packages[`${cordis}@4.0.2`];
-      if (field === 'integrity') p.resolution.integrity = 'sha512-AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
-      else if (field === 'tarball') p.resolution.tarball = 'https://registry.npmjs.org/@deepseek-ai/cordis/-/cordis-4.0.2.tgz';
-      else p.engines = {node:'>=20'};
-    }, /retained archive/, true);
-  }
   for (const refresh of [false, true]) {
     mutateAfter(l => l.packages['orphan@1.0.0'] = {resolution:{integrity:updateVectors.retainedIntegrity}}, /orphan/, refresh);
     mutateAfter(l => { l.packages['orphan@1.0.0'] = {resolution:{integrity:updateVectors.retainedIntegrity}}; l.snapshots['orphan@1.0.0'] = {}; }, /orphan/, refresh);

@@ -87,7 +87,13 @@ case "$phase" in
         audit_durations_start=$(wc -l <target/ci-logs/durations.txt)
         timed node-primitives bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer primitives --platform "$platform"
         timed dsh-default bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer dsh --platform "$platform"
-        timed dsh-changed bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer dsh --version 0.1.5-rc.1 --platform "$platform"
+        # The changed leg names the nearest release in the committed selection's own
+        # Cordis family. `0.1.5-rc.1` cannot pass at any comparison mode: its
+        # sub-packages declare exact `@deepseek-ai/cordis: 4.0.2` peers against the
+        # reviewed `4.0.5` map. A changed selection re-resolves without the lock and
+        # is compared as a refresh (ADR 0003 § Amended by #134), which is also what
+        # keeps this leg from going red on unrelated upstream drift.
+        timed dsh-changed bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer dsh --version 0.2.1-rc.4 --platform "$platform"
         timed dsh-policy bash script/test/standard-node-policy.sh agent-vm-base:local --consumer dsh --platform "$platform"
         # Pi and the bridge: the focused consumer legs install both projects cold
         # from the four inputs on the real base launcher, in the production tuple
