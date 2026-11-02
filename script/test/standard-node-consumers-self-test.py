@@ -34,6 +34,10 @@ DSH_BODY = '/source/script/test/fixtures/standard-node-dsh.py'
 PI_BODY = '/source/script/test/fixtures/standard-node-pi.py'
 PI_ROOT = '@earendil-works/pi-coding-agent'
 PI_ROOT_SRI = 'sha512-ROOTARCHIVE'
+# The dsh cases without `--version` model the committed manifest, so the layout
+# oracle's expectation is that manifest's own selection. A literal here would
+# assert a stale adoption instead of the harness's selection derivation.
+DSH_SELECTION = json.loads((ROOT / 'images/tools/dsh/package.json').read_text())['dependencies']['@deepseek-ai/dsh']
 # The self-test's own family/dispatch tables: plumbing only. The real
 # vectors are authored in standard-node-pi.py from the authenticated archives.
 PI_SHAPES = {'1.4.0': {'members': ['pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp',
@@ -638,7 +642,7 @@ def dsh_tests(work, environment):
             assert [Path(args[1]).name for args in copies[:4]] == ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'pnpm-inputs.sha256']
             assert len(copies) == 6 and copies[-1][1].endswith('/usr/local/bin/dsh')
             layout = next(args for args in commands if args[0] == 'layout')
-            assert layout[layout.index('--expect-version') + 1] == '0.1.5-rc.2'
+            assert layout[layout.index('--expect-version') + 1] == DSH_SELECTION
             probes = [args for args in commands if DSH_BODY in args and 'probe' in args]
             assert [(args[args.index('--reuid') + 1], args[args.index('--regid') + 1]) for args in probes] == [('12345','23456'),('0','23456'),('12345','0'),('12345','12345')]
             for args in probes:

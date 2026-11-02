@@ -114,7 +114,7 @@ class Invocation(base.Invocation):
             self.deadline = 190
 
     def negative_leg(self, main):
-        """Remove the four reviewed overrides, re-resolve, and require a failure.
+        """Remove the four reviewed overrides, re-resolve, and require evidence.
 
         Runs before the committed install: the rest of the flow is then the repair
         and the readiness proof. Fixture-authorized: the disposable copy lives in
@@ -130,8 +130,9 @@ class Invocation(base.Invocation):
         self.docker('cp', str(negative), main + ':/invocation/cordis-negative')
         output = self.action(main, 'cordis-negative', '/invocation/cordis-negative')
         record = self.json_line(output, 'cordisNegative')
-        if record.get('cordisNegative') not in ('exact-peer rejection', 'runtime startup failure'):
-            raise base.Failure('the overrides-removed graph produced no failure evidence')
+        if record.get('cordisNegative') not in ('exact-peer rejection', 'derivation requires review',
+                                                'reviewed map reproduced'):
+            raise base.Failure('the overrides-removed graph produced no evidence')
         print(output, end='', flush=True)
 
     def execute(self):

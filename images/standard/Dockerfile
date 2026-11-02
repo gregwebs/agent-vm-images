@@ -44,7 +44,7 @@ RUN --mount=type=bind,source=base-inputs.sha256,target=/tmp/base-source/base-inp
 ARG AGENT_VERSION_DSH=
 # Compatibility assertion only; base owns the pnpm selection and launcher.
 ARG AGENT_VERSION_PNPM=
-LABEL org.agent-vm.version.dsh="${AGENT_VERSION_DSH:-0.1.5-rc.2}"
+LABEL org.agent-vm.version.dsh="${AGENT_VERSION_DSH:-0.2.1-rc.5}"
 
 COPY tools/dsh/package.json tools/dsh/pnpm-lock.yaml tools/dsh/pnpm-workspace.yaml tools/dsh/pnpm-inputs.sha256 /opt/agent-vm/dsh/
 RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \

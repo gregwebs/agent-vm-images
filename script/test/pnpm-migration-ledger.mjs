@@ -1,18 +1,26 @@
 // Rebuilds docs/standard-pnpm-migration.json from two reviewable inputs: the
-// baseline npm lock read out of git at BASELINE and the committed dsh pnpm
-// project. Every selection, delta and peer row is derived here, so a per-row
-// reason cannot drift from the row it explains. RECORDED holds only the
-// measurements no input file contains (manager provenance, command
-// transcripts, inspected script payloads); it is cited from the prose doc.
+// baseline npm lock read out of git at BASELINE and the dsh pnpm project read out
+// of git at PNPM_SOURCE. Every selection, delta and peer row is derived here, so a
+// per-row reason cannot drift from the row it explains. RECORDED holds only the
+// measurements no input file contains (manager provenance, command transcripts,
+// inspected script payloads); it is cited from the prose doc.
+//
+// The pnpm side is historical by construction: the four dsh inputs and every
+// hash the ledger reports come from PNPM_SOURCE, so the record describes the
+// migration and no longer detects live-selection drift. A later adoption of the
+// same consumer is a review event, not a ledger update. What stays current is the
+// policy/argv compatibility check (`policySource`) and the current-input legs
+// named in `provenance.currentInputs`.
 //
 //   node script/test/pnpm-migration-ledger.mjs           # rewrite the ledger
 //   node script/test/pnpm-migration-ledger.mjs --check   # drift gate, no write
 //
-// --check needs the baseline commit object, so callers must fetch it (CI uses
+// --check needs both commit objects, so callers must fetch them (CI uses
 // fetch-depth: 0). A missing object is a hard failure, never a skip.
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -51,6 +59,13 @@ const ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const BASELINE = "6c51509";
 const BASELINE_PATH = "images/tools/dsh/package-lock.json";
 const PROJECT = "images/tools/dsh";
+// The last commit whose four dsh inputs are the migration's reviewed graph. A
+// later adoption of the same consumer changes the inputs, so pinning the source
+// is what keeps `--check` a drift gate over the record instead of a live-graph
+// assertion. `git diff c33ab9b HEAD -- images/tools/dsh/{package.json,pnpm-lock,
+// pnpm-workspace.yaml,pnpm-inputs.sha256}` being empty is the evidence this was
+// still the migration state when it was chosen.
+const PNPM_SOURCE = "c33ab9b61e631ef383cc2e45475e1a32e42da875";
 const LEDGER = "docs/standard-pnpm-migration.json";
 const PIN_FILE = "pnpm-inputs.sha256";
 // The one archive whose single snapshot is reached by two canonical owners; the
@@ -66,7 +81,6 @@ const REASON = {
   retargetRange: "range re-selection",
 };
 
-const sha256 = file => crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
 const sha256Of = value => crypto.createHash("sha256").update(value).digest("hex");
 const read = file => fs.readFileSync(path.join(ROOT, file), "utf8");
 const lexicographic = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -103,6 +117,27 @@ function readBaseline() {
   };
 }
 
+/** The four graph inputs of one dsh project, read out of one commit, plus the
+ * hash of each input's bytes. `pnpm-inputs.sha256` is a review claim about the
+ * other three, so the claim is re-derived here instead of being reported.
+ * @returns {{sourceSha:string, directory:string, digests:Map<string,string>, cleanup:()=>void}} */
+function readHistoricalProject() {
+  const sourceSha = git(["rev-parse", `${PNPM_SOURCE}^{commit}`]).trim();
+  git(["cat-file", "-e", `${sourceSha}^{tree}`]);
+  const files = new Map([...pinnedInputs, PIN_FILE].map(name => [name, git(["show", `${sourceSha}:${PROJECT}/${name}`])]));
+  const digests = new Map([...files].map(([name, bytes]) => [name, sha256Of(bytes)]));
+  const pinned = files.get(PIN_FILE).split("\n").filter(Boolean).map(line => line.split(/\s+/));
+  assert.deepEqual(pinned.map(row => row[1]), pinnedInputs,
+    `${sourceSha}:${PROJECT}/${PIN_FILE} does not pin the three reviewed inputs`);
+  for (const [digest, name] of pinned) {
+    assert.equal(digest, digests.get(name),
+      `${sourceSha}:${PROJECT}/${name}: the historical pin disagrees with the bytes it claims`);
+  }
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pnpm-migration-history-"));
+  for (const [name, bytes] of files) fs.writeFileSync(path.join(directory, name), bytes);
+  return { sourceSha, directory, digests, cleanup: () => fs.rmSync(directory, { recursive: true, force: true }) };
+}
+
 /** npm's tree is a location map, so an edge target is the nearest nested or
  * hoisted location the old resolver would have loaded. */
 function resolveNpmTarget(packages, location, dependency) {
@@ -126,8 +161,8 @@ const stripContext = key => {
   return out;
 };
 
-function readGraph() {
-  const project = readProject({ prefix: path.join(ROOT, PROJECT), kind: "dsh" });
+function readGraph(prefix) {
+  const project = readProject({ prefix, kind: "dsh" });
   const archives = new Map(project.packages.map(archive => [identity(archive), archive]));
   const snapshotsByIdentity = new Map();
   for (const snapshot of project.snapshots) {
@@ -952,7 +987,16 @@ const RECORDED = {
 
 function build() {
   const baseline = readBaseline();
-  const graph = readGraph();
+  const history = readHistoricalProject();
+  try {
+    return render(baseline, history);
+  } finally {
+    history.cleanup();
+  }
+}
+
+function render(baseline, history) {
+  const graph = readGraph(history.directory);
   const packages = JSON.parse(baseline.bytes).packages;
   const beforeEdges = npmEdgeIndex(baseline.entries, packages);
   const afterEdges = pnpmEdgeIndex(graph);
@@ -964,8 +1008,15 @@ function build() {
     consumer: "dsh",
     provenance: {
       baselineSha: baseline.sourceSha,
+      pnpmSourceSha: history.sourceSha,
+      // Which side of this record is a measurement of the commit above and which
+      // side is a check of today's scripts. The graph, selection, deltas and
+      // hashes are historical: this file does not detect live-selection drift.
+      graphSource: `historical: the four dsh inputs, the selection, every delta row and every reported hash are read out of ${history.sourceSha}`,
       measuredOn: RECORDED.measuredOn,
       graphReader: "recipe-contract pnpm-lock (images/recipe-contract/pnpmlock)",
+      policySource: "current images/tools/dsh/{prepare-lock.sh,install-dsh.sh} (compatibility check)",
+      currentInputs: "validated outside this record, by the gates that read today's four inputs: the committed-graph guards in script/test/image-sources (read_graph on MigratedProject::committed, plus every_dsh_locked_package_carries_integrity for the root and archive SRIs), Go's TestCommittedDshCheckFinal, and install-dsh.sh at build time; the fixture suites run check on their own fixtures instead, and bash script/build/base-inputs.sh --check proves only that these inputs are not base inputs, so an adoption of this project moves no base identity",
     },
     baseline: {
       sourceSha: baseline.sourceSha,
@@ -979,12 +1030,12 @@ function build() {
       changedCandidate: RECORDED.changedCandidate,
       packageManager: graph.project.manifest.packageManager,
     },
-    inputs: pinnedInputs.map(name => ({ name, sha256: sha256(path.join(ROOT, PROJECT, name)) })),
-    pinFile: { name: PIN_FILE, sha256: sha256(path.join(ROOT, PROJECT, PIN_FILE)) },
+    inputs: pinnedInputs.map(name => ({ name, sha256: history.digests.get(name) })),
+    pinFile: { name: PIN_FILE, sha256: history.digests.get(PIN_FILE) },
     manager: RECORDED.manager,
     policy: policySection(),
     workspace: {
-      sha256: sha256(path.join(ROOT, PROJECT, "pnpm-workspace.yaml")),
+      sha256: history.digests.get("pnpm-workspace.yaml"),
       overrides: graph.project.workspace.overrides,
       trustPolicyExclude: graph.project.workspace.trustPolicyExclude,
     },

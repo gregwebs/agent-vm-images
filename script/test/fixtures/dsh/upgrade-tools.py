@@ -14,6 +14,40 @@ def log(kind, value):
         handle.write(json.dumps({'kind': kind, 'value': value}) + '\n')
 
 
+def family_key(key):
+    """(family, version) of an archive or snapshot key, ignoring its peer context."""
+    return key.split('(', 1)[0].rsplit('@', 1)
+
+
+def honour_overrides(graph, overrides):
+    """The manager applies the staged overrides: one instance per pinned family.
+
+    A `parent>child` override fixes the parent's own edge, and because the reviewed
+    value is the family's unique selection every other consumer of it resolves to
+    the same instance. A graph that still carries a second instance of a pinned
+    family has not honoured the map, and stage validation refuses it.
+    """
+    for selector, pinned in overrides.items():
+        family = selector.rsplit('>', 1)[-1]
+        instances = [key for key in graph['packages'] if family_key(key)[0] == family]
+        if not instances:
+            continue
+        if not any(family_key(key)[1] == pinned for key in instances):
+            for field in ['packages', 'snapshots']:
+                key = next(k for k in graph[field] if family_key(k)[0] == family)
+                graph[field][family + '@' + pinned] = graph[field].pop(key)
+        for field in ['packages', 'snapshots']:
+            for key in list(graph[field]):
+                name, version = family_key(key)
+                if name == family and version != pinned:
+                    del graph[field][key]
+        for snapshot in graph['snapshots'].values():
+            for section in ['dependencies', 'optionalDependencies']:
+                edges = snapshot.get(section) or {}
+                if family in edges and not edges[family].startswith(pinned + '('):
+                    edges[family] = pinned
+
+
 def manager(args):
     log('pnpm', {'args': args, 'cwd': os.getcwd(), 'env': {key: value for key, value in os.environ.items() if key.startswith(('PNPM_CONFIG_', 'XDG_')) or key in ('HOME', 'TMPDIR')}})
     if '--version' in args:
@@ -35,35 +69,52 @@ def manager(args):
         graph[field]['@deepseek-ai/dsh@' + version] = graph[field].pop('@deepseek-ai/dsh@' + old)
     workspace = json.loads(subprocess.check_output(
         [os.environ['AGENT_VM_CONTRACT_DIR'] + '/recipe-contract', 'pnpm-yaml', 'pnpm-workspace.yaml'], text=True))
+    # No resolution is seeded with the committed lock: the manifest and the
+    # reviewed workspace are its only inputs (ADR 0003 § Amended by #134).
+    assert not Path('pnpm-lock.yaml').exists(), 'resolution seeded with the committed lock'
     tentative = 'overrides' not in workspace
     if tentative:
-        assert not Path('pnpm-lock.yaml').exists(), 'tentative graph seeded with old overrides'
         graph.pop('overrides', None)
     else:
         graph['overrides'] = workspace['overrides']
+    if not tentative:
+        honour_overrides(graph, workspace.get('overrides') or {})
     mode = os.environ.get('DSH_TEST_MODE')
-    if mode in ['changed-map', 'final-drift']:
+    family = '@deepseek-ai/cordis-plugin-timer'
+    if mode in ['changed-map', 'final-drift'] and tentative:
+        # The tentative resolution selects the newer timer; the reviewed map decides
+        # it, and the staged resolution below is the one that honours that map.
         for field in ['packages', 'snapshots']:
-            graph[field]['@deepseek-ai/cordis-plugin-timer@1.1.5'] = graph[field].pop('@deepseek-ai/cordis-plugin-timer@1.1.4')
-        graph['snapshots']['@deepseek-ai/dsh@' + version]['dependencies']['@deepseek-ai/cordis-plugin-timer'] = '1.1.5'
-        graph['snapshots']['declarations@1.0.0']['dependencies']['@deepseek-ai/cordis-plugin-timer'] = '1.1.5'
-        if mode == 'final-drift' and not tentative:
-            graph['packages']['declarations@1.0.0']['peerDependencies']['@deepseek-ai/cordis-plugin-timer'] = '^1.1.5'
+            graph[field][family + '@1.1.5'] = graph[field].pop(family + '@1.1.4')
+        graph['snapshots']['@deepseek-ai/dsh@' + version]['dependencies'][family] = '1.1.5'
+        graph['snapshots']['declarations@1.0.0']['dependencies'][family] = '1.1.5'
+    if mode == 'final-drift' and not tentative:
+        # The published graph's declared requirement drifts from the independent
+        # requirements even though it still resolves to the reviewed instance.
+        graph['packages']['declarations@1.0.0']['peerDependencies'][family] = '^1.1.5'
+    if mode == 'family-drift' and not tentative:
+        # The published graph resolves a family the unchanged reviewed map pins to
+        # another version: the pin is not honoured, so the graph is not publishable.
+        for field in ['packages', 'snapshots']:
+            graph[field][family + '@1.1.5'] = graph[field].pop(family + '@1.1.4')
+        graph['snapshots']['@deepseek-ai/dsh@' + version]['dependencies'][family] = '1.1.5'
+        graph['snapshots']['declarations@1.0.0']['dependencies'][family] = '1.1.5'
     if mode == 'conflict':
         graph['packages']['declarations@1.0.0']['peerDependencies']['@deepseek-ai/cordis'] = '4.0.3'
-    if mode == 'repin':
-        # A root range selects a newer timer beside the 1.1.4 the reviewed map
-        # pins. Both satisfy every declaration, so only the reviewed value can
-        # decide: this is the legitimate no-op re-pin of an unchanged map.
-        family = '@deepseek-ai/cordis-plugin-timer'
+    if mode == 'repin' and tentative:
+        # The tentative resolution selects a newer timer beside the 1.1.4 the
+        # reviewed map pins. Both satisfy every declaration, so only the reviewed
+        # value can decide: this is the legitimate no-op re-pin of an unchanged
+        # map. The staged resolution below re-runs with that map, which is what
+        # collapses the family back to the single pinned instance.
         graph['packages'][family + '@1.1.5'] = graph['packages'][family + '@1.1.4']
         graph['snapshots'][family + '@1.1.5'] = {}
         graph['snapshots']['@deepseek-ai/dsh@' + version]['dependencies'][family] = '1.1.5'
-    if mode == 'ambiguous':
+    if mode == 'ambiguous' and tentative:
         # Two selections that satisfy every declaration while the reviewed 1.1.4 is
         # not one of them: no graph fact and no reviewed value can decide, so
-        # derivation must stop instead of choosing a version.
-        family = '@deepseek-ai/cordis-plugin-timer'
+        # derivation must stop instead of choosing a version. The staged resolution
+        # then honours whichever map the review selected (honour_overrides above).
         for field in ['packages', 'snapshots']:
             graph[field][family + '@1.1.5'] = graph[field].pop(family + '@1.1.4')
         graph['packages'][family + '@1.1.6'] = graph['packages'][family + '@1.1.5']
@@ -72,6 +123,15 @@ def manager(args):
             if snapshot.get('dependencies', {}).get(family) == '1.1.4':
                 snapshot['dependencies'][family] = '1.1.5'
         graph['snapshots']['@deepseek-ai/dsh@' + version]['dependencies'][family] = '1.1.6'
+    # What the registry did since review; applies to every resolution, because
+    # both resolve from the manifest and neither is seeded with the old lock.
+    upstream = os.environ.get('DSH_TEST_UPSTREAM', '')
+    if upstream == 'deprecated-retained':
+        graph['packages']['leaf@1.0.0']['deprecated'] = 'fixture upstream notice'
+    if upstream == 'deprecated-dropped':
+        for field in ['packages', 'snapshots']:
+            graph[field]['leaf@1.0.1'] = graph[field].pop('leaf@1.0.0')
+        graph['snapshots']['@deepseek-ai/dsh@' + version]['dependencies']['leaf'] = '1.0.1'
     if not tentative:
         if mode == 'integrity': del graph['packages']['leaf@1.0.0']['resolution']['integrity']
         if mode == 'sandbox':
@@ -80,6 +140,8 @@ def manager(args):
             del graph['snapshots']['@deepseek-ai/dsh@' + version]['dependencies']['@deepseek-ai/dsh-sandbox-local']
         if mode == 'effective-peer':
             graph['snapshots']['declarations@1.0.0']['dependencies']['@deepseek-ai/cordis'] = '4.0.3'
+        if mode == 'orphan':
+            graph['packages']['orphan@1.0.0'] = {'resolution': {'integrity': 'sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=='}}
     Path('pnpm-lock.yaml').write_text(json.dumps(graph, indent=2) + '\n')
     return 0
 

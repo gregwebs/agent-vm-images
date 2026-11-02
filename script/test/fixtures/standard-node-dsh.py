@@ -20,9 +20,6 @@ POLICY = ('--config.minimum-release-age=1440', '--config.minimum-release-age-str
           '--ignore-scripts', '--ignore-pnpmfile', '--pm-on-fail=error',
           '--config.update-notifier=false', '--registry=https://registry.npmjs.org/',
           '--package-import-method=copy')
-# A graph without the reviewed overrides must fail loudly when it starts: these
-# are the startup failures a mismatched Cordis/HMR instance produces.
-FATAL = ('requires the Cordis HMR service', 'ERR_MODULE_NOT_FOUND', 'Cannot find module')
 
 
 def environment():
@@ -101,14 +98,15 @@ def clean():
 
 
 def cordis_negative(directory):
-    """The ticket's real negative leg: drop the four overrides, re-resolve, fail.
+    """The ticket's real negative leg: drop the four overrides, re-resolve, check.
 
     A project without the reviewed overrides is not a locked project, so the
     reviewed reader (`recipe-contract pnpm-lock`) cannot be the oracle here: derivation is the
     owning reader for that shape, and its exact-requirement rules are what refuse
-    to publish. A derivation that *accepts* the removed-override graph means the
-    graph is already peer-consistent, so the overrides are only load-bearing at
-    runtime and the leg installs it and requires the startup failure instead.
+    to publish. A derivation that *accepts* the removed-override graph has to
+    reproduce the reviewed map exactly -- otherwise the committed map is stale and
+    the leg says so -- and the project it produced must then start cleanly, because
+    one Cordis instance is the property the map exists for.
     """
     uploaded = Path(directory)
     assert all((uploaded / name).is_file() and not (uploaded / name).is_symlink() for name in INPUTS), uploaded
@@ -151,7 +149,6 @@ def cordis_negative(directory):
         diagnostic = [line for line in errors.splitlines() if line.strip()][-1][:400]
         print(json.dumps(dict({'cordisNegative': 'exact-peer rejection', 'diagnostic': diagnostic}, **numbers),
                          sort_keys=True))
-        report.unlink()
         shutil.rmtree(prefix, ignore_errors=True)
         return
     if status == 0:
@@ -167,42 +164,23 @@ def cordis_negative(directory):
                               'diagnostic': 'derived map differs from the reviewed overrides'}, sort_keys=True))
             shutil.rmtree(prefix, ignore_errors=True)
             return
-    # Peer-consistent without the overrides: either derivation succeeded, or it
-    # stopped on a conflicting requirement rather than an unmet peer. The reviewed
-    # overrides are then only load-bearing at runtime, so install the graph and
-    # require the real startup failure instead of accepting a derivation
-    # diagnostic as proof.
-    negative_prefix = ROOT / 'cordis-negative-prefix'
-    bin_dir = ROOT / 'cordis-negative-bin'
-    runtime = Path('/root/cordis-negative-runtime')
-    try:
-        shutil.copytree(prefix, negative_prefix)
-        status, output, errors = run_status(['/usr/local/bin/pnpm', 'install', '--prod', '--frozen-lockfile',
-                                             *POLICY, '--store-dir', '/tmp/cordis-negative-store'],
-                                            seconds=625, cwd=str(negative_prefix))
-        assert status == 0, errors
-        bin_dir.mkdir()
-        (bin_dir / 'dsh').symlink_to(negative_prefix / 'node_modules/@deepseek-ai/dsh/lib/bin.js')
-        runtime.mkdir(mode=0o700)
-        for name in ('config', 'cache', 'data', 'state', 'tmp'):
-            (runtime / name).mkdir()
-        env = environment()
-        env.update(HOME=str(runtime), TMPDIR=str(runtime / 'tmp'),
-                   XDG_CONFIG_HOME=str(runtime / 'config'), XDG_CACHE_HOME=str(runtime / 'cache'),
-                   XDG_DATA_HOME=str(runtime / 'data'), XDG_STATE_HOME=str(runtime / 'state'))
-        status, _, errors = run_status(['python3', str(SOURCE / 'probe-dsh.py'),
-                                        '--prefix', str(negative_prefix),
-                                        '--command', str(bin_dir / 'dsh'), '--scratch-root', str(runtime)],
-                                       seconds=90, env=env)
-        assert status == 1, (status, errors)
-        markers = [marker for marker in FATAL if marker in errors]
-        assert markers, errors
-        print(json.dumps(dict({'cordisNegative': 'runtime startup failure', 'diagnostic': markers[0]}, **numbers),
-                         sort_keys=True))
-    finally:
-        for item in (negative_prefix, bin_dir, runtime, prefix):
-            shutil.rmtree(item, ignore_errors=True)
-
+    # The graph is peer-consistent without the overrides and its derivation
+    # reproduces the reviewed map exactly: at `dsh 0.2.1-rc.5` every Cordis family
+    # is declared as a range (`~4.0.5`), so the ranges and the reviewed overrides
+    # resolve to the same graph today. The overrides are therefore not load-bearing
+    # at runtime, and this leg no longer asserts a startup failure that cannot
+    # happen -- while the 0.1.5/0.2.0 sub-packages pinned `cordis: 4.0.2` exactly,
+    # the removal did fail. What the removal still proves on the committed bytes:
+    # every Cordis peer is satisfied, and the map this graph demands is the map the
+    # repository reviewed. The startup of the shipped graph is the `install` action's
+    # own proof; installing this one would add ~300 MB to the leg's install budget
+    # for no new signal.
+    assert status == 0, (status, output, errors)
+    print(json.dumps(dict({'cordisNegative': 'reviewed map reproduced',
+                           'diagnostic': 'the derivation without the overrides equals the reviewed map'},
+                          **numbers), sort_keys=True))
+    report.unlink(missing_ok=True)
+    shutil.rmtree(prefix, ignore_errors=True)
 
 def probe(token, source, version, uid, gid):
     assert (os.getuid(), os.getgid()) == (uid, gid)

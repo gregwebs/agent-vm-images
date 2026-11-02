@@ -6,6 +6,23 @@
   "packages": [
     {
       "id": {
+        "name": "@deepseek-ai/cordis-plugin-include",
+        "version": "1.0.7"
+      },
+      "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      "tarball": "https://registry.npmjs.org/@deepseek-ai/cordis-plugin-include/-/cordis-plugin-include-1.0.7.tgz",
+      "peers": {},
+      "optionalPeers": [],
+      "hasBin": false,
+      "platform": {
+        "os": [],
+        "cpu": [],
+        "libc": []
+      },
+      "optional": false
+    },
+    {
+      "id": {
         "name": "@deepseek-ai/cordis-plugin-loader",
         "version": "1.0.3"
       },
@@ -14,6 +31,23 @@
       "peers": {
         "@deepseek-ai/cordis": "4.0.2"
       },
+      "optionalPeers": [],
+      "hasBin": false,
+      "platform": {
+        "os": [],
+        "cpu": [],
+        "libc": []
+      },
+      "optional": false
+    },
+    {
+      "id": {
+        "name": "@deepseek-ai/cordis-plugin-timer",
+        "version": "1.1.4"
+      },
+      "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      "tarball": "https://registry.npmjs.org/@deepseek-ai/cordis-plugin-timer/-/cordis-plugin-timer-1.1.4.tgz",
+      "peers": {},
       "optionalPeers": [],
       "hasBin": false,
       "platform": {
@@ -79,6 +113,18 @@
     {
       "id": {
         "packageId": {
+          "name": "@deepseek-ai/cordis-plugin-include",
+          "version": "1.0.7"
+        },
+        "peerContext": [],
+        "key": "@deepseek-ai/cordis-plugin-include@1.0.7"
+      },
+      "edges": [],
+      "optional": false
+    },
+    {
+      "id": {
+        "packageId": {
           "name": "@deepseek-ai/cordis-plugin-loader",
           "version": "1.0.3"
         },
@@ -101,6 +147,18 @@
           "optional": false
         }
       ],
+      "optional": false
+    },
+    {
+      "id": {
+        "packageId": {
+          "name": "@deepseek-ai/cordis-plugin-timer",
+          "version": "1.1.4"
+        },
+        "peerContext": [],
+        "key": "@deepseek-ai/cordis-plugin-timer@1.1.4"
+      },
+      "edges": [],
       "optional": false
     },
     {
@@ -138,8 +196,18 @@
       },
       "edges": [
         {
+          "name": "@deepseek-ai/cordis-plugin-include",
+          "target": "@deepseek-ai/cordis-plugin-include@1.0.7",
+          "optional": false
+        },
+        {
           "name": "@deepseek-ai/cordis-plugin-loader",
           "target": "@deepseek-ai/cordis-plugin-loader@1.0.3(@deepseek-ai/cordis@4.0.2)",
+          "optional": false
+        },
+        {
+          "name": "@deepseek-ai/cordis-plugin-timer",
+          "target": "@deepseek-ai/cordis-plugin-timer@1.1.4",
           "optional": false
         },
         {

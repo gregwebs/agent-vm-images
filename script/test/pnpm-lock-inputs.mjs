@@ -315,7 +315,9 @@ try {
   const intactReport = peersOf(intact);
   assert.deepEqual(intactReport.unsatisfied, []);
   run(["check", "dsh", intact], 0);
-  assert.deepEqual(intactReport, {exact:1,totalOptionalMissing:0,cordisExact:1,unsatisfied:[]});
+  // cordisExact counts the one declared exact Cordis peer plus the four reviewed
+  // families this graph resolves to exactly the pinned version.
+  assert.deepEqual(intactReport, {exact:1,totalOptionalMissing:0,cordisExact:5,unsatisfied:[]});
   // Peer specifications are classified, never silently skipped: `=X`/`vX` and
   // surrounding whitespace are exact pins, the explicit range grammar is a range,
   // and any other syntax stops the check instead of escaping the exact-peer oracle.
@@ -342,19 +344,35 @@ try {
   for (const spec of ["nonsense", "4.0.2 ||", ">=", "v4", "=", "~>4.0.2", "4.0.2, 4.0.3"]) {
     assert.match(peerSpec(spec, 1).stderr, /unknown peer specification/);
   }
+  // An optional peer may be missing while the reviewed map is still honoured: the
+  // loader loses its own resolver edge, and the root keeps the Cordis instance the
+  // map pins (a graph that drops a pinned family is refused, not tolerated).
   const optional = copy();
   edit(optional, "pnpm-lock.yaml", l => {
     l.packages[`${loader}@1.0.3`].peerDependenciesMeta = { [cordis]: { optional: true } };
     l.snapshots[`${root}@0.1.5-rc.2`].dependencies[loader] = "1.0.3";
+    l.snapshots[`${root}@0.1.5-rc.2`].dependencies[cordis] = "4.0.2";
     l.snapshots[`${loader}@1.0.3`] = {};
-    delete l.snapshots[loaderKey]; delete l.snapshots[`${cordis}@4.0.2`]; delete l.packages[`${cordis}@4.0.2`];
+    delete l.snapshots[loaderKey];
   });
   pins(optional); run(["check", "dsh", optional], 0);
-  assert.deepEqual(satisfiedSummary(peersOf(optional)), {exact:1,totalOptionalMissing:1,cordisExact:1,unsatisfied:0});
+  assert.deepEqual(satisfiedSummary(peersOf(optional)), {exact:1,totalOptionalMissing:1,cordisExact:5,unsatisfied:0});
 
-  invalid(prefix => edit(prefix, "pnpm-lock.yaml", l => {
+  // Exact Cordis control needs a declaration or a reviewed pin. Without the map
+  // there is neither, so the report says zero and the publication path refuses --
+  // the locked reader's workspace policy rejects the absent map itself, and the
+  // zero-guard behind it is covered by pnpmlock's own test.
+  const uncontrolled = copy();
+  edit(uncontrolled, "pnpm-workspace.yaml", w => { delete w.overrides; });
+  edit(uncontrolled, "pnpm-lock.yaml", l => {
+    delete l.overrides;
     delete l.packages[`${loader}@1.0.3`].peerDependencies;
-  }), /exact Cordis peers/);
+  });
+  pins(uncontrolled);
+  assert.equal(peersOf(uncontrolled).cordisExact, 0);
+  const uncontrolledCheck = spawnSync(bin, ["pnpm-lock", "check", "dsh", uncontrolled], { encoding: "utf8" });
+  assert.equal(uncontrolledCheck.status, 1);
+  assert.match(uncontrolledCheck.stderr, /mapping/);
   invalid(prefix => edit(prefix, "pnpm-lock.yaml", l => {
     l.packages[`${loader}@1.0.3`].peerDependenciesMeta = { [cordis]: { optional: true } };
     l.packages[`${cordis}@4.0.4`] = l.packages[`${cordis}@4.0.2`];
@@ -516,6 +534,11 @@ try {
   assert.deepEqual(satisfiedSummary(peersOf(before)), updateVectors.peerSummary);
   assert.equal(compare(before, before, '').mode, 'equal');
   assert.equal(compare(before, before, '', true).mode, 'refresh');
+  // A refresh re-resolves, so the replaced package leaves the old closure instead
+  // of being retained with today's registry metadata.
+  const dropped = compare(...changedPair(), updateVectors.afterVersion, true);
+  assert.equal(dropped.mode, 'refresh');
+  assert.deepEqual(dropped.removedArchives, [`${root}@${updateVectors.beforeVersion}`, ...updateVectors.beforeOnly]);
   // The retired forged-project row is unrepresentable here (D14): the CLI never
   // accepts a project object, so there is no in-process graph to hand in.
   assert.throws(() => compare(before,after,'latest'), /semver/);
@@ -534,14 +557,22 @@ try {
   const broken = copy('update-after');
   fs.appendFileSync(path.join(broken, 'package.json'), ' ');
   for (const refresh of [false, true]) assert.throws(() => compare(before, broken, updateVectors.afterVersion, refresh), /pin/);
-  for (const field of updateVectors.retainedArchiveMutations) {
-    mutateAfter(l => {
+  function retainedArchiveMutation(field) {
+    return l => {
       const p = l.packages[`${cordis}@4.0.2`];
       if (field === 'integrity') p.resolution.integrity = 'sha512-AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
       else if (field === 'tarball') p.resolution.tarball = 'https://registry.npmjs.org/@deepseek-ai/cordis/-/cordis-4.0.2.tgz';
       else p[field] = ({engines:{node:'>=20'}, optional:true, peerDependencies:{other:'^1.0.0'}, peerDependenciesMeta:{other:{optional:true}}, os:['linux'], cpu:['arm64'], libc:['glibc'], deprecated:'old', hasBin:true})[field];
       if (field === 'peerDependenciesMeta') p.peerDependencies = {other:'^1.0.0'};
-    }, /retained archive/);
+    };
+  }
+  // Refresh relaxes retained snapshot selection only. A retained archive is npm's
+  // immutable name@version, so a changed SRI, tarball or metadata — including a new
+  // `deprecated` notice — is substitution in every mode.
+  for (const refresh of [false, true]) {
+    for (const field of updateVectors.retainedArchiveMutations) {
+      mutateAfter(retainedArchiveMutation(field), /retained archive/, refresh);
+    }
   }
   for (const field of updateVectors.retainedSnapshotMutations) {
     mutateAfter(l => { l.snapshots['shared@1.0.0'][field] = ({dependencies:{[cordis]:'4.0.2'}, optionalDependencies:{[cordis]:'4.0.2'},transitivePeerDependencies:['other'],optional:true})[field]; }, /retained snapshot/);
@@ -550,16 +581,6 @@ try {
   const refreshed = changedPair();
   edit(refreshed[1], 'pnpm-lock.yaml', l => l.snapshots['shared@1.0.0'].dependencies = {[cordis]:'4.0.2'}); pins(refreshed[1]);
   assert.equal(compare(...refreshed, updateVectors.afterVersion, true).mode, 'refresh');
-  // Refresh relaxes transitive snapshot selection only. A retained archive is npm's
-  // immutable name@version, so a changed SRI, tarball or metadata is substitution.
-  for (const field of ['integrity', 'tarball', 'engines']) {
-    mutateAfter(l => {
-      const p = l.packages[`${cordis}@4.0.2`];
-      if (field === 'integrity') p.resolution.integrity = 'sha512-AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
-      else if (field === 'tarball') p.resolution.tarball = 'https://registry.npmjs.org/@deepseek-ai/cordis/-/cordis-4.0.2.tgz';
-      else p.engines = {node:'>=20'};
-    }, /retained archive/, true);
-  }
   for (const refresh of [false, true]) {
     mutateAfter(l => l.packages['orphan@1.0.0'] = {resolution:{integrity:updateVectors.retainedIntegrity}}, /orphan/, refresh);
     mutateAfter(l => { l.packages['orphan@1.0.0'] = {resolution:{integrity:updateVectors.retainedIntegrity}}; l.snapshots['orphan@1.0.0'] = {}; }, /orphan/, refresh);
@@ -787,10 +808,12 @@ try {
   const ambiguous = candidatePrefix();
   assert.equal(deriveOrThrow(ambiguous, { before: committedPrefix(derivationVectors.overrides) })
     .overrides[`@deepseek-ai/dsh>${timerPeer}`], '1.1.4');
-  // The committed value may not invent a candidate the graph does not select.
+  // The committed value may not invent a candidate the graph does not select. A
+  // committed map the committed graph does not honour is refused as soon as that
+  // graph is read, before the derivation can consider it.
   assert.throws(() => deriveOrThrow(ambiguous, {
     before: committedPrefix({...derivationVectors.overrides, [`@deepseek-ai/dsh>${timerPeer}`]: '1.1.5'}) }),
-    /ambiguous family selection/);
+    /override 1\.1\.5, got @deepseek-ai\/cordis-plugin-timer@1\.1\.4/);
   // (c) ambiguous without the committed value: a review stop, never a pick.
   assert.throws(() => deriveOrThrow(ambiguous),
     /ambiguous family selection: @deepseek-ai\/cordis-plugin-timer; candidates: 1\.1\.4, 1\.1\.7; .*pass --cordis-overrides after review/);

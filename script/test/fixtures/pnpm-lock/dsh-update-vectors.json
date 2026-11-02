@@ -4,7 +4,7 @@
   "retainedIntegrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
   "beforeOnly": ["leaf@1.0.0"],
   "afterOnly": ["leaf@2.0.0"],
-  "peerSummary": {"exact": 1, "totalOptionalMissing": 0, "cordisExact": 1, "unsatisfied": 0},
+  "peerSummary": {"exact": 1, "totalOptionalMissing": 0, "cordisExact": 5, "unsatisfied": 0},
   "opaque": "0123456789abcdef0123456789abcdef",
   "malformed": ["", "0123456789abcdef", "0123456789ABCDEF0123456789ABCDEF", "0123456789abcdef0123456789abcdeg"],
   "retainedArchiveMutations": ["integrity", "tarball", "engines", "optional", "peerDependencies", "peerDependenciesMeta", "os", "cpu", "libc", "deprecated", "hasBin"],

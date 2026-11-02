@@ -241,8 +241,11 @@ func StageTentative(request StageRequest) error {
 	return writeFile(filepath.Join(request.Stage, "pnpm-workspace.yaml"), staged)
 }
 
-// StageFinal writes the final tree from the tentative tree, the committed
-// workspace and the committed lock.
+// StageFinal writes the final tree from the tentative manifest and the reviewed
+// workspace. It stages no lock: tentative resolves without one, and a seeded
+// final keeps every locked version with its current registry metadata, which
+// both drifts from tentative and is refused by ADR 0003 rule 4 (§ Amended by
+// #134).
 func StageFinal(request StageRequest) error {
 	original, err := pnpmlock.ReadDshProject(request.Before)
 	if err != nil {
@@ -283,17 +286,12 @@ func StageFinal(request StageRequest) error {
 	if request.ExtraSet && !proofMatchesCommitted(proof.selected, committed) {
 		// An explicit review may replace the map; the committed bytes are otherwise
 		// the reviewed workspace.
-		workspace, err = document.ReplaceTopLevel(workspaceSource, "overrides", proof.overrides)
+		workspace, err = pnpmlock.WorkspaceWithOverrides(workspaceSource, proof.selected)
 		if err != nil {
 			return err
 		}
 	}
-	if err := writeFile(filepath.Join(request.Stage, "pnpm-workspace.yaml"), workspace); err != nil {
-		return err
-	}
-	return copyFile(
-		filepath.Join(string(request.Before), "pnpm-lock.yaml"),
-		filepath.Join(request.Stage, "pnpm-lock.yaml"))
+	return writeFile(filepath.Join(request.Stage, "pnpm-workspace.yaml"), workspace)
 }
 
 // CheckFinal verifies the staged final tree against an independent derivation of
@@ -378,20 +376,8 @@ func CheckFinal(request StageRequest) (CheckFinalReport, error) {
 	if err != nil {
 		return CheckFinalReport{}, err
 	}
-	if bytes.Equal(stagedWorkspace, committedWorkspace) {
-		requested, err := pnpmlock.ParseRequestedSelection(project.Selection().Version.String())
-		if err != nil {
-			return CheckFinalReport{}, err
-		}
-		if _, _, err := pnpmlock.CompareDshUpdate(pnpmlock.UpdateRequest{
-			Before:    request.Before,
-			After:     pnpmlock.Prefix(request.Stage),
-			Requested: requested,
-			Refresh:   pnpmlock.RefreshLock,
-		}); err != nil {
-			return CheckFinalReport{}, err
-		}
-	} else {
+	authority := pnpmlock.OverrideAuthority{}
+	if !bytes.Equal(stagedWorkspace, committedWorkspace) {
 		if !request.ExtraSet {
 			return CheckFinalReport{}, errorf("changed map requires explicit review")
 		}
@@ -402,12 +388,27 @@ func CheckFinal(request StageRequest) (CheckFinalReport, error) {
 		if !approved.Equal(final.Overrides) {
 			return CheckFinalReport{}, errorf("reviewed map differs from final requirements")
 		}
+		authority = pnpmlock.ReviewedOverrides(approved)
+	}
+	requested, err := pnpmlock.ParseRequestedSelection(project.Selection().Version.String())
+	if err != nil {
+		return CheckFinalReport{}, err
+	}
+	// A reviewed map may replace the committed one; it never exempts the graph
+	// from the closure and retained-archive freezes.
+	if _, _, err := pnpmlock.CompareDshUpdate(pnpmlock.UpdateRequest{
+		Before:    request.Before,
+		After:     pnpmlock.Prefix(request.Stage),
+		Requested: requested,
+		Refresh:   pnpmlock.RefreshLock,
+		Overrides: authority,
+	}); err != nil {
+		return CheckFinalReport{}, err
 	}
 	return CheckFinalReport{Selection: project.Selection(), Requirements: final.Requirements}, nil
 }
 
 type proofFile struct {
-	overrides    document.Value
 	requirements document.Value
 	selected     pnpmlock.OverrideMap
 }
@@ -428,7 +429,7 @@ func readProof(file string) (proofFile, error) {
 	if err != nil {
 		return proofFile{}, err
 	}
-	return proofFile{overrides: raw, requirements: value.Get("requirements"), selected: overrides}, nil
+	return proofFile{requirements: value.Get("requirements"), selected: overrides}, nil
 }
 
 func proofRequirementRows(requirements document.Value) (document.Value, error) {

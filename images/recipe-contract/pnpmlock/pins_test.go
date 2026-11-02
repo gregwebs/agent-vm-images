@@ -25,7 +25,7 @@ func TestWritePinsBytes(t *testing.T) {
 	}
 	// Captured from the retired Node pin writer over the committed tiny-dsh bytes.
 	const expected = "e38332e820531668714bd379a665dd96ae47d0979e8f17285e67099aa626a770  package.json\n" +
-		"f5001d8aaae950eabc4d3a1519dd9aff95e1f8b1d67a2dedf522cec8b5c3c93f  pnpm-lock.yaml\n" +
+		"685b9968483143b7167946092f78e428701b7acee2a930a963550adea56b9c2b  pnpm-lock.yaml\n" +
 		"de7cbb8ccf9ff2a507c57f45006564333f17dea8aded17aaca2ab2e65501ddc8  pnpm-workspace.yaml\n"
 	if string(source) != expected {
 		t.Fatalf("pins = %q, want %q", source, expected)

@@ -65,7 +65,9 @@ The rules, in order:
    **non-root** dependency/optional edges must be equal, with the optional flag
    and peer context preserved. Only the changed dsh root's own outgoing edges may
    differ; a surviving snapshot that happens to be the root still keeps its
-   archive record frozen.
+   archive record frozen. This is what an **equal** selection is checked with. A
+   changed selection re-resolves without the lock and is compared as a refresh,
+   so its retained snapshots may move (§ Amended by #134).
 6. **Equal selection may not be refreshed implicitly.** A developer who wants new
    transitives at the same selected version must ask for it explicitly
    (`--refresh-lock`); see "Refresh and the reviewed map" below.
@@ -77,12 +79,20 @@ The rules, in order:
 ## Peer-context identity rules
 
 The real graph cannot be parsed by name alone. Two measured facts from the exact
-committed workspace (see the [ledger](../standard-pnpm-migration.md)):
+committed workspace (see the [ledger](../standard-pnpm-migration.md)). The counts
+and the identity example below are recomputed from today's graph with
+`recipe-contract pnpm-lock graph dsh images/tools/dsh`, and the migration-time
+values are kept beside them rather than replaced. **This ADR is the one place the
+current numbers live**: the migration ledger keeps its historical `c33ab9b`
+numbers and points here, because no gate re-derives prose and a second copy would
+stale silently on the next adoption. The facts:
 
 - When the joined peer-id list exceeds pnpm's suffix budget, the segment is
   replaced by an **opaque 32-hex string**: the first 32 hex characters of the
-  sha256 of the sorted peer ids. 59 of 565 snapshots carry one, including the dsh
-  root `@deepseek-ai/dsh@0.1.5-rc.2(711fd5df96d806afccbe1a29bd047122)`.
+  sha256 of the sorted peer ids. 66 of 630 snapshots carry one, including the dsh
+  root `@deepseek-ai/dsh@0.2.1-rc.5(bea53bc47c5a13422d8eda70456bd64f)`; at the
+  migration source commit `c33ab9b` it was 59 of 565, the root being
+  `@deepseek-ai/dsh@0.1.5-rc.2(711fd5df96d806afccbe1a29bd047122)`.
   It is an **identity, not data**: it is never reconstructed, never inverted and
   never used to grant or deny reachability. Anything that is not exactly 32
   lowercase hex inside parentheses is a parse failure.
@@ -100,10 +110,19 @@ dependency edges grant reachability), so they cannot hide a changed record.
 The exact-peer oracle is **per context**, never "a satisfying version is
 installed somewhere": for every snapshot, every exact peer declaration must be
 satisfied by that snapshot's own edge target, and an absent peer is allowed only
-when the declaration is marked optional. The committed graph reports 243 exact
-declarations (229 `@deepseek-ai/cordis`), 0 unsatisfied and 0 optional missing;
-those counts are recomputed output, never constants. Globally finding
-`cordis@4.0.2` is not evidence that a plugin's context uses it.
+when the declaration is marked optional. A *range* declaration is a compatibility
+constraint, not a pin, so it is neither counted nor verified; what makes a Cordis
+family exact when upstream writes it that way is the reviewed override map
+verified against the resolved graph (see
+[Amended by dsh 0.2.x Cordis families](#amended-by-dsh-02x-cordis-families-2026-10-31)).
+The committed graph reports 777 exact declarations (0 written as
+`@deepseek-ai/cordis`, because 0.2.1-rc.5 states every Cordis family as a range),
+0 unsatisfied and 0 optional missing, plus four honoured Cordis selectors in
+`cordisExact`; those counts are recomputed output of `recipe-contract pnpm-lock
+peers dsh images/tools/dsh`, never constants. At the migration source commit
+`c33ab9b` the same report was 243 exact declarations (229 of them
+`@deepseek-ai/cordis`) with `cordisExact` 233. Globally finding `cordis@4.0.2` is
+not evidence that a plugin's context uses it.
 
 ## The accepted relaxation
 
@@ -193,3 +212,133 @@ and expected diagnostic and now drives the comparator out of process. The refres
 comparison's raw-record equality keeps UTF-16 code units losslessly, so an unpaired
 surrogate in a free-text manifest field is still a difference (see ADR 0001
 § Amended by #75, D8).
+
+## Amended by dsh 0.2.x Cordis families (2026-10-31)
+
+Rules 1–7, the freezes and the closed selector set are unchanged. What changes is
+where the exact-peer oracle reads Cordis exactness from. dsh 0.1.x carries the
+`@deepseek-ai/cordis*` families as **exact peer** declarations made by its
+sub-packages, and that is where the committed graph's `cordisExact` count of 229
+came from. dsh 0.2.x has **no `peerDependencies` at all**: the families are plain
+`dependencies` written as ranges (`~4.0.5`), and the sub-packages declare the
+cordis peers as ranges too. A walk over declarations therefore counted **zero**
+exact Cordis rows and `checkExactPeers` refused the graph with
+`dsh must cover declared exact Cordis peers`, even though the reviewed override
+map pinned every family exactly.
+
+**What it accepts.** For each selector `s` in the closed `selectorOrder`, when the
+reviewed override map in `pnpm-workspace.yaml` carries a version for `s`, the
+resolved graph must contain `s.Peer()` at exactly that version *and at no other
+version*; the family then counts toward `cordisExact`. The check is a verification,
+not an assertion: a family that the graph resolves at another version, at two
+versions, or not at all is reported `Unsatisfied` as
+`<family>: override <version>, got <resolved identities or "missing">` and the
+graph is refused. A family the reviewed map does not pin (or a graph with no
+reviewed map) contributes nothing here, so the count is only ever evidence a
+reviewer can check.
+
+**Why the family and not the declaration.** Upstream may express a Cordis family
+as an exact peer (0.1.x), a range peer, or a plain dependency, and any package in
+the closure may be the one that declares it. Reading exactness off a declaration
+therefore ties the oracle to upstream's packaging style. Reading it off the
+resolved graph ties it to the repository's own instrument — four
+`@deepseek-ai/dsh>@deepseek-ai/cordis*` selectors, derived without the old map,
+reviewed as exact requirements and published transactionally by
+`images/tools/dsh/upgrade-dsh.sh`. The selector set is closed: an unknown
+selector is an unexpected key, not a new override.
+
+**What it does not change.** `exact` still counts only verified declarations; a
+declaration written as a range stays an unverified compatibility constraint and is
+never counted, so the committed 0.1.5-rc.2 graph still reports `exact` 243 and the
+`243 exact peers satisfied` lines in the ledger stay true. `cordisExact` widens to
+"Cordis families controlled exactly and verified": for that graph it reports 233
+(229 declared rows plus the four honoured selectors) instead of 229. No freeze in
+`compare.go` (rule 4 and the workspace byte/header freezes) is relaxed, the
+selector set is not widened, and the published JSON keys (`exact`,
+`totalOptionalMissing`, `cordisExact`, `unsatisfied`) are untouched.
+
+**What it still refuses.** `cordisExact` zero still refuses with
+`dsh must cover declared exact Cordis peers`. Since a locked dsh project must
+carry the complete reviewed map (the workspace policy refuses an absent one), that
+guard is now reachable only on a non-locked graph — the tentative and report reads
+— so it is defence in depth and is tested directly rather than through the CLI.
+The bounded mini fixtures resolve every family their reviewed map pins, because a
+map that pins a family the graph does not carry is a stale decision record and is
+refused as such.
+
+## Amended by #134: what a refresh re-resolves (2026-11-01)
+
+Rules 1–7 and every freeze above stand, with the two stated exceptions below: the
+reviewed-map route's exception to rule 1's override equality, and a changed
+selection's exemption from rule 5's snapshot freeze. What changes is
+which resolution inputs a dsh resolution uses, which comparison a changed
+selection gets, and that the reviewed-map route now runs
+the comparison instead of skipping it. Both come from one defect: pnpm keeps a
+locked version and records the registry metadata it sees *now*, so a seeded
+refresh restates a retained record that upstream has since annotated, and rule 4
+refuses it. No
+resolution seeded with the committed lock can pass. The commit that introduced
+this section is machinery only; it changes no committed graph.
+
+**What a refresh re-resolves.** Every dsh resolution that produces a graph —
+`prepare-lock.sh` for any changed selection, with or without `--refresh-lock`, and
+every resolution `images/tools/dsh/upgrade-dsh.sh` runs, tentative and final,
+unchanged map and changed map alike — seeds the resolver with nothing but the
+manifest and the reviewed workspace. Staging the lock is not a private detail of
+one script: the tentative side already resolved unseeded, so a seeded final
+disagreed with it (`tentative/final peer requirement drift`), and that asymmetry
+was the second reason no refresh could complete. The image build and the CI
+changed leg seeded the lock and compared strictly, so a retained record upstream
+had annotated made every candidate fail: `0.1.5-rc.x` mixed two dsh generations,
+and `0.2.1-rc.4` moved one dependency edge inside a retained snapshot. Neither
+was a version problem; the seed was. `--refresh-lock` now means exactly one
+thing, re-resolve even though the selection did not change (rule 6).
+
+**What it still freezes.** Retained archive records stay canonically equal in every
+mode, `deprecated` included (rule 4). Closure and orphans (rule 3), the manifest
+mask (rule 1), lock settings and importers (rule 1) and every policy, exact-peer
+and base-ownership assertion are untouched. Retained snapshots are relaxed by a
+changed selection exactly as they are by a refresh (§ "Refresh and the reviewed
+map" above), because the resolution that produced them was unseeded and the
+comparison mode follows the producer; rule 6 does not relax them, it only says an
+**equal** selection may not be refreshed implicitly. That strict reading is what
+an equal selection is still checked with — `dsh-lock-update PREFIX PREFIX ''`,
+where nothing may differ at all — so rule 5 keeps its meaning for the one mode
+that can reach it.
+
+**Why new metadata can only leave by being dropped.** Registry metadata is mutable
+and the reviewed record is not. Absorbing new metadata would accept whatever
+upstream now says about an artifact this repository already shipped — including
+ship it deprecated — so rule 4 stays exact. A seeded resolver keeps the locked
+version *with* its new metadata, which is why a seeded refresh can never pass. An
+unseeded resolver selects the newest version the age policy allows, so an upstream
+fix replaces the record: the old identity leaves the old closure and the new one
+enters the new closure, both permitted by rule 3. A seeded resolver cannot do
+that, and if no fix is in range the refresh correctly fails with
+`retained archive changed: <key>`.
+
+**Ordinary refresh versus reviewed-map replacement.** § "Refresh and the reviewed
+map" keeps workspace and override invariance for an ordinary refresh. The
+`--cordis-overrides` route is a stated exception to that override equality, for
+the keys the proposal and the approval name — the `0.2.1-rc.5` adoption moved all
+four selectors at once — and before #134 it skipped `CompareDshUpdate` entirely,
+so a changed map published with no closure, retained-archive or header freeze at
+all. It now compares, using `pnpmlock.ReviewedOverrides(map)`, and only after
+`recipe-contract dsh-upgrade-stage check-final` has re-derived the final graph's
+map from the staged prefix and checked it against the tentative proof file's
+selection and requirement rows and against the approved file. The staged
+workspace must be the exact output of `pnpmlock.WorkspaceWithOverrides` on the
+committed bytes — the guarantee is "the reviewed rewrite ran and nothing else
+did", not "every original byte survived" — and the staged lock's overrides must
+equal the reviewed map. Retained archives are frozen, retained snapshots fall under
+the refresh contract, and header settings are compared with only the root masked.
+That is a comparison where there was none: a newly added rule, not a newly
+weakened one. Image builds cannot reach the route: only
+`recipe-contract dsh-upgrade-stage check-final` constructs the authority, and the
+generic comparison entry refuses it.
+
+**Why dsh differs from the bridge.** `images/tools/pi/bridge/prepare-lock.sh`
+seeds the lock on refresh, and that is right for an incremental maintenance graph
+whose authority is the authenticated upstream selection. dsh's refresh exists for
+the opposite reason: to escape a seed whose retained records rule 4 has made
+unadoptable.

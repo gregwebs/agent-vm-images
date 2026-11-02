@@ -23,6 +23,8 @@ Generation reported 101 resolutions; no payload install. The lock exhibits
 scoped identities, peer suffixes, and a present optional Zod edge. Independent
 review vectors in `real-bridge-evidence.json` were transcribed from the emitted
 lock and upstream bridge metadata, not the production graph CLI. Tiny expected
-graphs are independently authored from the three-node fixture specification;
-their all-zero SHA-512 is synthetic, never an installable package claim.
+graphs are independently authored from the miniature dsh specification and
+resolve every Cordis family their reviewed override map pins, since a pin the graph
+does not honour is refused; their all-zero SHA-512 is synthetic, never an
+installable package claim.
 No fixture certifies future production workspace runtime or interoperability.

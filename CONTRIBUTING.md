@@ -585,13 +585,27 @@ upgrade builds and authorizes the native composed helper
 (`script/build/recipe-contract.sh --native`) before the first graph check, so a
 source checkout on its own is not a runnable contract directory. Empty/equal
 preparation checks all four file bytes and the graph without starting a package
-manager. Changed exact dsh selections freeze retained identities and peer-context
-snapshots, but may replace transitives within dsh's own closure; they are not
-fully transitive-frozen. Read [ADR 0003](docs/adr/0003-dsh-graph-freeze.md) and
-the [migration ledger](docs/standard-pnpm-migration.md).
+manager. A changed exact dsh selection re-resolves from the manifest and the
+reviewed workspace: it freezes retained identities, may replace transitives within
+dsh's own closure, and is not fully transitive-frozen. Read
+[ADR 0003](docs/adr/0003-dsh-graph-freeze.md) and the
+[migration ledger](docs/standard-pnpm-migration.md).
+
+A refresh (`prepare-lock.sh --refresh-lock`, and every `upgrade-dsh.sh` run)
+resolves without the committed lock as a seed, so a retained package whose
+upstream metadata moved (a new `deprecated` notice) can leave only through a
+resolution that drops it. Every changed selection resolves the same way and is
+compared the same way, so the image build, the CI changed leg and a developer
+upgrade obey one rule; `--refresh-lock` asks for the same resolution when the
+selection did not change. See
+[ADR 0003 § Amended by #134](docs/adr/0003-dsh-graph-freeze.md#amended-by-134-what-a-refresh-re-resolves-2026-11-01).
 
 Cordis overrides are derived without the old map before any final resolution. A
-changed map stops an ordinary upgrade. Use
+changed map stops an ordinary upgrade. They are also what keeps the exact-peer
+oracle meaningful when upstream stops declaring the Cordis family exactly: each
+reviewed selector must be honoured by the resolved graph — one instance, at the
+pinned version — and only then is that family counted as exact. A family the graph
+resolves elsewhere, twice, or not at all is refused. Use
 `bash images/tools/dsh/upgrade-dsh.sh VERSION --propose-cordis-overrides /tmp/dsh-cordis.json`,
 review the exact requirements/delta, then
 `bash images/tools/dsh/upgrade-dsh.sh VERSION --cordis-overrides /tmp/dsh-cordis.json`.

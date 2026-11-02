@@ -146,6 +146,15 @@ func ReadOverrideMap(file string) (OverrideMap, error) {
 	return ParseOverrideMap(value)
 }
 
+// WorkspaceWithOverrides is the only way a reviewed map enters a dsh workspace.
+// It re-encodes the whole document deterministically, so its output — not the
+// original bytes — is what the developer staging path writes and what the
+// comparator requires: a reviewed map change can carry no other workspace edit
+// past the byte freeze (ADR 0003 rule 1, § Amended by #134).
+func WorkspaceWithOverrides(workspace []byte, overrides OverrideMap) ([]byte, error) {
+	return document.ReplaceTopLevel(workspace, "overrides", overrides.Value())
+}
+
 // validateWorkspace applies the closed per-consumer workspace policy.
 func validateWorkspace(workspace document.Value, kind Kind, mode readMode) error {
 	if _, err := recordOf(workspace); err != nil {
