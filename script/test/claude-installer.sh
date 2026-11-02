@@ -5,15 +5,19 @@
 #
 # No Docker, no network: the vendored installer is faked on a temp prefix and
 # the real run-install/report/download/check-tool-access helpers are used where
-# they are part of what is under test. This exercises the exact-version
-# validation, the classified transport softening (and every way it must NOT
-# soften), and the report/T5 gate.
+# they are part of what is under test. The committed closure is a per-run fixture
+# key and per-case closure (`script/test/fixtures/claude/claude_fixture.py`), so
+# the hook's pin refusal and the gate's payload/layout/state checks run against
+# real signatures. This exercises the exact-version validation, the pin refusal,
+# the classified transport softening (and every way it must NOT soften), and the
+# report/T5 gate.
 set -euo pipefail
 
 REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
 VENDOR_SRC="$REPO_ROOT/images/tools/claude/vendor"
 INSTALL="$REPO_ROOT/images/tools/claude/install-claude.sh"
 VERIFY="$REPO_ROOT/images/tools/claude/verify-claude.sh"
+FIXTURE="$REPO_ROOT/script/test/fixtures/claude/claude_fixture.py"
 # The converted verifiers execute `recipe-contract` from the contract directory,
 # so build the native composed directory once before any restricted env -i or
 # fixture PATH replaces the tooling.
@@ -25,11 +29,40 @@ trap 'rm -rf "$TEST_ROOT"' EXIT
 
 PYTHON_DIR="$(dirname "$(command -v python3)")"
 TIMEOUT_DIR="$(dirname "$(command -v timeout)")"
+
+# gpg and gpgconf only: the pin verifier allocates its own private GNUPGHOME, and
+# its cleanup must find gpgconf or it prints a warning into an exact-output case.
+GPGBIN="$TEST_ROOT/gpgbin"
+mkdir -p "$GPGBIN"
+ln -s "$(command -v gpg)" "$GPGBIN/gpg"
+ln -s "$(command -v gpgconf)" "$GPGBIN/gpgconf"
+
+# One throwaway OpenPGP key for the whole run; every closure below is signed by it.
+SIGNER="$TEST_ROOT/signer"
+python3 "$FIXTURE" keygen "$SIGNER" >/dev/null
+
 CASE=""
+
+# make_closure <version> <dir> <amd64 file> <arm64 file>
+make_closure() {
+    rm -rf "$2"
+    python3 "$FIXTURE" closure "$2" --signer "$SIGNER" --version "$1" \
+        --amd64 "$3" --arm64 "$4" >/dev/null
+}
 
 fail() {
     echo "FAIL: $*" >&2
     exit 1
+}
+
+assert_contains() { [[ "$1" == *"$2"* ]] || fail "expected '$2' in: $1"; }
+
+# The native layout check compares the payload's owner with the invoking uid/gid.
+# macOS gives every file created under /tmp the *directory's* group (wheel), not
+# the caller's, so a case tree has to carry the invoking group before anything is
+# written into it -- otherwise the check refuses a payload the suite created.
+own_case() {
+    chgrp -R "$(id -g)" "$CASE"
 }
 
 # --- 1. the patch reproduces the committed runnable installer ----------------
@@ -51,14 +84,17 @@ new_case() {
     CASE="$TEST_ROOT/$1"
     mkdir -p "$CASE/vendor" "$CASE/prefix" "$CASE/status"
     chmod 0755 "$CASE" "$CASE/prefix" "$CASE/status"
+    own_case
 
-    # Fake vendored installer. It honours FAKE_EXIT/FAKE_RECEIPT and records
-    # that it ran, so exact-version rejections can prove the installer was
-    # never invoked. It reads the receipt path the hook exports, like the real
-    # patched installer's download.sh does.
+    # Fake vendored installer. It honours FAKE_EXIT/FAKE_RECEIPT, records that it
+    # ran and records the pin directory it was handed, so exact-version and pin
+    # rejections can prove the installer was never invoked and a valid run can
+    # prove the seam reached it. It reads the receipt path the hook exports, like
+    # the real patched installer's download.sh does.
     cat >"$CASE/vendor/install.sh" <<'SH'
 #!/bin/sh
 if [ -n "${FAKE_SENTINEL:-}" ]; then printf 'ran\n' >>"$FAKE_SENTINEL"; fi
+if [ -n "${FAKE_PIN_LOG:-}" ]; then printf '%s\n' "${CLAUDE_PIN_DIR:-}" >>"$FAKE_PIN_LOG"; fi
 if [ -n "${FAKE_RECEIPT:-}" ] && [ -n "${AGENT_VM_TRANSPORT_RECEIPT:-}" ]; then
     printf '%s\n' "$FAKE_RECEIPT" >"$AGENT_VM_TRANSPORT_RECEIPT"
 fi
@@ -67,21 +103,33 @@ SH
     chmod 0755 "$CASE/vendor/install.sh"
 }
 
-# run_install <version>; env: FAKE_EXIT, FAKE_RECEIPT, SOFT, NO_RECEIPT
+# make_source <version> [<dir>]: a fixture closure for the hook to verify.
+make_source() {
+    local version="$1" directory="${2:-$CASE/source}"
+    printf 'amd64 payload for %s\n' "$version" >"$CASE/source-amd64"
+    printf 'arm64 payload for %s\n' "$version" >"$CASE/source-arm64"
+    make_closure "$version" "$directory" "$CASE/source-amd64" "$CASE/source-arm64"
+}
+
+# run_install <version>; env: FAKE_EXIT, FAKE_RECEIPT, SOFT, NO_RECEIPT,
+# SOURCE_DIR (default: the current case's fixture closure)
 run_install() {
     local version="$1"
     local receipt_val="$CASE/receipt"
+    local source_dir="${SOURCE_DIR:-$CASE/source}"
     [[ "${NO_RECEIPT:-}" == 1 ]] && receipt_val=""
     set +e
     RUN_OUTPUT="$(
         env -i \
-            "PATH=/usr/bin:/bin" \
+            "PATH=$GPGBIN:$PYTHON_DIR:/usr/bin:/bin" \
             "AGENT_VM_VENDOR_DIR=$CASE/vendor" \
             "AGENT_VM_CLAUDE_PREFIX=$CASE/prefix" \
             "AGENT_VM_FIXTURE_ROOT=$CASE" \
+            "AGENT_VM_CLAUDE_SOURCE_DIR=$source_dir" \
             "AGENT_VM_INSTALL_STATUS_DIR=$CASE/status" \
             "AGENT_VM_VERSION_CLAUDE=$version" \
             "FAKE_SENTINEL=$CASE/ran" \
+            "FAKE_PIN_LOG=$CASE/pin-dir.log" \
             "FAKE_EXIT=${FAKE_EXIT:-0}" \
             "FAKE_RECEIPT=${FAKE_RECEIPT:-}" \
             "AGENT_VM_TRANSPORT_RECEIPT=$receipt_val" \
@@ -94,9 +142,12 @@ run_install() {
 
 new_case success
 SOFT=
+make_source 2.1.286
 run_install 2.1.286
 [[ $RUN_STATUS -eq 0 ]] || fail "a clean install must pass: $RUN_OUTPUT"
 [[ -f "$CASE/ran" ]] || fail "the vendored installer must run on a valid version"
+[[ "$(cat "$CASE/pin-dir.log")" == "$CASE/source" ]] ||
+    fail "the vendor must receive the committed pin directory, got $(cat "$CASE/pin-dir.log")"
 [[ ! -e "$CASE/status/claude" ]] || fail "the hook must not write installed itself"
 
 # floating / non-exact versions are rejected BEFORE the installer runs
@@ -104,27 +155,64 @@ for bad in latest stable '^1.0.0' '1.0' '1.0.0 2.0.0' 'https://x/2.1.286' '2.1.2
     '01.2.3' '1.02.3' '1.2.03' '1.2.3-01' '1.2.3-alpha.01'; do
     new_case "reject-$(printf '%s' "$bad" | tr -c 'A-Za-z0-9' '_')"
     SOFT=
+    # The closure covers the pinned version, never the rejected spelling.
+    make_source 2.1.286
     run_install "$bad"
     [[ $RUN_STATUS -ne 0 ]] || fail "version '$bad' must be rejected"
     [[ ! -f "$CASE/ran" ]] || fail "version '$bad' must be rejected before the installer runs"
 done
 
-# Canonical prerelease/build metadata the pinned installer supports is accepted.
+# Canonical prerelease/build metadata the pinned installer supports is accepted,
+# but only for a version the committed pin actually covers.
 for good in 1.2.3-rc.1 1.2.3-alpha; do
     new_case "accept-$(printf '%s' "$good" | tr -c 'A-Za-z0-9' '_')"
     SOFT=
+    make_source "$good"
     run_install "$good"
     [[ $RUN_STATUS -eq 0 ]] || fail "canonical version '$good' must be accepted: $RUN_OUTPUT"
     [[ -f "$CASE/ran" ]] || fail "canonical version '$good' must reach the vendor"
 done
 
+# ...and an exact but unpinned version is refused before the vendor runs.
+for unpinned in 1.2.3-rc.1 2.1.285; do
+    new_case "unpinned-$(printf '%s' "$unpinned" | tr -c 'A-Za-z0-9' '_')"
+    SOFT=
+    make_source 2.1.286
+    run_install "$unpinned"
+    [[ $RUN_STATUS -ne 0 ]] || fail "unpinned version '$unpinned' must be refused"
+    [[ ! -f "$CASE/ran" ]] || fail "unpinned version '$unpinned' must be refused before the vendor"
+    assert_contains "$RUN_OUTPUT" "does not cover"
+done
+
 new_case empty
 SOFT=
+make_source 2.1.286
 run_install ""
 [[ $RUN_STATUS -ne 0 ]] || fail "an empty version must be rejected"
 
+# A missing pin directory is refused before the vendor runs.
+new_case no-pin
+SOFT=
+SOURCE_DIR="$CASE/absent"
+run_install 2.1.286
+[[ $RUN_STATUS -ne 0 ]] || fail "a missing pin directory must be refused"
+[[ ! -f "$CASE/ran" ]] || fail "a missing pin directory must be refused before the vendor"
+assert_contains "$RUN_OUTPUT" "no committed Claude pin"
+unset SOURCE_DIR
+
+# Tampered committed evidence is refused before the vendor runs.
+new_case tampered-evidence
+SOFT=
+make_source 2.1.286
+printf 'tampered\n' >>"$CASE/source/evidence/manifest.json"
+run_install 2.1.286
+[[ $RUN_STATUS -ne 0 ]] || fail "tampered evidence must be refused"
+[[ ! -f "$CASE/ran" ]] || fail "tampered evidence must be refused before the vendor"
+assert_contains "$RUN_OUTPUT" "does not match the pin digest"
+
 # a classified transport 75 with a fresh receipt softens when asked
 new_case transport-soft
+make_source 2.1.286
 FAKE_EXIT=75
 FAKE_RECEIPT='transport download 6'
 SOFT=1
@@ -141,6 +229,7 @@ unset FAKE_EXIT FAKE_RECEIPT SOFT
 # B6: an env-overridden prefix that is a symlink escaping the fixture root must
 # not authorise deletion of another real tree. The marker outside must survive.
 new_case transport-soft-symlink-escape
+make_source 2.1.286
 FAKE_EXIT=75
 FAKE_RECEIPT='transport download 6'
 SOFT=1
@@ -159,6 +248,7 @@ unset FAKE_EXIT FAKE_RECEIPT SOFT
 
 # ...but not without AGENT_INSTALL_SOFT_FAIL
 new_case transport-no-soft
+make_source 2.1.286
 FAKE_EXIT=75
 FAKE_RECEIPT='transport download 6'
 SOFT=
@@ -172,6 +262,7 @@ unset FAKE_EXIT FAKE_RECEIPT SOFT
 # *right-shaped* receipts for a different producer, so the control names an
 # operation that no helper produces at all.
 new_case transport-wrong-op
+make_source 2.1.286
 FAKE_EXIT=75
 FAKE_RECEIPT='transport wrong-operation 6'
 SOFT=1
@@ -181,6 +272,7 @@ unset FAKE_EXIT FAKE_RECEIPT SOFT
 
 # a bare 75 with no receipt is never classified
 new_case bare-75
+make_source 2.1.286
 FAKE_EXIT=75
 FAKE_RECEIPT=''
 SOFT=1
@@ -190,6 +282,7 @@ unset FAKE_EXIT FAKE_RECEIPT SOFT
 
 # an unknown installer failure is hard even with soft input
 new_case unknown-failure
+make_source 2.1.286
 FAKE_EXIT=3
 FAKE_RECEIPT=''
 SOFT=1
@@ -199,6 +292,7 @@ unset FAKE_EXIT FAKE_RECEIPT SOFT
 
 # no receipt environment at all: a 75 cannot be classified
 new_case no-receipt-env
+make_source 2.1.286
 FAKE_EXIT=75
 FAKE_RECEIPT='transport download 6'
 SOFT=1
@@ -211,23 +305,60 @@ unset FAKE_EXIT FAKE_RECEIPT SOFT NO_RECEIPT
 
 new_gate_case() {
     CASE="$TEST_ROOT/gate-$1"
-    mkdir -p "$CASE/prefix/.local/bin" "$CASE/status"
-    chmod 0755 "$CASE" "$CASE/prefix" "$CASE/prefix/.local/bin" "$CASE/status"
-    GATE_BIN="$CASE/prefix/.local/bin/claude"
+    mkdir -p "$CASE/prefix/.local/bin" "$CASE/prefix/.local/share/claude/versions" \
+        "$CASE/status"
+    chmod 0755 "$CASE" "$CASE/prefix" "$CASE/prefix/.local/bin" \
+        "$CASE/prefix/.local/share" "$CASE/prefix/.local/share/claude" \
+        "$CASE/prefix/.local/share/claude/versions" "$CASE/status"
+    own_case
+    GATE_BIN="$CASE/prefix/.local/share/claude/versions/${WANT-}"
+    GATE_LAUNCHER="$CASE/prefix/.local/bin/claude"
+    # A placeholder closure so the absence cases reach their own decision: the gate
+    # requires a readable pin directory before it looks at the command.
+    printf '#!/bin/sh\nexit 1\n' >"$CASE/dummy"
+    make_closure "${WANT-}" "$CASE/source" "$CASE/dummy" "$CASE/dummy"
 }
 
+# Seal the layout around whatever payload bytes are now at GATE_BIN: the native
+# shape the offline setup step leaves (absolute launcher, mode 0755, state file),
+# and a closure whose two platform digests are those bytes.
+seal_gate() {
+    make_closure "${WANT-}" "$CASE/source" "$GATE_BIN" "$GATE_BIN"
+    ln -sfn "$GATE_BIN" "$GATE_LAUNCHER"
+    printf '{"installMethod": "native", "autoUpdates": false}\n' \
+        >"$CASE/prefix/.claude.json"
+}
+
+# The marker is inserted after the shebang so a case that must refuse before
+# executing can prove nothing ran, whatever the script itself does.
 make_claude() {
+    cat >"$GATE_BIN.body"
+    {
+        head -n 1 "$GATE_BIN.body"
+        printf 'printf "ran\\n" >>%q\n' "$CASE/executed"
+        tail -n +2 "$GATE_BIN.body"
+    } >"$GATE_BIN"
+    rm -f "$GATE_BIN.body"
+    chmod 0755 "$GATE_BIN"
+    seal_gate
+}
+
+# A payload written without the execution marker (for mode/T5 cases).
+write_payload() {
     cat >"$GATE_BIN"
     chmod 0755 "$GATE_BIN"
+    seal_gate
 }
 
 run_gate() {
     set +e
     RUN_OUTPUT="$(
         env -i \
-            "PATH=$CASE/prefix/.local/bin:$TIMEOUT_DIR:$PYTHON_DIR:/usr/bin:/bin" \
+            "PATH=$GPGBIN:$CASE/prefix/.local/bin:$TIMEOUT_DIR:$PYTHON_DIR:/usr/bin:/bin" \
             "AGENT_VM_CONTRACT_DIR=$CONTRACT" \
             "AGENT_VM_CLAUDE_PREFIX=$CASE/prefix" \
+            "AGENT_VM_CLAUDE_SOURCE_DIR=$CASE/source" \
+            "AGENT_VM_CLAUDE_EXPECTED_OWNER=$(id -u):$(id -g)" \
             "AGENT_VM_INSTALL_STATUS_DIR=$CASE/status" \
             "AGENT_VM_VERSION_CLAUDE=${WANT-}" \
             sh "$VERIFY" 2>&1
@@ -330,8 +461,72 @@ exit 1
 SH
 run_gate
 [[ $RUN_STATUS -ne 0 ]] || fail "printing the expected version then exiting nonzero must fail"
-assert_contains() { [[ "$1" == *"$2"* ]] || fail "expected '$2' in: $1"; }
 assert_contains "$RUN_OUTPUT" "exited 1"
+
+# The committed payload, the native layout and the state file are checked BEFORE
+# the binary is executed. Each case below would pass on its report alone.
+WANT=2.1.286
+new_gate_case payload-bytes-changed
+make_claude <<'SH'
+#!/bin/sh
+printf '2.1.286 (Claude Code)\n'
+SH
+printf 'tampered after sealing\n' >>"$GATE_BIN"
+run_gate
+[[ $RUN_STATUS -ne 0 ]] || fail "a payload changed after sealing must fail"
+[[ ! -e "$CASE/executed" ]] || fail "a changed payload must not be executed"
+assert_contains "$RUN_OUTPUT" "does not match the pinned"
+
+WANT=2.1.286
+new_gate_case launcher-relative
+make_claude <<'SH'
+#!/bin/sh
+printf '2.1.286 (Claude Code)\n'
+SH
+ln -sfn ".local/share/claude/versions/2.1.286" "$GATE_LAUNCHER"
+run_gate
+[[ $RUN_STATUS -ne 0 ]] || fail "a relative launcher must fail"
+[[ ! -e "$CASE/executed" ]] || fail "a relative launcher must fail before execution"
+
+WANT=2.1.286
+new_gate_case extra-version
+make_claude <<'SH'
+#!/bin/sh
+printf '2.1.286 (Claude Code)\n'
+SH
+: >"$CASE/prefix/.local/share/claude/versions/9.9.9"
+run_gate
+[[ $RUN_STATUS -ne 0 ]] || fail "an extra versions entry must fail"
+
+WANT=2.1.286
+new_gate_case payload-mode
+make_claude <<'SH'
+#!/bin/sh
+printf '2.1.286 (Claude Code)\n'
+SH
+chmod 0775 "$GATE_BIN"
+run_gate
+[[ $RUN_STATUS -ne 0 ]] || fail "a 0775 payload must fail"
+
+WANT=2.1.286
+new_gate_case auto-updates
+make_claude <<'SH'
+#!/bin/sh
+printf '2.1.286 (Claude Code)\n'
+SH
+printf '{"installMethod": "native", "autoUpdates": true}\n' >"$CASE/prefix/.claude.json"
+run_gate
+[[ $RUN_STATUS -ne 0 ]] || fail "autoUpdates true must fail"
+
+WANT=2.1.286
+new_gate_case install-method
+make_claude <<'SH'
+#!/bin/sh
+printf '2.1.286 (Claude Code)\n'
+SH
+printf '{"autoUpdates": false}\n' >"$CASE/prefix/.claude.json"
+run_gate
+[[ $RUN_STATUS -ne 0 ]] || fail "a missing installMethod must fail"
 
 # absence with the exact record is accepted (raw developer build only)
 WANT=2.1.286
@@ -345,7 +540,7 @@ run_gate
 WANT=2.1.286
 new_gate_case dangling
 printf 'absent-transport 6\n' >"$CASE/status/claude"
-ln -s nowhere "$GATE_BIN"
+ln -s nowhere "$GATE_LAUNCHER"
 run_gate
 [[ $RUN_STATUS -ne 0 ]] || fail "a dangling command symlink must fail despite the absence record"
 
@@ -371,11 +566,11 @@ run_gate
 WANT=2.1.286
 new_gate_case present-unusable
 printf 'absent-transport 6\n' >"$CASE/status/claude"
-printf '#!/bin/sh\nexit 0\n' >"$GATE_BIN"
-chmod 0644 "$GATE_BIN"
+printf '#!/bin/sh\nexit 0\n' >"$GATE_LAUNCHER"
+chmod 0644 "$GATE_LAUNCHER"
 run_gate
 [[ $RUN_STATUS -ne 0 ]] || fail "a present 0644 command must fail despite the absence record"
-[[ -e "$GATE_BIN" ]] || fail "the present command must not be deleted"
+[[ -e "$GATE_LAUNCHER" ]] || fail "the present command must not be deleted"
 
 # SP2: an absence line inside a malformed multi-line record is not valid.
 WANT=2.1.286

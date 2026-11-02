@@ -37,8 +37,9 @@ lookup, graph regeneration, checksum refresh, silent fallback or image-owned
 first-use download. Only the explicit maintenance paths below - a
 [parent refresh](#maintenance-refreshing-a-parent), a
 [release-artifact refresh](#maintenance-refreshing-a-pinned-release-artifact), a
-[Codex payload closure refresh](#codex-standalone-payloads) and an
-[agy hash-only pin refresh](#the-agy-hash-only-artifact) - may resolve and
+[Codex payload closure refresh](#codex-standalone-payloads), an
+[agy hash-only pin refresh](#the-agy-hash-only-artifact) and a
+[Claude payload refresh](#claude-native-payload) - may resolve and
 re-place a pin, and they write a reviewed proposal for a human to
 commit; they never auto-adopt or auto-merge, and they refuse to run in CI. Installs that a user or their project triggers are outside this guarantee.
 
@@ -332,6 +333,97 @@ printed, `128+N` after a signal whose rollback succeeded.
 `script/build/agent-versions.sh --write` resolves the manifest and delegates to
 this tool **before** the Codex transaction, so a manifest that moves mid-run
 leaves every file untouched.
+
+## Claude native payload
+
+Claude Code is a **committed payload closure** whose native installer runs offline.
+The decision, the measured native-installer behaviour and the rejected
+alternatives are in [ADR 0013](adr/0013-claude-native-payload-pin.md); this
+section is the canonical policy.
+
+| Selected | Committed identity | Authentication |
+|---|---|---|
+| `2.1.286` (`org.agent-vm.version.claude`, `ARG AGENT_VERSION_CLAUDE`) | `images/tools/claude/pin.json`: the signed upstream `manifest.json` and its detached `manifest.json.sig` as committed evidence, the hand-committed release key, and for `linux/amd64` / `linux/arm64` the exact executable URL, SHA-256 and byte size | upstream OpenPGP: the detached signature over the committed manifest is verified with the committed release key, and the pin's fingerprint must be that key's single primary and the signature's `VALIDSIG` primary |
+
+**Build ordering.** `install-claude.sh` requires the committed closure, refuses an
+exact-but-unpinned version before the vendored installer runs, and exports the pin
+directory. The vendored installer refuses a non-fresh layout, takes `URL SHA256
+SIZE` from `claude_pin.py select` (which re-hashes every evidence file, verifies
+the signature and requires the signed manifest's version, binary, checksum and
+size to equal the pin), makes exactly one classified download, checks its SHA-256
+and size and the ELF machine of the manifest token, and only then places the bytes
+at `$HOME/.local/share/claude/versions/<v>` with an absolute launcher symlink.
+Bytes that agree with the pin, the manifest and the signature but are not the
+expected ELF are refused and removed before placement.
+
+**Offline native step.** Anthropic's `claude install` has a hardcoded CDN base and
+re-downloads a secondary payload that no hook can verify before use. The verified
+payload is therefore pre-placed in the layout the native installer expects, and
+the native step runs in its own `RUN --network=none`: `setup-claude.sh`
+re-verifies the placed bytes, layout and mode before executing anything, runs
+exactly `"<versions>/<v>" install "<v>"` under `timeout --kill-after=5 300` with
+the notifier suppressed, and re-verifies the payload and the native state
+afterwards. A future release that insists on downloading fails the build. A
+failure after placement is exit 1 — hard in every soft-fail mode — and the
+soft-fail cleanup still names only its two original targets, never `versions/`.
+
+**Single-URL egress, no route learning.** A Claude build reaches exactly one
+endpoint: `https://downloads.claude.ai/claude-code-releases/<v>/<token>/claude`,
+HTTPS/443, `GET`, no query. The gate sets `https_only`, `deny_redirects`,
+`learn_redirects: false` and no `learn_hosts`, because `downloads.claude.ai`
+answers the asset directly and any redirect would be a route change to review. The
+gate runs the offline setup step through the proxy as well, so a native request is
+a logged `DENY`, and a real-network control (the launcher removed) requires that
+denial. If the control produces no `DENY`, acceptance stops rather than the
+assertion being weakened. Maintenance is deliberately different: every *initial*
+request goes to `downloads.claude.ai`, and the shared owner transport may follow
+a redirect only to `release-assets.githubusercontent.com` or
+`objects.githubusercontent.com`; the bytes are verified regardless, so the
+serving host cannot change what is adopted
+([ADR 0013 § Egress](adr/0013-claude-native-payload-pin.md)).
+
+**Signature policy.** The build binds the pin's fingerprint to the committed key
+file's single primary and to the signature's `VALIDSIG` primary; it does not
+compare that fingerprint with a code constant. `script/dev/pin-claude.py` (write
+mode and `--check`) and the Rust source gate hold the pin to the reviewed
+fingerprint `31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE`. A signature made by a
+reviewed signing subkey is accepted; a pin or key file naming a subkey is refused,
+and so is a key file carrying secret key material (`sec`/`ssb`), which a
+single-primary count of `pub` records would otherwise let past.
+There is no hash-only exception. `manifest.json.raw-sig.json` is not verified and
+not used: it is an RSA record over an undocumented payload that does not verify
+over the manifest bytes under any tried canonicalization.
+
+**No arbitrary versions.** An exact version the pin does not select is refused,
+and the alternate column for `claude` in
+`script/test/fixtures/installer-egress/selections.tsv` is `-`.
+
+**Maintenance.** Only `script/dev/pin-claude.py` writes the pin, both evidence
+files and the Claude ARG, and only through the shared Python publication
+transaction, after printing a field-by-field payload delta. Typical commands:
+
+```bash
+python3 script/dev/pin-claude.py --check
+python3 script/dev/pin-claude.py --version 2.1.286
+bash script/build/agent-versions.sh --check
+bash script/build/agent-versions.sh --write --cosign /absolute/path/to/cosign
+bash script/test/shipped-installer-network.sh agent-vm-base:local --platform linux/arm64 --tool claude
+```
+
+`--check` is offline: it re-hashes the committed evidence, verifies the signature,
+requires the reviewed signer and the single ARG/label, and says it is not a fresh
+fetch. The write path requires the published key to be byte-identical to the
+committed one and the committed key's primary to be the reviewed signer, verifies
+the signature, requires both downloaded executables to match the signed manifest
+and to be ELF objects for their machines, and refuses a same-release rewrite. It
+never writes the key. Statuses are the shared ones: `0` published or unchanged,
+`1` failed with the sources unchanged or fully restored, `2` usage, `3`
+undecided/incomplete recovery with every retained directory printed, `128+N` after
+a signal whose rollback succeeded.
+`script/build/agent-versions.sh --write` runs it after agy and before Codex,
+because Codex stages from the Dockerfile Claude has already published and refuses
+a staged Claude ARG difference. Key rotation is manual:
+[CONTRIBUTING § Claude native payload pin](../CONTRIBUTING.md#claude-native-payload-pin).
 
 ## The Rust example's toolchain closure
 

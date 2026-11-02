@@ -122,6 +122,30 @@ assert_agy_request_log() { # $1 version, $2 marker, [$3 log file]
     echo "    request log: one pinned payload fetch only (no tag API, no manifest)"
 }
 
+# claude's build fetches ONE url: the committed pin's executable for the
+# architecture under test. The manifest, its signature and the native installer's
+# secondary payload are committed or offline, so a line naming any of them -- or a
+# redirect, learned or not -- is a defect (ADR 0013).
+claude_token() {
+    case "$arch" in
+        aarch64) printf '%s\n' linux-arm64 ;;
+        x86_64) printf '%s\n' linux-x64 ;;
+        *) fail "unsupported architecture for claude: $arch" ;;
+    esac
+}
+
+assert_claude_request_log() { # $1 version, $2 marker, [$3 log file]
+    local version=$1 marker=$2 log_file=${3:-$TMP/logs/egress.log} log expected trimmed
+    expected="ALLOW https://downloads.claude.ai/claude-code-releases/$version/$(claude_token)/claude"
+    log="$(tail -n "+$(( marker + 1 ))" "$log_file" 2>/dev/null || true)"
+    # Blank lines are noise; every remaining line is a decision, and the only
+    # accepted decision stream is exactly one payload ALLOW.
+    trimmed="$(printf '%s\n' "$log" | sed '/^$/d')"
+    [ "$trimmed" = "$expected" ] ||
+        fail "claude $version: the request log is not exactly one payload ALLOW line: $(printf '%s' "$trimmed" | tr '\n' '|')"
+    echo "    request log: exactly one pinned payload fetch (no manifest, signature, key, zst or redirect)"
+}
+
 # Exactly one version record, and never the `-` placeholder row. Comparing the
 # WHOLE string is the point: `case "$out" in *-*)` matched every canonical
 # `rust-v0.159.3` tag and so failed every correct Codex run.
@@ -174,6 +198,13 @@ stream_expect_fail() { # $1 label, $2 fragment, rest: the command that must refu
 
 run_stream_self_test() {
     local dir status=0
+    # The request-log assertions build an expected URL from the architecture, the
+    # same way a real run does.
+    case "$(uname -m)" in
+        arm64 | aarch64) arch=aarch64 ;;
+        x86_64 | amd64) arch=x86_64 ;;
+        *) echo 'FAIL: unsupported host architecture' >&2; return 1 ;;
+    esac
     dir="$(mktemp -d "${TMPDIR:-/tmp}/installer-egress-selftest.XXXXXX")"
     local log="$dir/egress.log"
     local release
@@ -245,6 +276,36 @@ run_stream_self_test() {
     stream_expect_fail 'agy request log rejects no payload request' \
         'no payload request was allowed' \
         assert_agy_request_log "$agy_release" 0 "$dir/agy-empty.log" || status=1
+
+    local claude_release claude_url
+    claude_release="$(selection_for claude 2)"
+    [ -n "$claude_release" ] || { echo 'FAIL: no claude selection' >&2; return 1; }
+    claude_url="https://downloads.claude.ai/claude-code-releases/$claude_release/$(claude_token)/claude"
+    printf 'ALLOW %s\n' "$claude_url" >"$log"
+    stream_expect_ok 'claude request log: exactly one payload allow' \
+        assert_claude_request_log "$claude_release" 0 "$log" || status=1
+    for defect in manifest manifest-zst raw-sig zst second-payload learn registry; do
+        cp "$log" "$dir/claude-defect.log"
+        case "$defect" in
+            manifest) printf 'ALLOW https://downloads.claude.ai/claude-code-releases/%s/manifest.json\n' "$claude_release" >>"$dir/claude-defect.log" ;;
+            manifest-zst) printf 'ALLOW https://downloads.claude.ai/claude-code-releases/%s/manifest.zst.json\n' "$claude_release" >>"$dir/claude-defect.log" ;;
+            raw-sig) printf 'ALLOW https://downloads.claude.ai/claude-code-releases/%s/manifest.json.raw-sig.json\n' "$claude_release" >>"$dir/claude-defect.log" ;;
+            zst) printf 'ALLOW https://downloads.claude.ai/claude-code-releases/%s/%s/claude.zst\n' "$claude_release" "$(claude_token)" >>"$dir/claude-defect.log" ;;
+            second-payload) printf 'ALLOW %s\n' "$claude_url" >>"$dir/claude-defect.log" ;;
+            learn) printf 'LEARN https://release-assets.githubusercontent.com/x/claude?<redacted>\n' >>"$dir/claude-defect.log" ;;
+            registry) printf 'ALLOW https://registry.npmjs.org/npm\n' >>"$dir/claude-defect.log" ;;
+        esac
+        stream_expect_fail "claude request log rejects $defect" \
+            'not exactly one payload ALLOW line' \
+            assert_claude_request_log "$claude_release" 0 "$dir/claude-defect.log" || status=1
+    done
+    : >"$dir/claude-empty.log"
+    stream_expect_fail 'claude request log rejects an empty log' \
+        'not exactly one payload ALLOW line' \
+        assert_claude_request_log "$claude_release" 0 "$dir/claude-empty.log" || status=1
+    stream_expect_fail 'claude request log honours the marker' \
+        'not exactly one payload ALLOW line' \
+        assert_claude_request_log "$claude_release" 99 "$log" || status=1
     rm -rf "$dir"
     [ "$status" -eq 0 ] || return 1
     echo '  the strict-egress stream assertions accept correct input and refuse each defect'
@@ -331,26 +392,26 @@ write_config() { # $1 = tool, $2 = version, $3 = out file
             }' >"$out"
             ;;
         claude)
+            # One network endpoint: the committed pin's executable for the
+            # architecture under test. The signed manifest, its signature and the
+            # key are committed evidence read offline; the native step runs with no
+            # network. `downloads.claude.ai` answers the asset directly today, so
+            # any redirect is a change to review: none is learned and every one is
+            # denied (ADR 0013, "Egress asymmetry").
             numeric="$(escape_re "$version")"
-            local cl_arch cl_platform
-            case "$arch" in
-                aarch64) cl_arch="arm64" ;;
-                x86_64) cl_arch="x64" ;;
-            esac
-            cl_platform="linux-$cl_arch"
+            local cl_platform
+            cl_platform="$(claude_token)"
             jq -n --arg v "$numeric" --arg p "$cl_platform" '{
+                https_only: true,
+                learn_redirects: false,
+                deny_redirects: true,
                 allow: [
-                    {host: "downloads.claude.ai",
-                     path: ("^/claude-code-releases/" + $v + "/manifest\\.json$")},
-                    {host: "downloads.claude.ai",
-                     path: ("^/claude-code-releases/" + $v + "/manifest\\.json\\.raw-sig\\.json$")},
-                    {host: "downloads.claude.ai",
-                     path: ("^/claude-code-releases/" + $v + "/manifest\\.zst\\.json$")},
-                    {host: "downloads.claude.ai",
-                     path: ("^/claude-code-releases/" + $v + "/" + $p + "/claude(\\.zst)?$")}
+                    {host: "downloads.claude.ai", method: "GET",
+                     path: ("^/claude-code-releases/" + $v + "/" + $p + "/claude$")}
                 ],
                 deny: ["/latest", "claude-code-releases/latest", "claude\\.ai/install\\.sh",
-                       "channel", "/api/event_logging/", "/api/claude_code/"]
+                       "channel", "manifest", "raw-sig", "\\.zst", "/keys/",
+                       "registry\\.npmjs\\.org", "/api/event_logging/", "/api/claude_code/"]
             }' >"$out"
             ;;
         *) fail "unknown tool: $tool" ;;
@@ -581,7 +642,12 @@ assert_selection_defaults_match_dockerfiles() {
         "$REPO_ROOT/images/tools/agy/pin.json")"
     [ "$agy_pin" = "$(selection_for agy 2)" ] ||
         fail "the committed agy pin is '$agy_pin' but selections.tsv says '$(selection_for agy 2)'"
-    echo "  selections.tsv defaults match the committed Dockerfile ARGs, the codex pin and the agy pin"
+    local claude_pin
+    claude_pin="$(python3 "$REPO_ROOT/images/tools/claude/claude_pin.py" version \
+        --pin-dir "$REPO_ROOT/images/tools/claude")"
+    [ "$claude_pin" = "$(selection_for claude 2)" ] ||
+        fail "the committed claude pin is '$claude_pin' but selections.tsv says '$(selection_for claude 2)'"
+    echo "  selections.tsv defaults match the committed Dockerfile ARGs, the codex, agy and claude pins"
 }
 assert_selection_defaults_match_dockerfiles
 
@@ -711,19 +777,41 @@ run_allowlist_negatives() { # $1 tool, $2 version
                 "https://registry.npmjs.org/@opencode/cli-$oc_target/-/cli-other-$numeric.tgz" \
                 'https://opencode.ai/v2/install' 'https://opencode.ai/update/api/latest/cli/npm' >>"$cases" ;;
         claude)
+            # One payload positive, and an explicit negative for every byte the
+            # closure owns (manifest, signature, key), the native step's secondary
+            # payload, the other architecture and machine flavours, an adjacent
+            # version, a separator variant, a prefix extension, a query, plain
+            # HTTP, a non-default port, the npm notifier and Anthropic telemetry.
             numeric="$version"
             sep="${numeric//./\/}"
             adjacent="${numeric%.*}.$(( ${numeric##*.} + 1 ))"
+            cl_platform="$(claude_token)"
             case "$arch" in
-                aarch64) cl_platform="linux-arm64" ;;
-                x86_64) cl_platform="linux-x64" ;;
+                aarch64) cl_other=linux-x64 ;;
+                x86_64) cl_other=linux-arm64 ;;
             esac
-            printf '%s\t1\n' "https://downloads.claude.ai/claude-code-releases/$numeric/manifest.json" >>"$cases"
-            printf '%s\t1\n' "https://downloads.claude.ai/claude-code-releases/$numeric/$cl_platform/claude" >>"$cases"
-            printf '%s\t0\n' "https://downloads.claude.ai/claude-code-releases/$sep/manifest.json" >>"$cases"
-            printf '%s\t0\n' "https://downloads.claude.ai/claude-code-releases/$adjacent/manifest.json" >>"$cases"
-            printf '%s\t0\n' "https://downloads.claude.ai/claude-code-releases/$numeric/$cl_platform/claudex" >>"$cases"
-            printf '%s\t0\n' "https://downloads.claude.ai/claude-code-releases/$numeric/manifest.json?sig=REVIEW-SIGNED-SECRET&token=REVIEW-TOKEN" >>"$cases" ;;
+            local cl_url="https://downloads.claude.ai/claude-code-releases/$numeric"
+            printf '%s\t1\n' "$cl_url/$cl_platform/claude" >>"$cases"
+            printf '%s\t0\n' \
+                "$cl_url/manifest.json" \
+                "$cl_url/manifest.json.sig" \
+                "$cl_url/manifest.zst.json" \
+                "$cl_url/manifest.json.raw-sig.json" \
+                "$cl_url/$cl_platform/claude.zst" \
+                "https://downloads.claude.ai/keys/claude-code.asc" \
+                "$cl_url/$cl_other/claude" \
+                "$cl_url/${cl_platform}-musl/claude" \
+                "https://downloads.claude.ai/claude-code-releases/$adjacent/$cl_platform/claude" \
+                "https://downloads.claude.ai/claude-code-releases/$sep/$cl_platform/claude" \
+                "$cl_url/$cl_platform/claudex" \
+                "$cl_url/$cl_platform/claude/extra" \
+                "$cl_url/$cl_platform/claude?sig=REVIEW-SIGNED-SECRET&token=REVIEW-TOKEN" >>"$cases"
+            printf '%s\t0\n' \
+                "http://downloads.claude.ai/claude-code-releases/$numeric/$cl_platform/claude" \
+                "https://downloads.claude.ai:444/claude-code-releases/$numeric/$cl_platform/claude" \
+                "https://registry.npmjs.org/@anthropic-ai/claude-code" \
+                "https://api.anthropic.com/api/event_logging/v2/batch" >>"$cases"
+            printf '%s\t0\tPOST\n' "$cl_url/$cl_platform/claude" >>"$cases" ;;
     esac
     # Audit the addon under the SAME invocation identity as the proxy: a
     # root-plus-cap-drop combination is not the demonstrated failure, but the
@@ -825,13 +913,19 @@ export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 export HOME=/opt/agent
 sh /hook
 INNER
+    if [ "$1" = claude ]; then
+        # Here the native setup runs WITH the proxy route on purpose: production
+        # runs it with `--network=none`, so any request it makes is a logged DENY
+        # and a failure.
+        printf '%s\n' 'sh /claude-source/setup-claude.sh'
+    fi
 }
 
 report_script() { # $1 = tool
     case "$1" in
         codex) printf '%s\n' '/opt/agent/.local/bin/codex --version' ;;
         opencode) printf '%s\n' '/usr/local/bin/opencode --version' ;;
-        claude) printf '%s\n' 'if [ -x /opt/agent/.local/bin/claude ]; then /opt/agent/.local/bin/claude --version; else find /opt/agent/.local/bin -name claude -type f -exec {} --version \; 2>/dev/null; fi' ;;
+        claude) printf '%s\n' '/opt/agent/.local/bin/claude --version' ;;
         agy) printf '%s\n' '/usr/local/bin/agy --version' ;;
     esac
 }
@@ -851,6 +945,13 @@ run_one_combined() { # $1 = tool, $2 = version
         # gets no expected hash, URL or trust policy through the environment.
         extra_env+=(-v "$REPO_ROOT/images/tools/codex:/codex-source:ro")
         extra_env+=(-e "AGENT_VM_CODEX_SOURCE_DIR=/codex-source")
+        extra_env+=(-e "TMPDIR=/tmp")
+    fi
+    if [ "$tool" = claude ]; then
+        # The committed closure travels read-only; the build receives no url,
+        # digest, signer or version-derived expectation through the environment.
+        extra_env+=(-v "$REPO_ROOT/images/tools/claude:/claude-source:ro")
+        extra_env+=(-e "AGENT_VM_CLAUDE_SOURCE_DIR=/claude-source")
         extra_env+=(-e "TMPDIR=/tmp")
     fi
     if [ "$tool" = agy ]; then
@@ -919,19 +1020,24 @@ $(report_script "$tool")" >"$out" 2>&1
 
     local report expect whole
     report="$(sed -n '/^--- REPORT ---$/,$p' "$out" | tail -n +2 | head -n 1)"
-    if [ "$tool" = agy ]; then
+    if [ "$tool" = agy ] || [ "$tool" = claude ]; then
         # The version report is byte-exact: one line, no second line, no footer.
         whole="$(sed -n '/^--- REPORT ---$/,$p' "$out" | tail -n +2)"
-        [ "$whole" = "$version" ] ||
-            fail "agy report is not exactly '$version': '$whole'"
+        expected_report="$version"
+        if [ "$tool" = claude ]; then expected_report="$version (Claude Code)"; fi
+        [ "$whole" = "$expected_report" ] ||
+            fail "$tool report is not exactly '$expected_report': '$whole'"
         echo "    report ok: $report"
-        assert_agy_request_log "$version" "$marker"
+        if [ "$tool" = agy ]; then
+            assert_agy_request_log "$version" "$marker"
+        else
+            assert_claude_request_log "$version" "$marker"
+        fi
         return 0
     fi
     case "$tool" in
         codex) expect="codex-cli ${version#rust-v}" ;;
         opencode) expect="opencode $version" ;;
-        claude) expect="$version" ;;
     esac
     case "$report" in
         *"$expect"*) echo "    report ok: $report" ;;
@@ -1085,6 +1191,76 @@ run_substitution_mutation() {
     echo "    substitution refused by the committed digest; one payload request, one redirect, nothing installed"
 }
 
+# The native-step control: with the launcher removed, Anthropic's `claude install`
+# must fall back to its hardcoded CDN, and the gate must see and deny it. This is
+# the only proof that the production `RUN --network=none` is load-bearing; a plain
+# proxy that refuses CONNECT is NOT an equivalent control (the native step exits 0
+# behind one despite its connection attempts). If no DENY appears here, stop: the
+# control is invalid, and weakening the assertion is not an option (ADR 0013).
+run_claude_redownload_mutation() {
+    local version mutdir="$TMP/claude-mutant" out="$TMP/claude-mutation.out" status=0 marker
+    local allows denied
+    version="$(selection_for claude 2)"
+    [ -n "$version" ] || fail "no claude selection to mutate"
+    python3 "$REPO_ROOT/script/test/vendored-installers-mutate-vendor.py" \
+        "$REPO_ROOT/images/tools/claude/setup-claude.sh" "$mutdir/setup-claude.sh" \
+        claude-drop-launcher
+    ! cmp -s "$REPO_ROOT/images/tools/claude/setup-claude.sh" "$mutdir/setup-claude.sh" ||
+        fail "the claude-drop-launcher mutation changed no bytes"
+    echo "--- mutation: claude native step loses the launcher"
+    write_config claude "$version" "$TMP/config.json"
+    start_proxy "$TMP/config.json"
+    marker="$(mark_log)"
+    CURRENT_LABEL="claude-redownload-mutation"
+    CURRENT_MARKER="$marker"
+    set +e
+    run_with_watchdog "$NETWORK_CONTAINER_WATCHDOG_SECONDS" \
+        docker run --rm --name "$RUN_ID-claude-mut-$RANDOM" --platform "$platform" \
+        --network "$NET_INTERNAL" \
+        -v "$TMP/certs/mitmproxy-ca-cert.pem:/mitm/ca.pem:ro" \
+        -v "$REPO_ROOT/images/tools/claude:/claude-source:ro" \
+        -v "$REPO_ROOT/images/tools/claude/vendor:/vendor:ro" \
+        -v "$CONTRACT:/contract:ro" \
+        -v "$REPO_ROOT/images/tools/claude/install-claude.sh:/hook:ro" \
+        -v "$mutdir/setup-claude.sh:/mutant-setup-claude.sh:ro" \
+        -e "HTTP_PROXY=http://$PROXY:8080" -e "HTTPS_PROXY=http://$PROXY:8080" \
+        -e "http_proxy=http://$PROXY:8080" -e "https_proxy=http://$PROXY:8080" \
+        -e "ALL_PROXY=http://$PROXY:8080" -e "NO_PROXY=" \
+        -e "AGENT_VM_CONTRACT_DIR=/contract" \
+        -e "AGENT_VM_VENDOR_DIR=/vendor" \
+        -e "AGENT_VM_CLAUDE_SOURCE_DIR=/claude-source" \
+        -e "AGENT_VM_TRANSPORT_RECEIPT=/tmp/receipt" \
+        -e "AGENT_VM_INSTALL_STATUS_DIR=/tmp/status" \
+        -e "AGENT_VM_VERSION_CLAUDE=$version" \
+        -e "TMPDIR=/tmp" \
+        "$BASE_IMAGE" \
+        sh -c "$(inner_script claude | sed 's#/claude-source/setup-claude.sh#/mutant-setup-claude.sh#')
+echo '--- STATUS ---'
+cat /tmp/status/* 2>/dev/null || true" >"$out" 2>&1
+    status=$?
+    set -e
+    since_marker "$marker" >"$TMP/mutation.log"
+    sed 's/^/    /' "$TMP/mutation.log"
+    mkdir -p "$EVIDENCE_DIR" &&
+        cp "$TMP/mutation.log" "$EVIDENCE_DIR/claude-redownload-mutation.log" ||
+        echo "FAIL: cannot write evidence $EVIDENCE_DIR/claude-redownload-mutation.log" >&2
+    tail -30 "$out" | sed 's/^/    /'
+    [ "$status" -ne 0 ] ||
+        fail "the claude re-download mutation unexpectedly succeeded: the native step found its payload without the launcher"
+    denied="$(grep -c '^DENY .*downloads\.claude\.ai' "$TMP/mutation.log" || true)"
+    [ "$denied" -ge 1 ] ||
+        fail "the claude re-download mutation produced no DENY for downloads.claude.ai; the control is invalid, stop (ADR 0013): $(cat "$TMP/mutation.log")"
+    allows="$(grep '^ALLOW ' "$TMP/mutation.log" | grep -v "/$(claude_token)/claude$" || true)"
+    [ -z "$allows" ] ||
+        fail "the claude re-download mutation allowed something else: $allows"
+    grep -q '^DENY .*downloads\.claude\.ai' "$EVIDENCE_DIR/claude-redownload-mutation.log" ||
+        fail "the claude re-download evidence does not contain the DENY"
+    if grep -q '^installed$' <(sed -n '/^--- STATUS ---$/,$p' "$out"); then
+        fail "the claude re-download mutation recorded an installed status"
+    fi
+    echo "    native re-download attempt denied and logged"
+}
+
 run_plugin_profile() {
     local cfg="$TMP/config.json" marker rc=0
     run_allowlist_negatives opencode-plugins committed
@@ -1151,6 +1327,9 @@ tool_selected() { # $1 = tool
 if [ "$observe" = false ] && tool_selected codex; then
     run_denial_mutation
     run_substitution_mutation
+fi
+if [ "$observe" = false ] && tool_selected claude; then
+    run_claude_redownload_mutation
 fi
 # Publish the run-scoped, already-redacted evidence into the CI evidence
 # directory (target/ci-logs before scratch cleanup), one log per selection plus

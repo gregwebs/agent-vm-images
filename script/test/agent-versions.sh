@@ -11,14 +11,17 @@
 # under test.
 #
 # Since #97 a write run also stages and publishes the Codex payload closure (pin,
-# four evidence files, Dockerfile) as ONE transaction, and since #131 it publishes
-# agy's closure (pin, three evidence files, Dockerfile) as its own transaction
-# FIRST. The fixture repository therefore carries committed OLD closures for both
-# and replaces `script/dev/pin-codex.py` / `script/dev/pin-agy.py` with
-# `fixtures/agent-versions/{codex,agy}-writer.py`, which load the REAL writers and
-# swap only their seams (streaming fetch, blob verification). Everything else --
-# schema, evidence hashing, archive preflight, the fixed destination lists, the
-# shared Python publisher and every status -- is production code.
+# four evidence files, Dockerfile) as ONE transaction; since #131 it publishes agy's
+# closure (pin, three evidence files, Dockerfile) as its own transaction first; and
+# since #98 it publishes claude's closure (pin, two evidence files, Dockerfile) as
+# its own transaction between them, because the Codex publication refuses a staged
+# Claude ARG difference. The fixture repository therefore carries committed OLD
+# closures for all three and replaces `script/dev/pin-{codex,agy,claude}.py` with
+# `fixtures/agent-versions/{codex,agy,claude}-writer.py`, which load the REAL
+# writers and swap only their seams (streaming fetch, blob verification, the
+# reviewed signer constant). Everything else -- schema, evidence hashing, archive
+# preflight, signature verification, the fixed destination lists, the shared
+# Python publisher and every status -- is production code.
 
 set -euo pipefail
 
@@ -36,7 +39,10 @@ REAL_CP="$(command -v cp || true)"
 BASH_BIN="${BASH:-/bin/bash}"
 
 # Upstream responses the fake curl/npm serve by default. The fixture Dockerfile
-# defaults below are different, so the happy path rewrites all four.
+# defaults below are different, so the happy path rewrites all four. claude's
+# channel default is the committed version on purpose: only the cases that are
+# about a Claude publication serve a newer one, so an unrelated failure's
+# snapshot stays comparable.
 DEFAULT_CODEX='{"tag_name":"rust-v0.30.0"}'
 DEFAULT_OPENCODE='2.2.3'
 DEFAULT_CLAUDE='1.0.100'
@@ -51,6 +57,10 @@ FIXTURE_OLD_COPILOT='0.1.29'
 # tag; the committed fixture closure and the served one are one minor apart.
 FIXTURE_OLD_AGY='1.4.10'
 DEFAULT_AGY_RELEASE='1.4.11'
+# claude resolves its version from the native channel and publishes a signed
+# closure; its committed fixture closure and the served one are one patch apart.
+CLAUDE_FIXTURES="$TEST_ROOT/claude-fixtures"
+CLAUDE_SIGNER="$TEST_ROOT/claude-signer"
 
 STUB_BIN="$TEST_ROOT/bin"
 mkdir -p "$STUB_BIN"
@@ -166,6 +176,16 @@ agy_fixture() { # $1 = version -> directory holding source/ (closure) and assets
     printf '%s\n' "$directory"
 }
 
+claude_fixture() { # $1 = version -> directory holding closure/ and assets/
+    local directory="$CLAUDE_FIXTURES/$1"
+    if [[ ! -d "$directory" ]]; then
+        python3 "$REPO_ROOT/script/test/claude-pins.py" --write-fixture "$directory" \
+            --version "$1" --signer "$CLAUDE_SIGNER" >/dev/null ||
+            fail "cannot build the claude $1 fixture"
+    fi
+    printf '%s\n' "$directory"
+}
+
 reset_fixture() {
     FIXTURE_ROOT="$CASE/repo"
     rm -rf "$FIXTURE_ROOT"
@@ -205,12 +225,28 @@ reset_fixture() {
     cp -R "$AGY_COMMITTED/evidence" "$FIXTURE_ROOT/images/tools/agy/"
     cp "$REPO_ROOT/script/test/fixtures/agent-versions/agy-writer.py" \
         "$FIXTURE_ROOT/script/dev/pin-agy.py"
+    # claude: one committed OLD closure (pin, both evidence files, the release key
+    # and the loader) plus the real writer behind its fixture adapter.
+    local claude_committed
+    claude_committed="$(claude_fixture "$FIXTURE_OLD_CLAUDE")/closure"
+    mkdir -p "$FIXTURE_ROOT/images/tools/claude"
+    cp "$claude_committed/pin.json" "$claude_committed/claude_pin.py" \
+        "$claude_committed/claude-code-release-key.asc" \
+        "$FIXTURE_ROOT/images/tools/claude/"
+    cp -R "$claude_committed/evidence" "$FIXTURE_ROOT/images/tools/claude/"
+    rm -rf "$CASE/claude-committed"
+    cp -R "$claude_committed" "$CASE/claude-committed"
+    cp "$REPO_ROOT/script/test/fixtures/agent-versions/claude-writer.py" \
+        "$FIXTURE_ROOT/script/dev/pin-claude.py"
     cp "$FIXTURE_ROOT/images/standard/Dockerfile" "$CASE/original"
     # shellcheck disable=SC2016 # literal Dockerfile interpolation
     printf 'LABEL org.agent-vm.version.codex="${AGENT_VERSION_CODEX}"\n' \
         >>"$FIXTURE_ROOT/images/standard/Dockerfile"
     # shellcheck disable=SC2016 # literal Dockerfile interpolation
     printf 'LABEL org.agent-vm.version.agy="${AGENT_VERSION_AGY}"\n' \
+        >>"$FIXTURE_ROOT/images/standard/Dockerfile"
+    # shellcheck disable=SC2016 # literal Dockerfile interpolation
+    printf 'LABEL org.agent-vm.version.claude="${AGENT_VERSION_CLAUDE}"\n' \
         >>"$FIXTURE_ROOT/images/standard/Dockerfile"
     cp "$FIXTURE_ROOT/images/standard/Dockerfile" "$CASE/original"
 }
@@ -238,7 +274,7 @@ new_case() {
     mkdir -p "$CASE/home"
     STUB_CODEX="$DEFAULT_CODEX"
     STUB_OPENCODE="$DEFAULT_OPENCODE"
-    STUB_CLAUDE="$DEFAULT_CLAUDE"
+    STUB_CLAUDE="$FIXTURE_OLD_CLAUDE"
     STUB_COPILOT="$DEFAULT_COPILOT"
     unset STUB_ROLLBACK_FAIL STUB_CURL_FAIL STUB_NPM_FAIL GH_TOKEN GITHUB_ACTIONS GITHUB_OUTPUT STUB_CP_FAIL_DEST
     : >"$CASE/log"
@@ -250,9 +286,14 @@ new_case() {
         STUB_AGY_FAIL_URL
     STAGED_AGY_DEFAULT=""
     SERVED_AGY_RELEASE="$FIXTURE_OLD_AGY"
+    unset STUB_CLAUDE_INJECT STUB_CLAUDE_INJECT_AT STUB_CLAUDE_REFUSE_RESTORE \
+        STUB_CLAUDE_TAMPER STUB_CLAUDE_FAIL_URL STUB_CLAUDE_RECORD_FETCHES \
+        STUB_CLAUDE_FINGERPRINT
+    SERVED_CLAUDE_RELEASE="$FIXTURE_OLD_CLAUDE"
     reset_fixture
     write_codex_assets "$SERVED_CODEX_RELEASE"
     serve_agy "$SERVED_AGY_RELEASE"
+    serve_claude "$SERVED_CLAUDE_RELEASE"
     ARGS=(--write --repo-root "$FIXTURE_ROOT" --cosign "$STUB_BIN/cosign")
 }
 
@@ -268,6 +309,16 @@ serve_agy() { # $1 = served version
     # documents the writer will corroborate keeps the two in step.
     STUB_AGY_AMD64="$(cat "$CASE/agy-assets/linux_amd64.json")"
     STUB_AGY_ARM64="$(cat "$CASE/agy-assets/linux_arm64.json")"
+}
+
+# The bytes the claude transport serves for the current case, copied per case so
+# one case can rewrite or delete one of them without touching the cached fixture.
+serve_claude() { # $1 = served version
+    local fixture
+    SERVED_CLAUDE_RELEASE=$1
+    fixture="$(claude_fixture "$1")"
+    rm -rf "$CASE/claude-assets"
+    cp -R "$fixture/assets" "$CASE/claude-assets"
 }
 
 ARGS=()
@@ -305,6 +356,15 @@ run_agent_versions() {
         "FIXTURE_AGY_REFUSE_RESTORE=${STUB_AGY_REFUSE_RESTORE-}" \
         "FIXTURE_AGY_RECORD_FETCHES=${STUB_AGY_RECORD_FETCHES-}" \
         "FIXTURE_AGY_FAIL_URL=${STUB_AGY_FAIL_URL-}" \
+        "FIXTURE_CLAUDE_WRITER=$REPO_ROOT/script/dev/pin-claude.py" \
+        "FIXTURE_CLAUDE_ASSETS=$CASE/claude-assets" \
+        "FIXTURE_CLAUDE_FINGERPRINT=${STUB_CLAUDE_FINGERPRINT-$(cat "$CLAUDE_SIGNER/fingerprint")}" \
+        "FIXTURE_CLAUDE_INJECT=${STUB_CLAUDE_INJECT:-none}" \
+        "FIXTURE_CLAUDE_INJECT_AT=${STUB_CLAUDE_INJECT_AT-}" \
+        "FIXTURE_CLAUDE_REFUSE_RESTORE=${STUB_CLAUDE_REFUSE_RESTORE-}" \
+        "FIXTURE_CLAUDE_TAMPER=${STUB_CLAUDE_TAMPER-}" \
+        "FIXTURE_CLAUDE_FAIL_URL=${STUB_CLAUDE_FAIL_URL-}" \
+        "FIXTURE_CLAUDE_RECORD_FETCHES=${STUB_CLAUDE_RECORD_FETCHES-}" \
         "GH_TOKEN=${GH_TOKEN-}" \
         "GITHUB_ACTIONS=${GITHUB_ACTIONS-}" \
         "GITHUB_OUTPUT=${GITHUB_OUTPUT-}" \
@@ -387,6 +447,10 @@ GITHUB_OUTPUT="$CASE/github_output"
 # Every case starts from the committed agy release; a bump case selects a newer
 # one, because a publication that changes nothing prints `unchanged`.
 serve_agy "$DEFAULT_AGY_RELEASE"
+# claude publishes in its own transaction before Codex. This case is about the
+# three transactions, so it bumps claude too.
+STUB_CLAUDE="$DEFAULT_CLAUDE"
+serve_claude "$DEFAULT_CLAUDE"
 # The codex fixture records the Dockerfile it staged, so the ordering claim is
 # checked on the bytes Codex actually read.
 STUB_CODEX_STAGE_SNAPSHOT="$CASE/codex-staged-dockerfile"
@@ -404,6 +468,14 @@ assert_contains "$RUN_OUTPUT" "images/tools/agy/"
 assert_contains "$RUN_OUTPUT" "Published closures"
 # agy moved, so the human-edited egress selection is named.
 assert_contains "$RUN_OUTPUT" "selections.tsv"
+# claude published in its own transaction, before Codex staged a Dockerfile copy:
+# the staged file must already carry the released claude default.
+assert_contains "$RUN_OUTPUT" "images/tools/claude/"
+assert_contains "$RUN_OUTPUT" "Next: set claude ${DEFAULT_CLAUDE} in script/test/fixtures/installer-egress/selections.tsv"
+grep -q "^ARG AGENT_VERSION_CLAUDE=${DEFAULT_CLAUDE}\$" "$STUB_CODEX_STAGE_SNAPSHOT" ||
+    fail "the Codex staging step read a Dockerfile without the published claude ARG: $(grep '^ARG AGENT_VERSION_CLAUDE=' "$STUB_CODEX_STAGE_SNAPSHOT")"
+grep -q "^ARG AGENT_VERSION_CLAUDE=${DEFAULT_CLAUDE}\$" "$FIXTURE_ROOT/images/standard/Dockerfile" ||
+    fail "the published Dockerfile does not carry the claude ARG: $(cat "$FIXTURE_ROOT/images/standard/Dockerfile")"
 # The old interface's machine-adoptable `tool=version` lines are gone.
 assert_not_contains "$RUN_OUTPUT" "codex="
 assert_not_contains "$RUN_OUTPUT" "opencode="
@@ -441,6 +513,21 @@ assert_all_args_unchanged() {
     grep -q "^ARG AGENT_VERSION_COPILOT=${FIXTURE_OLD_COPILOT}$" "$FIXTURE_ROOT/images/standard/Dockerfile" \
         || fail "copilot Dockerfile changed on rejection"
     assert_agy_unchanged
+    assert_claude_unchanged
+}
+
+# The committed claude closure and its ARG default: a refused run must leave both
+# exactly as they were.
+assert_claude_unchanged() {
+    local relative
+    for relative in pin.json evidence/manifest.json evidence/manifest.json.sig \
+        claude-code-release-key.asc; do
+        cmp -s "$CASE/claude-committed/$relative" \
+            "$FIXTURE_ROOT/images/tools/claude/$relative" ||
+            fail "a refused run changed images/tools/claude/$relative"
+    done
+    grep -q "^ARG AGENT_VERSION_CLAUDE=${FIXTURE_OLD_CLAUDE}$" "$FIXTURE_ROOT/images/standard/Dockerfile" \
+        || fail "a refused run changed the claude ARG"
 }
 
 # The committed agy closure and its ARG default: a refused run must leave both
@@ -516,15 +603,18 @@ STUB_CLAUDE='1.0.99'
 STUB_COPILOT='0.1.29'
 SERVED_CODEX_RELEASE="$FIXTURE_OLD_CODEX"
 write_codex_assets "$SERVED_CODEX_RELEASE"
+serve_claude "$FIXTURE_OLD_CLAUDE"
 run_agent_versions
 [[ $RUN_STATUS -eq 0 ]] || fail "a no-op run must succeed: $RUN_STDERR"
 assert_contains "$RUN_OUTPUT" "already current"
-assert_contains "$RUN_OUTPUT" "both closures were still verified"
+assert_contains "$RUN_OUTPUT" "all three closures were still verified"
 # agy did not move, so it is not reported as a bump, its directory is not listed
 # as changed, and the human-edited egress selection is not mentioned.
 assert_not_contains "$RUN_OUTPUT" "agy ${FIXTURE_OLD_AGY} ->"
+assert_not_contains "$RUN_OUTPUT" "claude ${FIXTURE_OLD_CLAUDE} ->"
 assert_not_contains "$RUN_OUTPUT" "Published closures"
 assert_not_contains "$RUN_OUTPUT" "images/tools/agy/"
+assert_not_contains "$RUN_OUTPUT" "images/tools/claude/"
 assert_not_contains "$RUN_OUTPUT" "selections.tsv"
 
 grep -q "^ARG AGENT_VERSION_CODEX=${FIXTURE_OLD_CODEX}$" "$FIXTURE_ROOT/images/standard/Dockerfile" \
@@ -737,6 +827,7 @@ STUB_CLAUDE='1.2.3-rc.1'
 STUB_COPILOT='1.2.3+build.01'
 SERVED_CODEX_RELEASE='rust-v1.2.3-alpha.1.2'
 write_codex_assets "$SERVED_CODEX_RELEASE"
+serve_claude '1.2.3-rc.1'
 run_agent_versions
 [[ $RUN_STATUS -eq 0 ]] || fail "canonical version ids must be accepted: $RUN_STDERR"
 assert_arg_rewritten codex rust-v1.2.3-alpha.1.2
@@ -1075,7 +1166,7 @@ staged_dockerfile_expected() { # $1 = out file
     local expressions=(
         -e "s|^ARG AGENT_VERSION_CODEX=.*\$|ARG AGENT_VERSION_CODEX=${DEFAULT_CODEX_RELEASE}|"
         -e "s|^ARG AGENT_VERSION_OPENCODE=.*\$|ARG AGENT_VERSION_OPENCODE=v${DEFAULT_OPENCODE}|"
-        -e "s|^ARG AGENT_VERSION_CLAUDE=.*\$|ARG AGENT_VERSION_CLAUDE=${DEFAULT_CLAUDE}|"
+        -e "s|^ARG AGENT_VERSION_CLAUDE=.*\$|ARG AGENT_VERSION_CLAUDE=${STUB_CLAUDE}|"
         -e "s|^ARG AGENT_VERSION_COPILOT=.*\$|ARG AGENT_VERSION_COPILOT=${DEFAULT_COPILOT}|"
     )
     if [ -n "$STAGED_AGY_DEFAULT" ]; then
@@ -1540,6 +1631,86 @@ agy_compare_snapshot "$CASE/agy-snapshot" 'agy fetch failure'
 assert_codex_unchanged
 echo '  ok: an agy fetch failure writes nothing and never reaches the Codex stage'
 
+# --- claude: its own transaction, between agy and Codex --------------------
+
+# The claude closure as the repository holds it, flattened so a pre-run snapshot
+# can be compared byte for byte afterwards.
+claude_snapshot() { # $1 = directory
+    local relative name
+    mkdir -p "$1"
+    for relative in images/tools/claude/pin.json \
+        images/tools/claude/evidence/manifest.json \
+        images/tools/claude/evidence/manifest.json.sig \
+        images/tools/claude/claude-code-release-key.asc; do
+        name="$(printf '%s' "$relative" | tr '/' '_')"
+        cp "$FIXTURE_ROOT/$relative" "$1/$name"
+    done
+}
+
+claude_compare_snapshot() { # $1 directory, $2 label
+    local relative name
+    for relative in images/tools/claude/pin.json \
+        images/tools/claude/evidence/manifest.json \
+        images/tools/claude/evidence/manifest.json.sig \
+        images/tools/claude/claude-code-release-key.asc; do
+        name="$(printf '%s' "$relative" | tr '/' '_')"
+        cmp -s "$1/$name" "$FIXTURE_ROOT/$relative" ||
+            fail "$2: $relative does not match the pre-publication snapshot"
+        [ "$(file_mode "$1/$name")" = "$(file_mode "$FIXTURE_ROOT/$relative")" ] ||
+            fail "$2: $relative mode changed"
+    done
+}
+
+new_case claude-writer-fails-after-agy
+# The agy transaction published and claude then refused: agy and claude are named,
+# Codex never starts, and no claude byte moved.
+serve_agy "$DEFAULT_AGY_RELEASE"
+agy_snapshot "$CASE/agy-snapshot"
+claude_snapshot "$CASE/claude-snapshot"
+STUB_CLAUDE="$DEFAULT_CLAUDE"
+serve_claude "$DEFAULT_CLAUDE"
+STUB_CLAUDE_FAIL_URL="https://downloads.claude.ai/claude-code-releases/${DEFAULT_CLAUDE}/linux-arm64/claude"
+STUB_CODEX_STAGE_SNAPSHOT="$CASE/codex-staged-dockerfile"
+run_agent_versions
+[[ $RUN_STATUS -eq 1 ]] || fail "a failed claude publication must exit 1, got $RUN_STATUS"
+assert_contains "$RUN_STDERR" "agy ${FIXTURE_OLD_AGY} -> ${DEFAULT_AGY_RELEASE} was already published (its own transaction); claude was not"
+assert_contains "$RUN_STDERR" "Next: set agy ${DEFAULT_AGY_RELEASE}"
+assert_not_contains "$RUN_OUTPUT" 'Staged version bumps:'
+[[ ! -e "$CASE/codex-staged-dockerfile" ]] ||
+    fail 'the Codex transaction started after a claude refusal'
+assert_agy_published "$DEFAULT_AGY_RELEASE"
+claude_compare_snapshot "$CASE/claude-snapshot" 'claude failure'
+assert_codex_unchanged
+echo '  ok: a failed claude publication names the landed agy half and stops before Codex'
+
+new_case claude-publication-undecided
+# Status 3 at the owner level: the bump stops with both directories printed and the
+# Codex transaction never starts.
+STUB_CLAUDE="$DEFAULT_CLAUDE"
+serve_claude "$DEFAULT_CLAUDE"
+STUB_CLAUDE_INJECT=partial
+STUB_CLAUDE_INJECT_AT=manifest.json
+STUB_CLAUDE_REFUSE_RESTORE=1
+STUB_CODEX_STAGE_SNAPSHOT="$CASE/codex-staged-dockerfile"
+run_agent_versions
+[[ $RUN_STATUS -eq 3 ]] || fail "an undecided claude publication must exit 3, got $RUN_STATUS"
+assert_contains "$RUN_STDERR" 'claude publication is undecided'
+assert_contains "$RUN_STDERR" 'pin-claude: owner scratch retained at /'
+assert_contains "$RUN_STDERR" 'recovery material retained at /'
+assert_not_contains "$RUN_COMBINED" 'Traceback'
+[[ ! -e "$CASE/codex-staged-dockerfile" ]] ||
+    fail 'the Codex transaction started after an undecided claude publication'
+echo '  ok: an undecided claude publication retains both directories and stops before Codex'
+
+new_case check-refuses-mutated-claude-evidence
+printf 'tampered\n' >>"$FIXTURE_ROOT/images/tools/claude/evidence/manifest.json"
+ARGS=(--check --repo-root "$FIXTURE_ROOT")
+run_agent_versions
+assert_status_fail
+assert_contains "$RUN_COMBINED" 'does not match the pin digest'
+assert_log_empty
+echo '  ok: --check runs the claude check and refuses tampered evidence'
+
 # --- offline --check ------------------------------------------------------
 
 new_case check-offline
@@ -1547,13 +1718,13 @@ ARGS=(--check --repo-root "$FIXTURE_ROOT")
 : >"$CASE/log"
 run_agent_versions
 [[ $RUN_STATUS -eq 0 ]] || fail "--check must succeed: $RUN_STDERR"
-assert_contains "$RUN_OUTPUT" 'Codex and agy scope only'
+assert_contains "$RUN_OUTPUT" 'agy, claude and Codex scope only'
 assert_contains "$RUN_OUTPUT" 'offline committed-input check'
 assert_contains "$RUN_OUTPUT" 'not a fresh corroboration'
 assert_contains "$RUN_OUTPUT" 'not a signature check'
 assert_log_empty
 cmp "$FIXTURE_ROOT/images/standard/Dockerfile" "$CASE/original"
-echo '  ok: --check is offline, covers both closures, writes nothing and states its scope'
+echo '  ok: --check is offline, covers all three closures, writes nothing and states its scope'
 
 new_case check-refuses-mutated-agy-evidence
 # The agy check must actually run: a mutated evidence byte is its own refusal,

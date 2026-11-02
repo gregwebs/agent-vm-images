@@ -258,46 +258,6 @@ SH
     chmod 0755 "$1"
 }
 
-render_claude_native() { # $1 out, $2 version, $3 exit, $4 hang
-    local body
-    body="$(cat <<'SH'
-#!/bin/sh
-printf 'claude-native-ran\n' >>"$HOME/native-ran"
-# Record and enforce the EXACT native dispatch: the production installer must
-# invoke `install <requested-version>`, and must strip AGENT_VM_TRANSPORT_RECEIPT
-# from the native environment. A dropped target, a wrong target, or a leaked
-# receipt env fails hard here (review F3).
-{
-  printf 'argc=%s\n' "$#"
-  for a in "$@"; do printf 'arg=%s\n' "$a"; done
-} >"$HOME/native-argv"
-if [ "$#" -ne 2 ] || [ "$1" != install ] || [ "$2" != "@VERSION@" ]; then
-  printf 'claude-native: unexpected argv (%s): %s\n' "$#" "$*" >&2
-  exit 90
-fi
-if [ -n "${AGENT_VM_TRANSPORT_RECEIPT:-}" ]; then
-  printf 'claude-native: AGENT_VM_TRANSPORT_RECEIPT must not reach the native\n' >&2
-  exit 91
-fi
-@HANG@if [ "@EXIT@" = 0 ]; then
-  mkdir -p "$HOME/.local/bin"
-  printf '#!/bin/sh\nprintf "@VERSION@ (Claude Code)\\n"\n' >"$HOME/.local/bin/claude"
-  chmod 0755 "$HOME/.local/bin/claude"
-fi
-exit @EXIT@
-SH
-)"
-    body="${body//@VERSION@/$2}"
-    body="${body//@EXIT@/$3}"
-    if [ "$4" = 1 ]; then
-        body="${body//@HANG@/sleep $FIXTURE_HANG_SECONDS$'\n'}"
-    else
-        body="${body//@HANG@/}"
-    fi
-    printf '%s\n' "$body" >"$1"
-    chmod 0755 "$1"
-}
-
 # --- fixture archives / metadata ---------------------------------------------
 build_codex_archive() { # $1 out, $2 version, $3 target, $4 exit, $5 hang
     local stage="$CASE/assets/stage-codex-$RANDOM"
@@ -375,35 +335,6 @@ SH
     done
 }
 
-make_claude_case() { # $1 name, $2 arch, $3 version, $4 native exit, $5 hang, $6 corrupt, $7 malformed
-    new_case "$1" "$2"
-    local platform hash
-    case "$2" in
-        x86_64) platform=linux-x64 ;;
-        aarch64) platform=linux-arm64 ;;
-        *) fail "unknown arch $2" ;;
-    esac
-    render_claude_native "$CASE/assets/claude-native" "$3" "$4" "$5"
-    hash="$(sha256_of "$CASE/assets/claude-native")"
-    served="$CASE/assets/claude-native"
-    # $6: 0 = intact, 1 = valid asset with a mismatched manifest digest,
-    # 2 = invalid bytes served with the real digest.
-    case "$6" in
-        1) hash="0000000000000000000000000000000000000000000000000000000000000000" ;;
-        2)
-            printf 'not a real binary\n' >"$CASE/assets/claude-corrupt"
-            served="$CASE/assets/claude-corrupt" ;;
-    esac
-    if [ "$7" = 1 ]; then
-        printf '{ this is not json\n' >"$CASE/assets/manifest.json"
-    else
-        printf '{"platforms":{"%s":{"checksum":"%s","size":1234}}}\n' "$platform" "$hash" \
-            >"$CASE/assets/manifest.json"
-    fi
-    route "manifest.json" "$CASE/assets/manifest.json"
-    route "claude" "$served"
-}
-
 # --- envelope runners --------------------------------------------------------
 # All run the real run-install.sh envelope with the owning hook and the real
 # vendored installer. The fake curl/sha256sum/uname/timeout live in $CASE/bin.
@@ -466,10 +397,12 @@ run_opencode() { # $1 slot, $2 vendor dir
 
 run_claude() { # $1 slot, $2 vendor dir
     local -a e=(
-        "PATH=$CASE/bin:/usr/bin:/bin"
+        "PATH=$CASE/bin:$CASE/pybin:$CLAUDE_GPGBIN:/usr/bin:/bin"
         "HOME=$CASE"
+        "TMPDIR=$CASE/tmp"
         "AGENT_VM_CONTRACT_DIR=$CONTRACT"
         "AGENT_VM_VENDOR_DIR=$2"
+        "AGENT_VM_CLAUDE_SOURCE_DIR=$CASE/source"
         "AGENT_VM_CLAUDE_PREFIX=$CASE/prefix"
         "AGENT_VM_FIXTURE_ROOT=$CASE"
         "AGENT_VM_INSTALL_STATUS_DIR=$CASE/status"
@@ -477,6 +410,7 @@ run_claude() { # $1 slot, $2 vendor dir
         "FAKE_CURL_LOG=$CASE/curl.log"
         "FAKE_CURL_DENY_LOG=$CASE/deny.log"
         "FAKE_CURL_ROUTES=$CASE/routes"
+        "FAKE_CURL_ROUTE_MODE=full-url"
         "FAKE_TIMEOUT_LOG=$CASE/timeout.log"
         "FAKE_TAR_LOG=$CASE/tar.log"
         "REAL_TAR=$REAL_TAR"
@@ -497,6 +431,7 @@ status_of() { # $1 tool
 
 expect_ok() { [ "$RUN_RC" -eq 0 ] || fail "$1: expected success, got rc=$RUN_RC: $RUN_OUT"; }
 expect_hard() { [ "$RUN_RC" -ne 0 ] || fail "$1: expected a hard failure, got success: $RUN_OUT"; }
+assert_contains() { [[ "$1" == *"$2"* ]] || fail "expected '$2' in: $1"; }
 expect_no_denied() {
     [ ! -s "$CASE/deny.log" ] ||
         fail "$1: a request was denied: $(cat "$CASE/deny.log")"
@@ -972,116 +907,577 @@ done
 # =============================================================================
 # claude
 # =============================================================================
+# claude
+# =============================================================================
 echo "== claude (real vendored install.sh) =="
+
+CLAUDE_SETUP="$REPO_ROOT/images/tools/claude/setup-claude.sh"
+CLAUDE_FIXTURE="$REPO_ROOT/script/test/fixtures/claude/claude_fixture.py"
+MUTATOR="$REPO_ROOT/script/test/vendored-installers-mutate-vendor.py"
+CLAUDE_SIGNER="$TEST_ROOT/claude-signer"
+[ -f "$CLAUDE_SIGNER/secret.asc" ] || python3 "$CLAUDE_FIXTURE" keygen "$CLAUDE_SIGNER" >/dev/null
+
+# gpg and gpgconf only, for the same reason as claude-installer.sh: the pin
+# verifier allocates its own private GNUPGHOME and its cleanup needs gpgconf.
+# The offline setup step asks the composed contract helper for the install-status
+# record, so this section needs the native build (the other runners use the
+# recipe-contract sources directly and never call the helper binary).
+if [ -n "${RECIPE_CONTRACT_CONTEXT:-}" ]; then
+    CLAUDE_CONTRACT="$RECIPE_CONTRACT_CONTEXT/out"
+else
+    CLAUDE_CONTRACT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)/out"
+fi
+
+CLAUDE_GPGBIN="$TEST_ROOT/claude-gpgbin"
+mkdir -p "$CLAUDE_GPGBIN"
+ln -sf "$(command -v gpg)" "$CLAUDE_GPGBIN/gpg"
+ln -sf "$(command -v gpgconf)" "$CLAUDE_GPGBIN/gpgconf"
+
+new_claude_case() { # $1 name, $2 uname arch
+    new_case "$1" "$2"
+    case "$2" in
+        x86_64) CLAUDE_PLATFORM=linux-x64 ;;
+        aarch64) CLAUDE_PLATFORM=linux-arm64 ;;
+        *) fail "unknown arch $2" ;;
+    esac
+    CLAUDE_SERVED=""
+    # The native layout check compares the payload owner with the invoking
+    # uid/gid; macOS gives new files the *directory's* group, so the case tree
+    # carries the invoking group before the installer writes into it.
+    chgrp -R "$(id -g)" "$CASE/prefix"
+}
+
+claude_url() { # $1 version
+    printf 'https://downloads.claude.ai/claude-code-releases/%s/%s/claude' \
+        "$1" "$CLAUDE_PLATFORM"
+}
+
+claude_closure() { # $1 version, $2 dir, $3 amd64 file, $4 arm64 file, [$5 signature]
+    rm -rf "$2"
+    python3 "$CLAUDE_FIXTURE" closure "$2" --signer "$CLAUDE_SIGNER" --version "$1" \
+        --amd64 "$3" --arm64 "$4" ${5:+--signature "$5"} >/dev/null
+}
+
+# One consistent closure with an ELF payload for each maintained machine, and
+# exactly the local machine's canonical payload URL routed to it.
+claude_assets() { # $1 version, [$2 amd64 file, $3 arm64 file]
+    local version="$1" amd64="${2:-}" arm64="${3:-}"
+    if [ -z "$amd64" ]; then
+        python3 "$CLAUDE_FIXTURE" elf "$CASE/assets/amd64" --machine 62
+        amd64="$CASE/assets/amd64"
+    fi
+    if [ -z "$arm64" ]; then
+        python3 "$CLAUDE_FIXTURE" elf "$CASE/assets/arm64" --machine 183
+        arm64="$CASE/assets/arm64"
+    fi
+    claude_closure "$version" "$CASE/source" "$amd64" "$arm64"
+    case "$CLAUDE_PLATFORM" in
+        linux-x64) CLAUDE_SERVED="$amd64" ;;
+        *) CLAUDE_SERVED="$arm64" ;;
+    esac
+    : >"$CASE/routes"
+    route "$(claude_url "$version")" "$CLAUDE_SERVED"
+}
+
+serve_claude_bytes() { # $1 version, $2 file: replace the routed payload bytes
+    : >"$CASE/routes"
+    route "$(claude_url "$1")" "$2"
+}
+
+claude_layout() { # $1 version
+    printf '%s/.local/share/claude/versions/%s' "$CASE/prefix" "$1"
+}
+
+expect_one_payload_request() { # $1 label, $2 version
+    printf '%s\n' "$(claude_url "$2")" >"$CASE/want-curl.log"
+    cmp -s "$CASE/curl.log" "$CASE/want-curl.log" ||
+        fail "$1: the request stream is not exactly the one payload URL: $(cat "$CASE/curl.log")"
+}
+
+expect_nothing_placed() { # $1 label
+    [ ! -e "$(claude_layout "$2")" ] ||
+        fail "$1: a payload was placed at $(claude_layout "$2")"
+    [ ! -e "$CASE/prefix/.local/bin/claude" ] &&
+        [ ! -L "$CASE/prefix/.local/bin/claude" ] ||
+        fail "$1: a launcher was placed"
+}
+
+expect_not_transport_absence() { # $1 label
+    case "$(status_of claude)" in
+        absent-transport*) fail "$1: softened to $(status_of claude)" ;;
+    esac
+}
+
+render_claude_native() { # $1 out, $2 version, $3 exit, $4 hang, $5 mode, $6 marker, $7 prefix
+    local body
+    body="$(cat <<'SH'
+#!/bin/sh
+printf 'ran %s\n' "$*" >>'@MARKER@'
+{
+  printf 'argc=%s\n' "$#"
+  for a in "$@"; do printf 'arg=%s\n' "$a"; done
+} >"$HOME/native-argv"
+if [ "$#" -ne 2 ] || [ "$1" != install ] || [ "$2" != "@VERSION@" ]; then
+  printf 'claude-native: unexpected argv (%s): %s\n' "$#" "$*" >&2
+  exit 90
+fi
+if [ -n "${AGENT_VM_TRANSPORT_RECEIPT:-}" ]; then
+  printf 'claude-native: AGENT_VM_TRANSPORT_RECEIPT must not reach the native\n' >&2
+  exit 91
+fi
+if [ "${NPM_CONFIG_UPDATE_NOTIFIER:-}" != false ]; then
+  printf 'claude-native: NPM_CONFIG_UPDATE_NOTIFIER must be false\n' >&2
+  exit 92
+fi
+if [ "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-}" != 1 ]; then
+  printf 'claude-native: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC must be 1\n' >&2
+  exit 93
+fi
+if [ "$HOME" != '@PREFIX@' ]; then
+  printf 'claude-native: HOME is %s\n' "$HOME" >&2
+  exit 94
+fi
+@HANG@if [ "@EXIT@" = 0 ]; then
+  mkdir -p "$HOME/.local/share/claude/versions" "$HOME/.local/bin" \
+      "$HOME/.claude/downloads" "$HOME/.cache/claude/staging"
+  printf '{"installMethod": "native", "autoUpdates": false, "migrationVersion": 14}\n' \
+      >"$HOME/.claude.json"
+  @DAMAGE@
+fi
+exit @EXIT@
+SH
+)"
+    body="${body//@VERSION@/$2}"
+    body="${body//@EXIT@/$3}"
+    body="${body//@MARKER@/$6}"
+    body="${body//@PREFIX@/$7}"
+    if [ "$4" = 1 ]; then
+        body="${body//@HANG@/sleep $FIXTURE_HANG_SECONDS$'\n'}"
+    else
+        body="${body//@HANG@/}"
+    fi
+    case "$5" in
+        ok) damage="" ;;
+        replace-bytes) damage="  printf 'replaced\\n' >>\"\$HOME/.local/share/claude/versions/@VERSION@\"" ;;
+        extra-version) damage="  : >\"\$HOME/.local/share/claude/versions/9.9.9\"" ;;
+        retarget-launcher) damage="  ln -sfn \"\$HOME/elsewhere\" \"\$HOME/.local/bin/claude\"" ;;
+        leave-download) damage="  printf 'staged\\n' >\"\$HOME/.claude/downloads/claude-@VERSION@-staged\"" ;;
+        auto-updates)
+            damage="  printf '{\"installMethod\": \"native\", \"autoUpdates\": true}\\n' >\"\$HOME/.claude.json\"" ;;
+        *) fail "unknown claude native mode $5" ;;
+    esac
+    body="${body//@DAMAGE@/$damage}"
+    body="${body//@VERSION@/$2}"
+    printf '%s\n' "$body" >"$1"
+    chmod 0755 "$1"
+}
+
+place_claude_layout() { # $1 payload file, $2 version
+    local versions="$CASE/prefix/.local/share/claude/versions"
+    mkdir -p "$versions" "$CASE/prefix/.local/bin"
+    cp "$1" "$versions/$2"
+    chmod 0755 "$versions/$2"
+    ln -sfn "$versions/$2" "$CASE/prefix/.local/bin/claude"
+}
+
+run_setup() { # $1 version, $2 setup script
+    local -a e=(
+        "PATH=$CASE/bin:$CASE/pybin:$CLAUDE_GPGBIN:/usr/bin:/bin"
+        "HOME=$CASE"
+        "TMPDIR=${SETUP_TMPDIR:-$CASE/tmp}"
+        "AGENT_VM_CONTRACT_DIR=$CLAUDE_CONTRACT"
+        "AGENT_VM_CLAUDE_SOURCE_DIR=$CASE/source"
+        "AGENT_VM_CLAUDE_PREFIX=$CASE/prefix"
+        "AGENT_VM_INSTALL_STATUS_DIR=$CASE/status"
+        "AGENT_VM_VERSION_CLAUDE=$1"
+        "FAKE_TIMEOUT_LOG=$CASE/timeout.log"
+        "REAL_TIMEOUT=$REAL_TIMEOUT"
+        "FAKE_TIMEOUT_CAP=$FAKE_TIMEOUT_CAP_SECONDS"
+    )
+    if [ -n "$SOFT" ]; then e+=("AGENT_INSTALL_SOFT_FAIL=$SOFT"); fi
+    set +e
+    RUN_OUT="$(env -i "${e[@]}" sh "$2" 2>&1)"
+    RUN_RC=$?
+    set -e
+}
+
 for arch in x86_64 aarch64; do
     V=2.1.286
 
-    make_claude_case "claude-$arch-ok" "$arch" "$V" 0 0 0 0
+    new_claude_case "claude-$arch-ok" "$arch"
+    claude_assets "$V"
     run_claude "$V" "$CLAUDE_VENDOR"
     expect_ok "claude $arch clean install"
     expect_no_denied "claude $arch clean install"
-    [ -f "$CASE/prefix/native-ran" ] || fail "claude $arch: the native installer never ran"
-    [ "$(cat "$CASE/prefix/native-argv")" = "$(printf 'argc=2\narg=install\narg=%s' "$V")" ] ||
-        fail "claude $arch: the native installer received unexpected argv: $(cat "$CASE/prefix/native-argv")"
-    [ -x "$CASE/prefix/.local/bin/claude" ] || fail "claude $arch: native install did not publish the command"
-    [ "$("$CASE/prefix/.local/bin/claude")" = "$V (Claude Code)" ] ||
-        fail "claude $arch: native command reports the wrong version"
+    expect_one_payload_request "claude $arch clean install" "$V"
+    expect_not_transport_absence "claude $arch clean install"
+    [ -f "$(claude_layout "$V")" ] || fail "claude $arch: the payload was not placed"
+    [ "$(sha256_of "$(claude_layout "$V")")" = "$(sha256_of "$CLAUDE_SERVED")" ] ||
+        fail "claude $arch: the placed bytes are not the served bytes"
+    # BSD `stat` is the one that answers here; a GNU `stat` earlier on PATH also
+    # prints a filesystem dump on stdout before failing, so its output cannot be
+    # captured and discarded with a `||` fallback inside one substitution.
+    payload_mode="$(stat -f '%Lp' "$(claude_layout "$V")" 2>/dev/null)" || payload_mode=""
+    [ -n "$payload_mode" ] || payload_mode="$(stat -c '%a' "$(claude_layout "$V")")"
+    [ "$payload_mode" = 755 ] ||
+        fail "claude $arch: the placed payload is not mode 0755"
+    [ "$(readlink "$CASE/prefix/.local/bin/claude")" = "$(claude_layout "$V")" ] ||
+        fail "claude $arch: the launcher is not the absolute payload path"
     [ "$(status_of claude)" = pending ] || fail "claude $arch: status is $(status_of claude)"
-    note "claude $arch: clean install verified the exact asset then ran the native installer"
+    [ ! -e "$CASE/executed" ] || fail "claude $arch: the install RUN executed the payload"
+    note "claude $arch: one payload request, verified and placed; nothing executed"
 
-    # Checksum corruption BEFORE native publication, under every nonempty soft
-    # input, for a valid asset with a mismatched manifest digest AND invalid
-    # bytes.
+    # Served bytes that are not the pinned ones, under every nonempty soft input.
     for soft in "" 1 0; do
-        for mode in 1 2; do
-            kind=valid-digest-mismatch
-            [ "$mode" = 2 ] && kind=invalid-bytes
-            make_claude_case "claude-$arch-checksum-$kind-soft-${soft:-none}" "$arch" "$V" 0 0 "$mode" 0
+        for kind in corrupt truncated; do
+            new_claude_case "claude-$arch-$kind-soft-${soft:-none}" "$arch"
+            claude_assets "$V"
+            if [ "$kind" = corrupt ]; then
+                printf 'not the pinned bytes\n' >"$CASE/assets/corrupt"
+            else
+                head -c 100 "$CLAUDE_SERVED" >"$CASE/assets/corrupt"
+            fi
+            serve_claude_bytes "$V" "$CASE/assets/corrupt"
             SOFT="$soft"
             run_claude "$V" "$CLAUDE_VENDOR"
-            expect_hard "claude $arch $kind checksum (soft='$soft')"
-            case "$(status_of claude)" in
-                absent-transport*) fail "claude $arch $kind (soft='$soft'): checksum softened to $(status_of claude)" ;;
-            esac
-            [ ! -e "$CASE/prefix/native-ran" ] ||
-                fail "claude $arch $kind (soft='$soft'): a checksum mismatch must fail before the native installer runs"
-            [ ! -e "$CASE/prefix/.local/bin/claude" ] ||
-                fail "claude $arch $kind (soft='$soft'): a checksum mismatch must not publish a command"
+            expect_hard "claude $arch $kind (soft='$soft')"
+            expect_not_transport_absence "claude $arch $kind (soft='$soft')"
+            expect_nothing_placed "claude $arch $kind (soft='$soft')" "$V"
             SOFT=""
         done
     done
-    note "claude $arch: checksum corruption (digest mismatch + invalid bytes) is HARD under empty/1/0 soft input"
+    note "claude $arch: served-byte corruption and truncation are HARD under empty/1/0 soft input"
 
-    for soft in "" 1 0; do
-        make_claude_case "claude-$arch-malformed-soft-${soft:-none}" "$arch" "$V" 0 0 0 1
-        SOFT="$soft"
-        run_claude "$V" "$CLAUDE_VENDOR"
-        expect_hard "claude $arch malformed manifest (soft='$soft')"
-        case "$(status_of claude)" in
-            absent-transport*) fail "claude $arch malformed (soft='$soft'): manifest failure softened to $(status_of claude)" ;;
-        esac
-        [ ! -e "$CASE/prefix/native-ran" ] ||
-            fail "claude $arch malformed (soft='$soft'): a malformed manifest must not reach the native installer"
-        SOFT=""
-    done
-    note "claude $arch: malformed manifest is HARD under empty/1/0 soft input"
+    # The other machine's ELF under a fully consistent pin, manifest and signature.
+    new_claude_case "claude-$arch-wrong-machine" "$arch"
+    other="$CASE/assets/other-machine"
+    case "$CLAUDE_PLATFORM" in
+        linux-x64) wrong_machine=183 ;;
+        *) wrong_machine=62 ;;
+    esac
+    python3 "$CLAUDE_FIXTURE" elf "$other" --machine "$wrong_machine"
+    claude_assets "$V" "$other" "$other"
+    run_claude "$V" "$CLAUDE_VENDOR"
+    expect_hard "claude $arch wrong machine"
+    assert_contains "$RUN_OUT" "targets ELF machine"
+    expect_nothing_placed "claude $arch wrong machine" "$V"
+    note "claude $arch: the other architecture's ELF is refused by the preflight"
 
-    make_claude_case "claude-$arch-latest" "$arch" "$V" 0 0 0 0
-    mutate_vendor "$CLAUDE_VENDOR" "$CASE/mutant" 's#/manifest.json#/latest/manifest.json#'
+    # Manifest and executable rewritten consistently, signature left stale.
+    new_claude_case "claude-$arch-stale-signature" "$arch"
+    python3 "$CLAUDE_FIXTURE" elf "$CASE/assets/amd64" --machine 62
+    python3 "$CLAUDE_FIXTURE" elf "$CASE/assets/arm64" --machine 183
+    claude_closure "$V" "$CASE/stale" "$CASE/assets/amd64" "$CASE/assets/arm64"
+    printf 'a rewritten payload\n' >"$CASE/assets/rewritten"
+    claude_closure "$V" "$CASE/source" "$CASE/assets/rewritten" "$CASE/assets/rewritten" \
+        "$CASE/stale/evidence/manifest.json.sig"
+    run_claude "$V" "$CLAUDE_VENDOR"
+    expect_hard "claude $arch stale signature"
+    assert_contains "$RUN_OUT" "signature does not verify"
+    [ ! -s "$CASE/curl.log" ] ||
+        fail "claude $arch stale signature: a download was attempted: $(cat "$CASE/curl.log")"
+    note "claude $arch: a stale signature over rewritten bytes is refused before any fetch"
+
+    new_claude_case "claude-$arch-unpinned" "$arch"
+    claude_assets 2.1.285
+    run_claude "$V" "$CLAUDE_VENDOR"
+    expect_hard "claude $arch unpinned version"
+    assert_contains "$RUN_OUT" "does not cover"
+    [ ! -s "$CASE/curl.log" ] ||
+        fail "claude $arch unpinned: a download was attempted: $(cat "$CASE/curl.log")"
+    note "claude $arch: an exact but unpinned version is refused before any fetch"
+
+    new_claude_case "claude-$arch-existing-payload" "$arch"
+    claude_assets "$V"
+    mkdir -p "$CASE/prefix/.local/share/claude/versions"
+    printf 'earlier build\n' >"$(claude_layout "$V")"
+    run_claude "$V" "$CLAUDE_VENDOR"
+    expect_hard "claude $arch existing payload"
+    assert_contains "$RUN_OUT" "Refusing to install over an existing"
+    [ ! -s "$CASE/curl.log" ] ||
+        fail "claude $arch existing payload: a download was attempted: $(cat "$CASE/curl.log")"
+    note "claude $arch: an existing versions/<v> is refused before any fetch"
+
+    # A vendored installer that re-adds a manifest request is denied.
+    new_claude_case "claude-$arch-manifest-request" "$arch"
+    claude_assets "$V"
+    python3 "$MUTATOR" "$CLAUDE_VENDOR/install.sh" "$CASE/mutant/install.sh" \
+        claude-manifest-request
+    ! cmp -s "$CLAUDE_VENDOR/install.sh" "$CASE/mutant/install.sh" ||
+        fail "claude $arch manifest mutation: the mutation changed no bytes"
     run_claude "$V" "$CASE/mutant"
-    expect_hard "claude $arch latest mutation"
-    expect_denied "claude $arch latest mutation"
-    note "claude $arch: a reintroduced /latest request is denied and fails"
+    expect_hard "claude $arch manifest mutation"
+    grep -q 'manifest.json' "$CASE/deny.log" ||
+        fail "claude $arch manifest mutation: the manifest URL was not denied: $(cat "$CASE/deny.log")"
+    expect_nothing_placed "claude $arch manifest mutation" "$V"
+    note "claude $arch: a reintroduced manifest request is denied and fatal"
 
-    make_claude_case "claude-$arch-transport-soft" "$arch" "$V" 0 0 0 0
+    new_claude_case "claude-$arch-transport-soft" "$arch"
+    claude_assets "$V"
     CURL_TRANSPORT_CODE=28
     SOFT=1
     run_claude "$V" "$CLAUDE_VENDOR"
     expect_ok "claude $arch transport-soft"
     [ "$(status_of claude)" = "absent-transport 28" ] ||
         fail "claude $arch: softened transport must record absence, got $(status_of claude)"
-    [ ! -e "$CASE/prefix/.local/bin/claude" ] ||
-        fail "claude $arch: softened transport must not leave a command"
+    expect_nothing_placed "claude $arch transport-soft" "$V"
     CURL_TRANSPORT_CODE=""
     SOFT=""
     note "claude $arch: transport 28 propagates as a receipt and softens to an absence record"
 
-    make_claude_case "claude-$arch-transport-hard" "$arch" "$V" 0 0 0 0
+    new_claude_case "claude-$arch-transport-hard" "$arch"
+    claude_assets "$V"
     CURL_TRANSPORT_CODE=28
     run_claude "$V" "$CLAUDE_VENDOR"
     expect_hard "claude $arch transport without soft"
     CURL_TRANSPORT_CODE=""
     note "claude $arch: the same transport failure is hard without soft input"
-
-    make_claude_case "claude-$arch-native-nonzero" "$arch" "$V" 1 0 0 0
-    SOFT=1
-    run_claude "$V" "$CLAUDE_VENDOR"
-    expect_hard "claude $arch native nonzero under soft input"
-    [ "$(status_of claude)" != installed ] || fail "claude $arch: native nonzero recorded installed"
-    SOFT=""
-    note "claude $arch: a native non-zero install is hard even with soft input"
-
-    make_claude_case "claude-$arch-native-75" "$arch" "$V" 75 0 0 0
-    SOFT=1
-    run_claude "$V" "$CLAUDE_VENDOR"
-    expect_hard "claude $arch native 75 under soft input"
-    case "$(status_of claude)" in
-        absent-transport*)
-            fail "claude $arch: a native exit 75 was misclassified as transport ($(status_of claude))" ;;
-    esac
-    SOFT=""
-    note "claude $arch: a native exit 75 stays hard (the native never sees the receipt env)"
-
-    make_claude_case "claude-$arch-hang" "$arch" "$V" 0 1 0 0
-    SOFT=1
-    run_claude "$V" "$CLAUDE_VENDOR"
-    expect_hard "claude $arch native hang under soft input"
-    [ "$(status_of claude)" != installed ] || fail "claude $arch: a hung native recorded installed"
-    grep -q '^300$' "$CASE/timeout.log" ||
-        fail "claude $arch: the vendored installer did not bound the native install with timeout 300"
-    SOFT=""
-    note "claude $arch: the native install is bounded by 'timeout 300' and a hang fails"
 done
+
+# --- the offline native setup step (RUN B) -----------------------------------
+echo "  (claude offline setup)"
+for mode in ok replace-bytes extra-version retarget-launcher leave-download \
+    auto-updates; do
+    V=2.1.286
+    new_claude_case "claude-setup-$mode" x86_64
+    native="$CASE/assets/native"
+    render_claude_native "$native" "$V" 0 0 "$mode" "$CASE/executed" "$CASE/prefix"
+    claude_closure "$V" "$CASE/source" "$native" "$native"
+    place_claude_layout "$native" "$V"
+    run_setup "$V" "$CLAUDE_SETUP"
+    if [ "$mode" = ok ]; then
+        expect_ok "claude setup $mode"
+        [ "$(cat "$CASE/prefix/native-argv")" = "$(printf 'argc=2\narg=install\narg=%s' "$V")" ] ||
+            fail "claude setup ok: unexpected argv: $(cat "$CASE/prefix/native-argv")"
+        grep -q '^300$' "$CASE/timeout.log" ||
+            fail "claude setup ok: the native step was not bounded by 300"
+        [ ! -s "$CASE/native.log" ] || true
+        [ -f "$CASE/prefix/.claude.json" ] || fail "claude setup ok: no native state was written"
+        [ "$(status_of claude)" = MISSING ] ||
+            fail "claude setup ok: the setup step must not write a status record"
+    else
+        expect_hard "claude setup $mode"
+        expect_not_transport_absence "claude setup $mode"
+    fi
+    note "claude setup $mode: $( [ "$mode" = ok ] && echo 'offline setup accepted' || echo 'secondary payload refused' )"
+done
+
+for exit_code in 1 75; do
+    V=2.1.286
+    new_claude_case "claude-setup-exit$exit_code" x86_64
+    native="$CASE/assets/native"
+    render_claude_native "$native" "$V" "$exit_code" 0 ok "$CASE/executed" "$CASE/prefix"
+    claude_closure "$V" "$CASE/source" "$native" "$native"
+    place_claude_layout "$native" "$V"
+    SOFT=1
+    run_setup "$V" "$CLAUDE_SETUP"
+    expect_hard "claude setup exit $exit_code under soft input"
+    expect_not_transport_absence "claude setup exit $exit_code"
+    SOFT=""
+    note "claude setup: a native exit $exit_code is hard even with soft input"
+done
+
+V=2.1.286
+new_claude_case "claude-setup-hang" x86_64
+native="$CASE/assets/native"
+render_claude_native "$native" "$V" 0 1 ok "$CASE/executed" "$CASE/prefix"
+claude_closure "$V" "$CASE/source" "$native" "$native"
+place_claude_layout "$native" "$V"
+SOFT=1
+run_setup "$V" "$CLAUDE_SETUP"
+expect_hard "claude setup hang under soft input"
+grep -q '^300$' "$CASE/timeout.log" ||
+    fail "claude setup hang: the native step was not bounded by 300"
+SOFT=""
+note "claude setup: the native step is bounded by 'timeout 300' and a hang fails"
+
+for absence in record no-record dangling; do
+    V=2.1.286
+    new_claude_case "claude-setup-absent-$absence" x86_64
+    dummy="$CASE/assets/dummy"
+    printf '#!/bin/sh\nexit 0\n' >"$dummy"
+    claude_closure "$V" "$CASE/source" "$dummy" "$dummy"
+    case "$absence" in
+        record) printf 'absent-transport 6\n' >"$CASE/status/claude" ;;
+        dangling)
+            mkdir -p "$CASE/prefix/.local/bin"
+            ln -s nowhere "$CASE/prefix/.local/bin/claude" ;;
+
+    esac
+    run_setup "$V" "$CLAUDE_SETUP"
+    if [ "$absence" = record ]; then
+        expect_ok "claude setup absent ($absence)"
+        assert_contains "$RUN_OUT" "no native setup"
+        [ ! -e "$CASE/executed" ] || fail "claude setup absent: something executed"
+        [ ! -s "$CASE/timeout.log" ] || fail "claude setup absent: timeout was invoked"
+    else
+        expect_hard "claude setup absent ($absence)"
+        [ ! -e "$CASE/executed" ] || fail "claude setup absent ($absence): something executed"
+    fi
+    note "claude setup: absence state '$absence' decided before any verification"
+done
+
+# --- before-execution control A: bytes changed after the closure was signed ---
+claude_setup_tamper_case() { # $1 name, $2 "signed" | "tampered"
+    local V=2.1.286 native
+    new_claude_case "$1" x86_64
+    native="$CASE/assets/native"
+    render_claude_native "$native" "$V" 0 0 ok "$CASE/executed" "$CASE/prefix"
+    mkdir -p "$CASE/prefix/.local/share/claude/versions" "$CASE/prefix/.local/bin"
+    if [ "$2" = signed ]; then
+        cp "$native" "$(claude_layout "$V")"
+        claude_closure "$V" "$CASE/source" "$(claude_layout "$V")" "$(claude_layout "$V")"
+    else
+        { cat "$native"; printf ': tampered-after-signing\n'; } >"$(claude_layout "$V")"
+        claude_closure "$V" "$CASE/source" "$native" "$native"
+    fi
+    chmod 0755 "$(claude_layout "$V")"
+    ln -sfn "$(claude_layout "$V")" "$CASE/prefix/.local/bin/claude"
+}
+
+claude_setup_problems() { # $1 setup script; sets PROBLEMS
+    local script="$1" long
+    long="$CASE/tmpdir-$(printf '%0120d' 0)"
+    mkdir -p "$long"
+    SETUP_TMPDIR="$long"
+    run_setup 2.1.286 "$script"
+    SETUP_TMPDIR=""
+    PROBLEMS=""
+    if [ "$RUN_RC" -eq 0 ]; then PROBLEMS="$PROBLEMS exit0"; fi
+    if [ -e "$CASE/executed" ]; then PROBLEMS="$PROBLEMS executed"; fi
+    if [ -s "$CASE/timeout.log" ]; then PROBLEMS="$PROBLEMS timeout"; fi
+    if ! printf '%s' "$RUN_OUT" | grep -Eq 'claude_pin: .*sha256'; then
+        PROBLEMS="$PROBLEMS no-refusal"
+    fi
+}
+
+claude_setup_tamper_case "claude-setup-tamper" tampered
+claude_setup_problems "$CLAUDE_SETUP"
+[ -z "$PROBLEMS" ] ||
+    fail "claude setup before-execution control: the real script fails it ($PROBLEMS): $RUN_OUT"
+[ ! -e "$CASE/executed" ] || fail "claude setup before-execution control: the payload ran"
+note "claude setup: a payload changed after signing is refused with no execution"
+
+claude_setup_tamper_case "claude-setup-tamper-positive" signed
+claude_setup_problems "$CLAUDE_SETUP"
+# The positive control is a *successful* run: no refusal, the payload ran and the
+# native step was reached. Its absence in the case above is therefore evidence.
+case "$PROBLEMS" in
+    *no-refusal*) ;;
+    *) fail "claude setup positive control: a correctly signed payload was refused ($PROBLEMS): $RUN_OUT" ;;
+esac
+[ -e "$CASE/executed" ] ||
+    fail "claude setup positive control: the payload did not run, so its absence proves nothing"
+grep -q '^300$' "$CASE/timeout.log" ||
+    fail "claude setup positive control: the native step was not bounded by 300"
+note "claude setup: the same tampered bytes re-signed do run (positive control)"
+
+for variant in claude-setup-skip-initial-check claude-setup-check-after-native; do
+    claude_setup_tamper_case "claude-setup-mutant-$variant" tampered
+    python3 "$MUTATOR" "$CLAUDE_SETUP" "$CASE/mutant/setup-claude.sh" "$variant"
+    ! cmp -s "$CLAUDE_SETUP" "$CASE/mutant/setup-claude.sh" ||
+        fail "claude setup mutant $variant: the mutation changed no bytes"
+    claude_setup_problems "$CASE/mutant/setup-claude.sh"
+    case "$PROBLEMS" in
+        *executed*) ;;
+        *) fail "claude setup mutant $variant: the payload executed undetected ($PROBLEMS): $RUN_OUT" ;;
+    esac
+    case "$PROBLEMS" in
+        *timeout*) ;;
+        *) fail "claude setup mutant $variant: the native step was never reached undetected ($PROBLEMS)" ;;
+    esac
+    note "claude setup: the $variant mutant is detected (the check is load-bearing)"
+done
+
+# --- before-execution control B: RUN A refuses a hash-consistent shell script --
+claude_shell_payload_problems() { # $1 mutant variant (empty: the real vendor); sets PROBLEMS
+    local V=2.1.286 script vendor="$CLAUDE_VENDOR"
+    new_claude_case "claude-shell-payload" x86_64
+    if [ -n "${1:-}" ]; then
+        python3 "$MUTATOR" "$CLAUDE_VENDOR/install.sh" "$CASE/mutant/install.sh" "$1"
+        ! cmp -s "$CLAUDE_VENDOR/install.sh" "$CASE/mutant/install.sh" ||
+            fail "claude $1 mutant: the mutation changed no bytes"
+        vendor="$CASE/mutant"
+    fi
+    script="$CASE/assets/shell-payload"
+    {
+        printf '#!/bin/sh\n'
+        printf 'printf "ran\\n" >>%q\n' "$CASE/executed"
+        printf 'exit 0\n'
+    } >"$script"
+    chmod 0755 "$script"
+    claude_closure "$V" "$CASE/source" "$script" "$script"
+    : >"$CASE/routes"
+    route "$(claude_url "$V")" "$script"
+    run_claude "$V" "$vendor"
+    # RUN A's outcome has to survive the setup run below, which replaces both.
+    local run_a_rc="$RUN_RC" run_a_out="$RUN_OUT"
+    if [ "$run_a_rc" -eq 0 ]; then
+        # RUN B as the build would run it after a (wrongly) accepted RUN A.
+        run_setup "$V" "$CLAUDE_SETUP"
+    fi
+    PROBLEMS=""
+    if [ "$run_a_rc" -eq 0 ]; then PROBLEMS="$PROBLEMS exit0"; fi
+    if [ -e "$(claude_layout "$V")" ]; then PROBLEMS="$PROBLEMS placed"; fi
+    if [ -e "$CASE/prefix/.local/bin/claude" ] ||
+        [ -L "$CASE/prefix/.local/bin/claude" ]; then
+        PROBLEMS="$PROBLEMS launcher"
+    fi
+    if [ -d "$CASE/prefix/.claude/downloads" ] &&
+        [ -n "$(ls -A "$CASE/prefix/.claude/downloads")" ]; then
+        PROBLEMS="$PROBLEMS leftover"
+    fi
+    if [ -e "$CASE/executed" ]; then PROBLEMS="$PROBLEMS executed"; fi
+    if ! printf '%s' "$run_a_out" | grep -q 'is not an ELF object' ||
+        printf '%s' "$run_a_out" | grep -q 'Checksum verification failed'; then
+        PROBLEMS="$PROBLEMS no-elf-refusal"
+    fi
+}
+
+for soft in "" 1; do
+    SOFT="$soft"
+    claude_shell_payload_problems
+    SOFT=""
+    [ -z "$PROBLEMS" ] ||
+        fail "claude shell-payload control (soft='$soft'): problems ($PROBLEMS): $RUN_OUT"
+    expect_one_payload_request "claude shell-payload control (soft='$soft')" 2.1.286
+    expect_not_transport_absence "claude shell-payload control (soft='$soft')"
+    note "claude shell-payload control (soft='$soft'): the download happened, the ELF preflight refused it"
+done
+
+SOFT=""
+claude_shell_payload_problems claude-skip-preflight
+case "$PROBLEMS" in
+    *exit0*) ;;
+    *) fail "claude skip-preflight mutant: not detected as an accepted payload ($PROBLEMS): $RUN_OUT" ;;
+esac
+case "$PROBLEMS" in
+    *placed*) ;;
+    *) fail "claude skip-preflight mutant: nothing was placed, so the control proves nothing" ;;
+esac
+case "$PROBLEMS" in
+    *executed*) ;;
+    *) fail "claude skip-preflight mutant: the payload never ran in the following setup step" ;;
+esac
+note "claude: the claude-skip-preflight mutant is detected (the preflight is load-bearing)"
+
+# --- a failure after the move is hard and leaves the documented state --------
+V=2.1.286
+new_claude_case "claude-placement-failure" x86_64
+claude_assets "$V"
+mkdir -p "$CASE/prefix/.local/bin"
+chmod 0775 "$CASE/prefix/.local/bin"
+SOFT=1
+run_claude "$V" "$CLAUDE_VENDOR"
+expect_hard "claude placement failure under soft input"
+SOFT=""
+expect_not_transport_absence "claude placement failure"
+assert_contains "$RUN_OUT" "group- or world-writable"
+[ -f "$(claude_layout "$V")" ] ||
+    fail "claude placement failure: the moved payload must remain (documented leftover)"
+[ "$(sha256_of "$(claude_layout "$V")")" = "$(sha256_of "$CLAUDE_SERVED")" ] ||
+    fail "claude placement failure: the remaining payload is not the verified bytes"
+note "claude: a failure after the move exits 1 and leaves the verified payload in place"
 
 # =============================================================================
 # transport receipt clearing (images/recipe-contract/download.sh)

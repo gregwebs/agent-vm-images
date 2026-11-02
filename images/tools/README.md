@@ -23,7 +23,7 @@ Node 22, base-owned pnpm, fetch/diagnostic facilities, explicit optional trust a
 |---|---|---|
 | codex | AGENT_VERSION_CODEX | rust-v0.159.3 / rust-vPINSELECTED (see [Codex payload closure](codex/vendor/README.md)) |
 | opencode | AGENT_VERSION_OPENCODE | v2.0.29 / v2.SEMVER |
-| claude | AGENT_VERSION_CLAUDE | 2.1.286 / SEMVER |
+| claude | AGENT_VERSION_CLAUDE | 2.1.286 / SEMVER (pin-selected, see [ADR 0013](../../docs/adr/0013-claude-native-payload-pin.md)) |
 | copilot | AGENT_VERSION_COPILOT | 1.0.90 / SEMVER |
 | agy | AGENT_VERSION_AGY | 1.4.11 / X.Y.Z (pin-selected, see [ADR 0012](../../docs/adr/0012-agy-hash-only-artifact-pin.md)) |
 | dsh | AGENT_VERSION_DSH | manifest 0.2.1-rc.5 / SEMVER |
@@ -93,8 +93,14 @@ Access auditing includes command/interpreter/symlink ancestry and arbitrary-UID
 usability; readable mode bits alone are not version proof. Future customization
 after this gate is the image author's responsibility.
 
-Claude is verified immediately after required installation, before optional
-marketplace work. Marketplace add is bounded to 180s, each of four LSP installs
+Claude's install RUN verifies the committed closure and places the pinned
+executable; the native step then runs in its own `RUN --network=none`
+(`setup-claude.sh`), which re-verifies the placed bytes before executing them.
+Claude is verified immediately after that, before optional marketplace work. The
+verify RUN checks the payload digest, the launcher, the install mode and
+`.claude.json` (`installMethod: native`, `autoUpdates: false`) before it executes
+the binary, and the final certification re-runs the same gate after the optional
+plugin work. Marketplace add is bounded to 180s, each of four LSP installs
 to 120s, list to 60s, each with 10s kill escalation; optional command budget is
 at most 13 minutes. Every nonzero logs operation/status explicitly. The stash
 under `/opt/agent-vm/claude-seed` remains readable outside HOME; optional download
@@ -109,14 +115,22 @@ Vendored snapshot + patch + runnable copy keep installer edits reviewable:
 upstream assets still arrive over the network. Vendor manifests detect
 corruption, not independent signing or upstream replacement of an exact-version
 asset. OpenCode has no independent archive
-checksum; its trust is TLS plus exact registry tarball URL. Two tools are the
+checksum; its trust is TLS plus exact registry tarball URL. Three tools are the
 exception. Codex's two payloads are bound by a committed content pin, so an exact
 version that the pin does not select is refused — see the
 [Codex payload policy](../../docs/image-input-policy.md#codex-standalone-payloads)
-and [ADR 0009](../../docs/adr/0009-codex-payload-pins.md). agy publishes nothing
-to verify against, so its pin is hash-only, corroborated at pin time by GitHub's
-asset digest and Google's updater manifest and re-checked from the committed
-evidence at build time — the weakest guarantee in this repository, recorded in
+and [ADR 0009](../../docs/adr/0009-codex-payload-pins.md). Claude's executable is
+bound by a committed closure too, and its manifest carries a detached OpenPGP
+signature the build verifies with the committed release key: the pin's fingerprint
+must be that key's single primary and the signature's primary, and
+`pin-claude.py --check` and the source gate hold that fingerprint to the reviewed
+signer — see the
+[Claude payload policy](../../docs/image-input-policy.md#claude-native-payload)
+and [ADR 0013](../../docs/adr/0013-claude-native-payload-pin.md). agy publishes
+nothing to verify against, so its pin is hash-only, corroborated at pin time by
+GitHub's asset digest and Google's updater manifest and re-checked from the
+committed evidence at build time — the weakest guarantee in this repository,
+recorded in
 [ADR 0012](../../docs/adr/0012-agy-hash-only-artifact-pin.md) and in the
 [agy hash-only artifact](../../docs/image-input-policy.md#the-agy-hash-only-artifact)
 section of the input policy. These are explicit trust

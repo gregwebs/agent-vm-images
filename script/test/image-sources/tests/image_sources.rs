@@ -2373,6 +2373,8 @@ fn exact_image_install_hooks_exist() {
         "opencode/vendor/install.sh",
         "claude/install-claude.sh",
         "claude/verify-claude.sh",
+        "claude/setup-claude.sh",
+        "claude/claude_pin.py",
         "claude/vendor/install.sh",
         "copilot/install-copilot.sh",
         "copilot/verify-copilot.sh",
@@ -10415,4 +10417,611 @@ fn codex_recipe_mutations_are_refused() {
             "the gate accepted loader mutation {index}"
         );
     }
+}
+
+// --- committed Claude native payload closure (#98) -----------------------------
+//
+// `images/tools/claude/pin.json` is the reviewed selection of one exact Claude
+// Code release: the signed manifest and its detached signature as committed
+// evidence, the release signing key, and per Linux architecture the executable
+// URL, SHA-256 and byte size. The loader (`images/tools/claude/claude_pin.py`)
+// verifies the signature; this gate re-derives the identity independently from
+// the pin (canonical URLs, the reviewed signer, the exact key sets) and requires
+// the recipe to install from a read-only committed source, place the verified
+// bytes, and run the native step in a separate `RUN --network=none`.
+//
+// What it cannot re-derive is a hash or a signature: no SHA-256 or OpenPGP
+// implementation lives in this crate, so evidence bytes are bound by the Python
+// loader and by `script/test/claude-pins.py`.
+
+const CLAUDE_PIN: &str = "images/tools/claude/pin.json";
+const CLAUDE_BASE: &str = "https://downloads.claude.ai/claude-code-releases/";
+const CLAUDE_KEY_URL: &str = "https://downloads.claude.ai/keys/claude-code.asc";
+const CLAUDE_SIGNER: &str = "31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE";
+const CLAUDE_NAME: &str = "claude";
+const CLAUDE_KIND: &str = "claude-native-release";
+const CLAUDE_AUTHENTICATION_METHOD: &str = "openpgp-signed-manifest";
+const CLAUDE_KEY_PATH: &str = "claude-code-release-key.asc";
+const CLAUDE_MANIFEST_PATH: &str = "evidence/manifest.json";
+const CLAUDE_SIGNATURE_PATH: &str = "evidence/manifest.json.sig";
+const CLAUDE_TOKENS: [(&str, &str); 2] =
+    [("linux/amd64", "linux-x64"), ("linux/arm64", "linux-arm64")];
+const CLAUDE_SOURCE_MOUNT: &str =
+    "--mount=type=bind,source=tools/claude,target=/tmp/claude-source,ro";
+const CLAUDE_SOURCE_ENV: &str = "AGENT_VM_CLAUDE_SOURCE_DIR=/tmp/claude-source";
+const CLAUDE_VENDOR_MOUNT: &str =
+    "--mount=type=bind,source=tools/claude/vendor,target=/opt/agent-vm/recipe-vendor,ro";
+const CLAUDE_HOOK_MOUNT: &str =
+    "--mount=type=bind,source=tools/claude/install-claude.sh,target=/tmp/install-claude.sh,ro";
+const CLAUDE_VERIFY_MOUNT: &str =
+    "--mount=type=bind,source=tools/claude/verify-claude.sh,target=/tmp/verify-claude.sh,ro";
+const CLAUDE_INSTALL_COMMAND: &str = "sh /tmp/recipe-contract/run-install.sh claude /opt/agent-vm/install-status/claude sh /tmp/install-claude.sh";
+const CLAUDE_SETUP_COMMAND: &str = "sh /tmp/claude-source/setup-claude.sh";
+const CLAUDE_VERIFY_COMMAND: &str = "sh /tmp/verify-claude.sh";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClaudeEvidence {
+    url: String,
+    path: String,
+    digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClaudePlatformPin {
+    token: String,
+    url: String,
+    digest: String,
+    size: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClaudePin {
+    version: String,
+    manifest: ClaudeEvidence,
+    signature: ClaudeEvidence,
+    key_path: String,
+    key_fingerprint: String,
+    key_digest: String,
+    platforms: BTreeMap<String, ClaudePlatformPin>,
+    verified_on: String,
+}
+
+fn claude_manifest_url(version: &str) -> String {
+    format!("{CLAUDE_BASE}{version}/manifest.json")
+}
+
+fn claude_signature_url(version: &str) -> String {
+    format!("{CLAUDE_BASE}{version}/manifest.json.sig")
+}
+
+fn claude_executable_url(version: &str, token: &str) -> String {
+    format!("{CLAUDE_BASE}{version}/{token}/claude")
+}
+
+fn parse_claude_evidence(
+    value: &Value,
+    url: String,
+    path: &str,
+    context: &str,
+) -> Result<ClaudeEvidence, String> {
+    let members = exact(value, &["url", "path", "sha256"], context)?;
+    let found_url = text(&members["url"], &format!("{context} url"))?;
+    if found_url != url {
+        return Err(format!("{context} url must be {url}, found {found_url}"));
+    }
+    let found_path = text(&members["path"], &format!("{context} path"))?;
+    if found_path != path {
+        return Err(format!("{context} path must be {path}, found {found_path}"));
+    }
+    let digest = text(&members["sha256"], &format!("{context} sha256"))?;
+    if !is_lower_hex(&digest, 64) {
+        return Err(format!("{context} sha256 must be 64 lower-case hex"));
+    }
+    Ok(ClaudeEvidence {
+        url: found_url,
+        path: found_path,
+        digest,
+    })
+}
+
+fn parse_claude_pin(source: &str) -> Result<ClaudePin, String> {
+    let document = strict_json(source)?;
+    let members = exact(
+        &document,
+        &[
+            "schema",
+            "name",
+            "kind",
+            "version",
+            "manifest",
+            "signature",
+            "key",
+            "platforms",
+            "authentication",
+        ],
+        "claude pin",
+    )?;
+    if members["schema"].as_i64() != Some(1) || members["schema"].as_u64() != Some(1) {
+        return Err("claude pin: schema must be the integer 1".into());
+    }
+    let name = text(&members["name"], "claude pin name")?;
+    if name != CLAUDE_NAME {
+        return Err(format!("claude pin: name must be {CLAUDE_NAME}"));
+    }
+    let kind = text(&members["kind"], "claude pin kind")?;
+    if kind != CLAUDE_KIND {
+        return Err(format!("claude pin: kind must be {CLAUDE_KIND}"));
+    }
+    let version = text(&members["version"], "claude pin version")?;
+    if !is_exact_version(&version) {
+        return Err(format!(
+            "claude pin: version is not an exact X.Y.Z release: {version}"
+        ));
+    }
+    let manifest = parse_claude_evidence(
+        &members["manifest"],
+        claude_manifest_url(&version),
+        CLAUDE_MANIFEST_PATH,
+        "claude manifest evidence",
+    )?;
+    let signature = parse_claude_evidence(
+        &members["signature"],
+        claude_signature_url(&version),
+        CLAUDE_SIGNATURE_PATH,
+        "claude signature evidence",
+    )?;
+    let key = exact(
+        &members["key"],
+        &["url", "path", "fingerprint", "sha256"],
+        "claude key",
+    )?;
+    let key_url = text(&key["url"], "claude key url")?;
+    if key_url != CLAUDE_KEY_URL {
+        return Err(format!(
+            "claude key url must be {CLAUDE_KEY_URL}, found {key_url}"
+        ));
+    }
+    let key_path = text(&key["path"], "claude key path")?;
+    if key_path != CLAUDE_KEY_PATH {
+        return Err(format!(
+            "claude key path must be {CLAUDE_KEY_PATH}, found {key_path}"
+        ));
+    }
+    let key_fingerprint = text(&key["fingerprint"], "claude key fingerprint")?;
+    if key_fingerprint != CLAUDE_SIGNER {
+        return Err(format!(
+            "claude key fingerprint must be the reviewed signer {CLAUDE_SIGNER}, found {key_fingerprint}"
+        ));
+    }
+    let key_digest = text(&key["sha256"], "claude key sha256")?;
+    if !is_lower_hex(&key_digest, 64) {
+        return Err("claude key sha256 must be 64 lower-case hex".into());
+    }
+    let platform_members = exact_platforms(
+        &members["platforms"],
+        &["manifest_platform", "url", "sha256", "size"],
+        "claude platforms",
+    )?;
+    let mut platforms = BTreeMap::new();
+    for ((platform, token), entry) in CLAUDE_TOKENS.iter().zip(platform_members) {
+        let found_token = text(
+            &entry["manifest_platform"],
+            &format!("claude {platform} manifest_platform"),
+        )?;
+        if found_token != *token {
+            return Err(format!(
+                "claude {platform}: manifest_platform must be {token}, found {found_token}"
+            ));
+        }
+        let url = text(&entry["url"], &format!("claude {platform} url"))?;
+        if url != claude_executable_url(&version, token) {
+            return Err(format!(
+                "claude {platform}: url must be {}, found {url}",
+                claude_executable_url(&version, token)
+            ));
+        }
+        let digest = text(&entry["sha256"], &format!("claude {platform} sha256"))?;
+        if !is_lower_hex(&digest, 64) {
+            return Err(format!(
+                "claude {platform}: sha256 must be 64 lower-case hex"
+            ));
+        }
+        let size = entry["size"]
+            .as_i64()
+            .ok_or_else(|| format!("claude {platform}: size must be an integer"))?;
+        if size <= 0 || entry["size"].is_boolean() {
+            return Err(format!(
+                "claude {platform}: size must be a positive integer, found {size}"
+            ));
+        }
+        platforms.insert(
+            (*platform).to_string(),
+            ClaudePlatformPin {
+                token: found_token,
+                url,
+                digest,
+                size,
+            },
+        );
+    }
+    let authentication = exact(
+        &members["authentication"],
+        &["method", "verified_on", "reason"],
+        "claude authentication",
+    )?;
+    let method = text(&authentication["method"], "claude authentication method")?;
+    if method != CLAUDE_AUTHENTICATION_METHOD {
+        return Err(format!(
+            "claude authentication method must be {CLAUDE_AUTHENTICATION_METHOD}, found {method}"
+        ));
+    }
+    let verified_on = text(&authentication["verified_on"], "claude verified_on")?;
+    if !is_date(&verified_on) {
+        return Err(format!(
+            "claude verified_on must be YYYY-MM-DD, found {verified_on}"
+        ));
+    }
+    let reason = text(&authentication["reason"], "claude authentication reason")?;
+    if !reason.contains("ADR 0013") {
+        return Err("claude authentication reason must point at ADR 0013".into());
+    }
+    Ok(ClaudePin {
+        version,
+        manifest,
+        signature,
+        key_path,
+        key_fingerprint,
+        key_digest,
+        platforms,
+        verified_on,
+    })
+}
+
+/// The whole Dockerfile instruction that contains `marker`.
+fn instruction_block(recipe: &str, marker: &str, what: &str) -> Result<String, String> {
+    let position = recipe
+        .find(marker)
+        .ok_or_else(|| format!("{what}: {marker} is missing from the recipe"))?;
+    let region_start = recipe[..position]
+        .rfind("\n\n")
+        .map(|offset| offset + 2)
+        .unwrap_or(0);
+    let start = recipe[region_start..position]
+        .rfind("RUN ")
+        .map(|offset| region_start + offset)
+        .ok_or_else(|| format!("{what}: {marker} is not inside a RUN instruction"))?;
+    let end = recipe[position..]
+        .find("\n\n")
+        .map(|offset| position + offset)
+        .unwrap_or(recipe.len());
+    Ok(recipe[start..end].to_string())
+}
+
+/// Every token after `RUN` that is a flag, whether or not it is a mount. A gate
+/// that only looked at leading mounts would miss a `--network` flag that sits
+/// after one, and one that stopped at the first non-mount token would miss a
+/// mount after `--network=none`, which is where the setup RUN puts it.
+fn run_flags(instruction: &str) -> Vec<String> {
+    instruction
+        .split_whitespace()
+        .skip(1)
+        .take_while(|token| token.starts_with('-'))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn claude_runs(recipe: &str) -> Result<(String, String, String), String> {
+    let install = instruction_block(recipe, CLAUDE_HOOK_MOUNT, "claude install RUN")?;
+    let setup = instruction_block(recipe, CLAUDE_SETUP_COMMAND, "claude setup RUN")?;
+    let verify = instruction_block(recipe, CLAUDE_VERIFY_COMMAND, "claude verify RUN")?;
+    let install_at = recipe.find(&install).ok_or("the install RUN is missing")?;
+    let setup_at = recipe.find(&setup).ok_or("the setup RUN is missing")?;
+    let verify_at = recipe.find(&verify).ok_or("the verify RUN is missing")?;
+    if !(install_at < setup_at && setup_at < verify_at) {
+        return Err("the claude RUNs must run install, then the offline setup, then verify".into());
+    }
+    // The optional plugin RUN (#101) must stay after all three: it is what the
+    // final certification uses to prove the payload was not changed afterwards.
+    if let Some(plugins) = recipe.find("claude plugin marketplace add")
+        && verify_at > plugins
+    {
+        return Err("the claude verify RUN must precede the optional plugin RUN".into());
+    }
+    Ok((install, setup, verify))
+}
+
+fn check_claude_recipe(recipe: &str, pin: &ClaudePin) -> Result<(), String> {
+    let argument = format!("ARG AGENT_VERSION_CLAUDE={}", pin.version);
+    let declarations: Vec<&str> = recipe
+        .lines()
+        .filter(|line| line.starts_with("ARG AGENT_VERSION_CLAUDE="))
+        .collect();
+    if declarations != vec![argument.as_str()] {
+        return Err(format!(
+            "the recipe must declare exactly `{argument}`, found {declarations:?}"
+        ));
+    }
+    let label = "LABEL org.agent-vm.version.claude=\"${AGENT_VERSION_CLAUDE}\"";
+    if recipe.matches(label).count() != 1 {
+        return Err(format!("the recipe must declare `{label}` exactly once"));
+    }
+    let (install, setup, verify) = claude_runs(recipe)?;
+    for required in [
+        CLAUDE_SOURCE_MOUNT,
+        CLAUDE_SOURCE_ENV,
+        CLAUDE_VENDOR_MOUNT,
+        CLAUDE_HOOK_MOUNT,
+        CLAUDE_INSTALL_COMMAND,
+        "AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract",
+        "AGENT_VM_VERSION_CLAUDE=\"${AGENT_VERSION_CLAUDE}\"",
+        "AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status",
+        "AGENT_INSTALL_SOFT_FAIL= \\",
+        "from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro",
+    ] {
+        if !install.contains(required) {
+            return Err(format!("the claude install RUN must contain `{required}`"));
+        }
+    }
+    // The offline setup RUN: a build flag, not a command argument, and nothing but
+    // the read-only mounts it needs.
+    let flags = run_flags(&setup);
+    if !flags.iter().any(|flag| flag == "--network=none") {
+        return Err("the claude setup RUN must be `RUN --network=none`".into());
+    }
+    let mounts = mount_specs(&setup);
+    for required in [
+        "from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro",
+        "type=bind,source=tools/claude,target=/tmp/claude-source,ro",
+    ] {
+        if !mounts.iter().any(|mount| mount == required) {
+            return Err(format!("the claude setup RUN must mount `{required}`"));
+        }
+    }
+    for required in [
+        CLAUDE_SOURCE_ENV,
+        "AGENT_VM_VERSION_CLAUDE=\"${AGENT_VERSION_CLAUDE}\"",
+        "AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status",
+    ] {
+        if !setup.contains(required) {
+            return Err(format!("the claude setup RUN must set `{required}`"));
+        }
+    }
+    if setup.contains("tools/claude/install-claude.sh")
+        || setup.contains("/opt/agent-vm/recipe-vendor")
+    {
+        return Err("the claude setup RUN needs the pin, not the installer or the vendor".into());
+    }
+    for required in [CLAUDE_SOURCE_MOUNT, CLAUDE_SOURCE_ENV, CLAUDE_VERIFY_MOUNT] {
+        if !verify.contains(required) {
+            return Err(format!("the claude verify RUN must contain `{required}`"));
+        }
+    }
+    // Nothing may reach a live manifest, the compressed secondary asset or the
+    // RSA record the pin deliberately does not use.
+    for forbidden in [
+        "manifest.json",
+        "claude.zst",
+        "raw-sig",
+        "AGENT_VM_CLAUDE_URL",
+    ] {
+        if recipe.contains(forbidden) {
+            return Err(format!(
+                "the recipe must not name `{forbidden}`: the committed pin is the only input"
+            ));
+        }
+    }
+    if recipe.matches("target=/tmp/claude-source").count()
+        != recipe.matches(CLAUDE_SOURCE_MOUNT).count()
+    {
+        return Err("the claude source mount must be read-only".into());
+    }
+    Ok(())
+}
+
+fn mutate_claude_run(recipe: &str, marker: &str, from: &str, to: &str) -> String {
+    let block = instruction_block(recipe, marker, "claude RUN").expect("the RUN is discoverable");
+    assert!(
+        block.contains(from),
+        "the claude RUN does not contain {from:?}"
+    );
+    recipe.replacen(&block, &block.replacen(from, to, 1), 1)
+}
+
+#[test]
+fn claude_pin_names_the_reviewed_signer_and_both_platforms() {
+    let pin = parse_claude_pin(&read_text(CLAUDE_PIN)).expect("the committed pin parses");
+    assert_eq!(pin.key_fingerprint, CLAUDE_SIGNER);
+    assert_eq!(pin.key_path, CLAUDE_KEY_PATH);
+    assert_eq!(pin.manifest.url, claude_manifest_url(&pin.version));
+    assert_eq!(pin.signature.url, claude_signature_url(&pin.version));
+    assert!(is_date(&pin.verified_on), "{}", pin.verified_on);
+    for (platform, token) in CLAUDE_TOKENS {
+        let entry = &pin.platforms[platform];
+        assert_eq!(entry.token, token);
+        assert_eq!(entry.url, claude_executable_url(&pin.version, token));
+        assert!(is_lower_hex(&entry.digest, 64), "{platform}");
+        assert!(entry.size > 0, "{platform}");
+    }
+    for relative in [
+        CLAUDE_PIN,
+        "images/tools/claude/claude_pin.py",
+        "images/tools/claude/setup-claude.sh",
+        "images/tools/claude/claude-code-release-key.asc",
+        "images/tools/claude/evidence/manifest.json",
+        "images/tools/claude/evidence/manifest.json.sig",
+    ] {
+        let path = repo_path(relative);
+        assert!(path.is_file(), "{relative} must exist");
+        assert!(
+            !path.symlink_metadata().unwrap().file_type().is_symlink(),
+            "{relative} must be a regular file, not a symlink"
+        );
+    }
+    // tools/claude is a standard-image input, not a base input: it must not appear
+    // in the committed base identity.
+    assert!(
+        !read_text("images/base-inputs.sha256").contains("tools/claude"),
+        "images/tools/claude must not be a base input"
+    );
+}
+
+#[test]
+fn claude_pin_mutations_are_refused() {
+    let source = read_text(CLAUDE_PIN);
+    let baseline: Value = serde_json::from_str(&source).expect("the pin is JSON");
+    type Mutation = Box<dyn Fn(&mut Value)>;
+    let mutations: Vec<(&str, Mutation)> = vec![
+        (
+            "another signer fingerprint",
+            Box::new(|pin| {
+                pin["key"]["fingerprint"] = Value::String("0".repeat(40));
+            }),
+        ),
+        (
+            "another manifest host",
+            Box::new(|pin| {
+                pin["manifest"]["url"] = Value::String(
+                    pin["manifest"]["url"]
+                        .as_str()
+                        .unwrap()
+                        .replace("downloads.claude.ai", "downloads.claude.ai.evil.example"),
+                );
+            }),
+        ),
+        (
+            "pin version detached from the ARG",
+            Box::new(|pin| pin["version"] = Value::String("2.1.285".into())),
+        ),
+        (
+            "swapped manifest tokens",
+            Box::new(|pin| {
+                pin["platforms"]["linux/amd64"]["manifest_platform"] =
+                    Value::String("linux-arm64".into());
+            }),
+        ),
+        (
+            "unknown field",
+            Box::new(|pin| {
+                pin["platforms"]["linux/amd64"]["note"] = Value::String("x".into());
+            }),
+        ),
+        (
+            "zero size",
+            Box::new(|pin| pin["platforms"]["linux/arm64"]["size"] = Value::from(0)),
+        ),
+        (
+            "boolean size",
+            Box::new(|pin| pin["platforms"]["linux/arm64"]["size"] = Value::Bool(true)),
+        ),
+        (
+            "uppercase digest",
+            Box::new(|pin| {
+                let upper = pin["platforms"]["linux/amd64"]["sha256"]
+                    .as_str()
+                    .unwrap()
+                    .to_uppercase();
+                pin["platforms"]["linux/amd64"]["sha256"] = Value::String(upper);
+            }),
+        ),
+        (
+            "hash-only authentication",
+            Box::new(|pin| {
+                pin["authentication"]["method"] = Value::String("hash-only".into());
+            }),
+        ),
+    ];
+    for (label, mutate) in mutations {
+        let mut candidate = baseline.clone();
+        mutate(&mut candidate);
+        assert_ne!(candidate, baseline, "{label}: the mutation changed nothing");
+        assert!(
+            parse_claude_pin(&candidate.to_string()).is_err(),
+            "the gate accepted the {label} mutation"
+        );
+    }
+}
+
+#[test]
+fn claude_recipe_installs_offline_from_the_pin() {
+    let pin = parse_claude_pin(&read_text(CLAUDE_PIN)).expect("the committed pin parses");
+    let recipe = standard_dockerfile();
+    check_claude_recipe(&recipe, &pin).expect("the committed recipe is wired to the pin");
+    let (install, setup, _verify) = claude_runs(&recipe).expect("three claude RUNs");
+    assert!(install.contains(CLAUDE_INSTALL_COMMAND));
+    assert!(setup.contains(CLAUDE_SETUP_COMMAND));
+    assert!(
+        run_flags(&setup)
+            .iter()
+            .any(|flag| flag == "--network=none"),
+        "the offline step must be a build flag, not an argument"
+    );
+}
+
+#[test]
+fn claude_recipe_mutations_are_refused() {
+    let pin = parse_claude_pin(&read_text(CLAUDE_PIN)).expect("the committed pin parses");
+    let recipe = standard_dockerfile();
+    check_claude_recipe(&recipe, &pin).unwrap();
+    let mut mutations: Vec<(&str, String)> = vec![
+        (
+            "--network=none dropped",
+            recipe.replacen("RUN --network=none \\\n", "RUN \\\n", 1),
+        ),
+        ("setup RUN moved before the install RUN", {
+            let (install, setup, _verify) = claude_runs(&recipe).unwrap();
+            let moved = recipe.replacen(&install, "@@INSTALL@@", 1);
+            let moved = moved.replacen(&setup, &install, 1);
+            moved.replacen("@@INSTALL@@", &setup, 1)
+        }),
+        ("setup RUN moved after the plugin RUN", {
+            let (_install, setup, verify) = claude_runs(&recipe).unwrap();
+            let without = recipe.replacen(&setup, "", 1);
+            without.replacen(&verify, &format!("{verify}\n\n{setup}\n\n# moved\n"), 1)
+        }),
+        (
+            "install RUN source mount dropped",
+            mutate_claude_run(&recipe, CLAUDE_HOOK_MOUNT, CLAUDE_SOURCE_MOUNT, ""),
+        ),
+        (
+            "install RUN source mount made writable",
+            mutate_claude_run(
+                &recipe,
+                CLAUDE_HOOK_MOUNT,
+                CLAUDE_SOURCE_MOUNT,
+                "--mount=type=bind,source=tools/claude,target=/tmp/claude-source",
+            ),
+        ),
+        (
+            "install RUN source environment dropped",
+            mutate_claude_run(&recipe, CLAUDE_HOOK_MOUNT, CLAUDE_SOURCE_ENV, ""),
+        ),
+        (
+            "ARG default detached from the pin",
+            recipe.replacen(
+                &format!("ARG AGENT_VERSION_CLAUDE={}", pin.version),
+                "ARG AGENT_VERSION_CLAUDE=0.0.0",
+                1,
+            ),
+        ),
+        (
+            "a live manifest request reintroduced",
+            format!("{recipe}\nRUN curl -fsSL {}/manifest.json\n", CLAUDE_BASE),
+        ),
+    ];
+    mutations.retain(|(label, mutated)| {
+        assert_ne!(*mutated, recipe, "{label}: the mutation changed nothing");
+        true
+    });
+    for (label, mutated) in mutations {
+        assert!(
+            check_claude_recipe(&mutated, &pin).is_err(),
+            "the gate accepted the {label} mutation"
+        );
+    }
+    // The setup RUN must actually be *after* the install RUN, not merely present:
+    // a Dockerfile that ran it first would have nothing to verify.
+    let (install, setup, _verify) = claude_runs(&recipe).unwrap();
+    let first = recipe.find(&install).unwrap();
+    let second = recipe.find(&setup).unwrap();
+    assert!(first < second, "the install RUN must precede the setup RUN");
 }

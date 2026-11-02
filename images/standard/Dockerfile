@@ -221,20 +221,38 @@ LABEL org.agent-vm.version.claude="${AGENT_VERSION_CLAUDE}"
 
 ENV PATH=/opt/agent/.local/bin:/opt/agent/.claude/local/bin:${PATH}
 
+# The committed pin (pin.json, evidence, release key, claude_pin.py) travels in the
+# tools/claude mount; the hook and vendor keep their own mounts.
 RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
+    --mount=type=bind,source=tools/claude,target=/tmp/claude-source,ro \
     --mount=type=bind,source=tools/claude/install-claude.sh,target=/tmp/install-claude.sh,ro \
     --mount=type=bind,source=tools/claude/vendor,target=/opt/agent-vm/recipe-vendor,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
+    AGENT_VM_CLAUDE_SOURCE_DIR=/tmp/claude-source \
     AGENT_VM_VENDOR_DIR=/opt/agent-vm/recipe-vendor \
     AGENT_VM_VERSION_CLAUDE="${AGENT_VERSION_CLAUDE}" \
     AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
     sh /tmp/recipe-contract/run-install.sh claude /opt/agent-vm/install-status/claude sh /tmp/install-claude.sh
 
+# Anthropic's `claude install` has a hardcoded download step. The verified payload is
+# already in place, so with no network the step can only write local state (ADR 0013).
+RUN --network=none \
+    --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
+    --mount=type=bind,source=tools/claude,target=/tmp/claude-source,ro \
+    AGENT_INSTALL_SOFT_FAIL= \
+    AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
+    AGENT_VM_CLAUDE_SOURCE_DIR=/tmp/claude-source \
+    AGENT_VM_VERSION_CLAUDE="${AGENT_VERSION_CLAUDE}" \
+    AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
+    sh /tmp/claude-source/setup-claude.sh
+
 RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
+    --mount=type=bind,source=tools/claude,target=/tmp/claude-source,ro \
     --mount=type=bind,source=tools/claude/verify-claude.sh,target=/tmp/verify-claude.sh,ro \
     AGENT_INSTALL_SOFT_FAIL= \
     AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
+    AGENT_VM_CLAUDE_SOURCE_DIR=/tmp/claude-source \
     AGENT_VM_VERSION_CLAUDE="${AGENT_VERSION_CLAUDE}" \
     AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
     sh /tmp/verify-claude.sh

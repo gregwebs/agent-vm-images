@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Developer write tool: resolve each single-slot installer block's current
 # upstream release, stage the reviewed exact default in its Dockerfile, and — for
-# codex and agy — publish the committed payload closure beside it.
+# codex, agy and claude — publish the committed payload closure beside it.
 #
 # Usage: script/build/agent-versions.sh --write [--cosign /abs/cosign] [--repo-root DIR]
 #        script/build/agent-versions.sh --check [--repo-root DIR]
@@ -22,17 +22,21 @@
 # dsh and pi are lock-backed layers with EMPTY version ARGs; their pins (and
 # generated LABEL fallbacks) are bumped by images/tools/{dsh,pi}/upgrade-*.sh.
 #
-# Codex and agy are not just ARG edits: an exact tag (codex) or a manifest version
-# (agy) names a release, not bytes, so each owning writer resolves both maintained
-# Linux payloads, verifies them (a cosign signature and SHA-256 for codex; two
-# agreeing SHA records for agy, which publishes no signature) and preflights both
-# archives, then publishes its pin, its evidence files and its ARG as ONE
-# transaction through the shared Python publisher. agy publishes FIRST: its likeliest failure — the updater manifest
-# moving to a new release between resolution and pinning — then leaves every file
-# untouched, and it reads the committed Dockerfile itself, so running it after
-# Codex had staged a Dockerfile copy would make the Codex publication refuse or
-# revert the agy ARG. `--check` validates both committed closures offline and
-# touches nothing.
+# Codex, agy and claude are not just ARG edits: an exact tag (codex), a manifest
+# version (agy) or a native channel version (claude) names a release, not bytes, so
+# each owning writer resolves both maintained Linux payloads, verifies them (a
+# cosign signature and SHA-256 for codex; two agreeing SHA records for agy, which
+# publishes no signature; a detached OpenPGP signature over the signed manifest for
+# claude) and preflights both payloads, then publishes its pin, its evidence files
+# and its ARG as ONE transaction through the shared Python publisher.
+#
+# The three transactions run agy -> claude -> Codex. agy publishes first because
+# its likeliest failure -- the updater manifest moving to a new release between
+# resolution and pinning -- then leaves every file untouched. Claude follows,
+# before Codex has staged a Dockerfile copy: Codex stages from the Dockerfile
+# Claude has already published, and the Codex publication now refuses a staged
+# Claude ARG difference outright (Claude has its own owner transaction). `--check`
+# validates all three committed closures offline and touches nothing.
 #
 # GitHub API calls are authenticated with $GH_TOKEN when set; the token never
 # appears in diagnostics. Write mode is rejected before any network call under
@@ -61,13 +65,18 @@ Usage: script/build/agent-versions.sh --write [--cosign /abs/cosign] [--repo-roo
           Codex ARG as one transaction; for agy it requires Google's updater
           manifest to name that release and both channels to corroborate the
           bytes, then publishes the pin, its three evidence files and the agy ARG
-          as its own transaction BEFORE codex runs. Developer write tool: no
-          commit, build or push, and it refuses to run under GitHub Actions.
---check   validate the committed Codex and agy closures offline (pin schema,
-          evidence, both Codex bundles' structure, package policy and each
-          single ARG/label). No network, no payload archive, no cosign, no
-          writes. It does NOT re-verify signatures and does not cover the other
-          tools' ARG defaults.
+          as its own transaction; for claude it fetches the signed manifest from
+          downloads.claude.ai, verifies it with the committed release key and
+          publishes the pin, both evidence files and the Claude ARG as its own
+          transaction. The three run agy, then claude, then Codex. Developer write
+          tool: no commit, build or push, and it refuses to run under GitHub
+          Actions.
+--check   validate the committed agy, claude and Codex closures offline (pin
+          schema, evidence, both Codex bundles' structure, the Claude signature
+          and signer policy, package policy and each single ARG/label). No
+          network, no payload archive, no cosign, no writes. It does NOT
+          re-verify Codex signatures and does not cover the other tools' ARG
+          defaults.
 
 --cosign  the reviewed cosign (v2.4.1) used to verify both legacy .sigstore
           bundles. Required for --write; never downloaded or substituted.
@@ -135,11 +144,15 @@ codex_writer="$repo_root/script/dev/pin-codex.py"
 [ -f "$codex_writer" ] || fail "missing $codex_writer"
 agy_writer="$repo_root/script/dev/pin-agy.py"
 [ -f "$agy_writer" ] || fail "missing $agy_writer"
+claude_writer="$repo_root/script/dev/pin-claude.py"
+[ -f "$claude_writer" ] || fail "missing $claude_writer"
 
 if [ "$check" = true ]; then
-    echo 'Codex and agy scope only: committed pins, evidence, bundles and the single ARG/label each.'
-    # agy first, then the codex `exec` last: the codex check owns the final status.
+    echo 'agy, claude and Codex scope only: committed pins, evidence, bundles, the Claude signature and the single ARG/label each.'
+    # agy, then claude, then the codex `exec` last: the codex check owns the final
+    # status.
     python3 "$agy_writer" --check --repo-root "$repo_root" || exit $?
+    python3 "$claude_writer" --check --repo-root "$repo_root" || exit $?
     exec python3 "$codex_writer" --check --repo-root "$repo_root"
 fi
 
@@ -151,7 +164,9 @@ fi
 # message instead of this chokepoint. `python3` and the reviewed cosign are
 # write-mode prerequisites: nothing here resolves an upstream release until both
 # are present, and pin-codex re-checks cosign's exact version before it fetches.
-require_tools curl jq npm python3
+# gpg is a claude prerequisite: the pin's signature is verified with it, in a
+# private home under /tmp (never TMPDIR: gpg-agent's socket lives there).
+require_tools curl jq npm python3 gpg gpgconf
 if [ -n "$cosign" ]; then
     case "$cosign" in
         /*) ;;
@@ -292,7 +307,6 @@ tool_arg() { # $1 = tool -> ARG name
     case "$1" in
         codex) printf 'AGENT_VERSION_CODEX\n' ;;
         opencode) printf 'AGENT_VERSION_OPENCODE\n' ;;
-        claude) printf 'AGENT_VERSION_CLAUDE\n' ;;
         copilot) printf 'AGENT_VERSION_COPILOT\n' ;;
     esac
 }
@@ -327,6 +341,7 @@ stage_one() { # $1 tool, $2 value, $3 (optional) previous value to report
 # report must name what the repository actually held.
 codex_committed="$(sed -n 's/^ARG AGENT_VERSION_CODEX=//p' "$file")"
 agy_committed="$(sed -n 's/^ARG AGENT_VERSION_AGY=//p' "$file")"
+claude_committed="$(sed -n 's/^ARG AGENT_VERSION_CLAUDE=//p' "$file")"
 
 # agy publishes FIRST, in its own transaction: its likeliest failure (the updater
 # manifest moving to a new release between the lookup above and this run) then
@@ -349,26 +364,54 @@ fi
 # rollback was refused and recovery material was retained), so the clean-failure
 # wording would contradict the recovery warning printed immediately above it: the
 # operator would be told nothing was published while being told to recover.
-report_agy_already_published() { # $1 = the Codex exit status the bumper is about to return
-    local codex_status=$1
-    if [ "$agy_committed" = "$agy" ]; then
-        return 0
-    fi
-    if [ "$codex_status" -eq 3 ]; then
-        echo "error: agy ${agy_committed} -> ${agy} was already published (its own transaction); codex is undecided — stop and recover before further edits, builds or commits" >&2
+report_already_published() { # $1 = the pending tool, $2 = the exit status being returned
+    local pending=$1 status=$2 entry summary=""
+    [ "${#published_values[@]}" -gt 0 ] || return 0
+    for entry in ${published_values[@]+"${published_values[@]}"}; do
+        summary="${summary}${summary:+; }${entry}"
+    done
+    if [ "$status" -eq 3 ]; then
+        echo "error: ${summary} was already published (its own transaction); ${pending} is undecided — stop and recover before further edits, builds or commits" >&2
     else
-        echo "error: agy ${agy_committed} -> ${agy} was already published (its own transaction); codex was not" >&2
+        echo "error: ${summary} was already published (its own transaction); ${pending} was not" >&2
     fi
-    echo "Next: set agy ${agy} in script/test/fixtures/installer-egress/selections.tsv (a human edit; the strict-egress audit compares it to the Dockerfile)." >&2
+    for entry in ${published_values[@]+"${published_values[@]}"}; do
+        case "$entry" in
+            agy\ *)
+                echo "Next: set agy ${agy} in script/test/fixtures/installer-egress/selections.tsv (a human edit; the strict-egress audit compares it to the Dockerfile)." >&2
+                ;;
+            claude\ *)
+                echo "Next: set claude ${claude} in script/test/fixtures/installer-egress/selections.tsv (a human edit; the strict-egress audit compares it to the Dockerfile)." >&2
+                ;;
+        esac
+    done
 }
 if [ "$agy_committed" != "$agy" ]; then
     published_values+=("agy ${agy_committed} -> ${agy}")
 fi
 
+# Claude publishes SECOND, in its own transaction, and reads the committed
+# Dockerfile itself. It must run before Codex stages a Dockerfile copy: the Codex
+# publication refuses a staged Claude ARG difference, so it has to stage from a
+# Dockerfile Claude has already published.
+claude_status=0
+python3 "$claude_writer" --version "$claude" --repo-root "$repo_root" || claude_status=$?
+if [ "$claude_status" -ne 0 ]; then
+    if [ "$claude_status" -eq 3 ]; then
+        echo "error: claude publication is undecided; recover the directories printed above" >&2
+    fi
+    report_already_published claude "$claude_status"
+    exit "$claude_status"
+fi
+if [ "$claude_committed" != "$claude" ]; then
+    published_values+=("claude ${claude_committed} -> ${claude}")
+fi
+
 # Stage the codex closure: it writes its own complete Dockerfile proposal (the
-# six-file set) into the owner's scratch, and the four single-slot ARG edits below
-# then apply to that same scratch file. Nothing is published until all of them are
-# staged, and the Dockerfile it stages is the one agy has already published.
+# six-file set) into the owner's scratch, and the three remaining single-slot ARG
+# edits below then apply to that same scratch file. Nothing is published until all
+# of them are staged, and the Dockerfile it stages is the one agy and claude have
+# already published.
 codex_status=0
 python3 "$codex_writer" --version "$codex" --stage-dir "$work" --repo-root "$repo_root" \
     "${cosign_args[@]}" || codex_status=$?
@@ -377,13 +420,12 @@ if [ "$codex_status" -ne 0 ]; then
         keep_recovery=true
         echo "error: codex staging is undecided; owner scratch retained at $work" >&2
     fi
-    report_agy_already_published "$codex_status"
+    report_already_published codex "$codex_status"
     exit "$codex_status"
 fi
 
 stage_one codex "$codex" "$codex_committed"
 stage_one opencode "$opencode"
-stage_one claude "$claude"
 stage_one copilot "$copilot"
 
 # ONE publication for the Dockerfile and the whole codex closure. The Python
@@ -400,7 +442,7 @@ if [ "$publish_status" -ne 0 ]; then
         keep_recovery=true
         echo "error: recovery material retained; owner scratch retained at $work" >&2
     fi
-    report_agy_already_published "$publish_status"
+    report_already_published codex "$publish_status"
     exit "$publish_status"
 fi
 
@@ -414,11 +456,17 @@ changed_files='images/standard/Dockerfile, images/tools/codex/pin.json and image
 if [ "${#published_values[@]}" -gt 0 ]; then
     changed_files="$changed_files, images/tools/agy/"
 fi
+if [ "$claude_committed" != "$claude" ]; then
+    changed_files="$changed_files, images/tools/claude/"
+fi
 echo "Changed files: ${changed_files}"
 if [ "$changed" = false ]; then
-    echo 'The codex/opencode/claude/copilot ARG defaults were already current; both closures were still verified.'
+    echo 'The codex/opencode/copilot ARG defaults were already current; all three closures were still verified.'
 fi
 if [ "$agy_committed" != "$agy" ]; then
     echo "Next: set agy ${agy} in script/test/fixtures/installer-egress/selections.tsv (a human edit; the strict-egress audit compares it to the Dockerfile)."
+fi
+if [ "$claude_committed" != "$claude" ]; then
+    echo "Next: set claude ${claude} in script/test/fixtures/installer-egress/selections.tsv (a human edit; the strict-egress audit compares it to the Dockerfile)."
 fi
 echo "Next: review 'git diff', run the installer tests / standard-image audit, then commit."

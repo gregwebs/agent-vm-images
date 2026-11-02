@@ -364,6 +364,10 @@ printf 'status_b64=%s\n' "$(b64file /opt/agent-vm/install-status/opencode)"
 EOS
             ;;
         claude)
+            # The version report is not the payload proof: the audit also records
+            # where the launcher points, which versions are installed, the pinned
+            # executable's own digest, mode and owner, and the native state that
+            # keeps updates off. jq is the image's own tool (no inline Python).
             cat <<'EOS'
 printf '=== RUN ===\n'
 timeout --kill-after=5s 60 claude --version >/tmp/o 2>/tmp/e
@@ -373,6 +377,14 @@ printf 'stderr_b64=%s\n' "$(b64file /tmp/e)"
 printf '=== T5 ===\n'
 /contract/recipe-contract tool-access claude
 printf 't5rc=%s\n' "$?"
+printf '=== SHAPE ===\n'
+launcher=$(readlink /opt/agent/.local/bin/claude)
+printf 'arch=%s\n' "$(uname -m)"
+printf 'launcher=%s\n' "$launcher"
+printf 'versions=%s\n' "$(ls -A /opt/agent/.local/share/claude/versions | tr '\n' ' ')"
+printf 'payload_sha256=%s\n' "$(sha256sum "$launcher" | cut -d' ' -f1)"
+printf 'payload=%s\n' "$(stat -c '%a %u:%g' "$launcher")"
+printf 'native=%s\n' "$(jq -r '[(.installMethod // "missing"), (.autoUpdates | tostring)] | join(" ")' /opt/agent/.claude.json)"
 printf '=== STATUS ===\n'
 printf 'status_b64=%s\n' "$(b64file /opt/agent-vm/install-status/claude)"
 EOS
@@ -676,6 +688,55 @@ check_agy_shape() { # $1 output
     return 0
 }
 
+# The committed Claude payload identity for one manifest token. The expectation
+# comes from reviewed sources, never from a label or from the image.
+claude_expected_sha() { # $1 = manifest token
+    python3 "$REPO_ROOT/images/tools/claude/claude_pin.py" digest \
+        --pin-dir "$REPO_ROOT/images/tools/claude" --platform "$1"
+}
+
+# check_claude_shape OUTPUT VERSION -- the payload shape the native step leaves.
+# The launcher, the single installed version, the pinned digest, mode and owner
+# as root, and `installMethod: native` with `autoUpdates: false` are each
+# checked: a version report is compatible with a replaced payload, a retargeted
+# launcher and updates turned back on.
+check_claude_shape() { # $1 output, $2 version
+    local out="$1" version="$2" got token expected digest
+    got="$(kv "$out" arch)"
+    case "$got" in
+        x86_64) token=linux-x64 ;;
+        aarch64) token=linux-arm64 ;;
+        *)
+            printf 'claude payload architecture is %s, want x86_64 or aarch64' \
+                "${got:-missing}"
+            return 1
+            ;;
+    esac
+    expected="/opt/agent/.local/share/claude/versions/$version"
+    got="$(kv "$out" launcher)"
+    [ "$got" = "$expected" ] ||
+        { printf 'claude launcher points at %s, want %s' "${got:-missing}" "$expected"; return 1; }
+    got="$(kv "$out" versions)"
+    [ "$got" = "$version " ] ||
+        { printf 'claude versions directory holds %s, want exactly %s' \
+            "${got:-missing}" "$version"; return 1; }
+    digest="$(claude_expected_sha "$token")" || {
+        printf 'cannot read the committed %s digest' "$token"
+        return 1
+    }
+    got="$(kv "$out" payload_sha256)"
+    [ "$got" = "$digest" ] ||
+        { printf 'claude payload sha256 is %s, want the committed %s' \
+            "${got:-missing}" "$digest"; return 1; }
+    got="$(kv "$out" payload)"
+    [ "$got" = '755 0:0' ] ||
+        { printf 'claude payload is %s, want "755 0:0"' "${got:-missing}"; return 1; }
+    got="$(kv "$out" native)"
+    [ "$got" = 'native false' ] ||
+        { printf 'claude native state is %s, want "native false"' "${got:-missing}"; return 1; }
+    return 0
+}
+
 check_report() { # $1 recipe, $2 label0 value, $3 label1 value, $4 output
     local recipe="$1" v0="$2" v1="$3" out="$4" expected file
     if [ "$recipe" = agy ]; then
@@ -968,6 +1029,41 @@ stderr_b64=$(printf '' | blob)" >/dev/null ||
         [ -n "$reason" ] || fail 'self-test: an agy shape rejection needs a reason'
     done
 
+    local claude_token claude_sha claude_other claude_wire
+    case "$(uname -m)" in
+        arm64 | aarch64) claude_token=linux-arm64; claude_other=linux-x64 ;;
+        x86_64 | amd64) claude_token=linux-x64; claude_other=linux-arm64 ;;
+        *)
+            echo 'self-test: unsupported host architecture' >&2
+            return 1
+            ;;
+    esac
+    claude_sha="$(claude_expected_sha "$claude_token")" || {
+        echo 'self-test: cannot read the committed claude digest' >&2
+        return 1
+    }
+    claude_wire=$(printf 'arch=%s\nlauncher=/opt/agent/.local/share/claude/versions/%s\nversions=%s \npayload_sha256=%s\npayload=755 0:0\nnative=native false\n' \
+        "$([ "$claude_token" = linux-arm64 ] && echo aarch64 || echo x86_64)" \
+        "$DEFAULT_CLAUDE" "$DEFAULT_CLAUDE" "$claude_sha")
+    check_claude_shape "$claude_wire" "$DEFAULT_CLAUDE" >/dev/null ||
+        fail 'self-test: the healthy claude shape was rejected'
+    local claude_bad
+    for claude_bad in \
+        "$(printf '%s\n' "$claude_wire" | sed 's/^payload_sha256=.*/payload_sha256=0000000000000000000000000000000000000000000000000000000000000000/')" \
+        "$(printf '%s\n' "$claude_wire" | sed "s/^payload_sha256=.*/payload_sha256=$(claude_expected_sha "$claude_other")/")" \
+        "$(printf '%s\n' "$claude_wire" | sed 's|^launcher=.*|launcher=/opt/agent/.local/bin/claude|')" \
+        "$(printf '%s\n' "$claude_wire" | sed 's/^versions=.*/versions=2.1.286 9.9.9 /')" \
+        "$(printf '%s\n' "$claude_wire" | sed 's/^payload=.*/payload=775 0:0/')" \
+        "$(printf '%s\n' "$claude_wire" | sed 's/^payload=.*/payload=755 1000:1000/')" \
+        "$(printf '%s\n' "$claude_wire" | sed 's/^native=.*/native=native true/')" \
+        "$(printf '%s\n' "$claude_wire" | sed 's/^native=.*/native=npm false/')" \
+        "$(printf '%s\n' "$claude_wire" | sed 's/^arch=.*/arch=riscv64/')" \
+        "$(printf '%s\n' "$claude_wire" | grep -v '^versions=')"; do
+        reason="$(check_claude_shape "$claude_bad" "$DEFAULT_CLAUDE")" &&
+            fail "self-test: a claude shape ($claude_bad) was accepted"
+        [ -n "$reason" ] || fail 'self-test: a claude shape rejection needs a reason'
+    done
+
     check_status codex "status_b64=$(sblob installed)" >/dev/null ||
         fail "self-test: an installed codex status was rejected"
     check_status pi "$(printf 'status_b64=%s\nbridgestatus_b64=%s\n' "$(sblob installed)" "$(sblob installed)")" >/dev/null ||
@@ -1139,6 +1235,12 @@ audit_image() { # $1 image, $2 recipe, $3 strict-label-exactness (default 1)
         if [ "$recipe" = agy ]; then
             # Owner, alias and switch are not version proof: audit them per UID.
             reason="$(check_agy_shape "$out")" || fail "agy ($uid) $reason"
+        fi
+        if [ "$recipe" = claude ]; then
+            # The launcher, payload digest, mode/owner and update state are what an
+            # unprivileged guest UID depends on; the labels and the report are not.
+            reason="$(check_claude_shape "$out" "$v0")" ||
+                fail "claude ($uid) $reason"
         fi
         if [ "$recipe" = pi ]; then
             # The behavioral probe must run under a numeric uid too: metadata
@@ -1990,6 +2092,19 @@ oracle_wiring_self_test() {
     if ( audit_image img agy ) >/dev/null 2>&1; then fail 'agy self-update switch wire accepted'; fi
     WIRE=$(printf '%s\n' "$agy_wire" | sed "s/^report_b64=.*/report_b64=$(printf '%s' "$DEFAULT_AGY" | blob)/")
     if ( audit_image img agy ) >/dev/null 2>&1; then fail 'agy report without a final newline accepted'; fi
+    local claude_healthy
+    claude_healthy=$(printf 'rc0=0\nt5rc=0\nreport_b64=%s\nstderr_b64=%s\narch=%s\nlauncher=/opt/agent/.local/share/claude/versions/%s\nversions=%s \npayload_sha256=%s\npayload=755 0:0\nnative=native false\nstatus_b64=%s\n' \
+        "$(printf '%s (Claude Code)\n' "$DEFAULT_CLAUDE" | blob)" "$(printf '' | blob)" \
+        "$([ "$claude_token" = linux-arm64 ] && echo aarch64 || echo x86_64)" \
+        "$DEFAULT_CLAUDE" "$DEFAULT_CLAUDE" "$claude_sha" "$(sblob installed)")
+    WIRE=$claude_healthy
+    audit_image img claude >/dev/null || fail 'healthy claude wire rejected'
+    WIRE=$(printf '%s\n' "$claude_healthy" | sed 's/^payload_sha256=.*/payload_sha256=0000000000000000000000000000000000000000000000000000000000000000/')
+    if ( audit_image img claude ) >/dev/null 2>&1; then fail 'claude payload digest wire accepted'; fi
+    WIRE=$(printf '%s\n' "$claude_healthy" | sed 's/^versions=.*/versions=2.1.286 9.9.9 /')
+    if ( audit_image img claude ) >/dev/null 2>&1; then fail 'claude extra-version wire accepted'; fi
+    WIRE=$(printf '%s\n' "$claude_healthy" | sed 's/^native=.*/native=native true/')
+    if ( audit_image img claude ) >/dev/null 2>&1; then fail 'claude autoUpdates wire accepted'; fi
     WIRE=$healthy
     # shellcheck disable=SC2030,SC2031 # mutation intentionally confined to child
     if ( EXPECTED=$(printf '%s\n' "$EXPECTED" | sed 's/^codex=.*/codex=rust-v0.0.1/'); audit_image img codex ) >/dev/null 2>&1; then fail 'ignored explicit selection accepted'; fi
