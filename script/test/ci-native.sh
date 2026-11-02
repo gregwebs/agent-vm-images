@@ -116,10 +116,13 @@ case "$phase" in
         # Serial and bounded like every other leg here.
         timed pi-policy bash script/test/standard-node-policy.sh agent-vm-base:local --consumer pi --platform "$platform"
         timed bridge-policy bash script/test/standard-node-policy.sh agent-vm-base:local --consumer bridge --platform "$platform"
-        # The ticket's real Cordis-removal negative: the same committed inputs with
-        # the four reviewed overrides removed must be rejected (exact peers) or fail
-        # at startup, and the run then installs the committed inputs and proves
-        # readiness. One extra resolution, inside the measured audit budget.
+        # The Cordis-removal leg: the same committed inputs with the four reviewed
+        # overrides removed must be refused (exact peers) or, when the graph is
+        # peer-consistent, must reproduce the reviewed map exactly -- at
+        # `0.2.1-rc.5` every family is a range, so removing the overrides no longer
+        # breaks startup and the leg asserts the map it still does prove. The run
+        # then installs the committed inputs and proves readiness. One extra
+        # resolution, inside the measured audit budget.
         timed dsh-cordis-negative bash script/test/standard-node-consumers.sh agent-vm-base:local \
             --consumer dsh --cordis-negative --platform "$platform"
         # The pinned Node/gh identity in the image itself (#96): versions, the
