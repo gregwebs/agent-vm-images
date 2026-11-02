@@ -1439,10 +1439,13 @@ dsh_graph_check() { # $1 extracted prefix
 }
 
 # The reviewed update rule (only the dsh root selection and its closure may
-# change; workspace bytes and lock settings stay frozen). The requested version
-# is the CALLER's --expect value, never inferred from the image label.
+# change; workspace bytes, lock settings and every retained archive stay frozen).
+# The mode matches the producer: a changed selection re-resolves unseeded, so it
+# is compared as a refresh (ADR 0003 § Amended by #134) — a strict comparison here
+# would refuse the retained snapshots that resolution is allowed to move. The
+# requested version is the CALLER's --expect value, never inferred from the label.
 dsh_compare_update() { # $1 committed prefix, $2 extracted prefix, $3 requested version
-    "$STATUS_VALIDATOR" dsh-lock-update "$1" "$2" "$3"
+    "$STATUS_VALIDATOR" dsh-lock-update "$1" "$2" "$3" --refresh-lock
 }
 
 # The caller already validated $platform from --platform (or the host default),

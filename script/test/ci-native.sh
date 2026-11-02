@@ -87,7 +87,13 @@ case "$phase" in
         audit_durations_start=$(wc -l <target/ci-logs/durations.txt)
         timed node-primitives bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer primitives --platform "$platform"
         timed dsh-default bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer dsh --platform "$platform"
-        timed dsh-changed bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer dsh --version 0.1.5-rc.1 --platform "$platform"
+        # The changed leg names the nearest release in the committed selection's own
+        # Cordis family. `0.1.5-rc.1` cannot pass at any comparison mode: its
+        # sub-packages declare exact `@deepseek-ai/cordis: 4.0.2` peers against the
+        # reviewed `4.0.5` map. A changed selection re-resolves without the lock and
+        # is compared as a refresh (ADR 0003 § Amended by #134), which is also what
+        # keeps this leg from going red on unrelated upstream drift.
+        timed dsh-changed bash script/test/standard-node-consumers.sh agent-vm-base:local --consumer dsh --version 0.2.1-rc.4 --platform "$platform"
         timed dsh-policy bash script/test/standard-node-policy.sh agent-vm-base:local --consumer dsh --platform "$platform"
         # Pi and the bridge: the focused consumer legs install both projects cold
         # from the four inputs on the real base launcher, in the production tuple
@@ -110,10 +116,13 @@ case "$phase" in
         # Serial and bounded like every other leg here.
         timed pi-policy bash script/test/standard-node-policy.sh agent-vm-base:local --consumer pi --platform "$platform"
         timed bridge-policy bash script/test/standard-node-policy.sh agent-vm-base:local --consumer bridge --platform "$platform"
-        # The ticket's real Cordis-removal negative: the same committed inputs with
-        # the four reviewed overrides removed must be rejected (exact peers) or fail
-        # at startup, and the run then installs the committed inputs and proves
-        # readiness. One extra resolution, inside the measured audit budget.
+        # The Cordis-removal leg: the same committed inputs with the four reviewed
+        # overrides removed must be refused (exact peers) or, when the graph is
+        # peer-consistent, must reproduce the reviewed map exactly -- at
+        # `0.2.1-rc.5` every family is a range, so removing the overrides no longer
+        # breaks startup and the leg asserts the map it still does prove. The run
+        # then installs the committed inputs and proves readiness. One extra
+        # resolution, inside the measured audit budget.
         timed dsh-cordis-negative bash script/test/standard-node-consumers.sh agent-vm-base:local \
             --consumer dsh --cordis-negative --platform "$platform"
         # The pinned Node/gh identity in the image itself (#96): versions, the

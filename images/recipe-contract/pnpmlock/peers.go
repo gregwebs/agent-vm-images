@@ -11,8 +11,10 @@ import (
 type PeerReport struct {
 	Exact                int
 	TotalOptionalMissing int
-	CordisExact          int
-	Unsatisfied          []string
+	// CordisExact counts verified exact Cordis declarations plus the reviewed
+	// Cordis selectors the resolved graph honours.
+	CordisExact int
+	Unsatisfied []string
 }
 
 // ExactPeerSummary is the asserting form the install paths publish.
@@ -73,9 +75,62 @@ func (p *DshProject) ExactPeers() (int, error) {
 	return summary.Exact, nil
 }
 
+// resolvedInstances is every identity of one package name the graph resolved.
+func resolvedInstances(packages []Archive, peer PackageName) []PackageID {
+	var resolved []PackageID
+	for position := range packages {
+		if packages[position].ID.Name == peer {
+			resolved = append(resolved, packages[position].ID)
+		}
+	}
+	return resolved
+}
+
+// overrideDiagnostic names the reviewed pin and every version found instead.
+func overrideDiagnostic(peer PackageName, pinned ExactVersion, resolved []PackageID) string {
+	got := "missing"
+	if len(resolved) != 0 {
+		keys := make([]string, 0, len(resolved))
+		for _, id := range resolved {
+			keys = append(keys, id.Key())
+		}
+		got = strings.Join(keys, " and ")
+	}
+	return peer.String() + ": override " + pinned.String() + ", got " + got
+}
+
+// honouredOverrides counts the reviewed Cordis overrides the resolved graph
+// honours. Upstream expresses Cordis as exact peers in 0.1.x but as ranges in
+// 0.2.x -- sometimes as dependencies with no peer declaration at all -- so the
+// family's exactness cannot be read from any one declaration. The reviewed
+// override map is this repository's exactness instrument, and a family counts
+// only when the graph resolved it to exactly the reviewed version and to nothing
+// else: a pin the graph does not honour is reported, not assumed.
+func honouredOverrides(packages []Archive, overrides OverrideMap) (int, []string) {
+	honoured := 0
+	var unsatisfied []string
+	for _, selector := range selectorOrder {
+		pinned, reviewed := overrides.Get(selector)
+		if !reviewed {
+			continue
+		}
+		resolved := resolvedInstances(packages, selector.Peer())
+		if len(resolved) == 1 && resolved[0].Version == pinned {
+			honoured++
+			continue
+		}
+		unsatisfied = append(unsatisfied, overrideDiagnostic(selector.Peer(), pinned, resolved))
+	}
+	return honoured, unsatisfied
+}
+
 // exactPeerReport walks every snapshot's peer declarations and records each one
 // it cannot satisfy, without stopping.
 func exactPeerReport(project *Project) (PeerReport, error) {
+	overrides, err := ParseOverrideMap(project.workspace.Get("overrides"))
+	if err != nil {
+		return PeerReport{}, err
+	}
 	archives := map[string]*Archive{}
 	for position := range project.packages {
 		pkg := &project.packages[position]
@@ -99,6 +154,9 @@ func exactPeerReport(project *Project) (PeerReport, error) {
 					return PeerReport{}, err
 				}
 				if class == specRange {
+					// A range says which versions are compatible, never which one is
+					// installed, so it is skipped here; honouredOverrides is what turns a
+					// reviewed pin into an exact family.
 					continue
 				}
 			}
@@ -155,6 +213,9 @@ func exactPeerReport(project *Project) (PeerReport, error) {
 			}
 		}
 	}
+	honoured, unsatisfied := honouredOverrides(project.packages, overrides)
+	report.CordisExact += honoured
+	report.Unsatisfied = append(report.Unsatisfied, unsatisfied...)
 	return report, nil
 }
 

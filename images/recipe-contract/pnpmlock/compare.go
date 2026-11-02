@@ -64,6 +64,27 @@ type UpdateRequest struct {
 	After     Prefix
 	Requested RequestedSelection
 	Refresh   RefreshMode
+	Overrides OverrideAuthority
+}
+
+// OverrideAuthority names who decides the Cordis override map a dsh update may
+// carry. The zero value is the committed map: rule 1 keeps the workspace
+// byte-equal and the lock overrides equal.
+//
+// ReviewedOverrides is the developer upgrade's `--cordis-overrides` decision.
+// Like SnapshotAuthority it is a trusted-caller value: any importer can build
+// one, and the comparator does not re-derive the map. Only
+// `recipe-contract dsh-upgrade-stage check-final` constructs it, after
+// re-deriving the final graph's map and checking it against the tentative proof
+// file and the approved file; no image-build argv reaches it. Every other freeze
+// still applies: the staged workspace must be the exact output of
+// WorkspaceWithOverrides on the committed one, and retained archives, closure
+// and header settings are compared as for any refresh.
+type OverrideAuthority struct{ reviewed *OverrideMap }
+
+// ReviewedOverrides is the authority for an already-proven reviewed map.
+func ReviewedOverrides(approved OverrideMap) OverrideAuthority {
+	return OverrideAuthority{reviewed: &approved}
 }
 
 // UpdateComparison is the ADR 0003 comparison result.
@@ -139,12 +160,44 @@ func CompareDshUpdateArgument(request UpdateRequest, argument string) (UpdateCom
 }
 
 func compareDshProjects(request UpdateRequest, before, after *DshProject) (UpdateComparison, *DshProject, error) {
-	comparison, err := compareSelection(KindDsh, projectSide(before.project), projectSide(after.project),
+	committed := projectSide(before.project)
+	if request.Overrides.reviewed != nil {
+		var err error
+		committed, err = withReviewedOverrides(committed, after, *request.Overrides.reviewed)
+		if err != nil {
+			return UpdateComparison{}, nil, err
+		}
+	}
+	comparison, err := compareSelection(KindDsh, committed, projectSide(after.project),
 		request.Requested, request.Refresh, RetainedSnapshotFreeze)
 	if err != nil {
 		return UpdateComparison{}, nil, err
 	}
 	return comparison, after, nil
+}
+
+// withReviewedOverrides is the committed side as the reviewed map would have
+// written it, so compareSelection keeps every rule 1 freeze except the one key
+// the review decided. readInput still reads the committed files: the equal,
+// unrefreshed byte rule must never see the substituted workspace.
+func withReviewedOverrides(committed comparisonSide, after *DshProject, reviewed OverrideMap) (comparisonSide, error) {
+	staged, err := after.Overrides()
+	if err != nil {
+		return comparisonSide{}, err
+	}
+	if !staged.Equal(reviewed) {
+		return comparisonSide{}, errorf("staged overrides differ from the reviewed map")
+	}
+	workspace, err := WorkspaceWithOverrides(committed.workspace, reviewed)
+	if err != nil {
+		return comparisonSide{}, err
+	}
+	if !bytes.Equal(workspace, after.project.workspaceBytes) {
+		return comparisonSide{}, errorf("workspace bytes changed outside the reviewed overrides")
+	}
+	committed.workspace = workspace
+	committed.lock = committed.lock.With("overrides", after.project.lock.Get("overrides").Clone())
+	return committed, nil
 }
 
 // CompareSelectionUpdate applies the ADR 0003 rules to two independently
@@ -161,6 +214,9 @@ func CompareSelectionUpdateArgument(request UpdateRequest, argument string) (Upd
 }
 
 func readAndCompareSelection(request UpdateRequest, argument *string) (UpdateComparison, *Project, error) {
+	if request.Overrides.reviewed != nil {
+		return UpdateComparison{}, nil, errorf("reviewed overrides are only available through the dsh comparison")
+	}
 	before, err := ReadProject(request.Before, request.Kind)
 	if err != nil {
 		return UpdateComparison{}, nil, err

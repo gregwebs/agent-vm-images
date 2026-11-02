@@ -193,12 +193,17 @@ cat "$work/proof.json"
 FINAL=(final "$DIR" "$work/final" "$work/proof.json")
 if [ -n "$approved" ]; then FINAL+=("$approved"); fi
 "$CONTRACT/recipe-contract" dsh-upgrade-stage "${FINAL[@]}"
-# Unchanged maps use the same ordinary refresh path as preparation, including
-# comparison. Reviewed changed maps have their own explicit developer boundary.
+# Both branches end in the same check-final comparison: the unchanged map goes
+# through the ordinary refresh path, and a reviewed changed map names its own
+# explicit developer boundary.
 if [ "$(jq '.delta | length' "$work/proof.json")" = 0 ]; then
-    cp "$DIR/pnpm-inputs.sha256" "$work/final/pnpm-inputs.sha256"
-    # The staged starting manifest must still match its committed pins.
-    cp "$DIR/package.json" "$work/final/package.json"
+    # prepare-lock.sh treats its prefix as the committed side of the comparison,
+    # so the prefix is rebuilt as the committed inputs — the staged workspace is
+    # already their bytes, because this map did not change — and its refresh then
+    # resolves without that lock as a seed.
+    for input in package.json pnpm-lock.yaml pnpm-inputs.sha256; do
+        cp "$DIR/$input" "$work/final/$input"
+    done
     prepare_status=0
     sh "$DIR/prepare-lock.sh" "$work/final" "$version" "$base" --refresh-lock || prepare_status=$?
     if [ "$prepare_status" -eq 3 ]; then
@@ -207,6 +212,8 @@ if [ "$(jq '.delta | length' "$work/proof.json")" = 0 ]; then
     fi
     [ "$prepare_status" -eq 0 ] || exit "$prepare_status"
 else
+    # No lock is staged: the final graph is resolved exactly like the tentative
+    # one, plus the reviewed map.
     (cd "$work/final" && sh "$CONTRACT/run-pnpm.sh" "$work/final.ndjson" -- \
         "${MANAGER[@]}" install --lockfile-only --no-frozen-lockfile "${POLICY[@]}")
 fi

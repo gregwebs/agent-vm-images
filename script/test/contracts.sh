@@ -300,9 +300,14 @@ bash script/test/example-layers.sh
 "$posix_sh" script/test/fixtures/chrome-example/checks.sh self-test
 python3 "$ROOT/script/test/contracts-python.py"
 # The migration ledger is a generated record: regenerate it in memory and fail on
-# any drift. Fast and offline, but it reads the baseline commit object, so CI needs
-# the full history (contracts.yml checks out with fetch-depth: 0).
+# any drift. Fast and offline, but it reads the baseline and migration commit
+# objects, so CI needs the full history (contracts.yml checks out with
+# fetch-depth: 0).
 node script/test/pnpm-migration-ledger.mjs --check
+# That gate is only a gate if a checkout without those objects says so. A shallow
+# clone (a missing `fetch-depth: 0`) and a clone whose historical source is gone
+# must both fail loudly instead of reporting a match they never read.
+python3 script/test/pnpm-migration-ledger.py
 for source in script/test/pnpm-lock-inputs.mjs \
     script/test/pnpm-migration-ledger.mjs \
     images/tools/dsh/check-runtime.mjs \

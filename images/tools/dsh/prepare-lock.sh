@@ -1,6 +1,6 @@
 #!/bin/sh
-# Empty/equal inputs are immutable; changed dsh selections use a staged graph.
-# --refresh-lock is developer-only and never bypasses policy or exact peers.
+# Empty/equal inputs are immutable; any changed selection re-resolves.
+# Neither path can bypass policy, exact peers or the retained-archive freeze.
 #
 # Usage: prepare-lock.sh PREFIX DSH_VERSION PNPM_VERSION [--refresh-lock]
 #
@@ -10,9 +10,16 @@
 #
 # Empty or equal selections start no package manager at all: they re-check the
 # committed bytes, structure and effective peers. A changed selection stages the
-# old lock plus the changed manifest, resolves a fresh graph under the owning
-# policy, validates structure, effective peers and the update rules, writes
-# build-local pins, and only then publishes all four files transactionally.
+# changed manifest only: it seeds the resolver with nothing but the manifest and
+# the reviewed workspace, and the update rules compare it as a refresh (ADR 0003
+# § Amended by #134). One rule for the image build, the CI changed leg and every
+# developer upgrade, because a seeded resolver keeps a locked version together
+# with the registry metadata it sees *now*, so upstream can turn any retained
+# record into a refusal that no selection can clear. `--refresh-lock` adds one
+# thing: it re-resolves even when the selection did not change. Every path
+# resolves under the owning policy, validates structure, effective peers and the
+# update rules, writes build-local pins, and only then publishes all four files
+# transactionally.
 set -eu
 
 usage() {
@@ -130,7 +137,12 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 
 mkdir "$stage"
-cp "$PREFIX/pnpm-lock.yaml" "$PREFIX/pnpm-workspace.yaml" "$PREFIX/pnpm-inputs.sha256" "$stage/"
+cp "$PREFIX/pnpm-workspace.yaml" "$PREFIX/pnpm-inputs.sha256" "$stage/"
+# Every resolution resolves from the manifest and the reviewed workspace alone.
+# Seeded, pnpm keeps every locked version and records its current registry
+# metadata, and ADR 0003 rule 4 refuses a retained record whose metadata moved,
+# so a seeded resolution could never leave a package upstream has deprecated (or
+# otherwise annotated) since the lock was written.
 jq --arg d "$effective_dsh" '.dependencies["@deepseek-ai/dsh"] = $d' "$manifest" >"$stage/package.json" ||
     fail 'cannot stage the changed manifest'
 # The workspace is staged even when byte-identical: resolution must run against
@@ -193,11 +205,9 @@ esac
 # peer validate; the following check re-reads them as reviewed bytes.
 "$CONTRACT/recipe-contract" pnpm-lock pin dsh "$stage" || fail 'staged graph failed structural validation'
 "$CONTRACT/recipe-contract" pnpm-lock check dsh "$stage" || fail 'staged graph failed pinned-input validation'
-if [ "$refresh" -eq 1 ]; then
-    "$CONTRACT/recipe-contract" dsh-lock-update "$PREFIX" "$stage" "$DSH_VERSION" --refresh-lock || exit 1
-else
-    "$CONTRACT/recipe-contract" dsh-lock-update "$PREFIX" "$stage" "$DSH_VERSION" || exit 1
-fi
+# The comparison matches how the graph was produced: an unseeded resolution is
+# free to move a retained snapshot, and only a refresh comparison says so.
+"$CONTRACT/recipe-contract" dsh-lock-update "$PREFIX" "$stage" "$DSH_VERSION" --refresh-lock || exit 1
 
 status=0
 python3 "$PROJECT" publish "$stage" "$PREFIX" || status=$?
