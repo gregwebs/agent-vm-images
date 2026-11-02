@@ -63,13 +63,43 @@ class StubResponse:
         return cls(status_code, content, headers)
 
 
+class StubOptions:
+    """The one option the addon reads: the connection strategy.
+
+    The smoke passes `--set connection_strategy=lazy`, and that is the strategy a
+    declarative-destination gate needs; the eager case sets it explicitly.
+    """
+
+    connection_strategy = 'lazy'
+
+
 def install_stub() -> None:
     http = types.ModuleType('mitmproxy.http')
     http.Response = StubResponse
     package = types.ModuleType('mitmproxy')
     package.http = http
+    ctx = types.ModuleType('mitmproxy.ctx')
+    ctx.options = StubOptions()
+    package.ctx = ctx
     sys.modules['mitmproxy'] = package
     sys.modules['mitmproxy.http'] = http
+    sys.modules['mitmproxy.ctx'] = ctx
+
+
+class StubConn:
+    """The parts of a client or server connection the addon reads."""
+
+    def __init__(self, address=None, sni=None) -> None:
+        self.address = address
+        self.sni = sni
+        self.error = None
+
+
+class StubServerConnectionHookData:
+    """The shape mitmproxy 12.2.3 hands `server_connect`/`server_connected`."""
+
+    def __init__(self, address, sni) -> None:
+        self.server = StubConn(address, sni)
 
 
 # --- flows, in the shape the addon reads -------------------------------------
@@ -79,14 +109,29 @@ class StubRequest:
         parts = urlsplit(url)
         self.pretty_url = url
         self.pretty_host = parts.hostname
+        # `host`/`port` are the CONNECT authority in mitmproxy; the stub derives
+        # them from the URL, which is the same thing for a correctly built flow.
+        self.host = parts.hostname
+        self.port = parts.port or 443
         self.path = parts.path + (f'?{parts.query}' if parts.query else '')
         self.method = method
 
 
 class StubFlow:
-    def __init__(self, url: str, method: str = 'GET') -> None:
+    """A flow with the TLS facts the opt-in destination mode compares.
+
+    `sni` and `address` default to the URL's own host, which is what a correct
+    client produces: the CONNECT authority, the SNI and the Host all agree.
+    """
+
+    def __init__(self, url: str, method: str = 'GET', sni: str | None = None,
+                 address: tuple | None = None) -> None:
         self.request = StubRequest(url, method)
         self.response = None
+        host = urlsplit(url).hostname
+        self.client_conn = StubConn(sni=sni if sni is not None else host)
+        self.server_conn = StubConn(address=address if address is not None else (host, 443))
+        self.client_conn.address = ('10.0.0.2', 51000)
 
     def redirect(self, location: str, status: int = 302) -> None:
         self.response = StubResponse.make(status, b'', {'location': location})
@@ -391,6 +436,220 @@ def case_claude_profile(platform: str, work: Path) -> None:
     report(label)
 
 
+# --- the runtime network-request smoke's config (ADR 0014) --------------------
+# The smoke asks `network_requests.py egress-config` for its addon config from the
+# built image's label, so this table asks the same module for the config of a
+# synthetic inspect file and replays the real addon against it. Every hook the
+# opt-in `enforce_tls_destination` mode adds is covered here as policy logic; the
+# real-proxy behavior is the runner's DESTINATIONS step.
+
+NETWORK_REQUESTS = REPO_ROOT / 'script' / 'test' / 'network_requests.py'
+SMOKE_LABEL_KEY = 'org.agent-vm.network-requests.image.rust-dev'
+SMOKE_HOSTS = ['crates.io', 'index.crates.io', 'static.crates.io']
+
+
+def smoke_config(work: Path) -> dict:
+    """The config the smoke would be handed for a rust-dev-shaped image."""
+    inspect = work / 'smoke-inspect.json'
+    inspect.write_text(json.dumps([{'Config': {'Labels': {
+        SMOKE_LABEL_KEY: ','.join(SMOKE_HOSTS)}}}]) + '\n')
+    finished = subprocess.run([sys.executable, str(NETWORK_REQUESTS), 'egress-config',
+                               '--inspect', str(inspect), '--key', SMOKE_LABEL_KEY],
+                              capture_output=True, text=True)
+    if finished.returncode != 0:
+        raise SystemExit(f'network_requests.py egress-config failed: '
+                         f'{finished.stderr.strip()}')
+    return json.loads(finished.stdout)
+
+
+def case_smoke_config(config: dict, work: Path) -> None:
+    label = 'network_request_config'
+    problems = []
+    if config.get('https_only') is not True:
+        problems.append('not https_only')
+    if config.get('learn_redirects') is not False:
+        problems.append(f'learn_redirects {config.get("learn_redirects")!r} '
+                        'would let an undeclared CDN through')
+    if config.get('enforce_tls_destination') is not True:
+        problems.append('enforce_tls_destination is not set')
+    if [rule.get('host') for rule in config.get('allow') or []] != SMOKE_HOSTS:
+        problems.append(f'allow rules {config.get("allow")!r}')
+    if any(rule.get('path') != '^/' for rule in config.get('allow') or []):
+        problems.append(f'allow paths {config.get("allow")!r}')
+    if problems:
+        fail(label, '; '.join(problems))
+        return
+    report(label)
+
+
+def case_smoke_policy(addon, work: Path, log: Path) -> None:
+    """The declared/undeclared policy the smoke relies on, under the new mode."""
+    label = 'network_request_policy'
+    allowed = StubFlow('https://index.crates.io/config.json')
+    addon.request(allowed)
+    if allowed.response is not None:
+        fail(f'{label}/declared', f'refused with {allowed.response.status_code}')
+        return
+    if 'ALLOW https://index.crates.io/config.json' not in log.read_text():
+        fail(f'{label}/declared', f'no ALLOW line: {log.read_text()!r}')
+        return
+    report(f'{label}/declared')
+    for name, url, reason in [
+            ('unlisted', 'https://example.com/', 'unlisted'),
+            ('http', 'http://index.crates.io/', 'https-required'),
+            ('port', 'https://index.crates.io:8443/', 'port-443-required'),
+            ('query', 'https://index.crates.io/api?q=1', 'no-query-required')]:
+        flow = StubFlow(url)
+        addon.request(flow)
+        if flow.response is None or flow.response.status_code != 403:
+            fail(f'{label}/{name}', f'accepted {url}')
+        elif f'DENY {reason}' not in log.read_text():
+            fail(f'{label}/{name}', f'no DENY {reason}: {log.read_text()!r}')
+        else:
+            report(f'{label}/{name}')
+    # Learning is off in this config: an undeclared redirect target stays
+    # unlisted, which is the case the mode exists for.
+    redirect = StubFlow('https://index.crates.io/config.json')
+    redirect.redirect('https://cdn.example/crates/itoa/1.0.15/download')
+    addon.request(redirect)
+    addon.response(redirect)
+    follow = StubFlow('https://cdn.example/crates/itoa/1.0.15/download')
+    addon.request(follow)
+    text = log.read_text()
+    if 'LEARN' in text or 'ALLOW-LEARNED' in text:
+        fail(f'{label}/redirect', f'an undeclared target was learned: {text!r}')
+    elif follow.response is None or follow.response.status_code != 403:
+        fail(f'{label}/redirect', 'the undeclared redirect target was requestable')
+    else:
+        report(f'{label}/redirect')
+
+
+def logged(log: Path) -> str:
+    """The log's text; an addon that logged nothing writes no file."""
+    return log.read_text() if log.exists() else ''
+
+
+def case_tls_destination_hooks(work: Path) -> None:
+    """Every hook of the opt-in mode, in the shape mitmproxy 12.2.3 calls it."""
+    label = 'tls_destination'
+    log = work / 'tls-destination.log'
+    config = work / 'smoke-config.json'
+    addon = load_addon(config, log)
+    addon.running()
+    if 'DENY' in logged(log):
+        fail(f'{label}/running', f'a lazy proxy was refused: {logged(log)!r}')
+        return
+    report(f'{label}/running')
+
+    listed = StubFlow('https://index.crates.io/config.json')
+    addon.http_connect(listed)
+    if listed.response is not None:
+        fail(f'{label}/connect-declared', 'a declared CONNECT authority was refused')
+    else:
+        report(f'{label}/connect-declared')
+
+    for name, url, host_reason in [
+            ('connect-unlisted', 'https://example.com/', 'connect-unlisted'),
+            ('connect-port', 'https://index.crates.io:8443/', 'connect-unlisted')]:
+        flow = StubFlow(url)
+        addon.http_connect(flow)
+        if flow.response is None or flow.response.status_code != 403:
+            fail(f'{label}/{name}', f'accepted {url}')
+        elif f'DENY {host_reason}' not in logged(log):
+            fail(f'{label}/{name}', f'no DENY {host_reason}: {logged(log)!r}')
+        else:
+            report(f'{label}/{name}')
+
+    # Host, SNI and CONNECT authority must name the same declared host.
+    for name, flow, reason in [
+            ('authority-mismatch',
+             StubFlow('https://example.com/', sni='index.crates.io',
+                      address=('index.crates.io', 443)), 'authority-mismatch'),
+            ('sni-mismatch', StubFlow('https://index.crates.io/', sni='example.com'),
+             'sni-mismatch')]:
+        addon.request(flow)
+        if flow.response is None or flow.response.status_code != 403:
+            fail(f'{label}/{name}', 'accepted')
+        elif f'DENY {reason}' not in logged(log):
+            fail(f'{label}/{name}', f'no DENY {reason}: {logged(log)!r}')
+        else:
+            report(f'{label}/{name}')
+
+    for name, address, sni in [
+            ('server-unlisted', ('example.com', 443), 'example.com'),
+            ('server-port', ('index.crates.io', 8443), 'index.crates.io'),
+            ('server-sni', ('index.crates.io', 443), 'example.com')]:
+        data = StubServerConnectionHookData(address, sni)
+        addon.server_connect(data)
+        if data.server.error is None:
+            fail(f'{label}/{name}', 'the upstream connection was allowed')
+        elif 'DENY server-unlisted' not in logged(log):
+            fail(f'{label}/{name}', f'no DENY server-unlisted: {logged(log)!r}')
+        else:
+            report(f'{label}/{name}')
+
+    connected = StubServerConnectionHookData(('index.crates.io', 443), 'index.crates.io')
+    addon.server_connect(connected)
+    if connected.server.error is not None:
+        fail(f'{label}/server-ok', 'a declared destination was refused')
+    else:
+        addon.server_connected(connected)
+        if 'UPSTREAM https://index.crates.io/' not in logged(log):
+            fail(f'{label}/upstream', f'no UPSTREAM line: {logged(log)!r}')
+        else:
+            report(f'{label}/upstream')
+
+    # The default eager strategy contacts the origin at CONNECT time, before any
+    # request hook can compare the Host with it: fail closed instead.
+    eager_log = work / 'tls-destination-eager.log'
+    eager = load_addon(config, eager_log)
+    addon_ctx = sys.modules['mitmproxy.ctx']
+    addon_ctx.options.connection_strategy = 'eager'
+    try:
+        eager.running()
+    finally:
+        addon_ctx.options.connection_strategy = 'lazy'
+    request_flow = StubFlow('https://index.crates.io/config.json')
+    eager.request(request_flow)
+    data = StubServerConnectionHookData(('index.crates.io', 443), 'index.crates.io')
+    eager.server_connect(data)
+    text = logged(eager_log)
+    if 'DENY eager-connection-strategy' not in text:
+        fail(f'{label}/eager', f'no eager refusal was logged: {text!r}')
+    elif request_flow.response is None or data.server.error is None:
+        fail(f'{label}/eager', 'an eager proxy still allowed a request or a connection')
+    else:
+        report(f'{label}/eager')
+
+
+def case_installer_policy_unchanged(platform: str, work: Path) -> None:
+    """The gate's own configs never opt in, and its hooks behave as before."""
+    for tool in ('codex', 'claude', 'agy'):
+        label = f'installer_policy_unchanged/{tool}'
+        config = gate_config(platform, tool)
+        if 'enforce_tls_destination' in config:
+            fail(label, 'the installer config opted into the runtime gate')
+            continue
+        log = work / f'installer-{tool}.log'
+        addon = load_addon(_write_config(work, f'installer-{tool}.json', config), log)
+        addon.running()
+        flow = StubFlow('https://example.com/', sni='index.crates.io',
+                        address=('index.crates.io', 443))
+        addon.http_connect(flow)
+        data = StubServerConnectionHookData(('example.com', 443), 'example.com')
+        addon.server_connect(data)
+        addon.server_connected(data)
+        text = logged(log)
+        if flow.response is not None:
+            fail(label, 'http_connect refused a CONNECT for the installer gate')
+        elif data.server.error is not None:
+            fail(label, 'server_connect killed an upstream for the installer gate')
+        elif 'UPSTREAM' in text:
+            fail(label, f'the installer gate now logs destinations: {text!r}')
+        else:
+            report(label)
+
+
 def _write_config(work: Path, name: str, config: dict) -> Path:
     path = work / name
     path.write_text(json.dumps(config) + '\n')
@@ -425,6 +684,13 @@ def main(argv: list[str]) -> int:
         case_unlisted_is_denied(addon, work)
         case_agy_profile(arguments.platform, work)
         case_claude_profile(arguments.platform, work)
+        smoke = smoke_config(work)
+        case_smoke_config(smoke, work)
+        smoke_path = _write_config(work, 'smoke-config.json', smoke)
+        smoke_log = work / 'smoke.log'
+        case_smoke_policy(load_addon(smoke_path, smoke_log), work, smoke_log)
+        case_tls_destination_hooks(work)
+        case_installer_policy_unchanged(arguments.platform, work)
     if failures:
         print(f'installer-egress-addon: {len(failures)} case(s) failed', file=sys.stderr)
         return 1

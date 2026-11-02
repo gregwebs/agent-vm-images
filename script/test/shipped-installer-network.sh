@@ -32,10 +32,6 @@
 
 set -euo pipefail
 
-# Digest-pinned mitmproxy sidecar (linux/arm64 + linux/amd64 multi-arch image).
-# Reviewed/updated by a developer; there is deliberately no floating tag here.
-MITM_IMAGE="mitmproxy/mitmproxy@sha256:00b77b5d8804c8ad18cb6caefbf9d5849e895e8986c5ce011f4ae30f4385962f"
-
 REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
 FIXTURES="$REPO_ROOT/script/test/fixtures/installer-egress"
 SELECTIONS="$FIXTURES/selections.tsv"
@@ -44,6 +40,24 @@ fail() {
     echo "FAIL: $*" >&2
     exit 1
 }
+
+# The digest-pinned mitmproxy sidecar (linux/arm64 + linux/amd64 multi-arch
+# image) is one data file, because the runtime network-request smoke
+# (`network-requests-egress.sh`, ADR 0014) runs the same proxy. Reviewed/updated
+# by a developer; there is deliberately no floating tag anywhere. The reader
+# below is COPIED into that runner, not shared: a shared helper would be one more
+# input every CI route has to know about.
+MITM_REFERENCE="$FIXTURES/mitmproxy-image.ref"
+read_proxy_image() { # FILE
+    local line
+    [ -f "$1" ] || return 1
+    line=$(head -n 1 "$1") || return 1
+    [ "$(wc -l <"$1")" -eq 1 ] || return 1
+    [[ "$line" =~ ^mitmproxy/mitmproxy@sha256:[0-9a-f]{64}$ ]] || return 1
+    printf '%s\n' "$line"
+}
+MITM_IMAGE=$(read_proxy_image "$MITM_REFERENCE") ||
+    fail "$MITM_REFERENCE must hold one digest-pinned mitmproxy reference"
 
 # Initialized here because `--self-test` and `--emit-config` run before the main
 # argument parsing below, and both reach functions that read it under `set -u`.
@@ -236,6 +250,26 @@ run_stream_self_test() {
     stream_expect_fail 'request log honours the marker' \
         'no payload request was allowed' \
         assert_codex_request_log "$release" 99 "$log" || status=1
+
+    # The proxy pin is one data file both this gate and the runtime smoke read.
+    # Each script keeps its own copy of the reader (ADR 0014); this is the gate's.
+    if read_proxy_image "$MITM_REFERENCE" >/dev/null; then
+        echo '  ok: proxy pin: the committed reference'
+    else
+        echo 'FAIL: self-test proxy pin: the committed reference was refused' >&2
+        status=1
+    fi
+    printf 'mitmproxy/mitmproxy:12\n' >"$dir/tag.ref"
+    printf '%s\n%s\n' "$MITM_IMAGE" "$MITM_IMAGE" >"$dir/duplicate.ref"
+    : >"$dir/empty.ref"
+    for defect in tag duplicate empty; do
+        if read_proxy_image "$dir/$defect.ref" >/dev/null; then
+            echo "FAIL: self-test proxy pin: a $defect reference was accepted" >&2
+            status=1
+        else
+            echo "  ok: proxy pin: a $defect reference is refused"
+        fi
+    done
 
     stream_expect_ok 'a canonical rust-v release is exactly one version line' \
         require_codex_version_line "$release" || status=1

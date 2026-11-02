@@ -22,6 +22,11 @@ on:
       - 'script/test/chrome-example-watchdog.sh'
       - 'script/test/fixtures/chrome-example/**'
       - 'script/build/chrome-mcp-provenance.sh'
+      - 'script/test/network_requests.py'
+      - 'script/test/network-requests-egress.sh'
+      - 'script/test/fixtures/network-requests/**'
+      - 'script/test/fixtures/installer-egress/addon.py'
+      - 'script/test/fixtures/installer-egress/mitmproxy-image.ref'
       - '.github/workflows/example-layers.yml'
       - '.github/workflows/chrome-example.yml'
       - '.github/workflows/contracts.yml'
@@ -43,6 +48,11 @@ on:
       - 'script/test/chrome-example-watchdog.sh'
       - 'script/test/fixtures/chrome-example/**'
       - 'script/build/chrome-mcp-provenance.sh'
+      - 'script/test/network_requests.py'
+      - 'script/test/network-requests-egress.sh'
+      - 'script/test/fixtures/network-requests/**'
+      - 'script/test/fixtures/installer-egress/addon.py'
+      - 'script/test/fixtures/installer-egress/mitmproxy-image.ref'
       - '.github/workflows/example-layers.yml'
       - '.github/workflows/chrome-example.yml'
       - '.github/workflows/contracts.yml'
@@ -117,12 +127,17 @@ jobs:
       matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     # Row budgets: generic 5 checkout + 20 prerequisites + 80 cold build + 5 summary
-    # + 10 upload = 120 inside 130. Chrome adds its 60-minute suite and its 14-minute
-    # arm64 control: 194 inside 205. The cold build is bounded by the runner's own
-    # 4500-second supervisor with 90-second TERM grace (4500 + 180 < 4800), the suite
+    # + 10 upload = 120 inside 130. A layer with an egress fixture has a 105-minute
+    # cold build: 145 inside 155. Chrome adds its 60-minute suite and its 14-minute
+    # arm64 control: 194 inside 205 (219 inside 230 if a runtime-suite layer gains a
+    # fixture). The cold build is bounded by the runner's own supervisor: 4500 s with
+    # 90-second TERM grace (4500 + 180 < 4800), or 5700 s with 290-second grace for a
+    # layer with an egress fixture (5700 + 580 < 6300), because that supervisor has to
+    # outlast both escalation windows of the smoke's own watchdog. The suite is bounded
     # by 3300 s with 110 s grace (3520 < 3600) and the control by 600 s with the same
-    # grace (820 < 840). These are floors: raise them to at least 1.5x the measured
-    # first green per-layer, per-architecture durations.
+    # grace (820 < 840). The selector sets both ceilings from fixture discovery. These
+    # are floors: raise them to at least 1.5x the measured first green per-layer,
+    # per-architecture durations.
     timeout-minutes: ${{ matrix.timeout }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -136,9 +151,10 @@ jobs:
         # already provides. This is the previous Chrome workflow's list unchanged.
         run: bash script/ci/apt-install.sh jq coreutils python3
       - name: Cold build
-        timeout-minutes: 80
-        # The runner supervises itself (4500 s, 90 s grace) and keeps every phase
-        # log in its evidence directory; the transcript below is for the job log.
+        timeout-minutes: ${{ matrix.build_timeout }}
+        # The runner supervises itself (4500 s with 90 s grace, or 5700 s with 290 s
+        # grace when the layer has an egress fixture) and keeps every phase log in its
+        # evidence directory; the transcript below is for the job log.
         env:
           LAYER: ${{ matrix.layer }}
           PLATFORM: ${{ matrix.platform }}

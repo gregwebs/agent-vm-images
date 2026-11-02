@@ -31,6 +31,11 @@
 ARG BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de
 FROM ${BASE_IMAGE}
 
+# Runtime network requests (ADR 0014): the GOPROXY/GOSUMDB defaults.
+# GOTOOLCHAIN=local below means no toolchain download; GOPROXY's `direct`
+# fallback reaches project-chosen hosts and is the user's decision.
+LABEL org.agent-vm.network-requests.image.go-dev="proxy.golang.org,sum.golang.org"
+
 # A C toolchain, for the two things the Go distribution itself defers to the
 # host: cgo (a project that imports "C", or a dependency that does) and
 # `go test -race`, which the Go command refuses to run without cgo. With no

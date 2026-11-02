@@ -282,6 +282,15 @@ ADR-0003) is not revived. agent-vm keeps launcher responsibilities: capability
 detection and its `defaults.rs` path constants, image selection/import and generic
 boot-image/runtime tests. Installed launchers read no image sources.
 
+Each of these images declares its runtime network requests on an OCI label
+(`org.agent-vm.network-requests.image.<component>`), as the product images do
+([ADR 0014](adr/0014-image-network-requests.md)). This repository owns that
+contract too: `script/test/network_requests.py` (grammar, key scheme, source form,
+ownership, built-image comparison), `script/test/network-requests-tests.py`, the
+`script/test/network-requests-egress.sh` smoke with its `destination-probe.py`
+and `run-in-image.sh` helpers, and the per-layer fixtures under
+`script/test/fixtures/network-requests/`.
+
 ### Provenance and path mapping
 
 Copied from agent-vm commit

@@ -85,3 +85,22 @@ failure into a silent reuse of an artifact no longer available. If measurements
 show the cold cost is prohibitive, the options to review are a deliberately
 time-bounded cache with an explicit bypass, or narrower path filtering — not a
 cache keyed only on identity that can remain valid after a withdrawal.
+
+## Amended by 0014 (network-request egress smoke)
+
+The decision above is unchanged except for the "no other runtime claim" sentence.
+A layer with a fixture under `script/test/fixtures/network-requests/<layer>/`
+runs one more phase, EGRESS, inside the same cold-build run, after INSPECT and
+before cleanup, because the image exists only there: the smoke needs the tag this
+run built. The phase runs the layer's own fixture command against a strict proxy
+whose allow-list is the request label read off that built image, and it is owned
+by [ADR 0014](0014-image-network-requests.md).
+
+The runner's bounds are the same shape as the rest of this decision — provisional
+floors derived from the supervisor chain, not measurements. A layer with a
+fixture gets a 5700-second supervisor with a 290-second grace, a 105-minute
+cold-build step and a 155-minute row (230 if a runtime-suite layer gains a
+fixture); every row without one keeps 4500 seconds with a 90-second grace, an
+80-minute step and 130/205-minute jobs. The choice is fixture discovery, not a
+list of layer names, and `layer-build.sh --self-test` asserts the relations
+between the nested bounds.
