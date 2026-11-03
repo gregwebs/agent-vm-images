@@ -645,8 +645,10 @@ run_docker() { # ARGS...
     case "$last" in
         *'env | sort'*)
             printf 'RUSTUP_AUTO_INSTALL=0\n'
+            printf 'RUSTC_WRAPPER=/opt/kache/bin/kache\n'
             printf '755 root:root /opt/cargo/bin/rustup\n'
             printf '644 root:root /opt/rustup/settings.toml\n'
+            printf '755 root:root /opt/kache/bin/kache\n'
             printf 'ls: cannot access /tmp/rust_prepare: No such file or directory\n'
             exit 0 ;;
     esac
@@ -1083,12 +1085,13 @@ record "image id=$IMAGE_ID size=$IMAGE_SIZE parent=$PARENT_REF parent-id=$PARENT
 PHASE=inspect
 run_bounded inspect-env "$RUN_SECONDS" "$LOG_DIR/inspect.log" \
     "$DOCKER" run --rm --network none --label "$LABEL" --entrypoint /bin/bash "$TAG" -c \
-    'env | sort; stat -c "%a %U:%G %n" /opt /opt/rustup /opt/cargo /opt/cargo/bin /opt/cargo/bin/rustup /opt/rustup/settings.toml 2>&1; ls -d /run/rust-verify 2>&1 || true; ls /tmp/rust_toolchain.py /tmp/install-rust.sh 2>&1 || true; ls -d /tmp/rust-prepare-* /tmp/rust-install-* /tmp/rust-verify-* 2>&1 || true' \
+    'env | sort; stat -c "%a %U:%G %n" /opt /opt/rustup /opt/cargo /opt/cargo/bin /opt/cargo/bin/rustup /opt/rustup/settings.toml /opt/kache /opt/kache/bin /opt/kache/bin/kache 2>&1; ls -d /run/rust-verify 2>&1 || true; ls /tmp/rust_toolchain.py /tmp/install-rust.sh 2>&1 || true; ls -d /tmp/rust-prepare-* /tmp/rust-install-* /tmp/rust-verify-* /tmp/kache-pin 2>&1 || true' \
     || true
 if grep -qx 'RUSTUP_AUTO_INSTALL=0' "$LOG_DIR/inspect.log" &&
+    grep -qx 'RUSTC_WRAPPER=/opt/kache/bin/kache' "$LOG_DIR/inspect.log" &&
     ! grep -q '^CARGO_HOME=' "$LOG_DIR/inspect.log" &&
     ! grep -q '^RUSTUP_TOOLCHAIN=' "$LOG_DIR/inspect.log"; then
-    pass 'image ENV: RUSTUP_AUTO_INSTALL=0, no CARGO_HOME and no forced toolchain'
+    pass 'image ENV: RUSTUP_AUTO_INSTALL=0, kache as RUSTC_WRAPPER, no CARGO_HOME and no forced toolchain'
 else
     fail 'image ENV contract'
 fi
@@ -1109,7 +1112,7 @@ fi
 # --- phase 2: verifier bundle, no network ------------------------------------
 PHASE=verifier
 mkdir -p "$BUNDLE"
-cp "$ROOT/$EXAMPLE/verify-toolchain.sh" "$ROOT/$EXAMPLE/rust_toolchain.py" "$BUNDLE/"
+cp "$ROOT/$EXAMPLE/verify-toolchain.sh" "$ROOT/$EXAMPLE/kache_probe.py" "$ROOT/$EXAMPLE/rust_toolchain.py" "$BUNDLE/"
 cp -R "$ROOT/$EXAMPLE/rust-toolchain" "$BUNDLE/rust-toolchain"
 if ! run_bounded pin-check "$RUN_SECONDS" "$LOG_DIR/pin-check.log" \
         env PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/$EXAMPLE/rust_toolchain.py" \
@@ -1118,12 +1121,14 @@ if ! run_bounded pin-check "$RUN_SECONDS" "$LOG_DIR/pin-check.log" \
     exit 1
 fi
 channel=$(cat "$LOG_DIR/pin-check.log")
+kache_version=$(sed -nE 's/^ARG KACHE_VERSION=(.*)$/\1/p' "$ROOT/$EXAMPLE/Dockerfile")
+[ -n "$kache_version" ] || { fail 'the recipe pins no kache release'; exit 1; }
 # The container is created before it is started so a failure between the two
 # still leaves a named, labelled, removable resource.
 OWNED_CONTAINER=1
 if run_bounded verifier-create "$RUN_SECONDS" "$LOG_DIR/verifier-create.log" \
         "$DOCKER" create --name "$CONTAINER" --label "$LABEL" --network none \
-        -e "RUST_TOOLCHAIN=$channel" -e VERUS_DIR=/opt/verus -e PYTHONDONTWRITEBYTECODE=1 \
+        -e "RUST_TOOLCHAIN=$channel" -e "KACHE_VERSION=$kache_version" -e VERUS_DIR=/opt/verus -e PYTHONDONTWRITEBYTECODE=1 \
         --entrypoint /bin/bash "$TAG" /run/rust-verify/verify-toolchain.sh; then
     if run_bounded verifier-copy "$RUN_SECONDS" "$LOG_DIR/verifier-copy.log" \
             "$DOCKER" cp "$BUNDLE" "$CONTAINER:/run/rust-verify"; then

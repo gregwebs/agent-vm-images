@@ -12,12 +12,12 @@ LAYERS=examples/layers
 EXAMPLES='chrome-devtools go-dev rust-dev wirenboard-cpp'
 # Known space-free paths, explicitly moved from agent-vm's ci-contracts.sh:
 # deletion/rename must fail rather than silently leave lint coverage.
-GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp.sh go-dev/gopls_closure.py go-dev/install-go.sh go-dev/install-golangci-lint.sh go-dev/install-gopls.sh go-dev/verify-toolchain.sh rust-dev/install-rust.sh rust-dev/install-verus.sh rust-dev/rust_toolchain.py rust-dev/verify-toolchain.sh'
+GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp.sh go-dev/gopls_closure.py go-dev/install-go.sh go-dev/install-golangci-lint.sh go-dev/install-gopls.sh go-dev/verify-toolchain.sh rust-dev/install-kache.sh rust-dev/kache_probe.py rust-dev/install-rust.sh rust-dev/install-verus.sh rust-dev/rust_toolchain.py rust-dev/verify-toolchain.sh'
 # The self-test table's case count. The case labels are checked against it as a
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=103
+SELF_TEST_CASES=110
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -168,7 +168,9 @@ check() {
     installed_token='chrome-devtools-mcp@$installed'
     grep -qF "\"$installed_token\"" "$wrapper" || fail "Chrome wrapper lacks: \"$installed_token\""
     dockerfile="$LAYERS/rust-dev/Dockerfile"
-    for token in '^ARG RUST_TOOLCHAIN=[0-9]+\.[0-9]+(\.[0-9]+)?$' '^ARG VERUS_RELEASE=[^[:space:]]+$' '^ARG VERUS_SHA256=[0-9a-f]{64}$'; do
+    for token in '^ARG RUST_TOOLCHAIN=[0-9]+\.[0-9]+(\.[0-9]+)?$' '^ARG VERUS_RELEASE=[^[:space:]]+$' '^ARG VERUS_SHA256=[0-9a-f]{64}$' \
+        '^ARG KACHE_VERSION=[0-9]+\.[0-9]+\.[0-9]+$' '^ARG KACHE_AMD64_SHA256=[0-9a-f]{64}$' \
+        '^ARG KACHE_ARM64_SHA256=[0-9a-f]{64}$' '^ARG KACHE_RELEASE_CERT_SHA256=[0-9a-f]{64}$'; do
         grep -qE "$token" "$dockerfile" || fail "rust-dev pins: $token"
     done
     file="$LAYERS/rust-dev/install-verus.sh"
@@ -193,7 +195,7 @@ check() {
 # spacing, so runs of blanks are collapsed before the exact shape comparison.
 normalize_instruction() { printf '%s' "$1" | tr -s ' \t' ' ' | sed -e 's/^ //' -e 's/ $//'; }
 reviewed_installer='RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro --mount=type=bind,source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro --mount=type=bind,source=rust-toolchain,target=/tmp/rust-toolchain,ro bash /tmp/install-rust.sh'
-reviewed_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro --mount=type=bind,source=rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro --mount=type=bind,source=rust-toolchain,target=/run/rust-verify/rust-toolchain,ro RUST_TOOLCHAIN=$RUST_TOOLCHAIN VERUS_DIR=/opt/verus PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/rust-verify/verify-toolchain.sh'
+reviewed_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro --mount=type=bind,source=kache_probe.py,target=/run/rust-verify/kache_probe.py,ro --mount=type=bind,source=rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro --mount=type=bind,source=rust-toolchain,target=/run/rust-verify/rust-toolchain,ro RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/rust-verify/verify-toolchain.sh'
 installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || true)
     [ "$installer_runs" -eq 1 ] || fail 'rust-dev: installer RUN must appear exactly once'
     installer_line=$(printf '%s\n' "$instructions" | grep -F 'install-rust.sh')
@@ -216,9 +218,11 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         *) fail 'rust-dev: verifier must run with --network=none' ;;
     esac
     for token in 'verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro' \
+        'kache_probe.py,target=/run/rust-verify/kache_probe.py,ro' \
         'rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro' \
         'rust-toolchain,target=/run/rust-verify/rust-toolchain,ro' \
-        'RUST_TOOLCHAIN=$RUST_TOOLCHAIN' 'VERUS_DIR=/opt/verus' 'PYTHONDONTWRITEBYTECODE=1'; do
+        'RUST_TOOLCHAIN=$RUST_TOOLCHAIN' 'KACHE_VERSION=$KACHE_VERSION' 'VERUS_DIR=/opt/verus' \
+        'PYTHONDONTWRITEBYTECODE=1'; do
         case "$verifier_line" in
             *"$token"*) ;;
             *) fail "rust-dev: verifier RUN lacks the reviewed delivery: $token" ;;
@@ -230,8 +234,10 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         fail 'rust-dev: missing the no-implicit-install contract (ENV RUSTUP_AUTO_INSTALL=0)'
     grep -qxF 'ENV RUSTUP_HOME=/opt/rustup' "$rustdir/Dockerfile" ||
         fail 'rust-dev: RUSTUP_HOME ENV'
-    grep -qxE 'ENV PATH=/opt/cargo/bin:/opt/verus/verus-x86-linux:\$\{PATH\}' "$rustdir/Dockerfile" ||
+    grep -qxE 'ENV PATH=/opt/kache/bin:/opt/cargo/bin:/opt/verus/verus-x86-linux:\$\{PATH\}' "$rustdir/Dockerfile" ||
         fail 'rust-dev: PATH must stay additive'
+    grep -qxF 'ENV RUSTC_WRAPPER=/opt/kache/bin/kache' "$rustdir/Dockerfile" ||
+        fail 'rust-dev: the guest cargo wrapper must be the pinned kache'
     if grep -qE '^ENV ([A-Za-z_]+=)*CARGO_HOME=' "$rustdir/Dockerfile"; then
         fail 'rust-dev: CARGO_HOME must not be exported at runtime'
     fi
@@ -254,6 +260,49 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     if grep -nE '\|\|[[:space:]]*(true|:)' "$verifier"; then
         fail 'rust-dev: Verus smoke must not swallow failures'
     fi
+    for token in 'doctor --probe --json' 'kache-engine' \
+        '"${RUSTC_WRAPPER:-}" = "$KACHE_DIR/bin/kache"'; do
+        grep -qF -- "$token" "$verifier" || fail "rust-dev: kache smoke lacks: $token"
+    done
+    # --- rust-dev: the pinned kache compiler cache ---------------------------
+    # A third-party release artifact: the tarball digest, the published sidecar
+    # and the release key are committed pins, and install-kache.sh verifies the
+    # detached signature over the tarball before anything is extracted. The
+    # committed evidence and the Dockerfile ARGs are checked against each other
+    # here so a re-pin cannot leave one of them behind.
+    kachedir=$rustdir/kache
+    installer=$rustdir/install-kache.sh
+    [ -f "$installer" ] || fail 'guarded script missing: rust-dev/install-kache.sh'
+    checksum_token "$installer" || fail 'rust-dev: install-kache.sh lacks non-comment sha256sum token'
+    awk '!/^[[:space:]]*#/ && /sha256sum -c/ { found=1 } END { exit !found }' "$installer" ||
+        fail 'rust-dev: install-kache.sh must verify the tarball with sha256sum -c'
+    if grep -nE 'releases/latest|/latest/|(^|[^[:alnum:]_])(curl|wget)[^|]*\|[[:space:]]*(ba)?sh' "$installer"; then
+        fail 'rust-dev: the kache installer must not resolve a mutable tag or pipe a download'
+    fi
+    kache_version_arg=$(sed -nE 's/^ARG KACHE_VERSION=(.*)$/\1/p' "$rustdir/Dockerfile")
+    [ "$(printf '%s\n' "$kache_version_arg" | grep -c .)" -eq 1 ] || fail 'rust-dev pins: ARG KACHE_VERSION'
+    for pair in amd64:x86_64 arm64:aarch64; do
+        kache_arch=${pair%%:*}
+        kache_host=${pair##*:}
+        kache_asset=kache-${kache_host}-unknown-linux-musl.tar.gz
+        kache_sha=$(sed -nE "s/^ARG KACHE_${kache_arch^^}_SHA256=(.*)\$/\1/p" "$rustdir/Dockerfile")
+        [ -f "$kachedir/$kache_asset.sha256" ] ||
+            fail "rust-dev: missing kache evidence: kache/$kache_asset.sha256"
+        [ "$(cat "$kachedir/$kache_asset.sha256")" = "$kache_sha  $kache_asset" ] ||
+            fail "rust-dev: kache/$kache_asset.sha256 does not record the KACHE_${kache_arch^^}_SHA256 pin"
+    done
+    [ -f "$kachedir/release-key.asc" ] || fail 'rust-dev: missing kache/release-key.asc'
+    [ "$(sha256sum "$kachedir/release-key.asc" | cut -d' ' -f1)" = \
+        "$(sed -nE 's/^ARG KACHE_RELEASE_CERT_SHA256=(.*)$/\1/p' "$rustdir/Dockerfile")" ] ||
+        fail 'rust-dev: kache/release-key.asc does not hash to the KACHE_RELEASE_CERT_SHA256 pin'
+    grep -qxF -- '-----BEGIN PGP PUBLIC KEY BLOCK-----' "$kachedir/release-key.asc" ||
+        fail 'rust-dev: kache/release-key.asc is not an armored public key'
+    reviewed_kache_installer='RUN --mount=type=bind,source=install-kache.sh,target=/tmp/install-kache.sh,ro --mount=type=bind,source=kache,target=/tmp/kache-pin,ro KACHE_VERSION=$KACHE_VERSION KACHE_AMD64_SHA256=$KACHE_AMD64_SHA256 KACHE_ARM64_SHA256=$KACHE_ARM64_SHA256 KACHE_RELEASE_CERT_SHA256=$KACHE_RELEASE_CERT_SHA256 KACHE_DIR=$KACHE_DIR KACHE_DATA=/tmp/kache-pin bash /tmp/install-kache.sh'
+    kache_installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-kache.sh' || true)
+    [ "$kache_installer_runs" -eq 1 ] || fail 'rust-dev: the kache installer RUN must appear exactly once'
+    kache_installer_line=$(printf '%s\n' "$instructions" | grep -F 'install-kache.sh')
+    [ "$(normalize_instruction "$kache_installer_line")" = "$reviewed_kache_installer" ] ||
+        fail "rust-dev: the kache installer RUN must be exactly the reviewed invocation (got: $(normalize_instruction "$kache_installer_line"))"
     for arg in GO_AMD64_SHA256 GO_ARM64_SHA256 GOLANGCI_LINT_AMD64_SHA256 GOLANGCI_LINT_ARM64_SHA256; do
         grep -qE "^ARG $arg=[0-9a-f]{64}$" "$LAYERS/go-dev/Dockerfile" || fail "go-dev: digest ARG shape: $arg"
     done
@@ -803,6 +852,23 @@ self_test() {
                 cat "$SCRATCH/rewrite" > "$goplsdir/pin.json"
                 expected='module-channel determination' ;;
             103) repin_gopls "$tree" ;;
+            # 104-110: the pinned kache release, its committed evidence and the
+            # wrapper every guest cargo invocation runs through.
+            104) rewrite "$tree/$LAYERS/rust-dev/Dockerfile" '/^ENV RUSTC_WRAPPER=/d'
+                expected='the guest cargo wrapper must be the pinned kache' ;;
+            105) rewrite "$tree/$LAYERS/rust-dev/Dockerfile" '/^ARG KACHE_AMD64_SHA256=/s/.$//'
+                expected='rust-dev pins: ^ARG KACHE_AMD64_SHA256' ;;
+            106) printf ' ' >> "$tree/$LAYERS/rust-dev/kache/kache-x86_64-unknown-linux-musl.tar.gz.sha256"
+                expected='does not record the KACHE_AMD64_SHA256 pin' ;;
+            107) rewrite "$tree/$LAYERS/rust-dev/install-kache.sh" '/^[[:space:]]*[(]cd "[$]work" && echo /d'
+                expected='must verify the tarball with sha256sum -c' ;;
+            108)
+                rewrite "$tree/$LAYERS/rust-dev/Dockerfile" 's|bash /tmp/install-kache.sh|: # bash /tmp/install-kache.sh|'
+                expected='the kache installer RUN must be exactly' ;;
+            109) cp "$rusttool/rust-release-key.asc" "$tree/$LAYERS/rust-dev/kache/release-key.asc"
+                expected='does not hash to the KACHE_RELEASE_CERT_SHA256 pin' ;;
+            110) rm "$tree/$LAYERS/rust-dev/kache_probe.py"
+                expected='guarded script missing: rust-dev/kache_probe.py' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac

@@ -789,6 +789,20 @@ SHIM
 
     control_version=0.0.0-control
     zeros=$(printf '0%.0s' $(seq 1 64))
+    # kache's installer reads its evidence from a directory, so the control uses a
+    # scratch copy: the committed key plus sidecars recording the control digest,
+    # which leaves the download itself as what the negative case exercises. Its
+    # version must be a real release shape, because the installer refuses a
+    # mutable or suffixed selection before it fetches anything.
+    kache_version=9.9.9
+    kache_data=$root/kache-pin
+    mkdir -p "$kache_data"
+    cp "$ROOT/examples/layers/rust-dev/kache/release-key.asc" "$kache_data/"
+    kache_key_sha=$(sha256sum "$kache_data/release-key.asc" | cut -d' ' -f1)
+    for kache_host in x86_64 aarch64; do
+        printf '%s  kache-%s-unknown-linux-musl.tar.gz\n' "$zeros" "$kache_host" \
+            >"$kache_data/kache-$kache_host-unknown-linux-musl.tar.gz.sha256"
+    done
     run_installer() { # SCRIPT MODE LOG
         local status=0
         : >"$trace"
@@ -798,6 +812,8 @@ SHIM
             GO_PREFIX="$root/go" GOLANGCI_LINT_VERSION="$control_version" \
             GOLANGCI_LINT_AMD64_SHA256="$zeros" GOLANGCI_LINT_ARM64_SHA256="$zeros" \
             GO_TOOLS_BIN="$root/go-tools" \
+            KACHE_VERSION="$kache_version" KACHE_AMD64_SHA256="$zeros" KACHE_ARM64_SHA256="$zeros" \
+            KACHE_RELEASE_CERT_SHA256="$kache_key_sha" KACHE_DIR="$root/kache" KACHE_DATA="$kache_data" \
             bash "$1" >"$3" 2>&1 || status=$?
         return "$status"
     }
@@ -806,13 +822,15 @@ SHIM
             verus) echo "https://github.com/verus-lang/verus/releases/download/release/$control_version/verus-$control_version-x86-linux.zip" ;;
             go) echo "https://go.dev/dl/go$control_version.linux-amd64.tar.gz" ;;
             golangci-lint) echo "https://github.com/golangci/golangci-lint/releases/download/v$control_version/golangci-lint-$control_version-linux-amd64.tar.gz" ;;
+            kache) echo "https://github.com/kunobi-ninja/kache/releases/download/v$kache_version/kache-x86_64-unknown-linux-musl.tar.gz" ;;
         esac
     }
-    for case in verus go golangci-lint; do
+    for case in verus go golangci-lint kache; do
         case "$case" in
             verus) script=examples/layers/rust-dev/install-verus.sh ;;
             go) script=examples/layers/go-dev/install-go.sh ;;
             golangci-lint) script=examples/layers/go-dev/install-golangci-lint.sh ;;
+            kache) script=examples/layers/rust-dev/install-kache.sh ;;
         esac
         script="$ROOT/$script"
         if [ "$case" = verus ]; then
@@ -837,6 +855,10 @@ SHIM
                 selftest_grep 'FAILED' "$log" "$case wrong-bytes: the digest check refused the bytes"
             fi
         done
+        if [ "$case" = kache ]; then
+            selftest_expect "$(test -e "$root/kache" && echo present || echo absent)" absent \
+                'kache: a refused download installs nothing'
+        fi
     done
     # The bounds here and in the egress runner are one arithmetic system: every
     # outer value has to outlast the inner one it can interrupt, at both nesting
