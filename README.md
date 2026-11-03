@@ -6,7 +6,8 @@ Editable Docker sources, independent of the agent-vm launcher:
   (pinned release archive), Python, Docker prerequisites, diagnostic
   utilities, zellij and pinned pnpm. No coding-agent CLI or fixed guest account.
 - **Standard:** the base plus dsh, Pi, Codex, OpenCode, Claude, Copilot and agy;
-  inherited base pnpm and the Pi Claude bridge are also mandatory.
+  inherited base pnpm and Pi's two image-owned extension packages (the Claude
+  bridge and the Antigravity provider) are also mandatory.
 - **Examples:** user-owned Dockerfiles built from the base or the released standard image; see [Examples](#examples).
 
 ```text
@@ -193,6 +194,7 @@ for agent commands: `bash -lc` can reset the image PATH through `/etc/profile`.
 - [Standard image releases](docs/standard-image-releases.md)
 - [The agy hash-only artifact pin](docs/adr/0012-agy-hash-only-artifact-pin.md)
 - [Runtime network requests declared as labels](docs/adr/0014-image-network-requests.md)
+- [The image-owned Pi Antigravity provider](docs/adr/0016-pi-antigravity-provider.md)
 - [Installer security, locks and runtime payloads](images/tools/README.md)
 - [Layout, migration manifest and staged ownership](docs/image-source-ownership.md)
 

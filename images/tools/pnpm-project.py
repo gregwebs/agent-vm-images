@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Shared pnpm project filesystem capabilities and handled-failure publication.
 
-Three consumers (dsh, Pi and its Claude bridge) share one install/authorization
-boundary; a lock parser is deliberately not part of it. Every consumer difference
-lives in the closed table below, so no caller can select a production path, a
-scratch parent or a manager route by argument or environment.
+Four consumers (dsh, Pi, Pi's Claude bridge and Pi's Antigravity provider) share
+one install/authorization boundary; a lock parser is deliberately not part of it.
+Every consumer difference lives in the closed table below, so no caller can
+select a production path, a scratch parent or a manager route by argument or
+environment.
 """
 import argparse
 from dataclasses import dataclass, field
@@ -66,6 +67,8 @@ CONSUMERS = {item.name: item for item in (
              'pi-', 'AGENT_VM_PI', Path('/tmp')),
     Consumer('bridge', Path('/opt/agent-vm/pi-packages'), None,
              'bridge-', 'AGENT_VM_BRIDGE', Path('/tmp')),
+    Consumer('antigravity', Path('/opt/agent-vm/pi-antigravity'), None,
+             'antigravity-', 'AGENT_VM_ANTIGRAVITY', Path('/tmp')),
 )}
 DSH = CONSUMERS['dsh']
 PRODUCTION = DSH.production_prefix
@@ -989,6 +992,7 @@ def remove_partial_install(capability):
 PI_GATE_DEFAULTS = {
     'pi': Path('/opt/agent-vm/pi'),
     'bridge': Path('/opt/agent-vm/pi-packages'),
+    'antigravity': Path('/opt/agent-vm/pi-antigravity'),
     'extensions': Path('/opt/agent-vm/pi-extensions'),
     'wrapper': Path('/usr/local/bin/pi'),
     'seed': Path('/opt/agent-vm/seed.d/20-pi-claude-bridge'),
@@ -1007,6 +1011,7 @@ class PiGateLayout:
     """Every slot the Pi feature owns, validated as one closed tuple."""
     pi: Path
     bridge: Path
+    antigravity: Path
     extensions: Path
     wrapper: Path
     seed: Path
@@ -1017,7 +1022,8 @@ class PiGateLayout:
 
     def json(self):
         return {name: str(getattr(self, name)) for name in
-                ('pi', 'bridge', 'extensions', 'wrapper', 'seed', 'status_dir', 'contract')}
+                ('pi', 'bridge', 'antigravity', 'extensions', 'wrapper', 'seed',
+                 'status_dir', 'contract')}
 
     @property
     def pi_bin(self):
@@ -1036,9 +1042,10 @@ class PiAbsenceAuthorization:
     """Authority to retire the feature for one recognised curl absence.
 
     The inventory is finite and fixed by the layout: two regular leaves (the
-    warning wrapper and the seed hook), two owned directory roots (extensions
-    and the bridge payload) and one atomic bridge status record. The Pi status
-    record is preserved, because it is the evidence that authorises this work.
+    warning wrapper and the seed hook), three owned directory roots (extensions,
+    the bridge payload and the Antigravity payload) and one atomic bridge status
+    record. The Pi status record is preserved, because it is the evidence that
+    authorises this work.
     """
     layout: PiGateLayout
     code: str
@@ -1066,8 +1073,8 @@ def _slot(value):
     return path
 
 
-def authorize_pi_gate_layout(*, pi, bridge, extensions, wrapper, seed, status_dir,
-                             contract=None, consumer='pi'):
+def authorize_pi_gate_layout(*, pi, bridge, antigravity, extensions, wrapper, seed,
+                             status_dir, contract=None, consumer='pi'):
     """Authorize the one closed tuple the absence decision may inspect.
 
     Production is the fixed image tuple. A fixture must place *every* slot under
@@ -1086,9 +1093,9 @@ def authorize_pi_gate_layout(*, pi, bridge, extensions, wrapper, seed, status_di
         # unauthorized value fails there rather than silently taking effect.
         os.environ['AGENT_VM_CONTRACT_DIR'] = str(contract)
     slots = {}
-    for name in ('pi', 'bridge', 'extensions', 'wrapper', 'seed', 'status_dir'):
-        slots[name] = _slot({'pi': pi, 'bridge': bridge, 'extensions': extensions,
-                             'wrapper': wrapper, 'seed': seed,
+    for name in ('pi', 'bridge', 'antigravity', 'extensions', 'wrapper', 'seed', 'status_dir'):
+        slots[name] = _slot({'pi': pi, 'bridge': bridge, 'antigravity': antigravity,
+                             'extensions': extensions, 'wrapper': wrapper, 'seed': seed,
                              'status_dir': status_dir}[name])
     productions = [slots[name] == PI_GATE_DEFAULTS[name] for name in slots]
     if all(productions) != any(productions):
@@ -1117,8 +1124,8 @@ def authorize_pi_gate_layout(*, pi, bridge, extensions, wrapper, seed, status_di
     for name in ('wrapper', 'seed'):
         if os.path.lexists(slots[name]):
             regular(slots[name])
-    return PiGateLayout(slots['pi'], slots['bridge'], slots['extensions'], slots['wrapper'],
-                        slots['seed'], status, directory, root, production)
+    return PiGateLayout(slots['pi'], slots['bridge'], slots['antigravity'], slots['extensions'],
+                        slots['wrapper'], slots['seed'], status, directory, root, production)
 
 
 def read_status_line(path, *, root=None):
@@ -1244,7 +1251,7 @@ def retire_absent_pi(authorization):
         regular(path)
         info = path.lstat()
         inventory.append(('leaf', path, (info.st_dev, info.st_ino)))
-    for name in ('extensions', 'bridge'):
+    for name in ('extensions', 'bridge', 'antigravity'):
         path = getattr(layout, name)
         if not os.path.lexists(path):
             continue
@@ -1476,6 +1483,7 @@ def main(consumer=None):
     gate = sub.add_parser('pi-gate-entry')
     gate.add_argument('--pi-prefix', required=True)
     gate.add_argument('--bridge-prefix', required=True)
+    gate.add_argument('--antigravity-prefix', required=True)
     gate.add_argument('--extension-root', required=True)
     gate.add_argument('--wrapper', required=True)
     gate.add_argument('--seed', required=True)
@@ -1520,6 +1528,7 @@ def main(consumer=None):
     elif verb == 'pi-gate-entry':
         layout = authorize_pi_gate_layout(
             pi=options['pi_prefix'], bridge=options['bridge_prefix'],
+            antigravity=options['antigravity_prefix'],
             extensions=options['extension_root'], wrapper=options['wrapper'],
             seed=options['seed'], status_dir=options['status_dir'],
             contract=options['contract_dir'], consumer=profile)

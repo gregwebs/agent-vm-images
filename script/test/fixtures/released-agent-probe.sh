@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Credential-free probe supplied verbatim to Docker and native msb guests.
 set -euo pipefail
-[ "$#" -eq 12 ] || { echo 'probe requires UID GID and ten source-derived selections' >&2; exit 2; }
-uid=$1 gid=$2 codex=$3 opencode=$4 claude=$5 copilot=$6 dsh=$7 pnpm=$8 pi=$9 bridge=${10} opencode_claude=${11}
-agy=${12}
+[ "$#" -eq 13 ] || { echo 'probe requires UID GID and eleven source-derived selections' >&2; exit 2; }
+# Argument order is the release verifier's selection vector:
+# codex opencode claude copilot dsh pnpm pi bridge antigravity opencode-claude agy.
+uid=$1 gid=$2 codex=$3 opencode=$4 claude=$5 copilot=$6 dsh=$7 pnpm=$8 pi=$9 bridge=${10}
+antigravity=${11} opencode_claude=${12} agy=${13}
 [ "$(id -u)" = "$uid" ] && [ "$(id -g)" = "$gid" ]
 : "${HOME:?fresh writable HOME required}"
 printf 'numeric uid probe\n' > "$HOME/agent-vm-probe"
@@ -15,9 +17,9 @@ for tool in codex opencode claude copilot dsh pi pnpm agy; do
     timeout --kill-after=5s 60 "$tool" --version > "$tmp/$tool.out" 2> "$tmp/$tool.err"
 done
 python3 "$tmp/released-agent-report.py" "$tmp" "$codex" "$opencode" "$claude" "$copilot" "$dsh" "$pnpm" "$pi" "$agy"
-# Pi and the bridge are reviewed pnpm projects too: four regular inputs and no
-# npm lock, not even a dangling link to one.
-for project in pi pi-packages; do
+# Pi and its two extension projects are reviewed pnpm projects too: four regular
+# inputs and no npm lock, not even a dangling link to one.
+for project in pi pi-packages pi-antigravity; do
     for input in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
         test -f "/opt/agent-vm/$project/$input"
         test ! -L "/opt/agent-vm/$project/$input"
@@ -39,6 +41,8 @@ test -x /usr/local/bin/pi
 test -r /opt/agent-vm/pi-extensions/guest-credential-warning.js
 test -r /opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts
 [ "$(jq -r .version /opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/package.json)" = "$bridge" ]
+test -r /opt/agent-vm/pi-antigravity/node_modules/pi-antigravity/src/index.ts
+[ "$(jq -r .version /opt/agent-vm/pi-antigravity/node_modules/pi-antigravity/package.json)" = "$antigravity" ]
 for seed in /opt/agent-vm/seed.d/*; do test -r "$seed"; test -x "$seed"; "$seed"; done
 # Registration is exercised without a provider turn or credentials.
 cat > "$tmp/bridge.js" <<'JS'
@@ -53,6 +57,18 @@ export default function (pi) {
 JS
 timeout --kill-after=5s 120 pi -e "$tmp/bridge.js" --mode rpc --no-session --no-approve < /dev/null > "$tmp/bridge.out" 2> "$tmp/bridge.err"
 python3 "$tmp/released-agent-bridge-report.py" "$tmp/bridge.out"
+cat > "$tmp/antigravity.js" <<'JS'
+export default function (pi) {
+  pi.on("session_start", (_event, ctx) => {
+    const p = ctx.modelRegistry.getProvider("antigravity");
+    const n = p && typeof p.getModels === "function" ? p.getModels().length
+            : p && Array.isArray(p.models) ? p.models.length : 0;
+    ctx.ui.notify(`RELEASE-ANTIGRAVITY models=${n}`, "warning");
+  });
+}
+JS
+timeout --kill-after=5s 120 pi -e "$tmp/antigravity.js" --mode rpc --no-session --no-approve < /dev/null > "$tmp/antigravity.out" 2> "$tmp/antigravity.err"
+python3 "$tmp/released-agent-antigravity-report.py" "$tmp/antigravity.out"
 mkdir -p "$tmp/location/nested"
 timeout --kill-after=5 25 node "$tmp/check-claude-runtime.mjs" /opt/agent-vm/opencode-plugins /opt/agent/.local/bin/claude >"$tmp/runtime.json"
 timeout --kill-after=5 80 python3 "$tmp/probe-opencode.py" capture --binary /opt/agent/.opencode/bin/opencode --state-root "$tmp" --directory "$tmp/location/nested" --timeout 60 >"$tmp/evidence.json"

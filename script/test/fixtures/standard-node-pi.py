@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Owning Pi/bridge actions for the focused native harness, in production shape.
+"""Owning Pi/extension actions for the focused native harness, in production shape.
 
-The Dockerfile installs Pi and the bridge into the *fixed* production paths, so
-the only honest focused proof is the same shape: this fixture creates
-`/opt/agent-vm/pi`, `/opt/agent-vm/pi-packages`, `/opt/agent-vm/pi-extensions`,
+The Dockerfile installs Pi and its two extension packages into the *fixed*
+production paths, so the only honest focused proof is the same shape: this
+fixture creates `/opt/agent-vm/pi`, `/opt/agent-vm/pi-packages`,
+`/opt/agent-vm/pi-antigravity`, `/opt/agent-vm/pi-extensions`,
 `/usr/local/bin/pi`, `/opt/agent-vm/seed.d/...` and `/opt/agent-vm/install-status`
 inside a disposable container and runs the image's own installer, verifier and
 build-only helpers there. Nothing is published anywhere, and the host driver
@@ -16,8 +17,8 @@ Why the production tuple matters here:
   fixture-only tree cannot run it without rewriting reviewed bytes;
 * `verify-pi.sh`'s single absence decision authorizes one closed tuple, and a
   mixed production/fixture tuple is refused by design;
-* `standard-node-layout.py --consumer pi|bridge` reads the production prefixes
-  from an extracted root, so the extraction has to be that root.
+* `standard-node-layout.py --consumer pi|bridge|antigravity` reads the production
+  prefixes from an extracted root, so the extraction has to be that root.
 
 Actions are one per owning phase, each a separate bounded `docker exec`, so the
 host driver can put its own deadline and evidence record around them instead of
@@ -40,6 +41,7 @@ SOURCE_DIR = Path('/source')
 CONTRACT = Path('/tmp/recipe-contract')
 PI = Path('/opt/agent-vm/pi')
 BRIDGE = Path('/opt/agent-vm/pi-packages')
+ANTIGRAVITY = Path('/opt/agent-vm/pi-antigravity')
 EXTENSIONS = Path('/opt/agent-vm/pi-extensions')
 WRAPPER = Path('/usr/local/bin/pi')
 SEED = Path('/opt/agent-vm/seed.d/20-pi-claude-bridge')
@@ -64,6 +66,10 @@ POLICY_ENV = {'PNPM_CONFIG_MINIMUM_RELEASE_AGE': '1440',
               'PNPM_CONFIG_MINIMUM_RELEASE_AGE_IGNORE_MISSING_TIME': 'false',
               'PNPM_CONFIG_TRUST_POLICY': 'no-downgrade',
               'PNPM_CONFIG_IGNORE_SCRIPTS': 'true'}
+# The provider's loadable entry as the image registers it (`pi.sh`'s
+# ANTIGRAVITY_EXTENSION default), authored from the reviewed payload for the same
+# reason as the bridge entry: a jiti-loaded TypeScript payload has no `main`.
+PROVIDER_ENTRY = 'src/index.ts'
 # The file the wrapper hands Pi as `--extension` for the image-owned bridge
 # (`pi.sh`'s BRIDGE_EXTENSION default), relative to the resolved bridge package.
 # Authored from the reviewed payload rather than read from its manifest: 0.8.0 is
@@ -80,6 +86,16 @@ PROBE = '''export default function (pi) {
     const n = p && typeof p.getModels === "function" ? p.getModels().length
             : p && Array.isArray(p.models) ? p.models.length : 0;
     ctx.ui.notify(p ? `AGENT-VM-BRIDGE-REGISTERED models=${n}` : "AGENT-VM-BRIDGE-MISSING",
+                  "warning");
+  });
+}
+'''
+PROVIDER_PROBE = '''export default function (pi) {
+  pi.on("session_start", (_event, ctx) => {
+    const p = ctx.modelRegistry.getProvider("antigravity");
+    const n = p && typeof p.getModels === "function" ? p.getModels().length
+            : p && Array.isArray(p.models) ? p.models.length : 0;
+    ctx.ui.notify(p ? `AGENT-VM-ANTIGRAVITY-REGISTERED models=${n}` : "AGENT-VM-ANTIGRAVITY-MISSING",
                   "warning");
   });
 }
@@ -102,12 +118,15 @@ def environment():
     env['AGENT_VM_VERSION_PI'] = record.get('pi', os.environ.get('AGENT_VM_VERSION_PI', ''))
     env['AGENT_VM_VERSION_PI_CLAUDE_BRIDGE'] = record.get(
         'bridge', os.environ.get('AGENT_VM_VERSION_PI_CLAUDE_BRIDGE', ''))
+    env['AGENT_VM_VERSION_PI_ANTIGRAVITY'] = record.get(
+        'antigravity', os.environ.get('AGENT_VM_VERSION_PI_ANTIGRAVITY', ''))
     env.update(AGENT_VM_CONTRACT_DIR=str(CONTRACT), AGENT_VM_PI_SOURCE_DIR=str(SOURCE),
                AGENT_VM_PI_SHARED='/source/images/tools/pnpm-project.py',
                AGENT_VM_PI_BYTES_CHECK=str(SOURCE / 'check-installed-bytes.mjs'),
                AGENT_VM_PI_TARGET_PLATFORM=env['AGENT_VM_HARNESS_PLATFORM'],
                AGENT_VM_PI_WORK_DIR=str(WORK), AGENT_VM_PI_PREFIX=str(PI),
                AGENT_VM_PI_WRAPPER=str(WRAPPER), AGENT_VM_PI_PACKAGES_PREFIX=str(BRIDGE),
+               AGENT_VM_PI_ANTIGRAVITY_PREFIX=str(ANTIGRAVITY),
                AGENT_VM_PI_EXTENSION_DIR=str(EXTENSIONS), AGENT_VM_PI_SEED_HOOK=str(SEED),
                AGENT_VM_PI_GATE_WORK_DIR=str(GATE), AGENT_VM_PI_CODEX_STATE_DIR=str(CODEX),
                AGENT_VM_PI_ENTRY=str(PI / 'node_modules/.bin/pi'),
@@ -169,11 +188,11 @@ def sha512_integrity(path):
     return 'sha512-' + base64.b64encode(digest).decode()
 
 
-def initialize(token, source, pi_version, bridge_version):
+def initialize(token, source, pi_version, bridge_version, antigravity_version):
     """Create the production tuple and the per-architecture invocation state."""
     WORK.mkdir(parents=True, mode=0o700)
     HARNESS.mkdir(parents=True, mode=0o700)
-    for directory in (STATUS, PI, BRIDGE, EXTENSIONS):
+    for directory in (STATUS, PI, BRIDGE, ANTIGRAVITY, EXTENSIONS):
         directory.mkdir(parents=True, exist_ok=True)
     SEED.parent.mkdir(parents=True, exist_ok=True)
     WRAPPER.parent.mkdir(parents=True, exist_ok=True)
@@ -193,7 +212,7 @@ def initialize(token, source, pi_version, bridge_version):
             run(['setpriv', '--reuid', str(uid), '--regid', str(gid), '--clear-groups',
                  'mkdir', '-m', '700', str(destination)])
     record = {'token': token, 'source': source, 'pi': pi_version, 'bridge': bridge_version,
-              'base': base_identity(),
+              'antigravity': antigravity_version, 'base': base_identity(),
               'launcher': hashlib.sha256(Path('/usr/local/bin/pnpm').read_bytes()).hexdigest(),
               'pin': hashlib.sha256(Path('/opt/agent-vm/pnpm/pin.json').read_bytes()).hexdigest(),
               'platform': os.environ['AGENT_VM_HARNESS_PLATFORM']}
@@ -271,6 +290,12 @@ def install_bridge(version):
     own_inputs(BRIDGE)
     visible(['sh', str(CONTRACT / 'run-install.sh'), 'pi-claude-bridge',
              str(STATUS / 'pi-claude-bridge'), 'sh', str(SOURCE / 'install-pi-packages.sh')], 600)
+
+
+def install_antigravity(version):
+    own_inputs(ANTIGRAVITY)
+    visible(['sh', str(CONTRACT / 'run-install.sh'), 'pi-antigravity',
+             str(STATUS / 'pi-antigravity'), 'sh', str(SOURCE / 'install-pi-antigravity.sh')], 600)
 
 
 def graph():
@@ -364,7 +389,9 @@ def verify():
     record = {'status': status,
               'pi': (STATUS / 'pi').read_text().strip() if (STATUS / 'pi').is_file() else None,
               'bridge': ((STATUS / 'pi-claude-bridge').read_text().strip()
-                         if (STATUS / 'pi-claude-bridge').is_file() else None)}
+                         if (STATUS / 'pi-claude-bridge').is_file() else None),
+              'antigravity': ((STATUS / 'pi-antigravity').read_text().strip()
+                              if (STATUS / 'pi-antigravity').is_file() else None)}
     sys.stdout.write(stdout)
     sys.stderr.write(stderr)
     print(json.dumps({'verify': record}, sort_keys=True))
@@ -593,22 +620,25 @@ def entry_cases(prefix, bridge):
     assert loaded_entry(prefix / 'node_modules' / sdk, module_entry(escaping))[1] is False
 
 
-def registration():
-    """One canonical bridge registration through the shipped warning wrapper."""
-    probe = HARNESS / 'probe.js'
-    probe.write_text(PROBE)
-    out, err = HARNESS / 'registration.out', HARNESS / 'registration.err'
+def registration(kind='bridge'):
+    """One canonical provider registration through the shipped warning wrapper."""
+    marker, body = {'bridge': ('AGENT-VM-BRIDGE', PROBE),
+                    'antigravity': ('AGENT-VM-ANTIGRAVITY', PROVIDER_PROBE)}[kind]
+    probe = HARNESS / ('probe-' + kind + '.js')
+    probe.write_text(body)
+    out = HARNESS / ('registration-' + kind + '.out')
+    err = HARNESS / ('registration-' + kind + '.err')
     env = environment()
     env.update(PI_TELEMETRY='0')
     status, _, _ = run_status(['sh', str(CONTRACT / 'run-report.sh'), '150', str(out), str(err),
                                str(WRAPPER), '-e', str(probe), '--mode', 'rpc', '--no-session',
                                '--no-approve'], seconds=200, env=env)
     text = out.read_text(errors='replace') if out.is_file() else ''
-    registered = re.findall(r'AGENT-VM-BRIDGE-REGISTERED models=([0-9]+)', text)
-    missing = text.count('AGENT-VM-BRIDGE-MISSING')
-    print(json.dumps({'registration': {'status': status, 'registered': registered,
-                                       'missing': missing,
-                                       'malformed': text.count('AGENT-VM-BRIDGE-REGISTERED models=') - len(registered)}},
+    registered = re.findall(marker + r'-REGISTERED models=([0-9]+)', text)
+    missing = text.count(marker + '-MISSING')
+    print(json.dumps({'registration': {'provider': kind, 'status': status,
+                                       'registered': registered, 'missing': missing,
+                                       'malformed': text.count(marker + '-REGISTERED models=') - len(registered)}},
                      sort_keys=True))
 
 
@@ -963,6 +993,22 @@ def break_bridge():
     print(json.dumps({'breakBridge': 'moved'}, sort_keys=True))
 
 
+def break_provider():
+    source = ANTIGRAVITY / 'node_modules/pi-antigravity/src'
+    if not source.is_dir() or source.is_symlink():
+        raise RuntimeError(f'{source} is not the installed provider source directory')
+    source.rename(ANTIGRAVITY / 'node_modules/pi-antigravity/src.broken')
+    print(json.dumps({'breakProvider': 'moved'}, sort_keys=True))
+
+
+def repair_provider():
+    broken = ANTIGRAVITY / 'node_modules/pi-antigravity/src.broken'
+    if not broken.is_dir():
+        raise RuntimeError('there is no broken provider source to restore')
+    broken.rename(ANTIGRAVITY / 'node_modules/pi-antigravity/src')
+    print(json.dumps({'repairProvider': 'restored'}, sort_keys=True))
+
+
 def repair_bridge():
     broken = BRIDGE / 'node_modules/pi-claude-bridge/src.broken'
     if not broken.is_dir():
@@ -971,7 +1017,7 @@ def repair_bridge():
     print(json.dumps({'repairBridge': 'restored'}, sort_keys=True))
 
 
-def probe(token, source, pi_version, bridge_version, uid, gid):
+def probe(token, source, pi_version, bridge_version, antigravity_version, uid, gid):
     assert (os.getuid(), os.getgid()) == (uid, gid)
     status = dict(line.split(':', 1)
                   for line in Path('/proc/self/status').read_text().splitlines() if ':' in line)
@@ -1001,7 +1047,8 @@ def probe(token, source, pi_version, bridge_version, uid, gid):
     finally:
         shutil.rmtree(scratch)
     print(json.dumps({'piProbe': token, 'source': source, 'pi': pi_version,
-                      'bridge': bridge_version, 'pair': f'{uid}:{gid}', 'caps': 'zero',
+                      'bridge': bridge_version, 'antigravity': antigravity_version,
+                      'pair': f'{uid}:{gid}', 'caps': 'zero',
                       'offline': True, 'wrapper': 'regular-file', 'version': version},
                      sort_keys=True))
 
@@ -1009,13 +1056,14 @@ def probe(token, source, pi_version, bridge_version, uid, gid):
 def clean():
     assert (STATUS / 'pi').read_text() == 'installed\n'
     assert (STATUS / 'pi-claude-bridge').read_text() == 'installed\n'
-    for prefix in (PI, BRIDGE):
+    assert (STATUS / 'pi-antigravity').read_text() == 'installed\n'
+    for prefix in (PI, BRIDGE, ANTIGRAVITY):
         assert not (prefix / 'package-lock.json').exists(), prefix
         assert all((prefix / name).is_file() for name in INPUTS), prefix
     # The installer's authorized scratch parent must be empty again, and no
     # transient archive or store may survive outside the harness's own root.
     assert not [item for item in WORK.iterdir()], list(WORK.iterdir())
-    print(json.dumps({'clean': {'work': 'empty', 'records': 2}}, sort_keys=True))
+    print(json.dumps({'clean': {'work': 'empty', 'records': 3}}, sort_keys=True))
 
 
 def main():
@@ -1028,6 +1076,8 @@ def main():
         install_pi(*args)
     elif action == 'install-bridge':
         install_bridge(*args)
+    elif action == 'install-antigravity':
+        install_antigravity(*args)
     elif action == 'graph':
         graph()
     elif action == 'archives':
@@ -1046,8 +1096,12 @@ def main():
         break_bridge()
     elif action == 'repair-bridge':
         repair_bridge()
+    elif action == 'break-provider':
+        break_provider()
+    elif action == 'repair-provider':
+        repair_provider()
     elif action == 'registration':
-        registration()
+        registration(*args)
     elif action == 'resolution':
         resolution(*args)
     elif action == 'resolution-self-test':
@@ -1057,7 +1111,7 @@ def main():
     elif action == 'mutants':
         mutants(*args)
     elif action == 'probe':
-        probe(*args[:4], int(args[4]), int(args[5]))
+        probe(*args[:5], int(args[5]), int(args[6]))
     elif action == 'clean':
         clean()
     else:

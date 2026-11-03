@@ -16,7 +16,7 @@ from contract_context import native_contract_directory  # noqa: E402  (path firs
 tmp=Path(tempfile.mkdtemp(prefix='gate.', dir='/tmp')); tmp.chmod(0o755)
 atexit.register(shutil.rmtree, tmp)
 records=tmp/'records'; records.mkdir(); tools=tmp/'tools'; commands=tmp/'bin'; commands.mkdir()
-names=['dsh','pi','pi-claude-bridge','codex','opencode','claude','copilot','agy','opencode-claude']; verifiers=['dsh','pi','codex','opencode','claude','copilot','agy']
+names=['dsh','pi','pi-claude-bridge','pi-antigravity','codex','opencode','claude','copilot','agy','opencode-claude']; verifiers=['dsh','pi','codex','opencode','claude','copilot','agy']
 def writeexe(p,s): p.parent.mkdir(parents=True,exist_ok=True); p.write_text(s); p.chmod(0o755)
 # Native fixtures are copied or appended byte-for-byte; variable paths/versions
 # travel as environment data instead of being interpolated into program bodies.

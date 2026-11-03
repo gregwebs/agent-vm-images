@@ -55,7 +55,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-USAGE = ('usage: standard-node-layout.py --consumer dsh|pi|bridge --root ROOT '
+USAGE = ('usage: standard-node-layout.py --consumer dsh|pi|bridge|antigravity --root ROOT '
          '--platform linux/amd64|linux/arm64 [--expect-version EXACT] '
          '[--archive-inventories EXPECTED_JSON]\n'
          '       standard-node-layout.py --self-test')
@@ -68,13 +68,14 @@ PRODUCTION_PREFIXES = {
     'dsh': PRODUCTION_PREFIX,
     'pi': ('opt', 'agent-vm', 'pi'),
     'bridge': ('opt', 'agent-vm', 'pi-packages'),
+    'antigravity': ('opt', 'agent-vm', 'pi-antigravity'),
 }
 # Pi's reviewed command is the warning *wrapper* (`images/tools/pi/pi.sh`), which
 # is a regular file and must never become the package entry. The bridge owns no
 # command of its own: Pi loads it as an extension. `None` therefore means "this
 # consumer must not install a command", not "the check is optional".
 PRODUCTION_COMMANDS = {'dsh': PRODUCTION_COMMAND, 'pi': ('usr', 'local', 'bin', 'pi'),
-                       'bridge': None}
+                       'bridge': None, 'antigravity': None}
 
 ROOT_PACKAGE = '@deepseek-ai/dsh'
 BASE = '@deepseek-ai/dsh-base'
@@ -102,9 +103,12 @@ MANAGER_NAMES = ('pnpm', 'pnx', 'pnpx')
 SOURCE_MANIFEST = Path(__file__).resolve().parents[2] / 'images/tools/dsh/package.json'
 PI_SOURCE_MANIFEST = Path(__file__).resolve().parents[2] / 'images/tools/pi/package.json'
 BRIDGE_SOURCE_MANIFEST = Path(__file__).resolve().parents[2] / 'images/tools/pi/bridge/package.json'
-SOURCE_MANIFESTS = {'dsh': SOURCE_MANIFEST, 'pi': PI_SOURCE_MANIFEST, 'bridge': BRIDGE_SOURCE_MANIFEST}
+ANTIGRAVITY_SOURCE_MANIFEST = (Path(__file__).resolve().parents[2]
+                               / 'images/tools/pi/antigravity/package.json')
+SOURCE_MANIFESTS = {'dsh': SOURCE_MANIFEST, 'pi': PI_SOURCE_MANIFEST,
+                    'bridge': BRIDGE_SOURCE_MANIFEST, 'antigravity': ANTIGRAVITY_SOURCE_MANIFEST}
 SOURCE_DEPENDENCIES = {'dsh': ROOT_PACKAGE, 'pi': '@earendil-works/pi-coding-agent',
-                       'bridge': 'pi-claude-bridge'}
+                       'bridge': 'pi-claude-bridge', 'antigravity': 'pi-antigravity'}
 
 
 class Mismatch(Exception):
@@ -197,6 +201,18 @@ BRIDGE_IGNORED_OPTIONAL = re.compile(r'^@anthropic-ai/claude-agent-sdk-')
 BRIDGE_FORBIDDEN_NAMES = ('typebox', '@sinclair/typebox', 'pi-agent-core', 'pi-ai', 'pi-tui',
                           'pi-coding-agent')
 BRIDGE_FORBIDDEN_PREFIXES = ('@earendil-works/', '@sinclair/')
+
+# --- antigravity -----------------------------------------------------------
+# The provider project is the same shape as the bridge: one hoisted root, no
+# installed peer, and one reviewed runtime dependency. It owns no command (Pi
+# loads it as a third --extension) and omits nothing optional.
+ANTIGRAVITY_ROOT_PACKAGE = 'pi-antigravity'
+ANTIGRAVITY_SOURCE = ('src', 'index.ts')
+ANTIGRAVITY_RUNTIME = 'undici'
+ANTIGRAVITY_UNMET_PEERS = ('@earendil-works/pi-ai', '@earendil-works/pi-coding-agent')
+ANTIGRAVITY_FORBIDDEN_NAMES = ('typebox', '@sinclair/typebox', 'pi-agent-core', 'pi-ai',
+                               'pi-tui', 'pi-coding-agent')
+ANTIGRAVITY_FORBIDDEN_PREFIXES = ('@earendil-works/', '@sinclair/')
 
 
 
@@ -1246,8 +1262,86 @@ class BridgeAudit(MigratedAudit):
         }
 
 
+class AntigravityAudit(MigratedAudit):
+    """The image-owned Antigravity provider: one hoisted, peer-free project."""
+
+    root_package = ANTIGRAVITY_ROOT_PACKAGE
+    hoisted = True
+
+    def __init__(self, root, platform, expect_version, inventories=None):
+        super().__init__(root, platform, expect_version, 'antigravity', inventories)
+        self.unmet_peers = frozenset(ANTIGRAVITY_UNMET_PEERS)
+        self.optional_absent_allowed = lambda owner, name: False
+
+    def check_hoisted(self):
+        """A hoisted tree has no package links; only generated ``.bin`` links."""
+        for path in sorted(self.tree.links):
+            if '.bin' in path:
+                continue
+            raise Mismatch(f'{virtual(path)}: a hoisted provider install carries no package links')
+        store = self.prefix + ('node_modules', '.pnpm')
+        for path in sorted(self.tree.dirs):
+            if len(path) > len(store) and path[:len(store)] == store:
+                raise Mismatch(f'{virtual(path)}: a hoisted provider install carries no private '
+                               'store payload')
+        node_modules = self.prefix + ('node_modules',)
+        instance = node_modules + (ANTIGRAVITY_ROOT_PACKAGE,)
+        try:
+            info = self.filesystem.lstat(instance)
+        except FileNotFoundError:
+            raise Mismatch(f'{virtual(instance)}: the provider package directory is missing') from None
+        if not stat.S_ISDIR(info.st_mode):
+            raise Mismatch(f'{virtual(instance)}: the provider package is not a real directory')
+        return instance
+
+    def check_no_second_pi(self):
+        found = []
+        for path, manifest in sorted(self.instances.items()):
+            name = manifest.name
+            if name.startswith(ANTIGRAVITY_FORBIDDEN_PREFIXES) or name in ANTIGRAVITY_FORBIDDEN_NAMES:
+                found.append(f'{name} at {virtual(path)}')
+        if found:
+            raise Mismatch('the provider tree installs a second Pi/typebox package: '
+                           + '; '.join(sorted(set(found))))
+
+    def run(self):
+        self.check_links()
+        self.collect_instances()
+        self.check_project()
+        self.check_hoisted()
+        self.check_manager()
+        provider = self.check_root()
+        source = provider + ANTIGRAVITY_SOURCE
+        if source in self.tree.links or source not in self.tree.files:
+            raise Mismatch(f'{virtual(source)}: the provider TypeScript entry is missing')
+        runtime = self.resolve(provider, ANTIGRAVITY_RUNTIME)
+        if runtime is None or runtime in self.excluded:
+            raise Mismatch(f'{virtual(provider)}: the provider runtime dependency '
+                           f'{ANTIGRAVITY_RUNTIME} is not installed')
+        exact_peers, optional_missing = self.check_edges()
+        self.check_no_second_pi()
+        self.reject_orphans([provider])
+        compared = self.check_archive_inventories()
+        return {
+            'consumer': 'antigravity',
+            'version': self.instances[provider].version,
+            'platform': self.platform.key,
+            'archives': sorted({f'{manifest.name}@{manifest.version}' for path, manifest
+                                in self.instances.items() if path not in self.excluded}),
+            'snapshots': len(self.instances) - len(self.excluded),
+            'exactPeers': exact_peers,
+            'optionalMissing': optional_missing,
+            'hoisted': True,
+            'source': virtual(source),
+            'runtime': self.instances[runtime].name,
+            'archiveInventories': compared,
+            'noPrivatePnpm': True,
+        }
+
+
 def analyze_migrated(root, platform, expect_version, consumer, inventories):
-    audit = {'pi': PiAudit, 'bridge': BridgeAudit}[consumer]
+    audit = {'pi': PiAudit, 'bridge': BridgeAudit,
+             'antigravity': AntigravityAudit}[consumer]
     return audit(Path(root), platform, expect_version, inventories).run()
 
 
@@ -1440,6 +1534,7 @@ def build_healthy(builder, absolute=False, dsh_version='1.0.0', link_platform_op
 
 PI_PREFIX = PRODUCTION_PREFIXES['pi']
 BRIDGE_PREFIX = PRODUCTION_PREFIXES['bridge']
+ANTIGRAVITY_PREFIX = PRODUCTION_PREFIXES['antigravity']
 
 
 def migrated_entry(builder, directory, name, version, **fields):
@@ -1657,6 +1752,31 @@ def build_bridge_healthy(builder):
     builder.write(bridge_store('pi-claude-bridge') + ('src', 'index.ts'),
                   'export default function register() {\n  return 12;\n}\n')
     builder.write(bridge_store(BRIDGE_SDK) + ('sdk.mjs',), 'export const models = [];\n')
+
+
+ANTIGRAVITY_TREE = {
+    'pi-antigravity': {'version': '0.11.0',
+                       'dependencies': {'undici': '8.12.3'},
+                       'peerDependencies': {'@earendil-works/pi-ai': '>=0.80.0',
+                                            '@earendil-works/pi-coding-agent': '>=0.80.0'}},
+    'undici': {'version': '8.12.3'},
+}
+
+
+def build_antigravity_healthy(builder):
+    builder.write(ANTIGRAVITY_PREFIX + ('package.json',), json.dumps({
+        'name': 'agent-vm-guest-pi-antigravity', 'private': True,
+        'packageManager': 'pnpm@11.11.0',
+        'dependencies': {'pi-antigravity': '0.11.0'}}, sort_keys=True))
+    builder.mkdir(ANTIGRAVITY_PREFIX + ('node_modules',))
+    builder.write(ANTIGRAVITY_PREFIX + ('node_modules', '.modules.yaml'),
+                  'nodeLinker: hoisted\n')
+    for name, fields in ANTIGRAVITY_TREE.items():
+        version = fields['version']
+        extra = {key: value for key, value in fields.items() if key != 'version'}
+        migrated_entry(builder, ANTIGRAVITY_PREFIX + ('node_modules',), name, version, **extra)
+    builder.write(ANTIGRAVITY_PREFIX + ('node_modules', 'pi-antigravity', 'src', 'index.ts'),
+                  'export default function register() {\n  return 8;\n}\n')
 
 
 class MigratedFixtures:
@@ -2091,6 +2211,85 @@ def migrated_self_test():
     def bridge_source_absent(builder):
         build_bridge_healthy(builder)
         builder.remove(bridge_store('pi-claude-bridge') + ('src', 'index.ts'))
+
+    # -- antigravity ---------------------------------------------------
+    def antigravity_check(report):
+        assert report['consumer'] == 'antigravity' and report['hoisted'] is True, report
+        assert report['version'] == '0.11.0', report
+        assert report['source'] == ('/opt/agent-vm/pi-antigravity/node_modules/'
+                                    'pi-antigravity/src/index.ts'), report
+        assert report['runtime'] == 'undici', report
+        assert report['snapshots'] == 2, report
+
+    fixtures.expect_pass('healthy hoisted provider with its runtime dependency',
+                         lambda b: build_antigravity_healthy(b), 'antigravity', '0.11.0',
+                         antigravity_check)
+
+    def antigravity_linked(builder):
+        build_antigravity_healthy(builder)
+        store = ANTIGRAVITY_PREFIX + ('node_modules',)
+        real = store + ('.store', 'pi-antigravity')
+        migrated_entry(builder, store + ('.store',), 'pi-antigravity', '0.11.0',
+                       **{key: value for key, value in ANTIGRAVITY_TREE['pi-antigravity'].items()
+                          if key != 'version'})
+        builder.write(real + ('src', 'index.ts'), 'export default function register() {}\n')
+        builder.remove(store + ('pi-antigravity',))
+        builder.link(store + ('pi-antigravity',),
+                     '/opt/agent-vm/pi-antigravity/node_modules/.store/pi-antigravity')
+
+    fixtures.expect_fail('provider installed through a link', antigravity_linked, 'antigravity',
+                         '0.11.0', 'a hoisted provider install carries no package links')
+
+    def antigravity_private_store(builder):
+        build_antigravity_healthy(builder)
+        builder.mkdir(ANTIGRAVITY_PREFIX + ('node_modules', '.pnpm', 'x', 'node_modules'))
+
+    fixtures.expect_fail('provider with private-store payload', antigravity_private_store,
+                         'antigravity', '0.11.0',
+                         'a hoisted provider install carries no private store payload')
+
+    def antigravity_metadata_store(builder):
+        build_antigravity_healthy(builder)
+        builder.mkdir(ANTIGRAVITY_PREFIX + ('node_modules', '.pnpm'))
+        builder.write(ANTIGRAVITY_PREFIX + ('node_modules', '.pnpm', 'lock.yaml'),
+                      'lockfileVersion: 9.0\n')
+
+    fixtures.expect_pass('provider with a metadata-only store', antigravity_metadata_store,
+                         'antigravity', '0.11.0', antigravity_check)
+
+    def antigravity_runtime_absent(builder):
+        build_antigravity_healthy(builder)
+        builder.remove(ANTIGRAVITY_PREFIX + ('node_modules', 'undici'))
+
+    fixtures.expect_fail('provider without its runtime dependency', antigravity_runtime_absent,
+                         'antigravity', '0.11.0',
+                         'the provider runtime dependency undici is not installed')
+
+    def antigravity_second_pi(builder):
+        build_antigravity_healthy(builder)
+        migrated_entry(builder, ANTIGRAVITY_PREFIX + ('node_modules',),
+                       '@earendil-works/pi-ai', '1.4.0')
+
+    fixtures.expect_fail('second Pi package in the provider tree', antigravity_second_pi,
+                         'antigravity', '0.11.0',
+                         'the provider tree installs a second Pi/typebox package')
+
+    def antigravity_source_absent(builder):
+        build_antigravity_healthy(builder)
+        builder.remove(ANTIGRAVITY_PREFIX + ('node_modules', 'pi-antigravity', 'src', 'index.ts'))
+
+    fixtures.expect_fail('provider TypeScript entry missing', antigravity_source_absent,
+                         'antigravity', '0.11.0', 'the provider TypeScript entry is missing')
+
+    def antigravity_version_mismatch(builder):
+        build_antigravity_healthy(builder)
+        path = ANTIGRAVITY_PREFIX + ('node_modules', 'pi-antigravity', 'package.json')
+        builder.write(path, json.dumps({'name': 'pi-antigravity', 'version': '0.10.0',
+                                        'dependencies': {'undici': '8.12.3'}}))
+
+    fixtures.expect_fail('provider version differs from the reviewed selection',
+                         antigravity_version_mismatch, 'antigravity', '0.11.0',
+                         'is not the expected 0.11.0')
 
     fixtures.expect_fail('bridge TypeScript entry missing', bridge_source_absent, 'bridge', '0.8.0',
                          'the bridge TypeScript entry is missing')

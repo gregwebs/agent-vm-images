@@ -153,7 +153,7 @@ class Verification:
                     selected = op.selections()
                     argv += ['released-agent-probe', *pair.split(':'), *[selected[x] for x in
                         ('codex', 'opencode', 'claude', 'copilot', 'dsh', 'pnpm', 'pi', 'pi-claude-bridge',
-                         'opencode-claude', 'agy')]]
+                         'pi-antigravity', 'opencode-claude', 'agy')]]
                 self.command(argv, env=env, timeout=660)
             finally:
                 if created:

@@ -65,6 +65,9 @@ for argument in "$@"; do
         *codex-probe.js)
             printf '%s\n' "${FAKE_CODEX_LINE:-AGENT-VM-CODEX-REGISTERED models=3}" || exit 1
             exit "${FAKE_CODEX_STATUS-0}" ;;
+        *antigravity-probe.js)
+            printf '%s\n' "${FAKE_ANTIGRAVITY_LINE:-AGENT-VM-ANTIGRAVITY-REGISTERED models=8}" || exit 1
+            exit "${FAKE_ANTIGRAVITY_STATUS-0}" ;;
         *probe.js)
             printf '%s\n' "${FAKE_BRIDGE_LINE:-AGENT-VM-BRIDGE-REGISTERED models=12}" || exit 1
             exit "${FAKE_BRIDGE_STATUS-0}" ;;
@@ -80,20 +83,23 @@ SH
 }
 
 new_case() {
-    unset SKIP_BRIDGE FAKE_VERSION FAKE_VERSION_TRAILER FAKE_VERSION_STATUS FAKE_HELP_STATUS \
-        FAKE_WARNING_STATUS FAKE_CODEX_LINE FAKE_CODEX_STATUS FAKE_BRIDGE_LINE \
-        FAKE_BRIDGE_STATUS FAKE_WRAPPER_LOG FAKE_HELP_FILE NODE_OPTIONS NODE_PATH BUN_OPTIONS \
-        FAKE_RUNTIME_CHECK_FAIL TARGET_PLATFORM CASE_PATH_PREFIX CODEX_STATE_SEAM \
-        INHERITED_FIXTURE_SRC
+    unset SKIP_BRIDGE SKIP_ANTIGRAVITY FAKE_VERSION FAKE_VERSION_TRAILER FAKE_VERSION_STATUS \
+        FAKE_HELP_STATUS FAKE_WARNING_STATUS FAKE_CODEX_LINE FAKE_CODEX_STATUS FAKE_BRIDGE_LINE \
+        FAKE_BRIDGE_STATUS FAKE_ANTIGRAVITY_LINE FAKE_ANTIGRAVITY_STATUS FAKE_WRAPPER_LOG \
+        FAKE_HELP_FILE NODE_OPTIONS NODE_PATH BUN_OPTIONS FAKE_RUNTIME_CHECK_FAIL TARGET_PLATFORM \
+        CASE_PATH_PREFIX CODEX_STATE_SEAM INHERITED_FIXTURE_SRC
     CASE="$TEST_ROOT/$1"
     mkdir -p "$CASE/tmp" \
         "$CASE/root/pi" "$CASE/root/pnpm" "$CASE/root/install-status" \
         "$CASE/root/pi-extensions" "$CASE/root/seed.d" "$CASE/root/pi-gate" \
         "$CASE/root/pi-packages/node_modules/pi-claude-bridge/src" \
         "$CASE/root/pi-packages/node_modules/@anthropic-ai/claude-agent-sdk" \
+        "$CASE/root/pi-antigravity/node_modules/pi-antigravity/src" \
+        "$CASE/root/pi-antigravity/node_modules/undici" \
         "$CASE/root/pi/node_modules/.bin"
     cp "$REPO_ROOT"/images/tools/pi/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,pnpm-inputs.sha256} "$CASE/root/pi/"
     cp "$REPO_ROOT"/images/tools/pi/bridge/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,pnpm-inputs.sha256} "$CASE/root/pi-packages/"
+    cp "$REPO_ROOT"/images/tools/pi/antigravity/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,pnpm-inputs.sha256} "$CASE/root/pi-antigravity/"
     cp "$REPO_ROOT/images/pnpm/pin.json" "$CASE/root/pnpm/pin.json"
     cp "$REPO_ROOT/images/tools/pi/dispatch/1.4.0.txt" "$CASE/root/pi/agent-vm-subcommands"
     : >"$CASE/root/pi-extensions/guest-credential-warning.js"
@@ -112,6 +118,11 @@ SH
     : >"$CASE/root/pi-packages/node_modules/pi-claude-bridge/src/index.ts"
     printf '{"name":"@anthropic-ai/claude-agent-sdk","version":"0.3.281"}\n' \
         >"$CASE/root/pi-packages/node_modules/@anthropic-ai/claude-agent-sdk/package.json"
+    printf '{"name":"pi-antigravity","version":"0.11.0"}\n' \
+        >"$CASE/root/pi-antigravity/node_modules/pi-antigravity/package.json"
+    : >"$CASE/root/pi-antigravity/node_modules/pi-antigravity/src/index.ts"
+    printf '{"name":"undici","version":"8.12.3"}\n' \
+        >"$CASE/root/pi-antigravity/node_modules/undici/package.json"
     make_wrapper "$CASE/root/wrapper"
     make_runtime_checker "$CASE/root/runtime-check.mjs"
     cat >"$CASE/help.txt" <<'HELP'
@@ -194,7 +205,9 @@ assert_family_unset "$install_window"
 # and leave the rest of the environment to the scripts.
 unset_witness=$(env -i PATH="$PATH" KEEP=1 \
     AGENT_VM_PI_WRAPPER=/evil/pi AGENT_VM_PI_GATE_SKIP_BRIDGE=1 \
-    AGENT_VM_PI_BRIDGE_EXTENSION=/evil/bridge.js AGENT_VM_PI_CODEX_EXTENSION=/evil/codex.js \
+    AGENT_VM_PI_GATE_SKIP_ANTIGRAVITY=1 AGENT_VM_PI_ANTIGRAVITY_PREFIX=/evil \
+    AGENT_VM_PI_BRIDGE_EXTENSION=/evil/bridge.js AGENT_VM_PI_ANTIGRAVITY_EXTENSION=/evil/ag.js \
+    AGENT_VM_PI_CODEX_EXTENSION=/evil/codex.js \
     AGENT_VM_PI_SUBCOMMANDS=/evil/list AGENT_VM_PI_DISPATCH_DIR=/evil \
     AGENT_VM_PI_PREFIX=/evil AGENT_VM_PI_GATE_WORK_DIR=/evil \
     sh -c "$pi_unset; env" | LC_ALL=C sort)
@@ -239,6 +252,7 @@ run_gate() {
         "AGENT_VM_PI_PREFIX=$CASE/root/pi"
         "AGENT_VM_PI_WRAPPER=$CASE/root/wrapper"
         "AGENT_VM_PI_PACKAGES_PREFIX=$CASE/root/pi-packages"
+        "AGENT_VM_PI_ANTIGRAVITY_PREFIX=$CASE/root/pi-antigravity"
         "AGENT_VM_PI_EXTENSION_DIR=$CASE/root/pi-extensions"
         "AGENT_VM_PI_SEED_HOOK=$CASE/root/seed.d/20-pi-claude-bridge"
         "AGENT_VM_PI_CODEX_STATE_DIR=${CODEX_STATE_SEAM-$CASE/root/codex-state}"
@@ -255,6 +269,7 @@ run_gate() {
         "AGENT_VM_FIXTURE_ROOT=$CASE/root"
         "FAKE_HELP_FILE=${FAKE_HELP_FILE-$CASE/help.txt}"
         "AGENT_VM_PI_GATE_SKIP_BRIDGE=${SKIP_BRIDGE-}"
+        "AGENT_VM_PI_GATE_SKIP_ANTIGRAVITY=${SKIP_ANTIGRAVITY-}"
         "FAKE_VERSION=${FAKE_VERSION-}"
         "FAKE_VERSION_TRAILER=${FAKE_VERSION_TRAILER-}"
         "FAKE_VERSION_STATUS=${FAKE_VERSION_STATUS-0}"
@@ -264,6 +279,8 @@ run_gate() {
         "FAKE_CODEX_STATUS=${FAKE_CODEX_STATUS-0}"
         "FAKE_BRIDGE_LINE=${FAKE_BRIDGE_LINE-}"
         "FAKE_BRIDGE_STATUS=${FAKE_BRIDGE_STATUS-0}"
+        "FAKE_ANTIGRAVITY_LINE=${FAKE_ANTIGRAVITY_LINE-}"
+        "FAKE_ANTIGRAVITY_STATUS=${FAKE_ANTIGRAVITY_STATUS-0}"
         "FAKE_WRAPPER_LOG=${FAKE_WRAPPER_LOG-}"
         # Empty unless a case injects one: the gate must refuse them before it
         # decides anything, including before the absence decision.
@@ -401,10 +418,12 @@ run_gate
 # Pi-only gates: a healthy Pi is distinguishable from a bridge failure.
 new_case pi-only
 SKIP_BRIDGE=1
+SKIP_ANTIGRAVITY=1
 run_gate
 [[ $RUN_STATUS -eq 0 ]] || fail "the Pi-only gate failed: $RUN_ERROR"
 [[ "$(cat "$CASE/root/install-status/pi")" == installed ]] || fail 'Pi was not recorded'
 assert_absent "$CASE/root/install-status/pi-claude-bridge"
+assert_absent "$CASE/root/install-status/pi-antigravity"
 
 # --- the single absence decision --------------------------------------------
 new_case absent-genuine
@@ -421,6 +440,7 @@ assert_absent "$CASE/root/wrapper"
 assert_absent "$CASE/root/seed.d/20-pi-claude-bridge"
 assert_absent "$CASE/root/pi-extensions"
 assert_absent "$CASE/root/pi-packages"
+assert_absent "$CASE/root/pi-antigravity"
 
 new_case absent-no-record
 rm -rf "$CASE/root/pi"
@@ -541,6 +561,7 @@ require_failure 'agent-vm-codex emitted 2 conflicting registration results'
 assert_no_record() {
     assert_absent "$CASE/root/install-status/pi"
     assert_absent "$CASE/root/install-status/pi-claude-bridge"
+    assert_absent "$CASE/root/install-status/pi-antigravity"
 }
 
 assert_scratch_removed() {
@@ -898,32 +919,32 @@ assert_absent "$CASE/root/install-status/pi"
 # The seed hook seeds the *bridge*, so its failures withhold the bridge record only:
 # they used to count as Pi gates, which threw away a Pi that had passed every Pi
 # proof. Each case below therefore asserts both halves.
-require_bridge_only_failure() {
+require_extension_only_failure() {
     [[ $RUN_STATUS -eq 1 ]] || fail "a bridge-only gate must still fail the layer (got $RUN_STATUS)"
     [[ "$(cat "$CASE/root/install-status/pi" 2>/dev/null)" == installed ]] ||
         fail 'a bridge-only failure cost the independently installed Pi record'
     assert_absent "$CASE/root/install-status/pi-claude-bridge"
-    assert_contains "$RUN_ERROR" 'bridge gate(s) failed; only Pi is recorded'
+    assert_contains "$RUN_ERROR" 'gate(s) failed; the failed slot is not recorded'
 }
 
 new_case seed-missing
 rm "$CASE/root/seed.d/20-pi-claude-bridge"
 run_gate
 assert_contains "$RUN_ERROR" 'the bridge seed hook is missing or not executable'
-require_bridge_only_failure
+require_extension_only_failure
 
 new_case seed-not-executable
 chmod 0644 "$CASE/root/seed.d/20-pi-claude-bridge"
 run_gate
 assert_contains "$RUN_ERROR" 'the bridge seed hook is missing or not executable'
-require_bridge_only_failure
+require_extension_only_failure
 
 new_case seed-content-drift
 sed -i.bak 's/pathToClaudeCodeExecutable/anotherOption/' "$CASE/root/seed.d/20-pi-claude-bridge"
 rm -f "$CASE/root/seed.d/20-pi-claude-bridge.bak"
 run_gate
 assert_contains "$RUN_ERROR" 'no longer seeds the SDK executable path'
-require_bridge_only_failure
+require_extension_only_failure
 
 new_case private-payload
 chmod 0700 "$CASE/root/pi/node_modules/.bin/pi"
@@ -962,5 +983,91 @@ run_gate
 assert_contains "$RUN_ERROR" 'waypoint escapes payload'
 assert_contains "$RUN_ERROR" 'the installed Pi payload failed runtime authorization'
 assert_no_record
+
+# --- antigravity gates -------------------------------------------------------
+new_case antigravity-missing
+rm -rf "$CASE/root/pi-antigravity/node_modules/pi-antigravity"
+run_gate
+require_failure 'no provider absence producer'
+[[ "$(cat "$CASE/root/install-status/pi")" == installed ]] ||
+    fail 'a missing provider erased a healthy Pi record'
+[[ "$(cat "$CASE/root/install-status/pi-claude-bridge")" == installed ]] ||
+    fail 'a missing provider withheld the independently verified bridge record'
+assert_absent "$CASE/root/install-status/pi-antigravity"
+
+new_case antigravity-version-mismatch
+printf '{"name":"pi-antigravity","version":"0.10.0"}\n' \
+    >"$CASE/root/pi-antigravity/node_modules/pi-antigravity/package.json"
+run_gate
+require_failure "pi-antigravity installed '0.10.0' but the manifest pins '0.11.0'"
+assert_absent "$CASE/root/install-status/pi-antigravity"
+[[ "$(cat "$CASE/root/install-status/pi")" == installed ]] ||
+    fail 'a provider-only failure must still record a healthy Pi'
+
+new_case antigravity-undici-missing
+rm "$CASE/root/pi-antigravity/node_modules/undici/package.json"
+run_gate
+require_failure 'the provider runtime dependency undici is missing'
+
+new_case antigravity-second-pi
+mkdir -p "$CASE/root/pi-antigravity/node_modules/@earendil-works"
+chmod -R a+rX "$CASE/root/pi-antigravity"
+run_gate
+require_failure 'installs @earendil-works'
+
+new_case antigravity-isolated-layout
+mkdir -p "$CASE/root/pi-antigravity/node_modules/.pnpm/x/node_modules"
+chmod -R a+rX "$CASE/root/pi-antigravity"
+run_gate
+require_failure 'private-store package payload'
+
+new_case antigravity-metadata-only-store
+mkdir -p "$CASE/root/pi-antigravity/node_modules/.pnpm"
+printf 'lockfileVersion: 9.0\n' >"$CASE/root/pi-antigravity/node_modules/.pnpm/lock.yaml"
+chmod -R a+rX "$CASE/root/pi-antigravity"
+run_gate
+[[ $RUN_STATUS -eq 0 ]] || fail 'a hoisted provider tree with a metadata-only store must pass'
+assert_contains "$RUN_OUTPUT" 'installed'
+
+new_case antigravity-print-marker-then-nonzero
+FAKE_ANTIGRAVITY_STATUS=5
+run_gate
+require_failure 'the antigravity probe exited 5; refusing to scan its output'
+assert_absent "$CASE/root/install-status/pi-antigravity"
+[[ "$(cat "$CASE/root/install-status/pi-claude-bridge")" == installed ]] ||
+    fail 'a provider failure must not erase the bridge record'
+
+new_case antigravity-empty-catalog
+FAKE_ANTIGRAVITY_LINE='AGENT-VM-ANTIGRAVITY-REGISTERED models=0'
+run_gate
+require_failure 'pi-antigravity registered but its model catalog is empty'
+
+new_case antigravity-missing-provider
+FAKE_ANTIGRAVITY_LINE='AGENT-VM-ANTIGRAVITY-MISSING'
+run_gate
+require_failure 'pi-antigravity did not report a model count'
+
+new_case antigravity-malformed-notification
+FAKE_ANTIGRAVITY_LINE='{"message": "AGENT-VM-ANTIGRAVITY-REGISTERED models=8", "truncated":'
+run_gate
+require_failure 'malformed registration line'
+
+# The two extension slots are independent: opting out of one leaves the other's
+# gates and record untouched.
+new_case antigravity-opted-out
+SKIP_ANTIGRAVITY=1
+run_gate
+[[ $RUN_STATUS -eq 0 ]] || fail "opting out of the provider failed the gate: $RUN_ERROR"
+assert_absent "$CASE/root/install-status/pi-antigravity"
+[[ "$(cat "$CASE/root/install-status/pi-claude-bridge")" == installed ]] ||
+    fail 'the bridge record was withheld when only the provider was opted out'
+
+new_case bridge-opted-out
+SKIP_BRIDGE=1
+run_gate
+[[ $RUN_STATUS -eq 0 ]] || fail "opting out of the bridge failed the gate: $RUN_ERROR"
+assert_absent "$CASE/root/install-status/pi-claude-bridge"
+[[ "$(cat "$CASE/root/install-status/pi-antigravity")" == installed ]] ||
+    fail 'the provider record was withheld when only the bridge was opted out'
 
 echo 'pi-verify contract tests passed'

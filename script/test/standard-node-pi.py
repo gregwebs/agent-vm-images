@@ -50,10 +50,13 @@ PI_BUDGET_KIB = 3145728
 RESERVE_KIB = 524288
 PI_PREFIX = '/opt/agent-vm/pi'
 BRIDGE_PREFIX = '/opt/agent-vm/pi-packages'
+ANTIGRAVITY_PREFIX = '/opt/agent-vm/pi-antigravity'
 # The bridge's loadable entry as the image registers it: `pi.sh` hands Pi
 # `--extension <this path>` and a jiti-loaded TypeScript payload has no `main` to
 # resolve instead (install-pi-packages.sh requires the same file).
 BRIDGE_ENTRY = BRIDGE_PREFIX + '/node_modules/pi-claude-bridge/src/index.ts'
+# The provider's loadable entry as the image registers it (`pi.sh`).
+PROVIDER_ENTRY = ANTIGRAVITY_PREFIX + '/node_modules/pi-antigravity/src/index.ts'
 WRAPPER = '/usr/local/bin/pi'
 EXACT = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
                    r'(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
@@ -99,6 +102,14 @@ MODERN_ABSENT = ('@earendil-works/chord', 'esbuild')
 # -- so keying this table by the Pi version only would let a bridge bump inherit a
 # number nobody measured.
 BRIDGE_MODELS = {('1.4.0', '0.8.0'): 14, ('0.87.0', '0.8.0'): 11}
+# The provider's registered catalog, measured on the reviewed 0.11.0 payload
+# beside each reviewed Pi selection: 8 beside 1.4.0 and 9 beside 0.87.0. The
+# count follows the selected Pi SDK's own model catalog, exactly as the bridge's
+# does (14 versus 11), so it is a per-selection measurement and never a constant.
+# It is an independent expectation authored from those measurements, never
+# derived from the installed tree; a different number is a review stop
+# (ADR 0016).
+PROVIDER_MODELS = {('1.4.0', '0.11.0'): 8, ('0.87.0', '0.11.0'): 9}
 # The three reviewed representation normalisations of the authenticated 0.87.0
 # shrinkwrap -> pnpm import conversion (ADR 0011, pending operator acceptance).
 # They are named explicitly so any *new* delta fails instead of averaging in.
@@ -139,7 +150,8 @@ def arguments(args):
 def inputs_for(consumer):
     """The consumer's committed four reviewed inputs, as one unit."""
     directory = {'pi': ROOT / 'images/tools/pi',
-                 'bridge': ROOT / 'images/tools/pi/bridge'}[consumer]
+                 'bridge': ROOT / 'images/tools/pi/bridge',
+                 'antigravity': ROOT / 'images/tools/pi/antigravity'}[consumer]
     missing = [name for name in INPUTS if not (directory / name).is_file()]
     if missing:
         raise base.Failure(f'the committed {consumer} four inputs are incomplete: '
@@ -476,9 +488,10 @@ def family_from_lock(lock, version):
 
 
 class Invocation(base.Invocation):
-    def __init__(self, image, requested, pi_version, bridge_version):
+    def __init__(self, image, requested, pi_version, bridge_version, antigravity_version=None):
         super().__init__(image, requested)
         self.pi_version, self.bridge_version = pi_version, bridge_version
+        self.antigravity_version = antigravity_version
         self.source = ''
         self.deadline = 190
         self.contract = None
@@ -529,9 +542,11 @@ class Invocation(base.Invocation):
         self.source = self.command('git', '-C', str(ROOT), 'rev-parse', 'HEAD').strip()
         files = [*(self.pi_inputs / name for name in INPUTS),
                  *(self.bridge_inputs / name for name in INPUTS),
+                 *(self.antigravity_inputs / name for name in INPUTS),
                  *(ROOT / 'images/pnpm').rglob('*'),
                  *(ROOT / 'images/tools/pi').glob('*'),
                  *(ROOT / 'images/tools/pi/bridge').glob('*'),
+                 *(ROOT / 'images/tools/pi/antigravity').glob('*'),
                  *(ROOT / 'images/tools/pi/extensions').glob('*'),
                  *(ROOT / 'images/tools/pi/dispatch').glob('*'),
                  ROOT / 'images/tools/pnpm-project.py', ROOT / 'images/tools/pnpm-host-manager.py',
@@ -545,12 +560,14 @@ class Invocation(base.Invocation):
                     base.hashlib.sha256(file.read_bytes()).hexdigest()
         self.evidence('source.json', {'source': self.source, 'pi': self.pi_version,
                                     'bridge': self.bridge_version,
+                                    'antigravity': self.antigravity_version,
                                     'inputs': {consumer: {'path': str(directory),
                                                           'files': {name: base.hashlib.sha256(
                                                               (directory / name).read_bytes()).hexdigest()
                                                                     for name in INPUTS}}
                                                for consumer, directory in
-                                               (('pi', self.pi_inputs), ('bridge', self.bridge_inputs))},
+                                               (('pi', self.pi_inputs), ('bridge', self.bridge_inputs),
+                                                ('antigravity', self.antigravity_inputs))},
                                     'files': hashes,
                                     'dirty': self.command('git', '-C', str(ROOT), 'status', '--short')})
         context = self.docker('context', 'show').strip()
@@ -574,13 +591,17 @@ class Invocation(base.Invocation):
                   'image, so the run is diagnostic and never a product certification', flush=True)
 
     def execute(self):
-        self.pi_inputs, self.bridge_inputs = inputs_for('pi'), inputs_for('bridge')
+        self.pi_inputs, self.bridge_inputs, self.antigravity_inputs = (
+            inputs_for('pi'), inputs_for('bridge'), inputs_for('antigravity'))
         self.pi_version = self.pi_version or json.loads(
             (self.pi_inputs / 'package.json').read_text())['dependencies'][PI_ROOT]
         self.bridge_version = self.bridge_version or json.loads(
             (self.bridge_inputs / 'package.json').read_text()
         )['dependencies']['pi-claude-bridge']
-        for name in (self.pi_version, self.bridge_version):
+        self.antigravity_version = self.antigravity_version or json.loads(
+            (self.antigravity_inputs / 'package.json').read_text()
+        )['dependencies']['pi-antigravity']
+        for name in (self.pi_version, self.bridge_version, self.antigravity_version):
             if not EXACT.fullmatch(name):
                 raise base.Failure('invalid input selection: ' + name)
         self.provenance(None)
@@ -596,7 +617,8 @@ class Invocation(base.Invocation):
                            self.image, 'sleep', 'infinity')
         self.docker('start', main)
         initialize = self.json_line(self.action(main, 'initialize', self.token, self.source,
-                                                self.pi_version, self.bridge_version), 'initialize')
+                                                self.pi_version, self.bridge_version,
+                                                self.antigravity_version), 'initialize')
         if initialize.get('initialize') != self.token or not initialize.get('base'):
             raise base.Failure('container readiness/identity evidence invalid')
         self.selection = self.evidence('base.json', initialize)
@@ -654,6 +676,13 @@ class Invocation(base.Invocation):
         bridge = self.action(main, 'install-bridge', self.bridge_version, seconds=600)
         if f'installed pi-claude-bridge {self.bridge_version} from the reviewed inputs' not in bridge:
             raise base.Failure('install-pi-packages.sh did not report the expected installed bridge')
+        for name in INPUTS:
+            self.docker('cp', str(self.antigravity_inputs / name),
+                        main + ':' + ANTIGRAVITY_PREFIX + '/' + name)
+        provider = self.action(main, 'install-antigravity', self.antigravity_version, seconds=600)
+        if f'installed pi-antigravity {self.antigravity_version} from the reviewed inputs' not in provider:
+            raise base.Failure('install-pi-antigravity.sh did not report the expected installed '
+                               'provider')
         runtime = self.json_line(self.action(main, 'runtime', seconds=420), 'runtime')['runtime']
         self.evidence('runtime.json', runtime)
         shape = sorted(runtime['shape'])
@@ -679,8 +708,9 @@ class Invocation(base.Invocation):
         self.evidence('verify.json', verified)
         if verified['status'] != 0:
             raise base.Failure('verify-pi.sh failed; see the verification log')
-        if (verified.get('pi'), verified.get('bridge')) != ('installed', 'installed'):
-            raise base.Failure('the verifier did not publish both independent health records: '
+        if (verified.get('pi'), verified.get('bridge'), verified.get('antigravity')) != \
+                ('installed', 'installed', 'installed'):
+            raise base.Failure('the verifier did not publish all three independent health records: '
                                + json.dumps(verified))
         registration = self.json_line(self.action(main, 'registration', seconds=300),
                                       'registration')['registration']
@@ -689,6 +719,27 @@ class Invocation(base.Invocation):
             raise base.Failure('the bridge registration probe exited ' + str(registration['status']))
         if len(registration['registered']) != 1 or registration['missing'] or registration['malformed']:
             raise base.Failure('registration is not one unambiguous positive: ' + json.dumps(registration))
+        provider_registration = self.json_line(
+            self.action(main, 'registration', 'antigravity', seconds=300), 'registration')['registration']
+        self.evidence('registration-antigravity.json', provider_registration)
+        if provider_registration['status'] != 0:
+            raise base.Failure('the provider registration probe exited '
+                               + str(provider_registration['status']))
+        if (len(provider_registration['registered']) != 1 or provider_registration['missing']
+                or provider_registration['malformed']):
+            raise base.Failure('provider registration is not one unambiguous positive: '
+                               + json.dumps(provider_registration))
+        provider_pair = (self.pi_version, self.antigravity_version)
+        provider_expected = PROVIDER_MODELS.get(provider_pair)
+        if provider_expected is None:
+            raise base.Failure('there is no measured provider catalog for Pi ' + self.pi_version
+                               + ' with provider ' + self.antigravity_version)
+        if int(provider_registration['registered'][0]) != provider_expected:
+            raise base.Failure(f'the provider registered '
+                               f'{provider_registration["registered"][0]} models; the measured '
+                               f'catalog for Pi {self.pi_version} with provider '
+                               f'{self.antigravity_version} is {provider_expected} -- stop for '
+                               'review instead of accepting a different number')
         pair = (self.pi_version, self.bridge_version)
         expected_models = BRIDGE_MODELS.get(pair)
         if expected_models is None:
@@ -807,28 +858,41 @@ class Invocation(base.Invocation):
         return json.loads(destination.read_text())
 
     def records_leg(self, main):
-        """The two health records stay independent under a real bridge failure."""
-        self.action(main, 'break-bridge', seconds=120)
-        try:
-            for slot in ('pi', 'pi-claude-bridge'):
-                self.docker('exec', main, 'sh', '-c', f'printf "pending\\n" > /opt/agent-vm/install-status/{slot}')
-            failed = self.json_line(self.action(main, 'verify', seconds=600), 'verify')['verify']
-            if failed['status'] == 0:
-                raise base.Failure('the verifier accepted a bridge whose source is missing')
-            if failed.get('pi') != 'installed':
-                raise base.Failure('a bridge failure cost the independently installed Pi record: '
-                                   + json.dumps(failed))
-            if failed.get('bridge') == 'installed':
-                raise base.Failure('a failed bridge gate still published its own record')
-            self.evidence('verify-bridge-failure.json', failed)
-        finally:
-            self.action(main, 'repair-bridge', seconds=120)
-        for slot in ('pi', 'pi-claude-bridge'):
-            self.docker('exec', main, 'sh', '-c', f'printf "pending\\n" > /opt/agent-vm/install-status/{slot}')
+        """Three health records stay independent under a real extension failure."""
+        slots = ('pi', 'pi-claude-bridge', 'pi-antigravity')
+        for broken, broken_slot, evidence in (
+                ('bridge', 'bridge', 'verify-bridge-failure.json'),
+                ('provider', 'antigravity', 'verify-antigravity-failure.json')):
+            self.action(main, 'break-' + broken, seconds=120)
+            try:
+                for slot in slots:
+                    self.docker('exec', main, 'sh', '-c',
+                                f'printf "pending\\n" > /opt/agent-vm/install-status/{slot}')
+                failed = self.json_line(self.action(main, 'verify', seconds=600), 'verify')['verify']
+                if failed['status'] == 0:
+                    raise base.Failure(f'the verifier accepted a {broken} whose source is missing')
+                if failed.get('pi') != 'installed':
+                    raise base.Failure(f'a {broken} failure cost the independently installed Pi '
+                                       'record: ' + json.dumps(failed))
+                if failed.get(broken_slot) == 'installed':
+                    raise base.Failure(f'a failed {broken} gate still published its own record')
+                # The other extension slot is an independent record: one broken
+                # payload withholds only its own.
+                other = 'antigravity' if broken_slot == 'bridge' else 'bridge'
+                if failed.get(other) != 'installed':
+                    raise base.Failure(f'a {broken} failure withheld the independent {other} '
+                                       'record: ' + json.dumps(failed))
+                self.evidence(evidence, failed)
+            finally:
+                self.action(main, 'repair-' + broken, seconds=120)
+        for slot in slots:
+            self.docker('exec', main, 'sh', '-c',
+                        f'printf "pending\\n" > /opt/agent-vm/install-status/{slot}')
         repaired = self.json_line(self.action(main, 'verify', seconds=600), 'verify')['verify']
         self.evidence('verify-repaired.json', repaired)
-        if (repaired['status'], repaired.get('pi'), repaired.get('bridge')) != (0, 'installed', 'installed'):
-            raise base.Failure('the repaired bridge did not restore both records')
+        if (repaired['status'], repaired.get('pi'), repaired.get('bridge'),
+                repaired.get('antigravity')) != (0, 'installed', 'installed', 'installed'):
+            raise base.Failure('the repaired extensions did not restore all three records')
 
     def identity_leg(self, main):
         """Extracted layout oracle, then offline capability-zero numeric pairs."""
@@ -838,6 +902,8 @@ class Invocation(base.Invocation):
                 (image_root / directory).mkdir(parents=True)
             self.docker('cp', main + ':' + PI_PREFIX, str(image_root / 'opt/agent-vm/pi'))
             self.docker('cp', main + ':' + BRIDGE_PREFIX, str(image_root / 'opt/agent-vm/pi-packages'))
+            self.docker('cp', main + ':' + ANTIGRAVITY_PREFIX,
+                        str(image_root / 'opt/agent-vm/pi-antigravity'))
             self.docker('cp', main + ':' + WRAPPER, str(image_root / 'usr/local/bin/pi'))
             self.command('python3', str(ROOT / 'script/test/standard-node-layout.py'),
                          '--consumer', 'pi', '--root', str(image_root),
@@ -845,6 +911,10 @@ class Invocation(base.Invocation):
             self.command('python3', str(ROOT / 'script/test/standard-node-layout.py'),
                          '--consumer', 'bridge', '--root', str(image_root),
                          '--platform', self.platform, '--expect-version', self.bridge_version)
+            self.command('python3', str(ROOT / 'script/test/standard-node-layout.py'),
+                         '--consumer', 'antigravity', '--root', str(image_root),
+                         '--platform', self.platform,
+                         '--expect-version', self.antigravity_version)
         finally:
             shutil.rmtree(image_root, ignore_errors=True)
         info = json.loads(self.docker('inspect', '--size', main))[0]
@@ -863,11 +933,13 @@ class Invocation(base.Invocation):
                                  '--ambient-caps=-all', '--reuid', str(uid), '--regid', str(gid),
                                  '--clear-groups', '--no-new-privs',
                                  'python3', '-B', BODY, 'probe', self.token, self.source,
-                                 self.pi_version, self.bridge_version, str(uid), str(gid))
+                                 self.pi_version, self.bridge_version, self.antigravity_version,
+                                 str(uid), str(gid))
             record = self.json_line(output, 'piProbe')
             if record.get('piProbe') != self.token or record.get('source') != self.source:
                 raise base.Failure('stale/duplicate/invalid Pi runtime evidence')
-            if (record.get('pi'), record.get('bridge')) != (self.pi_version, self.bridge_version):
+            if (record.get('pi'), record.get('bridge'), record.get('antigravity')) != (
+                    self.pi_version, self.bridge_version, self.antigravity_version):
                 raise base.Failure('runtime versions do not bind to the invocation selection')
             if record.get('pair') in seen:
                 raise base.Failure('duplicate numeric pair evidence')

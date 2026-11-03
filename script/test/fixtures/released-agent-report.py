@@ -3,7 +3,8 @@
 
 TMP is the probe's private scratch directory holding `TOOL.out`/`TOOL.err`; the
 ten selections follow in codex, opencode, claude, copilot, dsh, pnpm, pi, agy
-order (bridge and opencode-claude are checked by their own helpers). The
+order (bridge, the Antigravity provider and opencode-claude are checked by their
+own helpers). The
 released probe requires a final newline on every report, which is stricter than
 the finished-image audit, so these helpers stay separate.
 """
@@ -32,5 +33,5 @@ for tool in (*expected, 'copilot'):
 # diagnostic beside a correct version, so the released probe does too.
 assert (root / 'agy.err').read_bytes() == b'', 'agy stderr'
 for tool in ('codex', 'opencode', 'claude', 'copilot', 'dsh', 'pi', 'agy',
-             'pi-claude-bridge', 'opencode-claude'):
+             'pi-claude-bridge', 'pi-antigravity', 'opencode-claude'):
     assert Path('/opt/agent-vm/install-status', tool).read_bytes() == b'installed\n', tool + ' status'

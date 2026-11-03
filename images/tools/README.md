@@ -31,12 +31,13 @@ Node 22, base-owned pnpm, fetch/diagnostic facilities, explicit optional trust a
 | pi | AGENT_VERSION_PI | manifest 1.4.0 / SEMVER |
 | opencode-claude | AGENT_VERSION_OPENCODE_CLAUDE | plugin manifest 1.4.1 / SEMVER |
 | pi-claude-bridge | AGENT_VERSION_PI_CLAUDE_BRIDGE | bridge manifest 0.8.0 / SEMVER |
+| pi-antigravity | AGENT_VERSION_PI_ANTIGRAVITY | provider manifest 0.11.0 / SEMVER |
 
 Single-slot defaults are exact nonempty ARGs; empty values, dist-tags, ranges,
 URLs and malformed versions fail before network access. Locked slots have empty
 ARGs intentionally. Empty/equal slots reuse committed manifest/lock/configuration bytes during preparation without
 registry resolution; literal LABEL fallbacks mirror manifests because Docker
-cannot execute jq in LABEL. These ten `org.agent-vm.version.*` labels record
+cannot execute jq in LABEL. These eleven `org.agent-vm.version.*` labels record
 **selection, not health**. There is no build-time latest query.
 
 An explicit different exact locked selection prepares a build-local lock; it
@@ -45,15 +46,16 @@ archive and peer-context snapshot records stay frozen, while records inside the
 changed root's own closure may be replaced and nothing outside it may appear (see
 [ADR 0003](../../docs/adr/0003-dsh-graph-freeze.md)). An incompatible pair fails
 with the offending records named rather than silently refreshing the empty slot.
-Pi and bridge are
+Pi and its two extension packages are
 reviewed pnpm projects too: a changed Pi is prepared from its **authenticated
 selected archive** (shrinkwrap conversion when that archive carries one, an
 ordinary exact resolution when it does not), and the graph is compared before
-anything is pinned; a changed bridge starts from a fresh manifest and workspace.
-New transitives may be registry-dependent; a reviewed committed bump is the
-reproducible default. Pi and bridge are separate projects, so changing one does
-not rewrite the other. See `images/tools/pi/README.md` and
-[ADR 0011](../../docs/adr/0011-pi-selected-shrinkwrap.md).
+anything is pinned; a changed bridge or Antigravity provider starts from a fresh
+manifest and workspace. New transitives may be registry-dependent; a reviewed
+committed bump is the reproducible default. The three are separate projects, so
+changing one does not rewrite the others. See `images/tools/pi/README.md`,
+[ADR 0011](../../docs/adr/0011-pi-selected-shrinkwrap.md) and
+[ADR 0016](../../docs/adr/0016-pi-antigravity-provider.md).
 
 ## Failure and certification
 
@@ -70,18 +72,20 @@ invalid records now that `run-npm.sh` is deleted. Unknown errors, HTTP failures,
 checksum/sha512 mismatch, `EINTEGRITY`, native exit 75, timeout and every pnpm
 failure are hard. Native subprocesses do not receive the receipt. Pi's own
 independent archive download keeps the receipt-proved curl soft branch (soft 1
-or 0); dsh never softens a partial pnpm tree, the bridge has no absence producer
-at all, and Copilot remains an npm install until PR 4 of #42.
+or 0); dsh never softens a partial pnpm tree, the bridge and the Antigravity
+provider have no absence producer at all, and Copilot remains an npm install
+until PR 4 of #42.
 
 **Maintained base and standard builds disable soft failure explicitly.** No
 soft-fail ARG, skip flag or successful partial product exists. Each standard
 block requires its bounded exact report, access audit and `installed` record.
-Pi records `pi` and `pi-claude-bridge`; dsh records both dsh/pnpm health in `dsh`.
-That is nine agent records for ten selections, including `opencode-claude`.
-Bridge or plugin absence is not success.
+Pi records `pi`, `pi-claude-bridge` and `pi-antigravity`; dsh records both
+dsh/pnpm health in `dsh`. That is ten agent records for eleven selections,
+including `opencode-claude`. Bridge, provider or plugin absence is not success.
 
 The mandatory build-only final gate checks strict `installed\n` records before
-and after re-running all eight agent verifiers (excluding separate pnpm verification calls). It compares the first lexically existing
+and after re-running all eight agent verifiers (excluding separate pnpm
+verification calls). It compares the first lexically existing
 PATH candidate for dsh, Codex, OpenCode, Claude, Pi and agy to their fixed-path verified
 files, before and after verification. dsh's target is the installed
 `node_modules/@deepseek-ai/dsh/lib/bin.js` the image links directly, so a

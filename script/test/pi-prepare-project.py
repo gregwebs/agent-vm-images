@@ -155,6 +155,12 @@ fi
 FAKE_PNPM = r'''#!/bin/sh
 log=$(dirname "$0")/state/manager.jsonl
 printf '%s\n' "$*" >>"$log"
+# The resolution project's own location: pnpm records it in the store with a
+# link, so a project outside the invocation's work parent makes that link an
+# escape the scratch cleanup refuses.
+case " $* " in
+    *" --lockfile-only "*) printf '%s\n' "$PWD" >"$(dirname "$0")/state/resolve-cwd" ;;
+esac
 case " $* " in
     *" --version "*)
         printf '11.11.0\n'
@@ -488,6 +494,31 @@ class DriverTests(unittest.TestCase):
         result = self.run_driver('--consumer', 'pi', 'prepare', str(self.prefix), '1.4.0')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.manager_calls(), [])
+
+    def test_the_resolution_project_lives_beside_the_store(self):
+        """The resolve project is in the invocation's work parent, not the stage.
+
+        pnpm records the project it resolved in `store/v11/projects/` with a
+        relative link. A resolve directory inside the 0700 candidate stage (a
+        system temporary directory) makes that legitimate link point outside the
+        work parent, which the scratch cleanup refuses; the refresh then fails
+        after the manager has already worked. The bootstrap and adoption routes
+        always resolved into the work parent, so this is the ordinary route
+        matching them.
+        """
+        result = self.run_driver('--consumer', 'pi', 'prepare', str(self.prefix), '1.4.1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        resolve = Path((self.state / 'resolve-cwd').read_text().strip())
+        self.assertEqual(resolve.parent.parent, self.root,
+                         'the resolution project must sit in the invocation work parent')
+        self.assertTrue(resolve.parent.name.startswith('pi-'), resolve.parent.name)
+        self.assertNotIn('pnpm-project-', str(resolve),
+                         'the resolution project must not be the candidate stage')
+        candidate = (self.state / 'candidate-inventory.json')
+        self.assertTrue(candidate.exists())
+        # The stage still holds the candidate inputs the helper validated.
+        self.assertEqual(json.loads(candidate.read_text()),
+                         ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml'])
 
     def test_change_publishes_only_after_pin_and_frozen_install(self):
         result = self.run_driver('--consumer', 'pi', 'prepare', str(self.prefix), '1.4.1')

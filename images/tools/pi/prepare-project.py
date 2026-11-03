@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""The one owning preparation process for the Pi and Pi-bridge pnpm projects.
+"""The one owning preparation process for the image-owned Pi pnpm projects.
 
-Both migrated projects share one routine: guard the environment, mint a private
-`pnpm-project-*` candidate stage, get the manager argv from the shared
-capabilities, generate a lock under the reviewed workspace, ask the Go helper to
-validate the candidate against its reviewed predecessor (or, for a first
-adoption, against nothing), pin only after the comparison is accepted, run a
-cold frozen validation, and publish exactly four inputs.
+The Pi, bridge and Antigravity projects share one routine: guard the
+environment, mint a private `pnpm-project-*` candidate stage, get the manager
+argv from the shared capabilities, generate a lock under the reviewed workspace,
+ask the Go helper to validate the candidate against its reviewed predecessor (or,
+for a first adoption, against nothing), pin only after the comparison is
+accepted, run a cold frozen validation, and publish exactly four inputs.
 
 Nothing here parses YAML, decides graph policy or classifies manager transport:
 those are the Go helper's and the shell installers' jobs. This module owns only
 *sequencing*, so no caller can reorder "compare, then pin" or skip the frozen
 validation by invoking a lower-level verb.
 
-Two entry points exist:
+Three entry points exist:
 
   prepare TARGET VERSION [--refresh-lock]
       A project that already has its four reviewed inputs. `pnpm-lock-candidate
@@ -42,6 +42,15 @@ Two entry points exist:
       verb, imports the fixed baseline npm lock read-only from Git, and writes an
       external proposal; it never mutates the source checkout and is not
       reachable from the ordinary preparation path.
+
+  bootstrap PROPOSAL VERSION
+      The maintainer-only first creation of a project that has no npm baseline
+      and no committed lock (the Antigravity provider). It stages the reviewed
+      manifest and workspace from the closed table below, resolves the exact
+      selection fresh, and validates the candidate with the same
+      no-predecessor `adoption-graph` verb `adopt` uses before pinning, cold
+      frozen validation and an external proposal. It refuses a project that
+      already has a lock: a published project is refreshed by `prepare`.
 
 The candidate stage is a fixed shape: `mkdtemp` of `pnpm-project-*` under the
 platform's canonical system temporary directory, holding a 0700 `candidate`
@@ -118,6 +127,27 @@ PROJECTS = {
             'preferSymlinkedExecutables: true\n'
             'extendNodePath: false\n'
             "trustPolicyExclude: ['undici-types@6.21.0']\n"),
+    },
+    'antigravity': {
+        'root': 'pi-antigravity',
+        'name': 'agent-vm-guest-pi-antigravity',
+        'license': 'MIT',
+        'description': ('Pinned Pi provider package for the agent-vm guest image. The base '
+                        'pnpm installs the reviewed frozen graph with scripts disabled into '
+                        '/opt/agent-vm/pi-antigravity; the wrapper loads pi-antigravity from it '
+                        'as a third --extension. Pi supplies the peer declarations, so nothing '
+                        'from its own tree is installed here.'),
+        'workspace': (
+            'packages: [.]\n'
+            'autoInstallPeers: false\n'
+            'strictPeerDependencies: false\n'
+            'nodeLinker: hoisted\n'
+            'enableGlobalVirtualStore: false\n'
+            'pmOnFail: error\n'
+            'sideEffectsCache: false\n'
+            'allowBuilds: {}\n'
+            'extendNodePath: false\n'
+            "trustPolicyExclude: ['pi-antigravity@0.11.0']\n"),
     },
     'bridge': {
         'root': 'pi-claude-bridge',
@@ -824,7 +854,11 @@ def baseline_inputs(consumer, reference):
     local lock for the reviewed baseline.
     """
     root = project.checkout_root()
-    sources = {'pi': 'images/tools/pi', 'bridge': 'images/tools/pi/bridge'}[consumer]
+    sources = {'pi': 'images/tools/pi', 'bridge': 'images/tools/pi/bridge',
+               'antigravity': 'images/tools/pi/antigravity'}.get(consumer)
+    if sources is None:
+        # A project created by `bootstrap` never had an npm baseline to adopt.
+        raise PreparationError('consumer ' + consumer + ' has no npm baseline to adopt')
     resolved = subprocess.run(['git', '-C', str(root), 'rev-parse', '--verify',
                                reference + '^{commit}'], capture_output=True, text=True)
     if resolved.returncode != 0:
@@ -981,8 +1015,8 @@ def prepare(options):
         manager = project.manager_argv(capability)
         manager_version(manager, environment, work)
         # The route is decided by the authenticated selection's own content. Only
-        # Pi publishes a dependency shrinkwrap, so the bridge keeps its ordinary
-        # path and never pays for a download it would not use.
+        # Pi publishes a dependency shrinkwrap, so the extensions keep their
+        # ordinary path and never pay for a download they would not use.
         selected = None
         route = ROUTE_RESOLVE
         if consumer == 'pi':
@@ -1001,8 +1035,8 @@ def prepare(options):
             'the selected selection carries no dependency shrinkwrap: it is resolved '
             'under the reviewed workspace and policy as an ordinary all-hashed graph'
             if consumer == 'pi' else
-            'the bridge publishes no dependency shrinkwrap; its manifest is resolved '
-            'under the reviewed workspace and policy')
+            'the extension publishes no dependency shrinkwrap; its manifest is '
+            'resolved under the reviewed workspace and policy')
         stage = mint_stage(consumer)
         keep = False
         try:
@@ -1026,13 +1060,19 @@ def prepare(options):
                     'accepted': delta.get('accepted'), 'counts': delta.get('counts'),
                     'reported': delta.get('reported'), 'supplements': delta.get('supplements')}
             else:
-                resolve = stage.scratch / 'resolve'
+                # The resolution project lives in the invocation's own work
+                # directory, beside the store, exactly like the bootstrap route:
+                # pnpm records the project in `store/v11/projects/` with a link,
+                # and the scratch cleanup refuses a link whose target leaves the
+                # work parent. A candidate-stage resolve directory would make that
+                # legitimate link an escape and fail the whole preparation.
+                resolve = work / 'resolve'
                 resolve.mkdir(mode=0o700)
                 write_private(resolve / 'package.json', manifest_bytes, 0o644)
                 write_private(resolve / 'pnpm-workspace.yaml', workspace_bytes, 0o644)
-                if consumer == 'bridge' and options.refresh_lock:
-                    # A bridge refresh is incremental maintenance: the reviewed lock
-                    # is the seed, so pnpm updates the existing graph instead of
+                if consumer != 'pi' and options.refresh_lock:
+                    # An extension refresh is incremental maintenance: the reviewed
+                    # lock is the seed, so pnpm updates the existing graph instead of
                     # resolving it from nothing. An ordinary changed build keeps the
                     # fresh resolution the reviewed route describes.
                     seeded = prefix / 'pnpm-lock.yaml'
@@ -1207,6 +1247,105 @@ def adopt(options):
     return 0
 
 
+def bootstrap(options):
+    """Create a project's four reviewed inputs from the closed table alone.
+
+    There is no baseline and no predecessor: the reviewed manifest and workspace
+    are generated here, the exact selection is resolved fresh under the same
+    policy every other route uses, and the candidate is validated with the
+    no-predecessor `adoption-graph` verb. A project that already carries a lock
+    is refused -- that project is maintained by `prepare`, which compares every
+    change against its pinned predecessor.
+    """
+    consumer = options.consumer
+    facts = PROJECTS[consumer]
+    if 'name' not in facts:
+        raise PreparationError('consumer ' + consumer + ' is created by adopt, not bootstrap')
+    version = exact_version(options.version)
+    proposal = Path(options.proposal)
+    root = project.authorized_root()
+    project.below(proposal, root)
+    if os.path.lexists(proposal) and not proposal.is_dir():
+        raise PreparationError('proposal destination must be a directory')
+    for name in ('package.json', 'pnpm-lock.yaml', PIN_FILE):
+        if os.path.lexists(proposal / name):
+            raise PreparationError(f'{proposal / name} already exists: a created project is '
+                                   'prepared, never bootstrapped again')
+    if not proposal.is_dir():
+        proposal.mkdir(mode=0o700)
+
+    manifest = json.dumps({
+        'name': facts['name'],
+        'version': '0.0.0',
+        'private': True,
+        'description': facts['description'],
+        'license': facts['license'],
+        'packageManager': 'pnpm@11.11.0',
+        'dependencies': {facts['root']: version},
+    }, indent=2) + '\n'
+
+    work = bootstrap_stage(consumer)
+    environment = child_environment(work)
+    store = work / 'store'
+    keep = False
+    try:
+        # A first creation has no reviewed inputs, so the manager comes from the
+        # bootstrap stage capability instead of a mutation capability.
+        capability = project.authorize_stage(work, consumer=consumer)
+        project.guard_environment([], consumer=consumer)
+        contract = project.authorize_contract([], consumer=consumer)
+        manager = project.stage_manager_argv(capability)
+        manager_version(manager, environment, work)
+        stage = mint_stage(consumer)
+        try:
+            resolve = work / 'resolve'
+            resolve.mkdir(mode=0o700)
+            write_private(resolve / 'package.json', manifest.encode(), 0o600)
+            write_private(resolve / 'pnpm-workspace.yaml', facts['workspace'].encode(), 0o600)
+            run_pnpm(contract, install_argv(manager, store, frozen=False, lockfile_only=True),
+                     cwd=resolve, environment=environment, scratch=work, label='resolve')
+            if (resolve / 'node_modules').exists():
+                raise PreparationError('lockfile-only resolution created node_modules')
+            stage_candidate(stage, {name: resolve / name for name in CANDIDATE_INPUTS})
+            report = candidate_report(contract, consumer, stage, environment,
+                                      verb='adoption-graph')
+            staged = work / 'prefix'
+            staged.mkdir(mode=0o700)
+            for name in CANDIDATE_INPUTS:
+                shutil.copyfile(stage.candidate / name, staged / name)
+            write_pins(contract, consumer, staged, environment, work)
+            nodes = frozen_validation(contract, staged, manager, store, environment, work)
+            contract_call(contract, ['pnpm-lock', 'check', consumer, str(staged)],
+                          cwd=staged, environment=environment, scratch=work, label='recheck')
+            holder = Path(tempfile.mkdtemp(prefix=consumer + '-proposal-stage.',
+                                           dir=str(project.authorized_root())))
+            os.chmod(holder, 0o700)
+            try:
+                for name in (*CANDIDATE_INPUTS, PIN_FILE):
+                    shutil.copyfile(staged / name, holder / name)
+                publish_four(holder, proposal, consumer)
+            finally:
+                shutil.rmtree(holder, ignore_errors=True)
+            if options.keep_payload:
+                keep_payload(nodes, Path(options.keep_payload), project.authorized_root())
+        except project.PublicationFailure as error:
+            keep = error.status == 3
+            raise
+        except BaseException:
+            keep = True
+            raise
+        finally:
+            discard_stage(stage, keep=keep)
+    finally:
+        if not keep:
+            shutil.rmtree(work, ignore_errors=True)
+    emit({'mode': 'bootstrap', 'consumer': consumer, 'version': version,
+          'proposal': str(proposal),
+          'digests': {name: sha256(proposal / name) for name in (*CANDIDATE_INPUTS, PIN_FILE)},
+          'candidateDigests': report['inputDigests']})
+    return 0
+
+
 def emit(payload):
     json.dump(payload, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write('\n')
@@ -1225,8 +1364,12 @@ def main():
     first.add_argument('proposal')
     first.add_argument('--baseline', default=BASELINE)
     first.add_argument('--keep-payload')
+    created = sub.add_parser('bootstrap')
+    created.add_argument('proposal')
+    created.add_argument('version')
+    created.add_argument('--keep-payload')
     options = parser.parse_args()
-    handlers = {'prepare': prepare, 'adopt': adopt}
+    handlers = {'prepare': prepare, 'adopt': adopt, 'bootstrap': bootstrap}
     try:
         return handlers[options.verb](options)
     except PreparationError as error:

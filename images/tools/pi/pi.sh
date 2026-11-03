@@ -7,11 +7,11 @@
 # credential warning is loaded for every normal Pi invocation, including a bare
 # `pi` typed into `agent-vm shell`.
 #
-# It makes four decisions and then execs:
+# It makes five decisions and then execs:
 #   1. the Pi env enforcement (PI_SKIP_VERSION_CHECK);
 #   2. subcommand dispatch (forwarded verbatim);
-#   3. whether the optional image-owned bridge extension is loadable and not
-#      opted out;
+#   3. whether the image-owned Pi extension packages are loadable and not opted
+#      out (the Claude bridge and the Antigravity provider);
 #   4. whether the image-owned Codex extension is loadable (ADR-0044);
 # plus the mandatory extension below.
 #
@@ -137,7 +137,18 @@ BRIDGE_EXTENSION="${AGENT_VM_PI_BRIDGE_EXTENSION:-/opt/agent-vm/pi-packages/node
 # https://github.com/gregwebs/agent-vm/blob/7438927/docs/adr/0044-pi-reaches-host-codex-through-an-image-owned-provider.md
 CODEX_EXTENSION="${AGENT_VM_PI_CODEX_EXTENSION:-/opt/agent-vm/pi-extensions/agent-vm-codex.js}"
 
-# POSIX sh has no arrays; reverse prepending preserves mandatory/bridge/codex order.
+# The image-owned Antigravity provider, an image-owned Pi extension package like
+# the bridge (ADR-0016). It is existence-checked for the same reason: Pi treats an
+# --extension it cannot load as fatal before session startup, so an absent
+# provider must cost the provider, not pi. AGENT_VM_PI_NO_ANTIGRAVITY is its
+# recovery hatch, and the path override is test-only, not a protection.
+ANTIGRAVITY_EXTENSION="${AGENT_VM_PI_ANTIGRAVITY_EXTENSION:-/opt/agent-vm/pi-antigravity/node_modules/pi-antigravity/src/index.ts}"
+
+# POSIX sh has no arrays; reverse prepending preserves
+# mandatory/bridge/codex/antigravity order.
+if [ -r "$ANTIGRAVITY_EXTENSION" ] && [ -z "${AGENT_VM_PI_NO_ANTIGRAVITY:-}" ]; then
+    set -- --extension "$ANTIGRAVITY_EXTENSION" "$@"
+fi
 if [ -r "$CODEX_EXTENSION" ]; then
     set -- --extension "$CODEX_EXTENSION" "$@"
 fi

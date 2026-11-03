@@ -93,13 +93,14 @@ class CapabilityTests(unittest.TestCase):
     # --- the closed consumer table ------------------------------------------
 
     def test_consumer_table_is_closed(self):
-        self.assertEqual(sorted(project.CONSUMERS), ['bridge', 'dsh', 'pi'])
+        self.assertEqual(sorted(project.CONSUMERS), ['antigravity', 'bridge', 'dsh', 'pi'])
         profiles = list(project.CONSUMERS.values())
         self.assertEqual({item.production_prefix for item in profiles},
                          {Path('/opt/agent-vm/dsh'), Path('/opt/agent-vm/pi'),
-                          Path('/opt/agent-vm/pi-packages')})
-        self.assertEqual(len({item.scratch_token for item in profiles}), 3)
-        self.assertEqual(len({item.host_env for item in profiles}), 3)
+                          Path('/opt/agent-vm/pi-packages'),
+                          Path('/opt/agent-vm/pi-antigravity')})
+        self.assertEqual(len({item.scratch_token for item in profiles}), 4)
+        self.assertEqual(len({item.host_env for item in profiles}), 4)
         self.assertTrue(all(item.scratch_parent == Path('/tmp') for item in profiles))
         self.assertIs(project.CONSUMERS['dsh'], project.DSH)
         self.assertEqual(project.PRODUCTION, Path('/opt/agent-vm/dsh'))
@@ -116,7 +117,7 @@ class CapabilityTests(unittest.TestCase):
         self.assertIs(project.consumer_of('pi'), project.CONSUMERS['pi'])
 
     def test_capabilities_carry_their_consumer(self):
-        for name in ('dsh', 'pi', 'bridge'):
+        for name in ('dsh', 'pi', 'bridge', 'antigravity'):
             capability = project.authorize_mutation(self.prefix, consumer=name)
             self.assertIs(capability.consumer, project.CONSUMERS[name])
             self.assertTrue(capability.mutation)

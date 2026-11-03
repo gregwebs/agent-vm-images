@@ -236,11 +236,12 @@ merging. Policy and the exact exception language: [image input policy](docs/imag
 
 ## Selection ownership and maintenance
 
-`images/standard/Dockerfile` owns nine selection labels; base owns pnpm via
+`images/standard/Dockerfile` owns ten selection labels; base owns pnpm via
 `images/pnpm/pin.json` and a mirrored literal base label. Its deprecated standard
 AGENT_VERSION_PNPM is a compatibility assertion only (empty/equal accepted).
-Five exact nonempty installer defaults reference ARGs; dsh, Pi, bridge and OpenCode-plugin
-empty/equal slots reuse committed manifest/lock bytes. Literal label fallbacks
+Five exact nonempty installer defaults reference ARGs; dsh, Pi, the bridge, the
+Antigravity provider and OpenCode-plugin empty/equal slots reuse committed
+manifest/lock bytes. Literal label fallbacks
 mirror manifests. Labels record selection, not health. Unrelated slots/locks
 must not change when one owner is bumped.
 
@@ -249,6 +250,7 @@ bash script/build/agent-versions.sh --write
 bash images/tools/dsh/upgrade-dsh.sh VERSION --pnpm 11.11.0
 bash images/tools/pi/upgrade-pi.sh VERSION
 bash images/tools/pi/bridge/upgrade-bridge.sh VERSION
+bash images/tools/pi/antigravity/upgrade-antigravity.sh VERSION
 bash images/tools/opencode/plugins/upgrade-plugins.sh VERSION # requires pnpm 11.11.0
 bash script/test/contracts.sh
 # Review central Dockerfile, relevant JSON/lock diff and vendor provenance.
@@ -266,7 +268,7 @@ bash script/test/standard-node-policy.sh agent-vm-base:local --consumer bridge -
 python3 script/test/standard-node-layout.py --consumer pi --root /extracted --platform linux/arm64
 ```
 
-The independent oracle (`standard-node-layout.py --consumer dsh|pi|bridge`) reads
+The independent oracle (`standard-node-layout.py --consumer dsh|pi|bridge|antigravity`) reads
 an extracted virtual root and knows nothing about the build's own success
 markers; `--archive-inventories FILE` additionally compares installed bytes with
 pre-run, independently authenticated tarball inventories. **No caller passes it:**
@@ -300,17 +302,21 @@ permitted; the bumper refuses GitHub Actions. Builds consume committed selection
 and never call bump scripts. Lock upgrades retain dsh graph-freeze review
 (retained records and sandbox reachability, not npm locations).
 
-Pi and the bridge publish **four** pnpm inputs plus the one central label per
-bump, in one transaction each, and they run **sequentially** (Pi, then bridge,
-each rereading the current Dockerfile; never two bumpers against one stale
-preimage). A Pi bump additionally reviews the selected archive's route (does the
+Pi, the bridge and the Antigravity provider publish **four** pnpm inputs plus the
+one central label per bump, in one transaction each, and they run
+**sequentially** (Pi, then bridge, then provider, each rereading the current
+Dockerfile; never two bumpers against one stale preimage). A Pi bump additionally reviews the selected archive's route (does the
 authenticated tarball carry `npm-shrinkwrap.json`?), the complete
 identity/SRI/edge/optional/peer delta, the reviewed family shape for the new
 selection, the per-version dispatch list and the sibling byte expectations — see
 [ADR 0011](docs/adr/0011-pi-selected-shrinkwrap.md) and
 `images/tools/pi/README.md`. A new lifecycle-script dependency, a new exact trust
 exception, a new missing-SRI sibling shape or a shrinkwrap-to-pnpm delta outside
-the reviewed three is a **stop and review**, never an automatic allowlist.
+the reviewed three is a **stop and review**, never an automatic allowlist. The
+provider carries exactly one such exception, `pi-antigravity@0.11.0` (published
+without the provenance its predecessors carry); [ADR
+0016](docs/adr/0016-pi-antigravity-provider.md) records the decision and why a
+second one is not a maintenance edit.
 Preparation status 1 restores and fails, 2 is usage, 3 is an incomplete rollback:
 on 3 stop, keep the scratch and recover from the printed path before any further
 edit, build or commit.
@@ -879,8 +885,8 @@ regenerate the lock. Empty/equal preparation validates committed YAML without a
 manager or registry call; frozen installation still verifies registry metadata.
 The hard-only runner never emits a transport receipt or retries with npm.
 
-Nine required agent records and eight agent verifiers exclude the separate
-base-pnpm identity/verification calls. Ten selection labels include base pnpm;
+Ten required agent records and eight agent verifiers exclude the separate
+base-pnpm identity/verification calls. Eleven selection labels include base pnpm;
 the plugin manifest's packageManager field creates no additional selection.
 The five strict-egress profiles retain the native installers' narrower contracts;
 the plugin profile permits only eleven exact package documents and three exact

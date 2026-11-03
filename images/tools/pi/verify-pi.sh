@@ -1,6 +1,7 @@
 #!/bin/sh
 # Build-time verification gate for the pinned Pi layer and its image-owned
-# Claude bridge, run from the layer's final `RUN --mount=type=bind` (see
+# extension packages (the Claude bridge and the Antigravity provider), run from
+# the layer's final `RUN --mount=type=bind` (see
 # images/standard/Dockerfile). Bind-mounted, never COPYed, so the script stays
 # out of the shipped image and needs no execute bit.
 #
@@ -34,6 +35,7 @@ CONTRACT="${AGENT_VM_CONTRACT_DIR:-/tmp/recipe-contract}"
 PI_PREFIX="${AGENT_VM_PI_PREFIX:-/opt/agent-vm/pi}"
 WRAPPER="${AGENT_VM_PI_WRAPPER:-/usr/local/bin/pi}"
 PACKAGES_PREFIX="${AGENT_VM_PI_PACKAGES_PREFIX:-/opt/agent-vm/pi-packages}"
+ANTIGRAVITY_PREFIX="${AGENT_VM_PI_ANTIGRAVITY_PREFIX:-/opt/agent-vm/pi-antigravity}"
 EXTENSION_DIR="${AGENT_VM_PI_EXTENSION_DIR:-/opt/agent-vm/pi-extensions}"
 CODEX_STATE_DIR="${AGENT_VM_PI_CODEX_STATE_DIR:-/agent-vm-state/codex}"
 GATE_WORK_DIR="${AGENT_VM_PI_GATE_WORK_DIR:-/tmp/pi-gate}"
@@ -42,6 +44,7 @@ SEED_HOOK="${AGENT_VM_PI_SEED_HOOK:-/opt/agent-vm/seed.d/20-pi-claude-bridge}"
 STATUS_DIR="${AGENT_VM_INSTALL_STATUS_DIR:-/opt/agent-vm/install-status}"
 PI_VERSION="${AGENT_VM_VERSION_PI:-}"
 BRIDGE_VERSION="${AGENT_VM_VERSION_PI_CLAUDE_BRIDGE:-}"
+ANTIGRAVITY_VERSION="${AGENT_VM_VERSION_PI_ANTIGRAVITY:-}"
 SELF_DIR=$(cd "$(dirname "$0")" && pwd -P)
 PROJECT="${AGENT_VM_PI_SHARED:-$SELF_DIR/../pnpm-project.py}"
 # The mounted-helper seam, pinned by the standard image's verify RUN for the same
@@ -52,6 +55,7 @@ RUNTIME_CHECK="${AGENT_VM_PI_RUNTIME_CHECK:-$SELF_DIR/check-runtime.mjs}"
 SUBCOMMAND_FILE="${AGENT_VM_PI_SUBCOMMANDS:-$PI_PREFIX/agent-vm-subcommands}"
 DISPATCH_DIR="${AGENT_VM_PI_DISPATCH_DIR:-$SELF_DIR/dispatch}"
 SKIP_BRIDGE="${AGENT_VM_PI_GATE_SKIP_BRIDGE:-}"
+SKIP_ANTIGRAVITY="${AGENT_VM_PI_GATE_SKIP_ANTIGRAVITY:-}"
 
 # A Node preload or an injected module path would make every later probe, RPC
 # registration and content walk report what the caller chose rather than what the
@@ -65,6 +69,7 @@ SKIP_BRIDGE="${AGENT_VM_PI_GATE_SKIP_BRIDGE:-}"
 pi_bin="$PI_PREFIX/node_modules/.bin/pi"
 pi_failed=0
 bridge_failed=0
+antigravity_failed=0
 pi_fail() {
     echo "  pi: $*" >&2
     pi_failed=$((pi_failed + 1))
@@ -73,6 +78,10 @@ bridge_fail() {
     echo "  pi: $*" >&2
     bridge_failed=$((bridge_failed + 1))
 }
+antigravity_fail() {
+    echo "  pi: $*" >&2
+    antigravity_failed=$((antigravity_failed + 1))
+}
 
 # --- the single absence decision ---------------------------------------------
 command -v python3 >/dev/null 2>&1 || fail 'python3 is required'
@@ -80,13 +89,14 @@ command -v python3 >/dev/null 2>&1 || fail 'python3 is required'
 [ -f "$RUNTIME_CHECK" ] || fail "the runtime checker is missing at $RUNTIME_CHECK"
 gate=$(python3 "$PROJECT" --consumer pi pi-gate-entry \
     --pi-prefix "$PI_PREFIX" --bridge-prefix "$PACKAGES_PREFIX" \
+    --antigravity-prefix "$ANTIGRAVITY_PREFIX" \
     --extension-root "$EXTENSION_DIR" --wrapper "$WRAPPER" --seed "$SEED_HOOK" \
     --status-dir "$STATUS_DIR" --contract-dir "$CONTRACT" --retire) ||
     fail 'the Pi gate entry rejected this image (see the diagnostic above)'
 case "$gate" in
     present) ;;
     absent-retired)
-        echo "  pi: ABSENT ($(cat "$STATUS_DIR/pi")); retired the feature, bridge record is derivative"
+        echo "  pi: ABSENT ($(cat "$STATUS_DIR/pi")); retired the feature, extension records are derivative"
         exit 0
         ;;
     *) fail "the Pi gate entry returned an unknown answer '$gate'" ;;
@@ -440,6 +450,53 @@ else
     done
 fi
 
+# --- antigravity gates -------------------------------------------------------
+ANTIGRAVITY_MANIFEST="$ANTIGRAVITY_PREFIX/package.json"
+ANTIGRAVITY_PKG="$ANTIGRAVITY_PREFIX/node_modules/pi-antigravity"
+ANTIGRAVITY_SRC="$ANTIGRAVITY_PKG/src/index.ts"
+antigravity_shipped=0
+if [ -n "$SKIP_ANTIGRAVITY" ]; then
+    antigravity_shipped=2 # explicitly opted out for this invocation only
+elif [ ! -d "$ANTIGRAVITY_PKG" ] || [ -L "$ANTIGRAVITY_PKG" ]; then
+    # Like the bridge: there is no provider-side absence producer. A missing
+    # provider payload is only ever the derivative of a genuine Pi curl absence,
+    # and that branch exited above; a Pi-present image with no provider is a hard
+    # failure.
+    antigravity_fail 'pi-antigravity is missing while Pi is present -- there is no provider absence producer'
+elif [ ! -r "$ANTIGRAVITY_SRC" ]; then
+    antigravity_fail 'pi-antigravity is present but its source is unreadable'
+elif [ ! -f "$ANTIGRAVITY_MANIFEST" ]; then
+    antigravity_fail 'the antigravity prefix has no manifest'
+else
+    antigravity_shipped=1
+    antigravity_want=$(jq -er '.dependencies["pi-antigravity"]' "$ANTIGRAVITY_MANIFEST") ||
+        antigravity_fail 'the antigravity manifest pins no version'
+    antigravity_got=$(jq -er '.version' "$ANTIGRAVITY_PKG/package.json" 2>/dev/null) ||
+        antigravity_got=
+    if [ -z "${antigravity_want:-}" ] || [ "$antigravity_got" != "$antigravity_want" ]; then
+        antigravity_fail "pi-antigravity installed '$antigravity_got' but the manifest pins '${antigravity_want:-nothing}'"
+    fi
+    if [ -n "$ANTIGRAVITY_VERSION" ] && [ "$ANTIGRAVITY_VERSION" != "${antigravity_want:-}" ]; then
+        antigravity_fail "layer asked for pi-antigravity $ANTIGRAVITY_VERSION but the manifest pins ${antigravity_want:-nothing}"
+    fi
+    # The reviewed provider workspace is hoisted with no peer installed, keeps
+    # the provider's one runtime dependency, and installs no second Pi/typebox.
+    if [ -L "$ANTIGRAVITY_PKG" ] || [ ! -d "$ANTIGRAVITY_PKG" ]; then
+        antigravity_fail 'the provider tree is not hoisted: the provider package is not a real directory'
+    elif [ -n "$(find "$ANTIGRAVITY_PREFIX/node_modules/.pnpm" -mindepth 1 -type d -print 2>/dev/null | head -n 1)" ]; then
+        antigravity_fail 'the provider tree carries private-store package payload; the reviewed workspace is hoisted'
+    fi
+    if [ ! -f "$ANTIGRAVITY_PREFIX/node_modules/undici/package.json" ]; then
+        antigravity_fail 'the provider runtime dependency undici is missing from the hoisted tree'
+    fi
+    for aliased in '@earendil-works' 'typebox' '@sinclair/typebox' 'pi-agent-core' 'pi-ai' 'pi-tui'; do
+        if [ -e "$ANTIGRAVITY_PREFIX/node_modules/$aliased" ] ||
+            [ -L "$ANTIGRAVITY_PREFIX/node_modules/$aliased" ]; then
+            antigravity_fail "the provider tree installs $aliased, which Pi's loader aliases to its own copy"
+        fi
+    done
+fi
+
 if [ "$pi_failed" -eq 0 ] && [ "$bridge_shipped" -eq 1 ]; then
     # A --extension Pi cannot load is fatal before session startup, so a run that
     # exits 0 already proves every top-level import resolved (the Agent SDK, the
@@ -465,6 +522,32 @@ PROBE
         sed -n '1,10p' "$scratch/p.err" >&2
     elif ! require_registered_provider pi-claude-bridge AGENT-VM-BRIDGE "$scratch/p.out"; then
         bridge_fail "pi-claude-bridge ${registration_error}"
+    fi
+fi
+
+if [ "$pi_failed" -eq 0 ] && [ "$antigravity_shipped" -eq 1 ]; then
+    # Same half as the bridge probe: an exit 0 proves every top-level import of the
+    # provider resolved (undici, and the loader-aliased Pi peers), so what is left
+    # to prove is that the provider REGISTERED with a non-empty catalog. Keep this
+    # body in sync with the non-root copy in script/test/pi-runtime.sh.
+    cat > "$GATE_WORK_DIR/antigravity-probe.js" <<'PROBE'
+export default function (pi) {
+  pi.on("session_start", (_event, ctx) => {
+    const p = ctx.modelRegistry.getProvider("antigravity");
+    const n = p && typeof p.getModels === "function" ? p.getModels().length
+            : p && Array.isArray(p.models) ? p.models.length : 0;
+    ctx.ui.notify(p ? `AGENT-VM-ANTIGRAVITY-REGISTERED models=${n}` : "AGENT-VM-ANTIGRAVITY-MISSING",
+                  "warning");
+  });
+}
+PROBE
+    pi_run 120 "$scratch/a.out" "$scratch/a.err" \
+        "$WRAPPER" -e "$GATE_WORK_DIR/antigravity-probe.js" --mode rpc --no-session --no-approve
+    if [ "$PI_RUN_STATUS" -ne 0 ]; then
+        antigravity_fail "the antigravity probe exited $PI_RUN_STATUS; refusing to scan its output"
+        sed -n '1,10p' "$scratch/a.err" >&2
+    elif ! require_registered_provider pi-antigravity AGENT-VM-ANTIGRAVITY "$scratch/a.out"; then
+        antigravity_fail "pi-antigravity ${registration_error}"
     fi
 fi
 
@@ -516,21 +599,33 @@ if [ "$bridge_shipped" -eq 1 ]; then
     "$CONTRACT/recipe-contract" tool-access --quiet --content "$BRIDGE_SRC" ||
         bridge_fail 'the bridge source is not readable by any uid'
 fi
+if [ "$antigravity_shipped" -eq 1 ]; then
+    "$CONTRACT/recipe-contract" tool-access --quiet --tree "$ANTIGRAVITY_PREFIX" ||
+        antigravity_fail 'the provider payload is not readable/searchable by any uid'
+    "$CONTRACT/recipe-contract" tool-access --quiet --content "$ANTIGRAVITY_SRC" ||
+        antigravity_fail 'the provider source is not readable by any uid'
+fi
 
 # --- publication -------------------------------------------------------------
 # Only a slot whose OWN gates all passed is published. A failed command, probe or
 # content audit can never be erased by a later passing walk, and a Pi failure
-# also leaves the bridge unpublished because an unproven Pi cannot prove it.
+# leaves every extension unpublished because an unproven Pi cannot prove one. The
+# two extension records are independent: one failing slot withholds its own
+# record only.
 if [ "$pi_failed" -ne 0 ]; then
     echo "  pi: $pi_failed Pi gate(s) failed; no record published" >&2
     exit 1
 fi
 printf 'installed\n' >"$STATUS_DIR/pi"
-if [ "$bridge_failed" -ne 0 ]; then
-    echo "  pi: $bridge_failed bridge gate(s) failed; only Pi is recorded" >&2
-    exit 1
-fi
-if [ "$bridge_shipped" -eq 1 ]; then
+if [ "$bridge_shipped" -eq 1 ] && [ "$bridge_failed" -eq 0 ]; then
     printf 'installed\n' >"$STATUS_DIR/pi-claude-bridge"
+fi
+if [ "$antigravity_shipped" -eq 1 ] && [ "$antigravity_failed" -eq 0 ]; then
+    printf 'installed\n' >"$STATUS_DIR/pi-antigravity"
+fi
+if [ "$bridge_failed" -ne 0 ] || [ "$antigravity_failed" -ne 0 ]; then
+    echo "  pi: $bridge_failed bridge and $antigravity_failed antigravity gate(s) failed;" \
+        "the failed slot is not recorded" >&2
+    exit 1
 fi
 echo "  pi: readable and executable by any uid"

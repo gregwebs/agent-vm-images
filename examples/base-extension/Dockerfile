@@ -3,7 +3,7 @@
 # copied extension keeps the default of the checkout it came from. Overriding it
 # is an explicit acceptance of another base, not authentication of it.
 ARG BASE_IMAGE=agent-vm-base:local
-ARG AGENT_VM_BASE_IDENTITY=sha256:66fae9a5814c99e9c8c5741a59484e424fa4826d80ab921a1be8078aad8b9905
+ARG AGENT_VM_BASE_IDENTITY=sha256:a4d51197fbb249c1b1a31973854646769cdc715188056c89bd12e474bdfb6524
 FROM ${BASE_IMAGE}
 ARG AGENT_VM_BASE_IDENTITY
 RUN --mount=type=bind,source=check-base-identity.sh,target=/tmp/check-base-identity.sh,ro \
