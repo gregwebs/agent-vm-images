@@ -59,6 +59,17 @@ version bump, Rust application build, submodule or launcher packaging is needed.
   keyring directories, `URIs:`, `Types: deb`, `Dir::Etc`, `apt-config`, the
   NodeSource and GitHub CLI marks), a downloaded script piped into a shell, or
   `nodejs`/`npm`/`gh` through apt fails it.
+- Changing what software a component installs, or its defaults, means reviewing
+  its runtime network requests: the `org.agent-vm.network-requests.*` label in
+  the same Dockerfile
+  ([ADR 0014](docs/adr/0014-image-network-requests.md)).
+  `python3 script/test/network_requests.py check-sources` is part of
+  `contracts.sh` and checks the form, the grammar and the owner of every label,
+  never whether the value is still true. Only a host contacted by an **exercised
+  fixture command** shows up as `DENY connect-unlisted` in an example layer's
+  egress smoke, and only `rust-dev` and `go-dev` have one; a base or agent install
+  has no runtime fixture at all. Every other change is caught by review or not at
+  all.
 - `CODING_STANDARDS.md` is generated from the shared standards and stays
   unchanged. Its immutable-input rule applies here with exactly one exception:
   packages from official Debian apt repositories, with the reviewed policy in
@@ -510,8 +521,13 @@ the platform inspections ([ADR 0010](docs/adr/0010-layer-build-ci.md)).
 `chrome-devtools` additionally keeps its runtime suite, and the interrupted-run
 path (cleanup after the workflow watchdog fires) is re-proved by
 `bash script/test/chrome-example-watchdog.sh` in the arm64 row after the suite,
-reusing its inspected parent image ID. The Rust and Go suites stay manual
-maintenance evidence. Their pin policy and bump order are in
+reusing its inspected parent image ID. Every row also checks the request labels
+of its built image against its recipe and its inspected parent in INSPECT, and
+the layers with a fixture under `script/test/fixtures/network-requests/`
+(`rust-dev`, `go-dev`) run the restricted-egress smoke in an EGRESS phase inside
+the same cold build ([ADR 0014](docs/adr/0014-image-network-requests.md)). The
+Rust and Go suites stay manual maintenance evidence. Their pin policy and bump
+order are in
 [Example images](docs/image-source-ownership.md#example-images-exampleslayers).
 
 The Chrome harness reserves 90 seconds total for cleanup (5 seconds per client,
@@ -752,6 +768,12 @@ content check fails independently; CI runs it in the native audit phase.
 
 ```bash
 bash script/test/shipped-installer-network.sh agent-vm-base:local --platform linux/arm64
+# Runtime network requests: the built layer's own label, a strict proxy and a
+# denial control. Opt-in per layer, through its fixture directory; the evidence
+# (summary.txt, egress-strict.log, egress-destinations.log) lands in the given
+# directory.
+bash script/test/network-requests-egress.sh --image agent-vm-rust-dev:dev \
+  --layer rust-dev --platform linux/arm64 --evidence-dir target/ci-logs/egress-rust
 # Repository base identity: base stamp == this checkout, stale/stamp-less bases
 # refused by both consumers, and the same identity under both helper deliveries.
 bash script/test/parent-identity.sh agent-vm-base:local --platform linux/arm64
@@ -768,9 +790,17 @@ credentials. `example-layers.yml` has provisional bounds. Its `changes` job is
 5 minutes checkout + 10 selector + 5 summary + 10 upload inside a 35-minute job.
 Each native row is 5 checkout + 20 prerequisites + 80 cold build (the runner's own
 4500-second supervisor plus 90-second TERM grace) + 5 summary + 10 upload = 120
-inside 130; a Chrome row adds its 60-minute suite (3300-second watchdog plus
+inside 130; a row whose layer has an egress fixture spends 5 + 20 + 105 (the
+runner's 5700-second supervisor plus 290-second grace, because it must outlast
+both escalation windows of the smoke's own watchdog, of which the EGRESS phase is
+940 seconds plus two 100-second windows) + 5 + 10 = 145 inside 155. A Chrome row
+adds its 60-minute suite
+(3300-second watchdog plus
 110-second grace, 3520 < 3600) and the 14-minute arm64 watchdog control
-(600-second watchdog plus 110-second grace, 820 < 840), 194 inside 205. Reset
+(600-second watchdog plus 110-second grace, 820 < 840), 194 inside 205 (219
+inside 230 if a runtime-suite layer gains a fixture). The selector picks both the
+row and the cold-build ceilings from fixture discovery, never from a list of
+layer names. Reset
 bounds to at least 1.5× the first green per-layer, per-architecture measurements,
 keeping these floors. `contracts.yml` is PR/push/manual and reusable via `workflow_call`;
 expensive build/audit workflows invoke it as a local prerequisite job (`needs`).

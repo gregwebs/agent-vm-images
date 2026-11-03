@@ -1,6 +1,9 @@
 ARG BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de
 FROM ${BASE_IMAGE}
 
+# Browsing is project-dependent and Chromium's background services are not needed: no request.
+LABEL org.agent-vm.network-requests.image.chrome-devtools=""
+
 RUN apt-get update \
  && apt-get install -y --no-install-recommends chromium fonts-liberation sudo libnss3-tools \
  && rm -rf /var/lib/apt/lists/* \

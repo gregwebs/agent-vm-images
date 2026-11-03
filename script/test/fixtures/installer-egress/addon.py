@@ -13,9 +13,21 @@ request log, not merely by the final installed version.
 
 Config (mounted JSON, path in EGRESS_CONFIG):
   {"allow": [{"host": H, "path": REGEX, "method": M?}], "deny": [REGEX],
-   "https_only": true?, "learn_hosts": [HOST...]?}
+   "https_only": true?, "learn_hosts": [HOST...]?,
+   "enforce_tls_destination": true?}
 `EGRESS_MODE=observe` logs and forwards everything (capture mode); the default
 `strict` enforces the allowlist. Every decision is appended to EGRESS_LOG.
+
+`enforce_tls_destination` is an OPT-IN mode for the runtime network-request
+smoke (ADR 0014), which is the only caller that sets it. The rules above match
+the HTTP Host, which is not the TLS destination: a client can name an allowed
+host and connect elsewhere, and mitmproxy's default eager strategy contacts the
+CONNECT authority before any request hook runs. In this mode the CONNECT
+authority, the SNI and the Host/`:authority` must all name the same declared
+host, checked in `http_connect`, in `request` before the rules above, and in
+`server_connect` before the upstream connection exists. The proxy must also run
+with `connection_strategy=lazy`; otherwise every request is refused. The
+installer gate does not set the key, and its policy is byte-for-byte unchanged.
 
 A learned target is the signed CDN URL an already-allowed HTTPS response pointed
 at. Scheme, port and credentials are enforced for it exactly as for any other
@@ -29,7 +41,7 @@ import os
 import re
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
-from mitmproxy import http
+from mitmproxy import ctx, http
 
 CONFIG = os.environ["EGRESS_CONFIG"]
 LOG = os.environ["EGRESS_LOG"]
@@ -39,6 +51,11 @@ with open(CONFIG, encoding="utf-8") as handle:
     _CFG = json.load(handle)
 ALLOW = _CFG["allow"]
 DENY = [re.compile(pattern) for pattern in _CFG.get("deny", [])]
+ALLOW_HOSTS = frozenset(rule["host"] for rule in ALLOW)
+
+# Off unless the config asks for it: the installer gate never sets the key.
+ENFORCE_TLS_DESTINATION = _CFG.get("enforce_tls_destination") is True
+_eager_strategy = False
 
 _allowed_urls = set()
 _learned = set()
@@ -90,8 +107,66 @@ def _shape_reason(parts):
     return None
 
 
+def _tls_destination(host, port):
+    return port == 443 and host in ALLOW_HOSTS
+
+
+def running():
+    """A declared-destination gate is only a gate with lazy connections.
+
+    With the default eager strategy mitmproxy opens the upstream connection at
+    CONNECT time, before any request hook can compare the Host with it. A runner
+    that forgot `--set connection_strategy=lazy` therefore fails closed here
+    instead of silently checking only the Host header.
+    """
+    global _eager_strategy
+    if not ENFORCE_TLS_DESTINATION:
+        return
+    if ctx.options.connection_strategy != "lazy":
+        _eager_strategy = True
+        _log("DENY eager-connection-strategy")
+
+
+def http_connect(flow):
+    """Refuse an unlisted CONNECT authority before any tunnel or upstream exists."""
+    if not ENFORCE_TLS_DESTINATION:
+        return
+    host = flow.request.host
+    if _eager_strategy or not _tls_destination(host, flow.request.port):
+        _block(flow, "connect-unlisted", "https://%s/" % host)
+
+
+def server_connect(data):
+    """Final check, independent of the HTTP layer: the address it is dialling."""
+    if not ENFORCE_TLS_DESTINATION:
+        return
+    address = data.server.address or ("", None)
+    host, port = address[0], address[1]
+    if _eager_strategy or not _tls_destination(host, port) or data.server.sni != host:
+        data.server.error = "network-request destination refused"
+        _log("DENY server-unlisted https://%s/" % host)
+
+
+def server_connected(data):
+    """Evidence: this is the TLS origin the proxy actually reached."""
+    if not ENFORCE_TLS_DESTINATION:
+        return
+    _log("UPSTREAM https://%s/" % data.server.address[0])
+
+
 def request(flow):
     url = flow.request.pretty_url
+    if ENFORCE_TLS_DESTINATION:
+        if _eager_strategy:
+            _block(flow, "eager-connection-strategy", url)
+            return
+        destination = flow.server_conn.address[0] if flow.server_conn.address else None
+        if flow.client_conn.sni != destination:
+            _block(flow, "sni-mismatch", "https://%s/" % (flow.client_conn.sni or "-"))
+            return
+        if flow.request.pretty_host != destination:
+            _block(flow, "authority-mismatch", url)
+            return
     parts = urlsplit(url)
     learned = url in _learned
     if _CFG.get("https_only"):

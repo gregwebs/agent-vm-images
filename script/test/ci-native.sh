@@ -81,6 +81,23 @@ case "$phase" in
             docker image inspect "$image" --format '{{.Id}} {{.Os}}/{{.Architecture}} size={{.Size}} labels={{json .Config.Labels}}'
             [ "$(docker image inspect "$image" --format '{{.Os}}/{{.Architecture}}')" = "$platform" ]
         done
+        # Request labels (ADR 0014): each built image carries exactly what its
+        # sources and its parent declare, and every value parses. Build phase, not
+        # audit: the audit sum has a measured budget and this is three inspections.
+        # The base's debian parent carries no request labels, so it has no --inherits.
+        docker image inspect agent-vm-base:local >target/ci-logs/base-inspect.json
+        docker image inspect agent-vm-standard:local >target/ci-logs/standard-inspect.json
+        docker image inspect my-agent-vm:local >target/ci-logs/extension-inspect.json
+        timed requests-base python3 script/test/network_requests.py check-image \
+            --inspect target/ci-logs/base-inspect.json --dockerfile images/Dockerfile
+        timed requests-standard python3 script/test/network_requests.py check-image \
+            --inspect target/ci-logs/standard-inspect.json \
+            --dockerfile images/standard/Dockerfile \
+            --inherits target/ci-logs/base-inspect.json
+        timed requests-extension python3 script/test/network_requests.py check-image \
+            --inspect target/ci-logs/extension-inspect.json \
+            --dockerfile examples/base-extension/Dockerfile \
+            --inherits target/ci-logs/base-inspect.json
         ;;
     audit)
         touch target/ci-logs/durations.txt

@@ -30,6 +30,13 @@ LABEL org.agent-vm.version.gh="2.103.2"
 LABEL org.opencontainers.image.source="https://github.com/gregwebs/agent-vm-images"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
+# Runtime network requests (ADR 0014): the TLS hosts this base's own software
+# contacts under its defaults -- gh (api.github.com, github.com), pip (pypi.org,
+# files.pythonhosted.org) and pnpm/npm (registry.npmjs.org). apt is not here:
+# Debian's mirrors are plain HTTP (apt-policy/debian.sources), which can never be
+# a TLS request. A request is reported by the launcher, never granted.
+LABEL org.agent-vm.network-requests.image.base="api.github.com,files.pythonhosted.org,github.com,pypi.org,registry.npmjs.org"
+
 # C.UTF-8 is present without locale generation and preserves non-ASCII paths.
 ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/root \

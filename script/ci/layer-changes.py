@@ -47,6 +47,11 @@ ARCHITECTURES = (Architecture('amd64', 'ubuntu-24.04'), Architecture('arm64', 'u
 
 GENERIC_TIMEOUT_MINUTES = 130
 RUNTIME_SUITE_TIMEOUT_MINUTES = 205
+# The cold-build step: the layer runner's own supervisor plus two TERM-grace
+# windows (ADR 0010, and ADR 0014 for the egress phases). A layer with an egress
+# fixture runs the smoke inside it and gets the larger pair.
+COLD_BUILD_TIMEOUT_MINUTES = 80          # 4500 + 2 x 90 = 4680 < 4800
+EGRESS_COLD_BUILD_TIMEOUT_MINUTES = 105  # 5700 + 2 x 290 = 6280 < 6300
 # Chrome is the one context with a runtime suite after its cold build, so it is
 # the one row that needs the larger job budget.
 RUNTIME_SUITE_LAYERS = frozenset({'chrome-devtools'})
@@ -80,6 +85,8 @@ SHARED_INPUTS = frozenset({
     '.github/workflows/chrome-example.yml',
     # Parent inventory and source policy: every layer's parent is decided there.
     'images/parent-pins.json',
+    # Every layer's INSPECT phase checks the built image's request labels.
+    'script/test/network_requests.py',
 })
 SHARED_PREFIXES = ('script/test/image-sources/',)
 CHROME_INPUTS = frozenset({
@@ -89,6 +96,17 @@ CHROME_INPUTS = frozenset({
 })
 CHROME_PREFIXES = ('script/test/fixtures/chrome-example/',)
 CHROME_LAYER = 'chrome-devtools'
+# Network-request egress smoke (ADR 0014): its runner, the reused addon and the
+# proxy pin select every layer that has a fixture; a fixture directory selects
+# its own layer. Discovery is the filesystem, like the layers themselves. The
+# proxy-pin reader is copied into the runner (no shared helper), so the runner
+# path covers it.
+EGRESS_INPUTS = frozenset({
+    'script/test/network-requests-egress.sh',
+    'script/test/fixtures/installer-egress/addon.py',
+    'script/test/fixtures/installer-egress/mitmproxy-image.ref',
+})
+EGRESS_FIXTURES = 'script/test/fixtures/network-requests/'
 
 
 @dataclass(frozen=True, order=True)
@@ -142,13 +160,20 @@ ZERO_SHA = Sha('0' * 40)
 class LayerJob:
     layer: LayerName
     architecture: Architecture
+    egress: bool = False
 
     def matrix_row(self) -> dict:
-        timeout = (RUNTIME_SUITE_TIMEOUT_MINUTES if self.layer.value in RUNTIME_SUITE_LAYERS
+        runtime_suite = self.layer.value in RUNTIME_SUITE_LAYERS
+        timeout = (RUNTIME_SUITE_TIMEOUT_MINUTES if runtime_suite
                    else GENERIC_TIMEOUT_MINUTES)
+        if self.egress:
+            timeout += EGRESS_COLD_BUILD_TIMEOUT_MINUTES - COLD_BUILD_TIMEOUT_MINUTES
+        build_timeout = (EGRESS_COLD_BUILD_TIMEOUT_MINUTES if self.egress
+                         else COLD_BUILD_TIMEOUT_MINUTES)
         return {'layer': self.layer.value, 'arch': self.architecture.name,
                 'platform': f'linux/{self.architecture.name}',
-                'runner': self.architecture.runner, 'timeout': timeout}
+                'runner': self.architecture.runner, 'timeout': timeout,
+                'build_timeout': build_timeout}
 
 
 @dataclass(frozen=True)
@@ -156,10 +181,11 @@ class Selection:
     layers: tuple[LayerName, ...]
     removed: tuple[LayerName, ...]
     reasons: tuple[str, ...]
+    egress_layers: frozenset[str] = frozenset()
 
     @property
     def jobs(self) -> tuple[LayerJob, ...]:
-        return tuple(LayerJob(layer, architecture)
+        return tuple(LayerJob(layer, architecture, layer.value in self.egress_layers)
                      for layer in self.layers for architecture in ARCHITECTURES)
 
 
@@ -191,6 +217,21 @@ def discover_layers(root: Path) -> tuple[LayerName, ...]:
             raise SelectionError(f'example layer {entry.name} has no regular Dockerfile')
         found.append(LayerName(entry.name))
     return tuple(found)
+
+
+def discover_egress_layers(root: Path, layers: tuple[LayerName, ...]) -> frozenset[str]:
+    """The known layers that have an egress fixture.
+
+    A symlink counts, so the larger ceiling follows the same fact the layer
+    runner refuses in PREFLIGHT: the bound is chosen by what is on disk, never by
+    a list of layer names.
+    """
+    directory = root / EGRESS_FIXTURES
+    if not directory.is_dir():
+        return frozenset()
+    return frozenset(layer.value for layer in layers
+                     if (directory / layer.value).is_dir()
+                     or (directory / layer.value).is_symlink())
 
 
 def parse_event(name: str, payload: dict) -> ChangeEvent:
@@ -246,7 +287,8 @@ def changed_paths(root: Path, event: ChangeEvent) -> tuple[str, ...]:
 
 
 def select_layers(layers: tuple[LayerName, ...], paths: tuple[str, ...], *,
-                  all_layers: bool) -> Selection:
+                  all_layers: bool,
+                  egress_layers: frozenset[str] = frozenset()) -> Selection:
     known = {layer.value for layer in layers}
     selected = set(known) if all_layers else set()
     removed: set[str] = set()
@@ -256,6 +298,19 @@ def select_layers(layers: tuple[LayerName, ...], paths: tuple[str, ...], *,
         if shared is not None:
             selected |= known
             reasons.add(shared)
+            continue
+        if _is_egress_input(path):
+            selected |= egress_layers & known
+            reasons.add(f'egress smoke input: {path}')
+            continue
+        egress_context = _egress_fixture_layer(path)
+        if egress_context is not None:
+            if egress_context in known:
+                selected.add(egress_context)
+                reasons.add(f'{egress_context} egress fixture changed')
+            else:
+                removed.add(egress_context)
+                reasons.add(f'{egress_context} egress fixture for an unknown layer')
             continue
         if _is_chrome_input(path):
             if CHROME_LAYER in known:
@@ -273,7 +328,8 @@ def select_layers(layers: tuple[LayerName, ...], paths: tuple[str, ...], *,
             reasons.add(f'{context} context removed or not buildable')
     return Selection(layers=tuple(LayerName(name) for name in sorted(selected)),
                      removed=tuple(LayerName(name) for name in sorted(removed)),
-                     reasons=tuple(sorted(reasons)))
+                     reasons=tuple(sorted(reasons)),
+                     egress_layers=egress_layers & frozenset(known))
 
 
 def _shared_reason(path: str) -> str | None:
@@ -286,6 +342,20 @@ def _shared_reason(path: str) -> str | None:
 
 def _is_chrome_input(path: str) -> bool:
     return path in CHROME_INPUTS or path.startswith(CHROME_PREFIXES)
+
+
+def _is_egress_input(path: str) -> bool:
+    """A change to the smoke itself: every layer with a fixture has to run it."""
+    return path in EGRESS_INPUTS or (path.startswith(EGRESS_FIXTURES)
+                                     and _egress_fixture_layer(path) == '')
+
+
+def _egress_fixture_layer(path: str) -> str | None:
+    """The layer whose fixture directory holds ``path``; '' for a shared fixture."""
+    if not path.startswith(EGRESS_FIXTURES):
+        return None
+    name, _, remainder = path[len(EGRESS_FIXTURES):].partition('/')
+    return name if remainder else ''
 
 
 def _layer_segment(path: str) -> str | None:
@@ -373,7 +443,8 @@ def summarize(record: dict) -> str:
     rows = record.get('matrix', {}).get('include', [])
     lines.append(f'rows: {len(rows)}')
     for row in rows:
-        lines.append(f'row: {row["layer"]} {row["platform"]} {row["runner"]} {row["timeout"]}m')
+        lines.append(f'row: {row["layer"]} {row["platform"]} {row["runner"]} '
+                     f'{row["timeout"]}m build {row["build_timeout"]}m')
     return '\n'.join(lines) + '\n'
 
 
@@ -403,7 +474,9 @@ def main(argv: list[str], root: Path | None = None) -> int:
                       diff_head=event.head.value if event.head else '',
                       all_layers=event.all_layers)
         paths = changed_paths(root, event)
-        selection = select_layers(discover_layers(root), paths, all_layers=event.all_layers)
+        layers = discover_layers(root)
+        selection = select_layers(layers, paths, all_layers=event.all_layers,
+                                  egress_layers=discover_egress_layers(root, layers))
     except (OSError, ValueError, SelectionError) as error:
         record['failure'] = str(error or error.__class__.__name__)
         record.setdefault('reasons', [])
@@ -435,6 +508,9 @@ def _head_sha(root: Path) -> str:
 # --- self-test: a scratch repository, no daemon and no network ---------------
 SELF_TEST_LAYERS = ('chrome-devtools', 'go-dev', 'new-layer', 'rust-dev',
                     'rust-dev-extra', 'wirenboard-cpp')
+# The fixture tree in this scratch repository has an egress fixture for these two
+# layers only, so the ceiling cases can tell discovery from a name list.
+SELF_TEST_EGRESS_LAYERS = ('go-dev', 'rust-dev')
 
 
 class Fixture:
@@ -465,7 +541,10 @@ class Fixture:
         files = {'README.md': '# fixture\n', 'examples/layers/README.md': '# layers\n',
                  'examples/layers/go-dev/notes.txt': 'notes\n',
                  'images/Dockerfile': 'FROM scratch\n', 'script/test/contracts.sh': '#!/bin/sh\n',
-                 'script/test/chrome-example.sh': '#!/bin/sh\n'}
+                 'script/test/chrome-example.sh': '#!/bin/sh\n',
+                 'script/test/fixtures/network-requests/run-in-image.sh': '#!/bin/sh\n'}
+        for layer in SELF_TEST_EGRESS_LAYERS:
+            files[f'script/test/fixtures/network-requests/{layer}/smoke.sh'] = '#!/bin/sh\n'
         for layer in SELF_TEST_LAYERS:
             files[f'examples/layers/{layer}/Dockerfile'] = 'FROM scratch\n'
         self.commit('base', files)
@@ -521,9 +600,10 @@ class SelfTest:
 
     def select(self, payload: dict, kind: str = 'pull_request') -> Selection:
         event = parse_event(kind, payload)
-        return select_layers(discover_layers(self.fixture.repo),
-                             changed_paths(self.fixture.repo, event),
-                             all_layers=event.all_layers)
+        layers = discover_layers(self.fixture.repo)
+        return select_layers(layers, changed_paths(self.fixture.repo, event),
+                             all_layers=event.all_layers,
+                             egress_layers=discover_egress_layers(self.fixture.repo, layers))
 
     def pull_request(self, base: str, head: str) -> dict:
         return {'pull_request': {'base': {'sha': base}, 'head': {'sha': head}}}
@@ -536,6 +616,7 @@ def run_self_test() -> int:
         _self_test_validated_values(test)
         _self_test_own_paths(test, fixture)
         _self_test_shared_inputs(test, fixture)
+        _self_test_egress(test, fixture)
         _self_test_context_lifecycle(test, fixture)
         _self_test_history(test, fixture)
         _self_test_failures(test, fixture)
@@ -591,8 +672,14 @@ def _self_test_own_paths(test: SelfTest, fixture: Fixture) -> None:
             rows = [job.matrix_row() for job in selection.jobs]
             test.expect(f'{label}: native rows', [(row['arch'], row['runner']) for row in rows],
                         [('amd64', 'ubuntu-24.04'), ('arm64', 'ubuntu-24.04-arm')])
+            # Literals on purpose: the test checks the constants instead of
+            # restating them. The names are facts about this fixture tree.
             test.expect(f'{label}: row timeout', {row['timeout'] for row in rows},
-                        {205} if expected == 'chrome-devtools' else {130})
+                        {205} if expected == 'chrome-devtools'
+                        else {155} if expected in SELF_TEST_EGRESS_LAYERS else {130})
+            test.expect(f'{label}: cold-build timeout',
+                        {row['build_timeout'] for row in rows},
+                        {105} if expected in SELF_TEST_EGRESS_LAYERS else {80})
     # A lookalike name is a different context, not a prefix match for its neighbour.
     head = fixture.branch('lookalike', {'examples/layers/rust-dev-extra/extra.txt': 'x\n'})
     test.expect('a lookalike name does not select its neighbour',
@@ -610,6 +697,7 @@ def _self_test_shared_inputs(test: SelfTest, fixture: Fixture) -> None:
     for path in ('script/test/host-watchdog.py', 'script/test/contracts.sh',
                  'images/parent-pins.json', 'script/ci/layer-changes.py',
                  'script/test/image-sources/tests/image_sources.rs',
+                 'script/test/network_requests.py',
                  '.github/workflows/chrome-example.yml'):
         head = fixture.branch(f'shared-{path.replace("/", "-")}', {path: 'changed\n'})
         selection = test.select(test.pull_request(fixture.base, head))
@@ -630,6 +718,91 @@ def _self_test_shared_inputs(test: SelfTest, fixture: Fixture) -> None:
     bootstrap = test.select({'before': zeroes, 'after': fixture.rev('main')}, 'push')
     test.expect('a push without a before commit selects every layer',
                 len(bootstrap.layers), len(SELF_TEST_LAYERS))
+
+
+def _self_test_egress(test: SelfTest, fixture: Fixture) -> None:
+    """Fixture discovery, not a name list, decides the smoke and the ceilings."""
+
+    def selection_for(name: str, changes: dict) -> Selection:
+        return test.select(test.pull_request(fixture.base, fixture.branch(name, changes)))
+
+    def selection_on_branch(name: str, changes: dict) -> Selection:
+        """Select with the branch checked out: discovery reads the filesystem."""
+        fixture.git('checkout', '--quiet', '-b', name, fixture.base)
+        fixture.commit(name, changes)
+        selection = test.select(test.pull_request(fixture.base, fixture.rev('HEAD')))
+        fixture.git('checkout', '--quiet', 'main')
+        return selection
+
+    def rows(selection: Selection) -> list:
+        return [job.matrix_row() for job in selection.jobs]
+
+    shared = [('the reused addon', 'script/test/fixtures/installer-egress/addon.py'),
+              ('the proxy pin', 'script/test/fixtures/installer-egress/mitmproxy-image.ref'),
+              ('the runner', 'script/test/network-requests-egress.sh'),
+              ('the in-image helper', 'script/test/fixtures/network-requests/run-in-image.sh'),
+              ('the destination probe',
+               'script/test/fixtures/network-requests/destination-probe.py')]
+    for label, path in shared:
+        selection = selection_for(f'egress-{path.replace("/", "-")}', {path: 'changed\n'})
+        test.expect(f'{label} selects every layer with a fixture',
+                    _layers(selection), SELF_TEST_EGRESS_LAYERS)
+        test.expect(f'{label}: rows', len(selection.jobs), 2 * len(SELF_TEST_EGRESS_LAYERS))
+        test.expect(f'{label}: row timeout', {row['timeout'] for row in rows(selection)}, {155})
+        test.expect(f'{label}: cold-build timeout',
+                    {row['build_timeout'] for row in rows(selection)}, {105})
+
+    selection = selection_for('egress-rust-fixture',
+                              {'script/test/fixtures/network-requests/rust-dev/Cargo.toml': 'x\n'})
+    test.expect('a layer fixture change selects only that layer', _layers(selection), ('rust-dev',))
+    test.expect('a layer fixture change keeps the other layers out', len(selection.jobs), 2)
+
+    # A shared input still wins: every layer, not only the ones with a fixture.
+    selection = selection_for('egress-shared-wins',
+                              {'script/test/contracts.sh': 'changed\n',
+                               'script/test/network-requests-egress.sh': 'changed\n'})
+    test.expect('a shared input still selects every layer', _layers(selection),
+                tuple(sorted(SELF_TEST_LAYERS)))
+    test.expect('a shared input records its reason',
+                'shared build input: script/test/contracts.sh' in selection.reasons, True)
+
+    selection = selection_on_branch(
+        'egress-unknown-fixture',
+        {'script/test/fixtures/network-requests/ghost/smoke.sh': 'x\n'})
+    test.expect('a fixture for an unknown layer selects nothing', _layers(selection), ())
+    test.expect('a fixture for an unknown layer is recorded, not built',
+                tuple(layer.value for layer in selection.removed), ('ghost',))
+
+    selection = selection_on_branch(
+        'egress-wirenboard-fixture',
+        {'script/test/fixtures/network-requests/wirenboard-cpp/smoke.sh': 'x\n'})
+    test.expect('a new fixture selects its own layer', _layers(selection), ('wirenboard-cpp',))
+    test.expect('a new fixture raises the row timeout',
+                {row['timeout'] for row in rows(selection)}, {155})
+    test.expect('a new fixture raises the cold-build timeout',
+                {row['build_timeout'] for row in rows(selection)}, {105})
+
+    selection = selection_on_branch(
+        'egress-chrome-fixture',
+        {'script/test/fixtures/network-requests/chrome-devtools/smoke.sh': 'x\n'})
+    test.expect('a runtime-suite layer with a fixture keeps its larger row',
+                {row['timeout'] for row in rows(selection)}, {230})
+    test.expect('a runtime-suite layer with a fixture gets the larger cold build',
+                {row['build_timeout'] for row in rows(selection)}, {105})
+
+    for label, layer, expected in (('a layer without a fixture', 'wirenboard-cpp', (130, 80)),
+                                   ('a runtime-suite layer without a fixture',
+                                    'chrome-devtools', (205, 80))):
+        selection = selection_on_branch(f'egress-{layer}',
+                                        {f'examples/layers/{layer}/Dockerfile': 'FROM scratch\n# changed\n'})
+        test.expect(f'{label} keeps its timeouts',
+                    {(row['timeout'], row['build_timeout']) for row in rows(selection)},
+                    {expected})
+
+    # The summary line carries both so a reviewer sees which ceiling a row took.
+    record = {'event': 'pull_request', 'matrix': {'include': rows(selection)}}
+    test.expect('the summary prints both ceilings',
+                'build 80m' in summarize(record), True)
 
 
 def _self_test_context_lifecycle(test: SelfTest, fixture: Fixture) -> None:

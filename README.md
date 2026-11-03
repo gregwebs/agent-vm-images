@@ -172,7 +172,10 @@ Ordinary user-owned Dockerfiles; each README is the canonical build guide.
   CI builds each one cold on both native architectures when a change touches it — see
   [CI builds](examples/layers/README.md#ci-builds) and
   [ADR 0010](docs/adr/0010-layer-build-ci.md); they are still examples, not published
-  products.
+  products. Each declares the runtime hosts it contacts as
+  [network requests](examples/layers/README.md#declaring-network-requests)
+  ([ADR 0014](docs/adr/0014-image-network-requests.md)); `rust-dev` and `go-dev`
+  prove theirs against a restricted egress in CI.
 
 ## Extend and contribute
 
@@ -189,6 +192,7 @@ for agent commands: `bash -lc` can reset the image PATH through `/etc/profile`.
 - [Root-store advisory response](docs/ca-trust-response.md)
 - [Standard image releases](docs/standard-image-releases.md)
 - [The agy hash-only artifact pin](docs/adr/0012-agy-hash-only-artifact-pin.md)
+- [Runtime network requests declared as labels](docs/adr/0014-image-network-requests.md)
 - [Installer security, locks and runtime payloads](images/tools/README.md)
 - [Layout, migration manifest and staged ownership](docs/image-source-ownership.md)
 

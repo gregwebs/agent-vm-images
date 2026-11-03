@@ -11,6 +11,9 @@
 ARG BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de
 FROM ${BASE_IMAGE}
 
+# apt, debootstrap and sbuild use plain-HTTP Debian mirrors, which are never TLS requests.
+LABEL org.agent-vm.network-requests.image.wirenboard-cpp=""
+
 # WB C/C++ build essentials. Ported verbatim from agent-vm's former images/Dockerfile
 # DEFERRED block (rationale for each package lives in agent-vm's history of this file /
 # the ADR). Sourced from the union of debian/control Build-Depends across

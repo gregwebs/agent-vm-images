@@ -45,6 +45,8 @@ ARG AGENT_VERSION_DSH=
 # Compatibility assertion only; base owns the pnpm selection and launcher.
 ARG AGENT_VERSION_PNPM=
 LABEL org.agent-vm.version.dsh="${AGENT_VERSION_DSH:-0.2.1-rc.5}"
+# dsh resolves models from an embedded catalog: inventoried, no default host (ADR 0014).
+LABEL org.agent-vm.network-requests.agent.dsh=""
 
 COPY tools/dsh/package.json tools/dsh/pnpm-lock.yaml tools/dsh/pnpm-workspace.yaml tools/dsh/pnpm-inputs.sha256 /opt/agent-vm/dsh/
 RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
@@ -98,6 +100,11 @@ ARG AGENT_VERSION_PI_CLAUDE_BRIDGE=
 
 LABEL org.agent-vm.version.pi="${AGENT_VERSION_PI:-1.4.0}" \
       org.agent-vm.version.pi-claude-bridge="${AGENT_VERSION_PI_CLAUDE_BRIDGE:-0.8.0}"
+
+# Pi's own request is its provider-catalog refresh. Hosts reached through the
+# Claude bridge or the codex extension are the user's choice of another agent,
+# not Pi's request.
+LABEL org.agent-vm.network-requests.agent.pi="pi.dev"
 
 COPY tools/pi/package.json tools/pi/pnpm-lock.yaml tools/pi/pnpm-workspace.yaml tools/pi/pnpm-inputs.sha256 /opt/agent-vm/pi/
 RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
@@ -166,6 +173,7 @@ RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro 
 ARG AGENT_VERSION_CODEX=rust-v0.159.3
 
 LABEL org.agent-vm.version.codex="${AGENT_VERSION_CODEX}"
+LABEL org.agent-vm.network-requests.agent.codex="api.openai.com,auth.openai.com,chatgpt.com"
 
 ENV PATH=/opt/agent/.local/bin:${PATH}
 
@@ -193,6 +201,8 @@ RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro 
 ARG AGENT_VERSION_OPENCODE=v2.0.29
 
 LABEL org.agent-vm.version.opencode="${AGENT_VERSION_OPENCODE}"
+# Credential-free provider-catalog refresh only; provider hosts follow the user's choice.
+LABEL org.agent-vm.network-requests.agent.opencode="models.opencode.ai"
 
 ENV PATH=/opt/agent/.opencode/bin:${PATH}
 
@@ -218,6 +228,7 @@ RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro 
 ARG AGENT_VERSION_CLAUDE=2.1.286
 
 LABEL org.agent-vm.version.claude="${AGENT_VERSION_CLAUDE}"
+LABEL org.agent-vm.network-requests.agent.claude="api.anthropic.com,mcp-proxy.anthropic.com,platform.claude.com"
 
 ENV PATH=/opt/agent/.local/bin:/opt/agent/.claude/local/bin:${PATH}
 
@@ -287,6 +298,7 @@ COPY --chmod=0755 tools/claude/seed-claude-plugins.sh /opt/agent-vm/seed.d/10-cl
 ARG AGENT_VERSION_COPILOT=1.0.90
 
 LABEL org.agent-vm.version.copilot="${AGENT_VERSION_COPILOT}"
+# No agent network request yet: copilot is not inventoried (#143).
 
 RUN --mount=type=bind,source=tools/copilot/install-copilot.sh,target=/tmp/install-copilot.sh,ro \
     AGENT_INSTALL_SOFT_FAIL= \
@@ -332,6 +344,7 @@ RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro 
 ARG AGENT_VERSION_AGY=1.4.11
 
 LABEL org.agent-vm.version.agy="${AGENT_VERSION_AGY}"
+# No agent network request yet: agy is not inventoried (#143).
 
 # The background self-update would replace the reviewed binary in a guest.
 ENV AGY_CLI_DISABLE_AUTO_UPDATE=1

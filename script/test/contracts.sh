@@ -209,6 +209,13 @@ if [ "$guard_only" = false ]; then
     # Repository base identity (#95): the committed manifest, the generator, the
     # in-build verifier and the copied extension default, all hermetic.
     python3 script/test/base-inputs.py
+    # The network-request label contract (ADR 0014): grammar boundaries,
+    # launcher-parity vectors, the strict source form and the ownership table.
+    python3 script/test/network-requests-tests.py
+    # The restricted-egress smoke's own harness (ADR 0014): the stream and
+    # destination assertions and the whole runner against a fake Docker, so its
+    # evidence, readiness and cleanup paths are covered without a daemon.
+    bash script/test/network-requests-egress.sh --self-test
 fi
 # --- no embedded Python in shell sources -------------------------------------
 # Python belongs in its own file, invoked as `python3 FILE`; see CODING_STANDARDS
@@ -300,6 +307,10 @@ while IFS= read -r -d '' script; do
     shellcheck --severity=warning "$script"
 done < <(find images script examples -type f \( -name '*.sh' -o -name hello-image \) ! -name '*.upstream.sh' ! -path '*/target/*' -print0)
 bash script/test/example-layers.sh
+# Runtime network-request labels (ADR 0014): the key scheme, the value grammar
+# and the one-owner rule are static facts about the recipes, so --guard-only
+# still refuses a bad label without Docker.
+python3 script/test/network_requests.py check-sources
 # The Chrome container checks assert subprocess status separately from the text
 # they match; these stand-in producers prove that, without Docker.
 "$posix_sh" script/test/fixtures/chrome-example/checks.sh self-test

@@ -73,20 +73,98 @@ digest-pinned released-standard parent on every run, refuses a daemon, host or
 parent platform other than the requested native one, then builds with
 `--no-cache`. A pin that upstream withdrew therefore fails a real fetch here with
 the URL in the log, instead of being masked by a warm cache. The built image's
-identity and platform are inspected afterwards, and only that run's own tag is
-removed. `chrome-devtools` additionally keeps its runtime suite and the arm64
+identity and platform are inspected afterwards, and the request labels of the
+built image are compared with the layer's recipe and its inspected parent
+([ADR 0014](../../docs/adr/0014-image-network-requests.md)), so a label that did
+not reach the final stage fails the row. Only that run's own tag is removed.
+`chrome-devtools` additionally keeps its runtime suite and the arm64
 interrupted-run control.
 
 What CI does not do: it publishes nothing — no tags, no release contract, no
-provenance — and no layer's runtime suite runs except Chrome's. The deeper Rust
-and Go suites below stay manual maintenance evidence. Decision and rejected
-alternatives, including why both architectures build cold rather than from a
-cache: [ADR 0010](../../docs/adr/0010-layer-build-ci.md).
+provenance — and, apart from the network-request egress smoke below, no layer's
+runtime suite runs except Chrome's. The deeper Rust and Go suites below stay
+manual maintenance evidence. Decision and rejected alternatives, including why
+both architectures build cold rather than from a cache:
+[ADR 0010](../../docs/adr/0010-layer-build-ci.md).
 
 Registering a new input is still reviewed work: a new third-party source is
 registered in `images/parent-pins.json.recipes` (the source-policy gate requires
 exact agreement with the discovered `Dockerfile`s), and a new script beside a
 recipe is added to `script/test/example-layers.sh`'s guarded list.
+
+## Declaring network requests
+
+A user-owned layer is a component: it installs software, and that software
+contacts hosts at runtime. Say which hosts on the layer's own label, so the
+launcher can report a host the guest's egress does not cover. A request is
+reported, never granted — see
+[ADR 0014](../../docs/adr/0014-image-network-requests.md).
+
+```dockerfile
+FROM ${BASE_IMAGE}
+
+# Runtime network requests (ADR 0014): cargo's sparse index, crate downloads and
+# the crates.io API. Only this layer's own key: the parent's requests stay under
+# their own keys.
+LABEL org.agent-vm.network-requests.image.rust-dev="crates.io,index.crates.io,static.crates.io"
+```
+
+Use **your** component's name and never the parent's keys. A `FROM` child that
+repeats a parent's key replaces the parent's value, which is why each component
+has its own key. `image.base` belongs to the base recipe, `agent.claude` to the
+standard image.
+
+The value is a comma-separated list with no whitespace: exact lowercase
+hostnames, optionally `:port` (not 443, 53 or 853), at most 64, sorted, no
+wildcards or IPs. `""` means inventoried and contacts nothing by default; an
+absent key means not inventoried. Do not derive it from an `ARG`: the hosts have
+to be knowable from the source. `rust-dev` declares three hosts because `cargo`
+uses `index.crates.io` for the sparse index, `static.crates.io` for downloads and
+`crates.io` for the search/publish API; `apt` adds nothing, because Debian's
+mirrors are plain HTTP and can never be a TLS request.
+
+Check it before pushing:
+
+```sh
+python3 script/test/network_requests.py check-sources                 # the whole repository
+python3 script/test/network_requests.py source-labels examples/layers/rust-dev/Dockerfile
+# Your layer is checked against its own parent, so inspect that exact parent too
+# and pass it with --inherits: a request label it carries is not your layer's, and
+# without its inspect output the check reports every one of them as unexplained.
+# PARENT_IMAGE is the pinned reference your FROM names, not your finished layer;
+# this repository's layers keep it in the ARG BASE_IMAGE default.
+PARENT_IMAGE=$(sed -n 's/^ARG BASE_IMAGE=//p' examples/layers/rust-dev/Dockerfile)
+docker image inspect "$PARENT_IMAGE" > parent.json
+docker image inspect my-layer:dev > i.json
+python3 script/test/network_requests.py check-image --inspect i.json \
+  --dockerfile examples/layers/rust-dev/Dockerfile --inherits parent.json
+```
+
+`--inherits` is what makes "a layer cannot erase its parent's requests" a check
+rather than a claim: every request label of the parent must still be there with
+the same value, and every label the layer adds must come from its own source. It
+is vacuous only while the parent you build on predates the labels.
+
+`contracts.sh` runs `check-sources` on every change, and CI runs `check-image`
+on every built layer, so a label that is malformed, unsorted, in the wrong stage
+or overwritten comes back as a named error.
+
+### The egress smoke
+
+A static label is a claim. For `rust-dev` and `go-dev`, CI also proves it:
+[`script/test/network-requests-egress.sh`](../../script/test/network-requests-egress.sh)
+reads the label off the built image, turns it into a strict proxy allow-list, and
+runs the layer's own fixture command (`cargo fetch --locked`, `go mod download`)
+in a container whose only route out is that proxy. The run passes when every TLS
+destination the command reached is declared, and a second run with one used host
+removed has to fail, which is what makes the gate load-bearing. It proves that
+no undeclared host was contacted, not that every declared host is used.
+
+A layer opts in by adding a fixture directory
+`script/test/fixtures/network-requests/<layer>/` holding the command (`smoke.sh`)
+and its project files; nothing else names the layer. That directory also selects
+the larger CI bounds, because the phase runs inside the cold build. The Rust and
+Go suites below stay manual.
 
 ## Index
 

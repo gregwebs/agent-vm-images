@@ -24,7 +24,9 @@ with tempfile.TemporaryDirectory() as work:
     work = Path(work)
     (work / 'config').write_text(json.dumps(rules.rules(manifest)))
     os.environ.update(EGRESS_CONFIG=str(work / 'config'), EGRESS_LOG=str(work / 'log'))
-    sys.modules['mitmproxy'] = SimpleNamespace(http=SimpleNamespace(Response=SimpleNamespace(make=lambda *a: a)))
+    # The addon imports ctx for its opt-in TLS-destination mode; this config never sets it.
+    sys.modules['mitmproxy'] = SimpleNamespace(http=SimpleNamespace(Response=SimpleNamespace(make=lambda *a: a)),
+                                               ctx=SimpleNamespace(options=SimpleNamespace(connection_strategy='eager')))
     addon = module('addon', FIXTURES / 'addon.py')
     def flow(url, method='GET'):
         p = urlsplit(url)

@@ -27,6 +27,11 @@
 ARG BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de
 FROM ${BASE_IMAGE}
 
+# Runtime network requests (ADR 0014; examples/layers/README.md#declaring-network-requests):
+# cargo's sparse index, crate downloads and the crates.io API. Only this layer's
+# own key: the parent's requests stay under their own keys.
+LABEL org.agent-vm.network-requests.image.rust-dev="crates.io,index.crates.io,static.crates.io"
+
 # Pins. These mirror agent-vm's canonical pins: RUST_TOOLCHAIN its
 # rust-toolchain.toml channel, VERUS_RELEASE/VERUS_SHA256 its
 # .github/workflows/verus.yml. This repository does not check out/read those files;

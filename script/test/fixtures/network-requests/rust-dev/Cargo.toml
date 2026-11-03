@@ -1,0 +1,10 @@
+# One dependency, no transitive ones: the smoke's subject is the hosts cargo
+# contacts, not a dependency graph.
+[package]
+name = "network-requests-smoke"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+itoa = "=1.0.15"
