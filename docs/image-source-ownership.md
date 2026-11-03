@@ -364,15 +364,22 @@ marker. `example-layers.sh` scans only the current base/standard recipe text for
 direct forbidden tokens; it does not inspect the released parent filesystem or
 helper-installed content. Harmless comments containing those tokens also fail.
 
-### Rust and Verus pins
+### Rust, Verus and kache pins
 
-agent-vm owns the canonical selections: the Rust channel in its
+agent-vm owns the canonical selections for the Rust channel in its
 `rust-toolchain.toml` and the Verus release/digest in its
 `.github/workflows/verus.yml`. `examples/layers/rust-dev/Dockerfile` mirrors them
 (`ARG RUST_TOOLCHAIN`, `ARG VERUS_RELEASE`, `ARG VERUS_SHA256`).
 
 Bump order: agent-vm lands its pin bump first; then a PR here moves the mirrored
 selection (both Verus values together), citing the agent-vm commit.
+
+kache is the exception: no other repository pins it, so this example owns the
+selection and its bump order. `ARG KACHE_VERSION`, `ARG KACHE_AMD64_SHA256`,
+`ARG KACHE_ARM64_SHA256` and `ARG KACHE_RELEASE_CERT_SHA256` move together with the
+evidence in `examples/layers/rust-dev/kache/` — the two published `.sha256`
+sidecars and the release key. A version bumped without re-downloading that
+evidence fails `script/test/example-layers.sh` and then the build.
 
 #### Rust: reviewed closure, not a channel name (#102)
 
@@ -398,6 +405,37 @@ URLs/digests, upstream `.sha256` and installation-document evidence, reviewer an
 a reassessment condition; it is not a claim that the bootstrap publisher is
 authenticated. Signed archives are verified, not excused. Decision and rejected
 alternatives: [ADR 0007](adr/0007-rust-example-toolchain-pins.md).
+
+#### kache: a signature-verified release artifact
+
+`examples/layers/rust-dev/kache/` holds the reviewed evidence for the pinned
+kache release: the published `.sha256` sidecar for each static musl tarball and
+the release key ("Kunobi Release Signing <feedback@kunobi.ninja>", RSA-4096,
+fingerprint `6069 18FD A7F1 854E 78B6 83CE 9A99 0E6B CBCC A73B`). The key is
+https://r2.kunobi.com/kache/apt/gpg.key, the one the vendor signs its apt
+repository with; the release workflow's copy of the same certificate lives in
+repository secrets, so that URL is the only published form. Its authorship is
+established at review time by TLS from the vendor's domain and by that apt use —
+not by a web of trust, and there is no attestation or transparency-log entry to
+check.
+
+`install-kache.sh` refuses a key that does not hash to `ARG KACHE_RELEASE_CERT_SHA256`, a
+sidecar that does not record the pinned digest, a tarball that does not hash to
+it, a published sidecar that differs from the committed one, a tarball whose
+detached `.asc` does not verify against the committed key, an archive member
+outside `{kache, kache-engine, kache.asc, kache-engine.asc}`, and a binary that
+does not report `kache <ARG KACHE_VERSION>`. Both binaries of the paired release
+are installed. Nothing resolves `latest`, and a refused download installs
+nothing. `kache_probe.py` then decides the `kache doctor --probe --json` report
+in the `--network=none` verifier, because `doctor` exits 0 with findings.
+
+The decision and its rejected alternatives are in
+[ADR 0015](adr/0015-kache-compiler-cache.md).
+
+What that does not prove: that the release is safe. Maintenance is a
+maintainer-host step, never a build step: download the new per-architecture
+tarballs, their `.sha256` sidecars and the key, confirm the digests, replace
+`kache/` and move the four ARGs together.
 
 Only `script/dev/upgrade-rust-toolchain.sh` (with
 `script/dev/rust-toolchain-update.py`) writes these files, on a maintainer host
@@ -435,9 +473,10 @@ project dependencies.
 Machine-checked here: the committed closure (file set, digests, checksum lines,
 key identity, manifest signature, manifest-derived selection, ARG equality), the
 exact installer/verifier RUN shapes and mounts, `--network=none` on the verifier,
-the absence of a runtime `CARGO_HOME`/`RUSTUP_TOOLCHAIN`, banned live-bootstrap
-or mutable-channel tokens, and the Verus smoke shape — by
-`script/test/example-layers.sh` (103 cases). Hermetic behaviour:
+the absence of a runtime `CARGO_HOME`/`RUSTUP_TOOLCHAIN`, the kache wrapper ENV
+and its installer shape, the kache evidence hashing to its ARGs, banned
+live-bootstrap or mutable-channel tokens, and the Verus smoke shape — by
+`script/test/example-layers.sh` (110 cases). Hermetic behaviour:
 `python3 script/test/rust-toolchain-pins.py` and
 `python3 script/test/rust-toolchain-maintenance.py`. Native evidence:
 `bash script/test/rust-example.sh --platform linux/arm64|linux/amd64` on a
@@ -502,7 +541,7 @@ all four ARG-derived assertions), the exact installer/verifier RUN shapes and
 mounts, `--network=none` on the verifier, exactly one `ENV GOTOOLCHAIN=local`, the
 absence of any other `GO*` policy ENV, and banned unpinned-install /
 graph-regeneration / checksum-bypass tokens — by `script/test/example-layers.sh`
-(103 cases). Hermetic behaviour on a pinned native Go:
+(110 cases). Hermetic behaviour on a pinned native Go:
 `python3 script/test/gopls-closure-pins.py --go-root PATH` and
 `python3 script/test/gopls-closure-maintenance.py --go-root PATH`. Native
 evidence: `bash script/test/go-example.sh --platform linux/arm64|linux/amd64

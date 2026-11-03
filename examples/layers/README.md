@@ -171,7 +171,7 @@ Go suites below stay manual.
 | Example | Adds |
 |---|---|
 | [`wirenboard-cpp`](wirenboard-cpp/) | WB C/C++ build-essentials (debhelper, clang-format/clang-tidy, libcurl/libgtest/libmodbus/libsystemd-dev, cmake/ninja, ...) plus the armhf/arm64 cross toolchains, qemu-user-static, and the sbuild/schroot/debootstrap path. |
-| [`rust-dev`](rust-dev/) | The Rust toolchain [agent-vm](https://github.com/gregwebs/agent-vm) pins (via its `rust-toolchain.toml`, with clippy and rustfmt), the host musl target, the native build libraries agent-vm's `ci.yml` installs, shellcheck, and the pinned Verus release — enough to build, test, lint and verify agent-vm's Rust code in the guest. The toolchain is installed from a reviewed pin set, not from the live installer. |
+| [`rust-dev`](rust-dev/) | The Rust toolchain [agent-vm](https://github.com/gregwebs/agent-vm) pins (via its `rust-toolchain.toml`, with clippy and rustfmt), the host musl target, the native build libraries agent-vm's `ci.yml` installs, shellcheck, the pinned kache compiler cache every cargo invocation runs through, and the pinned Verus release — enough to build, test, lint and verify agent-vm's Rust code in the guest, reusing compiled crates across worktrees and launches. The toolchain and kache are installed from reviewed pin sets, not from the live installer. |
 | [`go-dev`](go-dev/) | The pinned Go toolchain (go, gofmt, go vet) plus the two tools a Go project's editor and CI loop expect beyond it, `golangci-lint` and the `gopls` language server (built from a reviewed module closure, not `go install pkg@version`) — enough to build, test, lint and navigate a Go code base in the guest. |
 | [`chrome-devtools`](chrome-devtools/) | Chromium, Chrome DevTools MCP wrapper, scoped NSS CA trust, and the Chrome capability marker. |
 
@@ -187,6 +187,9 @@ the vendored `msb` (agent-vm's own gates do not);
 - the native libraries agent-vm's `ci.yml` installs — `build-essential`, `pkg-config`,
 `libcap-ng-dev`, `libdbus-1-dev` — plus `musl-tools` for that musl target, and
 `shellcheck` for agent-vm's `script/test/ci-contracts.sh`;
+- **kache** (Apache-2.0, [kunobi-ninja/kache](https://github.com/kunobi-ninja/kache)),
+installed as `RUSTC_WRAPPER` so every cargo compile in the guest is cached (see
+[kache build cache](#kache-build-cache));
 - the **pinned Verus release** CI verifies with, on `linux/amd64` (see the
 Apple Silicon note below).
 
@@ -224,6 +227,69 @@ prevented is the implicit kind — automatic installation is disabled, so an
 ordinary `cargo`, `rustc`, `cargo clippy` or `cargo fmt` invocation installs
 nothing and fails locally instead (see [First use](#first-use)). The layer
 pre-provisions exactly the pinned toolchain.
+
+### kache build cache
+
+[kache](https://github.com/kunobi-ninja/kache) is a compiler cache for Rust (and
+C/C++ and CUDA): it keys each rustc invocation on its inputs and restores
+matching outputs across target directories, worktrees and launches, keeping one
+copy of identical bytes. The layer installs both binaries of the paired release
+under `/opt/kache/bin` and exports:
+
+```sh
+RUSTC_WRAPPER=/opt/kache/bin/kache
+```
+
+so the ordinary `cargo` loop is cached without a guest setup step. Nothing else
+is shared: the store, its index, the diagnostic log and the per-user daemon live
+in the guest's own writable `$HOME/.cache/kache`, so two launches of the same
+project reuse each other's work while the shared `/opt` tree stays read-only. The
+daemon is started by the first cache-enabled compile (no systemd user session is
+needed, which is why `kache init`'s login service is not installed);
+`kache daemon status`, `kache monitor` and `kache stats` show what it did.
+
+Turn it off for one command with `KACHE_DISABLED=1`, or for a whole session with
+`env -u RUSTC_WRAPPER`. `kache init --no-service` adds what the image does not: a
+`cargo` shim that protects target directories, the C/C++ compiler shims, test
+pacing and shell completions. The C/C++ shims matter only when a project compiles
+C natively; Rust needs no shims.
+
+`cargo verus` is unaffected by the wrapper: it sets `RUSTC_WRAPPER` to Verus's
+own driver, which overrides the image value, so verification never runs through
+the cache.
+
+What it adds to the network: nothing. The store is local and remote backends are
+opt-in, so `org.agent-vm.network-requests.image.rust-dev` keeps the three crates
+hosts and the layer requests no new one (`kache doctor` reports the same: no
+remote configured).
+
+#### Pinned inputs
+
+The layer owns this selection: nothing else pins kache, so there is no mirrored
+pin to follow. Four `ARG`s and [`kache/`](rust-dev/kache/) move together:
+`KACHE_VERSION` plus the per-architecture tarball digest and the release
+certificate's digest.
+`kache/` commits the published `.sha256` sidecar for each static musl tarball and
+the release key ("Kunobi Release Signing", RSA-4096, fingerprint
+`6069 18FD A7F1 854E 78B6 83CE 9A99 0E6B CBCC A73B`, taken from
+https://r2.kunobi.com/kache/apt/gpg.key).
+
+[`install-kache.sh`](rust-dev/install-kache.sh) refuses a key that does not hash
+to its pin, a sidecar that does not record the pinned digest, a tarball that does
+not hash to it, a published sidecar that differs from the committed one, a
+tarball whose detached OpenPGP signature does not verify against the committed
+key, an archive member outside `{kache, kache-engine, kache.asc,
+kache-engine.asc}`, and a binary that does not report `kache <KACHE_VERSION>`. A
+refused download installs nothing; `layer-build.sh` exercises that against a
+404 and against wrong bytes. The verifier then re-checks both versions behind
+`RUSTC_WRAPPER` and runs `kache doctor --probe` with no network: it compiles,
+stores and restores a small library in an isolated cache, so a broken wrapper,
+daemon or store fails the build instead of a guest.
+
+Bump it on a maintainer host: download the new per-architecture tarballs, their
+sidecars and the key, confirm the digests, replace `kache/` and move the four
+`ARG`s together. Then run the native suite below. The decision and its rejected
+alternatives are in [ADR 0015](../../docs/adr/0015-kache-compiler-cache.md).
 
 ### Reviewed toolchain closure (#102)
 
@@ -294,7 +360,9 @@ explicitly runs `rustup install/add/update` is outside this guarantee.
 native daemon builds this recipe at the committed default parent, re-runs the
 verifier with `--network none`, and exercises the toolchain as root and as numeric
 uids with an empty writable `HOME`, a project `rust-toolchain.toml` and negative
-first-use legs. Add `--no-cache` for acceptance evidence: a cached
+first-use legs — each of those cargo runs also exercises kache as
+`RUSTC_WRAPPER`, so a broken wrapper, daemon or store fails the suite. Add
+`--no-cache` for acceptance evidence: a cached
 toolchain-install stage proves nothing about the installer, so every run records
 `build-toolchain-install cached=0|1` and a cached stage is called out in its log. Its first-use policy legs run on an `--internal` canary network
 with writable clones of the shared homes, so a leg observes the policy rather than
@@ -319,17 +387,22 @@ layer works on both architectures.
 ### Keeping the pins in lockstep
 
 agent-vm owns the Rust channel and the Verus release/digest; this Dockerfile
-mirrors them. Bump order and check coverage live in
-[Example image ownership](../../docs/image-source-ownership.md#rust-and-verus-pins).
+mirrors them, and this layer owns the kache selection (nothing else pins it).
+Bump order and check coverage live in
+[Example image ownership](../../docs/image-source-ownership.md#rust-verus-and-kache-pins).
 `script/test/example-layers.sh` guards the committed closure, the recipe shape,
-ARG anchors and the Verus smoke shape statically; native amd64 builds exercise
-Verus verification.
+ARG anchors, the kache evidence, and the kache and Verus smoke shapes statically;
+native amd64 builds exercise Verus verification, and every cold build on both
+architectures proves the kache pins through the installer and the
+`--network=none` probe.
 
 The layer's build steps are committed as standalone scripts beside the
-Dockerfile — `install-rust.sh`, `install-verus.sh`, `verify-toolchain.sh` and
-the build-only `rust_toolchain.py` — and bind-mounted in at build time, so each
-can be read, reviewed and run on its own. They are guarded by
-`script/test/example-layers.sh`, which `script/test/contracts.sh` runs.
+Dockerfile — `install-rust.sh`, `install-kache.sh`, `install-verus.sh`,
+`verify-toolchain.sh` and the build-only `rust_toolchain.py` and
+`kache_probe.py` — and bind-mounted
+in at build time, so each can be read, reviewed and run on its own. They are
+guarded by `script/test/example-layers.sh`, which `script/test/contracts.sh`
+runs.
 
 ## Go development
 
