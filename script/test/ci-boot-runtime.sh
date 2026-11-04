@@ -2,6 +2,7 @@
 # Offline pin/linkage controls; fixture hashes change, production has no bypass.
 set -euo pipefail
 ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+. "$ROOT/script/test/file-mode.sh"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin" "$work/tree/script/release" "$work/fixtures"
@@ -33,6 +34,17 @@ SH
 chmod +x "$work/bin/"*
 export PATH="$work/bin:$PATH"
 fail() { echo "runtime regression: $*" >&2; exit 1; }
+# The mode read is forced through the BSD stat dialect on every host, which is the
+# shape that used to stop this suite on macOS. The stub goes on PATH for that read
+# alone, so the installer under test never inherits it.
+REAL_STAT="$(command -v stat)"
+install_file_mode_stat_shim "$work/bsd-stat"
+msb_mode_is_755() { # $1 = path, $2 = directory that holds the forced BSD stat
+    local mode
+    mode=$(REAL_STAT="$REAL_STAT" FILE_MODE_STAT_SHAPE=bsd PATH="$2:$PATH" file_mode "$1") ||
+        fail "cannot read the mode of $1"
+    [ "$mode" = 755 ]
+}
 for number in 1 2 3 4 5 6 7 8; do
     case_dir="$work/case-$number"
     mkdir -p "$case_dir/tmp"
@@ -70,7 +82,7 @@ for number in 1 2 3 4 5 6 7 8; do
             echo "dir=$dir"
         } > "$case_dir/expected"
         cmp "$case_dir/expected" "$case_dir/out" || fail 'output declaration'
-        [ "$(stat -c %a "$dir/bin/msb")" = 755 ] || fail 'msb mode'
+        msb_mode_is_755 "$dir/bin/msb" "$work/bsd-stat" || fail 'msb mode'
         printf '%s\n' \
             'https://github.com/superradcompany/microsandbox/releases/download/v0.7.7/msb-linux-x86_64' \
             'https://github.com/superradcompany/microsandbox/releases/download/v0.7.7/libkrunfw-linux-x86_64.so' \
@@ -95,4 +107,12 @@ for number in 1 2 3 4 5 6 7 8; do
     fi
     echo "runtime case $number passed"
 done
+# The guard has to reject a mode that is really on disk, so the control ships one.
+mkdir -p "$work/mutant/bin"
+printf '#!/bin/sh\n' > "$work/mutant/bin/msb"
+chmod 0644 "$work/mutant/bin/msb"
+if msb_mode_is_755 "$work/mutant/bin/msb" "$work/bsd-stat"; then
+    fail 'msb mode guard accepted 0644'
+fi
+echo 'ci boot runtime rejected an msb with mode 644'
 echo 'ci boot runtime controls passed'

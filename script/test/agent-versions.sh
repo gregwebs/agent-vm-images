@@ -26,6 +26,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+. "$REPO_ROOT/script/test/file-mode.sh"
 SCRIPT="$REPO_ROOT/script/build/agent-versions.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/agent-versions-test.XXXXXX")"
 TEST_ROOT="$(cd "$TEST_ROOT" && pwd -P)"
@@ -964,70 +965,69 @@ assert_contains "$RUN_COMBINED" "missing Dockerfile"
 
 EVIDENCE_BUNDLE='codex-package-aarch64-unknown-linux-musl.tar.gz.sigstore'
 
-# The permission mode of one path, as `chmod` accepts it. Each `stat` dialect is
-# captured and status-checked SEPARATELY: GNU `stat -f` prints filesystem data
-# before it fails, so `stat -f ... || stat -c ...` inside ONE command substitution
-# produced a multi-line, invalid mode and took the whole suite down at
-# partial-publication. Only a successful capture is ever printed.
-file_mode() { # $1 = path
-    local mode
-    if mode="$(stat -c '%a' "$1" 2>/dev/null)" && [ -n "$mode" ]; then
-        printf '%s\n' "$mode"
-        return 0
-    fi
-    if mode="$(stat -f '%Lp' "$1" 2>/dev/null)" && [ -n "$mode" ]; then
-        printf '%s\n' "$mode"
-        return 0
-    fi
-    fail "cannot read the mode of $1 with stat -c or stat -f"
+# The read is done here and its status checked here: with the read inside the
+# comparison's own `$( )`, two unreadable paths compare as '' = '' and pass.
+require_same_mode() { # $1, $2 = paths, $3 = what a difference means
+    local left right
+    left=$(file_mode "$1") || fail "cannot read the mode of $1"
+    right=$(file_mode "$2") || fail "cannot read the mode of $2"
+    [ "$left" = "$right" ] || fail "$3 ($left vs $right)"
 }
 
-# The mode helper's own control, including the failure mode that broke the suite:
-# a GNU `stat` that prints a filesystem block for the format argument and THEN
-# fails must contribute nothing to the mode.
+copy_mode() { # $1 = path to read the mode from, $2 = path that must carry it
+    local mode
+    mode=$(file_mode "$1") || fail "cannot read the mode of $1"
+    chmod "$mode" "$2"
+}
+
+# The helper's own control, including the failure that broke the suite: a stat
+# that prints a filesystem block for `-f` and THEN fails must contribute nothing
+# to the mode. Each dialect is forced through the stub, so every control runs on
+# every host instead of only where that stat ships.
 file_mode_self_check() {
-    local dir="$TEST_ROOT/file-mode" fake real_stat mode
+    local dir="$TEST_ROOT/file-mode" real_stat shape mode
     rm -rf "$dir"
     mkdir -p "$dir/bin"
     real_stat="$(command -v stat)"
     : >"$dir/probe"
     chmod 0640 "$dir/probe"
 
-    mode="$(file_mode "$dir/probe")"
+    mode=$(file_mode "$dir/probe") || fail 'file_mode cannot read a readable path'
     [ "$mode" = 640 ] || fail "file_mode returned '$mode', expected 640"
     [ "$(printf '%s\n' "$mode" | grep -c .)" = 1 ] ||
         fail "file_mode returned a multi-line mode: '$mode'"
     cp "$dir/probe" "$dir/copy"
     chmod "$mode" "$dir/copy" || fail "file_mode returned a mode chmod rejects: '$mode'"
+    echo '  ok: file_mode returns one octal mode that chmod accepts'
 
-    # The reported regression: a stat whose FIRST dialect fails after printing.
-    # Only a real GNU stat has that behaviour, so the control runs where it can.
-    if stat -c '%a' "$dir/probe" >/dev/null 2>&1; then
-        fake="$dir/bin/stat"
-        # shellcheck disable=SC2016  # these printf arguments are fixture shell source
-        {
-            printf '#!/bin/sh\n'
-            printf 'case "$1" in\n'
-            printf '  --format|-c) exec "%s" "$@" ;;\n' "$real_stat"
-            printf '  -f|--file-system)\n'
-            printf '    echo "  File: \"%%s\"" "$2"\n'
-            printf '    echo "    ID: 0000 Namelen: 255 Type: fixture"\n'
-            printf '    exit 1 ;;\n'
-            printf 'esac\n'
-            printf 'exec "%s" "$@"\n' "$real_stat"
-        } >"$fake"
-        chmod 0755 "$fake"
-        mode="$(PATH="$dir/bin:$PATH" file_mode "$dir/probe")"
+    for shape in bsd gnu; do
+        install_file_mode_stat_shim "$dir/bin/$shape"
+        mode=$(REAL_STAT="$real_stat" FILE_MODE_STAT_SHAPE="$shape" \
+            PATH="$dir/bin/$shape:$PATH" file_mode "$dir/probe") ||
+            fail "file_mode cannot read a mode through the $shape stat dialect"
         case "$mode" in
             [0-7][0-7][0-7] | [0-7][0-7][0-7][0-7]) ;;
-            *) fail "file_mode returned a contaminated mode: '$mode'" ;;
+            *) fail "the $shape stat dialect produced a contaminated mode: '$mode'" ;;
         esac
-        [ "$mode" = 640 ] || fail "file_mode returned '$mode' under a failing stat -f"
-        echo '  ok: file_mode ignores a stat dialect that prints before it fails'
-    else
-        echo '  ok: file_mode reads the BSD stat dialect (no GNU stat on PATH here)'
+        [ "$mode" = 640 ] || fail "file_mode returned '$mode' through the $shape stat dialect"
+        echo "  ok: file_mode reads the mode through the $shape stat dialect"
+    done
+
+    # A failed read is a status the caller checks, never an empty mode.
+    install_file_mode_stat_shim "$dir/bin/none"
+    if mode=$(REAL_STAT="$real_stat" FILE_MODE_STAT_SHAPE=none \
+        PATH="$dir/bin/none:$PATH" file_mode "$dir/probe"); then
+        fail 'file_mode reported success when neither stat dialect works'
     fi
-    echo '  ok: file_mode returns one octal mode that chmod accepts'
+    [ -z "$mode" ] || fail "file_mode printed '$mode' while failing"
+    echo '  ok: file_mode reports a failed read as a status, not as an empty mode'
+
+    if (require_same_mode "$dir/absent-a" "$dir/absent-b" 'unreadable') >/dev/null 2>"$dir/err"; then
+        fail 'require_same_mode accepted two unreadable paths'
+    fi
+    grep -q 'cannot read the mode of' "$dir/err" ||
+        fail 'require_same_mode failed without naming the path it could not read'
+    echo '  ok: require_same_mode fails the case instead of comparing two empty modes'
 }
 
 file_mode_self_check
@@ -1047,16 +1047,16 @@ SNAPSHOT_FILES=(
 
 codex_snapshot() { # $1 = directory
     mkdir -p "$1"
-    local relative
+    local relative name
     for relative in images/standard/Dockerfile images/tools/codex/pin.json \
         images/tools/codex/evidence/release.json \
         images/tools/codex/evidence/codex-package_SHA256SUMS \
         "images/tools/codex/evidence/$EVIDENCE_BUNDLE" \
         images/tools/codex/evidence/codex-package-x86_64-unknown-linux-musl.tar.gz.sigstore \
         images/tools/codex/evidence/codex-package-aarch64-unknown-linux-musl.tar.gz.sigstore; do
-        cp "$FIXTURE_ROOT/$relative" "$1/$(printf '%s' "$relative" | tr '/' '_')"
-        chmod "$(file_mode "$FIXTURE_ROOT/$relative")" \
-            "$1/$(printf '%s' "$relative" | tr '/' '_')"
+        name="$(printf '%s' "$relative" | tr '/' '_')"
+        cp "$FIXTURE_ROOT/$relative" "$1/$name"
+        copy_mode "$FIXTURE_ROOT/$relative" "$1/$name"
     done
 }
 
@@ -1073,8 +1073,7 @@ codex_compare_snapshot() { # $1 directory, $2 label
         name="$(printf '%s' "$relative" | tr '/' '_')"
         cmp -s "$1/$name" "$FIXTURE_ROOT/$relative" ||
             fail "$2: $relative does not match the pre-publication snapshot"
-        [ "$(file_mode "$1/$name")" = "$(file_mode "$FIXTURE_ROOT/$relative")" ] ||
-            fail "$2: $relative mode changed ($(file_mode "$1/$name") vs $(file_mode "$FIXTURE_ROOT/$relative"))"
+        require_same_mode "$1/$name" "$FIXTURE_ROOT/$relative" "$2: $relative mode changed"
     done
 }
 
@@ -1279,6 +1278,7 @@ agy_proposal_self_check
 verify_retained_recovery() { # $1 label, $2 profile, $3 snapshot dir, $4 owner override, $5 publisher override
     local label=$1 profile=$2 snapshot=$3
     local publisher owner entry name matched count numbered proposal expected
+    local entry_mode snapshot_mode
     recovery_profile "$profile"
     prepare_recovery_expectations "$profile"
     publisher="${5:-$(retained_publisher_dir)}"
@@ -1319,9 +1319,11 @@ verify_retained_recovery() { # $1 label, $2 profile, $3 snapshot dir, $4 owner o
         matched=0
         [ -f "$snapshot/$name" ] ||
             fail "$label: the snapshot is missing $name: $snapshot"
+        snapshot_mode=$(file_mode "$snapshot/$name") ||
+            fail "$label: cannot read the mode of $snapshot/$name"
         for entry in $numbered; do
-            if cmp -s "$entry" "$snapshot/$name" &&
-                [ "$(file_mode "$entry")" = "$(file_mode "$snapshot/$name")" ]; then
+            entry_mode=$(file_mode "$entry") || fail "$label: cannot read the mode of $entry"
+            if cmp -s "$entry" "$snapshot/$name" && [ "$entry_mode" = "$snapshot_mode" ]; then
                 matched=$((matched + 1))
             fi
         done
@@ -1496,7 +1498,7 @@ agy_snapshot() { # $1 = directory
         destination="$(agy_destination "$proposal")"
         name="$(recovery_snapshot_name agy "$proposal")"
         cp "$FIXTURE_ROOT/$destination" "$1/$name"
-        chmod "$(file_mode "$FIXTURE_ROOT/$destination")" "$1/$name"
+        copy_mode "$FIXTURE_ROOT/$destination" "$1/$name"
     done
 }
 
@@ -1507,8 +1509,7 @@ agy_compare_snapshot() { # $1 directory, $2 label
         name="$(recovery_snapshot_name agy "$proposal")"
         cmp -s "$1/$name" "$FIXTURE_ROOT/$destination" ||
             fail "$2: $destination does not match the pre-publication snapshot"
-        [ "$(file_mode "$1/$name")" = "$(file_mode "$FIXTURE_ROOT/$destination")" ] ||
-            fail "$2: $destination mode changed"
+        require_same_mode "$1/$name" "$FIXTURE_ROOT/$destination" "$2: $destination mode changed"
     done
 }
 
@@ -1656,8 +1657,7 @@ claude_compare_snapshot() { # $1 directory, $2 label
         name="$(printf '%s' "$relative" | tr '/' '_')"
         cmp -s "$1/$name" "$FIXTURE_ROOT/$relative" ||
             fail "$2: $relative does not match the pre-publication snapshot"
-        [ "$(file_mode "$1/$name")" = "$(file_mode "$FIXTURE_ROOT/$relative")" ] ||
-            fail "$2: $relative mode changed"
+        require_same_mode "$1/$name" "$FIXTURE_ROOT/$relative" "$2: $relative mode changed"
     done
 }
 
