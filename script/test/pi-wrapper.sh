@@ -30,6 +30,7 @@ fail() {
 CASE=""
 CASE_EXTRA_ENV=""
 CASE_BRIDGE_EXTENSION=""
+CASE_ANTIGRAVITY_EXTENSION=""
 
 new_case() {
     CASE="$TEST_ROOT/$1"
@@ -40,6 +41,8 @@ new_case() {
     # skip it. The bridge cases below plant a readable file via
     # CASE_BRIDGE_EXTENSION and repoint this.
     CASE_BRIDGE_EXTENSION="$CASE/no-such-bridge.ts"
+    # Same default for the Antigravity provider: absent unless a case plants it.
+    CASE_ANTIGRAVITY_EXTENSION="$CASE/no-such-antigravity.ts"
     mkdir -p "$CASE"
     : >"$CASE/log"
     : >"$CASE/stdin"
@@ -70,6 +73,7 @@ run_wrapper() {
         "PATH=/usr/bin:/bin"
         "AGENT_VM_PI_ENTRY=$CASE/fake-pi"
         "AGENT_VM_PI_BRIDGE_EXTENSION=$CASE_BRIDGE_EXTENSION"
+        "AGENT_VM_PI_ANTIGRAVITY_EXTENSION=$CASE_ANTIGRAVITY_EXTENSION"
         "AGENT_VM_PI_CODEX_EXTENSION=$CASE_CODEX_EXTENSION"
         "AGENT_VM_PI_SUBCOMMANDS=$CASE_SUBCOMMANDS"
         "FAKE_LOG=$CASE/log"
@@ -398,6 +402,8 @@ grep -Fq "MANDATORY_EXTENSION=$MANDATORY_EXTENSION" "$WRAPPER" \
     || fail "production mandatory-extension path is missing"
 grep -Fq 'AGENT_VM_PI_BRIDGE_EXTENSION:-/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts}"' "$WRAPPER" \
     || fail "production bridge-extension path is missing"
+grep -Fq 'AGENT_VM_PI_ANTIGRAVITY_EXTENSION:-/opt/agent-vm/pi-antigravity/node_modules/pi-antigravity/src/index.ts}"' "$WRAPPER" \
+    || fail "production antigravity-extension path is missing"
 grep -Fq 'PI_SUBCOMMANDS="auth config install list mcp remove uninstall update"' "$WRAPPER" \
     || fail "the subcommand vocabulary literal changed (the image build checks drift against pi --help)"
 grep -Fq 'PI_SUBCOMMAND_VOCABULARY=$PI_SUBCOMMANDS' "$WRAPPER" \
@@ -434,6 +440,31 @@ for bridge in absent present opted-out; do
     done
 done
 
+# The two extension packages load in one fixed order after the mandatory
+# extension, and each has its own opt-out: an absent or opted-out provider never
+# displaces the other extension, and the ordering is the reviewed one.
+for antigravity in absent present opted-out; do
+    for bridge in present absent; do
+        new_case "antigravity-$antigravity-bridge-$bridge"
+        expected=(--extension "$MANDATORY_EXTENSION")
+        if [[ $bridge == present ]]; then
+            CASE_BRIDGE_EXTENSION="$CASE/bridge.ts"
+            : >"$CASE_BRIDGE_EXTENSION"
+            expected+=(--extension "$CASE_BRIDGE_EXTENSION")
+        fi
+        if [[ $antigravity != absent ]]; then
+            CASE_ANTIGRAVITY_EXTENSION="$CASE/antigravity.ts"
+            : >"$CASE_ANTIGRAVITY_EXTENSION"
+            if [[ $antigravity == opted-out ]]; then
+                CASE_EXTRA_ENV=AGENT_VM_PI_NO_ANTIGRAVITY=1
+            else expected+=(--extension "$CASE_ANTIGRAVITY_EXTENSION"); fi
+        fi
+        run_wrapper
+        [[ $RUN_STATUS -eq 0 ]] || fail 'antigravity matrix invocation failed'
+        assert_argv_is "${expected[@]}"
+    done
+done
+
 for variant in prompt subcommand argv-fidelity unreadable; do
     new_case "codex-present-$variant"
     CASE_CODEX_EXTENSION="$CASE/codex.js"
@@ -442,9 +473,11 @@ for variant in prompt subcommand argv-fidelity unreadable; do
         prompt|subcommand)
             CASE_BRIDGE_EXTENSION="$CASE/bridge.ts"
             : >"$CASE_BRIDGE_EXTENSION"
+            CASE_ANTIGRAVITY_EXTENSION="$CASE/antigravity.ts"
+            : >"$CASE_ANTIGRAVITY_EXTENSION"
             if [[ $variant == prompt ]]; then
                 run_wrapper 'fix the tests'
-                assert_argv_is --extension "$MANDATORY_EXTENSION" --extension "$CASE_BRIDGE_EXTENSION" --extension "$CASE_CODEX_EXTENSION" 'fix the tests'
+                assert_argv_is --extension "$MANDATORY_EXTENSION" --extension "$CASE_BRIDGE_EXTENSION" --extension "$CASE_CODEX_EXTENSION" --extension "$CASE_ANTIGRAVITY_EXTENSION" 'fix the tests'
             else run_wrapper install foo; assert_argv_is install foo; fi ;;
         argv-fidelity)
             run_wrapper -- '-a b' '*' ''

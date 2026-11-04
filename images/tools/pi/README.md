@@ -1,11 +1,13 @@
 # Pi runtime payloads
 
-Pi (`@earendil-works/pi-coding-agent`, default `1.4.0`) and the separate bridge
-project (`pi-claude-bridge`, default `0.8.0`) are **reviewed pnpm projects**, not
-npm projects. Each carries the same four inputs as dsh — `package.json`,
-`pnpm-lock.yaml`, `pnpm-workspace.yaml`, `pnpm-inputs.sha256` (digests of exactly
-the first three) — and both are installed by the base-owned pnpm exactly
-`11.11.0` with scripts disabled. Neither carries an npm project lock any more.
+Pi (`@earendil-works/pi-coding-agent`, default `1.4.0`) and the two image-owned
+extension projects — the Claude bridge (`pi-claude-bridge`, default `0.8.0`) and
+the Antigravity provider (`pi-antigravity`, default `0.11.0`) — are **reviewed
+pnpm projects**, not npm projects. Each carries the same four inputs as dsh —
+`package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `pnpm-inputs.sha256`
+(digests of exactly the first three) — and all three are installed by the
+base-owned pnpm exactly `11.11.0` with scripts disabled. None carries an npm
+project lock any more.
 
 See `docs/adr/0011-pi-selected-shrinkwrap.md` for the route decisions, the
 family-shape and bin-mode reasoning, and the exact limits of the authenticity
@@ -24,6 +26,16 @@ policy defaults, the npmjs registry, a private HOME/XDG/store and
 * Bridge: `nodeLinker: hoisted`, `autoInstallPeers: false`, the same frozen
   settings, and exactly `ignoredOptionalDependencies:
   ['@anthropic-ai/claude-agent-sdk-*']`.
+* Antigravity: `nodeLinker: hoisted`, `autoInstallPeers: false`, the same frozen
+  settings, no omitted optional dependency (its `undici` runtime dependency is
+  real), and exactly one trust exception, `trustPolicyExclude:
+  ['pi-antigravity@0.11.0']`. That exception exists because `0.11.0` is published
+  without the provenance attestation every predecessor carries, so the reviewed
+  no-downgrade policy refuses it; the operator accepted it on 2026-11-03 and
+  [ADR 0016](../../../docs/adr/0016-pi-antigravity-provider.md) records its
+  limits. A wildcard, a second entry or another version fails the Go workspace
+  policy, and the trap is closed for later bumps: a version that trips
+  `ERR_PNPM_TRUST_DOWNGRADE` again is a review stop.
 
 Hoisted means *no private-store payload*: pnpm 11.11.0 still writes a
 metadata-only `node_modules/.pnpm/lock.yaml`, so the installer, the verifier and
@@ -54,7 +66,7 @@ The seed hook merges the image Claude executable path into project-owned Pi stat
 without clobbering user configuration; it is invoked by the caller, never by
 Docker CMD. Registration probes are not authenticated session evidence.
 
-## Two independent proofs
+## Preparation of the extension projects
 
 * Build-time: `install-pi.sh` downloads every reachable sibling archive
   independently, checks its SRI, extracts it safely and runs the mounted
@@ -65,10 +77,11 @@ Docker CMD. Registration probes are not authenticated session evidence.
   payload: the checker ignores exactly those regular files (a directory or link
   of the same name still fails) because the first real cold install reported them
   as unreachable packages.
-* Finished image: `script/test/standard-node-layout.py --consumer pi|bridge`
-  reads an extracted virtual root with its own authored expectations (family
-  shape, generated bins, wrapper split, hoisted bridge identity, SDK omission)
-  and never imports production JS. `standard-image.sh` runs it after extraction.
+* Finished image: `script/test/standard-node-layout.py --consumer
+  pi|bridge|antigravity` reads an extracted virtual root with its own authored
+  expectations (family shape, generated bins, wrapper split, hoisted bridge
+  identity, SDK omission, the provider's one runtime dependency) and never
+  imports production JS. `standard-image.sh` runs it after extraction.
 
 | Module | Owns | Never owns |
 |---|---|---|
@@ -122,20 +135,29 @@ does not name and a record entry this graph no longer produces. A version nobody
 reviewed therefore gets an empty record, and anything unexpected stops preparation
 before a pin.
 
-`bash images/tools/pi/prepare-lock.sh PREFIX VERSION [--refresh-lock]` and
-`bash images/tools/pi/bridge/prepare-lock.sh PREFIX VERSION [--refresh-lock]` are
-the stable interfaces; the owning driver is `prepare-project.py`. An equal,
-unrefreshed request starts **zero** manager processes (not even `--version`) and
-writes nothing. Anything else:
+`bash images/tools/pi/prepare-lock.sh PREFIX VERSION [--refresh-lock]`,
+`bash images/tools/pi/bridge/prepare-lock.sh PREFIX VERSION [--refresh-lock]` and
+`bash images/tools/pi/antigravity/prepare-lock.sh PREFIX VERSION
+[--refresh-lock]` are the stable interfaces; the owning driver is
+`prepare-project.py`. An equal, unrefreshed request starts **zero** manager
+processes (not even `--version`) and writes nothing. Anything else:
 
 * Pi, selected archive carries `npm-shrinkwrap.json`: synthesize the staged
   project lock from that authenticated archive, run one bounded `pnpm import`,
   compare the graph, then validate frozen and publish.
 * Pi, no shrinkwrap: resolve the exact selected version as an ordinary
   all-hashed graph and review the complete delta.
-* Bridge, ordinary build: fresh manifest/workspace, no old lock seed. Explicit
-  developer refresh (including of the equal selection) seeds the existing pnpm
-  lock and reports the full delta.
+* Bridge or Antigravity, ordinary build: fresh manifest/workspace, no old lock
+  seed. Explicit developer refresh (including of the equal selection) seeds the
+  existing pnpm lock and reports the full delta.
+
+The provider project's first creation has no npm baseline to adopt, so it used
+the driver's `bootstrap PROPOSAL VERSION` verb: the closed table supplies the
+manifest and workspace, the exact selection is resolved fresh under the same
+policy, the candidate is validated with the same no-predecessor
+`adoption-graph` verb `adopt` uses, and only then is it pinned, cold-frozen
+validated and published. It refuses a project that already has a lock; a
+published project is maintained by `prepare` like the other two.
 
 Publication is one four-input transaction with reverse rollback; status 1 is a
 restored failure, 2 usage, 3 an incomplete rollback that keeps the scratch and
@@ -144,16 +166,18 @@ is unlinked before candidate validation and never committed or copied.
 
 ## Upgrades and verification
 
-Upgrade with `bash images/tools/pi/upgrade-pi.sh VERSION` and
-`bash images/tools/pi/bridge/upgrade-bridge.sh VERSION`; both publish four inputs
-plus one central Dockerfile label in a single sequential transaction. Review
+Upgrade with `bash images/tools/pi/upgrade-pi.sh VERSION`,
+`bash images/tools/pi/bridge/upgrade-bridge.sh VERSION` and
+`bash images/tools/pi/antigravity/upgrade-antigravity.sh VERSION`; each publishes
+four inputs plus one central Dockerfile label in a single sequential transaction. Review
 every integrity entry, the selected archive's route (shrinkwrap or not), the
 family shape for the new selection, the bridge's unmet peers and SDK omission,
 and the per-version dispatch list. See
 [CONTRIBUTING](../../../CONTRIBUTING.md#selection-ownership-and-maintenance).
 
 Suites: `bash script/test/pi-prepare-lock.sh`, `pi-install.sh`, `pi-verify.sh`,
-`pi-wrapper.sh`, `pi-bridge-install.sh`, `node script/test/pi-shrinkwrap.mjs`,
+`pi-wrapper.sh`, `pi-bridge-install.sh`, `pi-antigravity-install.sh`,
+`node script/test/pi-shrinkwrap.mjs`,
 `node script/test/pi-installed-bytes.mjs`,
 `python3 script/test/standard-node-layout.py --self-test`, and the focused
 container legs `bash script/test/standard-node-consumers.sh agent-vm-base:local

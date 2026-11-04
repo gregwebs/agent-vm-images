@@ -30,7 +30,8 @@ UNCOMPRESSED_CAP = 8 * 1024 ** 3
 TAR_CAP = COMPRESSED_CAP + 64 * 1024 ** 2
 JSON_CAP = 16 * 1024 ** 2
 SOURCE = 'https://github.com/gregwebs/agent-vm-images'
-SELECTIONS = {'codex', 'opencode', 'claude', 'copilot', 'agy', 'dsh', 'pnpm', 'pi', 'pi-claude-bridge', 'opencode-claude'}
+SELECTIONS = {'codex', 'opencode', 'claude', 'copilot', 'agy', 'dsh', 'pnpm', 'pi', 'pi-claude-bridge',
+              'pi-antigravity', 'opencode-claude'}
 
 
 @dataclass(frozen=True)

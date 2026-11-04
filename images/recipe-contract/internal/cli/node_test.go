@@ -45,13 +45,13 @@ func TestPnpmLockArgv(t *testing.T) {
 		stderr string
 	}{
 		{"check", []string{"pnpm-lock", "check", "dsh", prefix}, 0, "0.1.5-rc.2\n", ""},
-		{"no-verb", []string{"pnpm-lock"}, 2, "", "usage: recipe-contract pnpm-lock check|graph|pin|peers dsh|pi|bridge PREFIX\n"},
-		{"no-kind", []string{"pnpm-lock", "check"}, 2, "", "usage: recipe-contract pnpm-lock check|graph|pin|peers dsh|pi|bridge PREFIX\n"},
-		{"bad-verb", []string{"pnpm-lock", "wat", "dsh", prefix}, 2, "", "usage: recipe-contract pnpm-lock check|graph|pin|peers dsh|pi|bridge PREFIX\n"},
-		{"bad-kind", []string{"pnpm-lock", "check", "copilot", prefix}, 2, "", "usage: recipe-contract pnpm-lock check|graph|pin|peers dsh|pi|bridge PREFIX\n"},
-		{"empty-prefix", []string{"pnpm-lock", "graph", "dsh", ""}, 2, "", "usage: recipe-contract pnpm-lock check|graph|pin|peers dsh|pi|bridge PREFIX\n"},
-		{"extra", []string{"pnpm-lock", "check", "dsh", prefix, "extra"}, 2, "", "usage: recipe-contract pnpm-lock check|graph|pin|peers dsh|pi|bridge PREFIX\n"},
-		{"help", []string{"pnpm-lock", "--help"}, 2, "", "usage: recipe-contract pnpm-lock check|graph|pin|peers dsh|pi|bridge PREFIX\n"},
+		{"no-verb", []string{"pnpm-lock"}, 2, "", "usage: recipe-contract pnpm-lock check|graph|pin|peers dsh|pi|bridge|antigravity PREFIX\n"},
+		{"no-kind", []string{"pnpm-lock", "check"}, 2, "", "usage: recipe-contract pnpm-lock check|graph|pin|peers dsh|pi|bridge|antigravity PREFIX\n"},
+		{"bad-verb", []string{"pnpm-lock", "wat", "dsh", prefix}, 2, "", "usage: recipe-contract pnpm-lock check|graph|pin|peers dsh|pi|bridge|antigravity PREFIX\n"},
+		{"bad-kind", []string{"pnpm-lock", "check", "copilot", prefix}, 2, "", "usage: recipe-contract pnpm-lock check|graph|pin|peers dsh|pi|bridge|antigravity PREFIX\n"},
+		{"empty-prefix", []string{"pnpm-lock", "graph", "dsh", ""}, 2, "", "usage: recipe-contract pnpm-lock check|graph|pin|peers dsh|pi|bridge|antigravity PREFIX\n"},
+		{"extra", []string{"pnpm-lock", "check", "dsh", prefix, "extra"}, 2, "", "usage: recipe-contract pnpm-lock check|graph|pin|peers dsh|pi|bridge|antigravity PREFIX\n"},
+		{"help", []string{"pnpm-lock", "--help"}, 2, "", "usage: recipe-contract pnpm-lock check|graph|pin|peers dsh|pi|bridge|antigravity PREFIX\n"},
 		{"peers-non-dsh", []string{"pnpm-lock", "peers", "pi", prefix}, 1, "", "pnpm-lock: " + "peer reporting is dsh-only\n"},
 		{"absent", []string{"pnpm-lock", "check", "dsh", filepath.Join(prefix, "absent")}, 1, "", ""},
 	} {

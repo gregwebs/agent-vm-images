@@ -97,13 +97,18 @@ RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro 
 ARG TARGETARCH
 ARG AGENT_VERSION_PI=
 ARG AGENT_VERSION_PI_CLAUDE_BRIDGE=
+ARG AGENT_VERSION_PI_ANTIGRAVITY=
 
 LABEL org.agent-vm.version.pi="${AGENT_VERSION_PI:-1.4.0}" \
-      org.agent-vm.version.pi-claude-bridge="${AGENT_VERSION_PI_CLAUDE_BRIDGE:-0.8.0}"
+      org.agent-vm.version.pi-claude-bridge="${AGENT_VERSION_PI_CLAUDE_BRIDGE:-0.8.0}" \
+      org.agent-vm.version.pi-antigravity="${AGENT_VERSION_PI_ANTIGRAVITY:-0.11.0}"
 
 # Pi's own request is its provider-catalog refresh. Hosts reached through the
-# Claude bridge or the codex extension are the user's choice of another agent,
-# not Pi's request.
+# Claude bridge, the codex extension or the Antigravity provider are the user's
+# choice of another agent or provider, not Pi's request: pi-antigravity contacts
+# accounts.google.com, oauth2.googleapis.com, www.googleapis.com and the
+# cloudcode-pa endpoints only after the guest signs in, so it adds no image or
+# agent request (ADR 0014, ADR 0016).
 LABEL org.agent-vm.network-requests.agent.pi="pi.dev"
 
 COPY tools/pi/package.json tools/pi/pnpm-lock.yaml tools/pi/pnpm-workspace.yaml tools/pi/pnpm-inputs.sha256 /opt/agent-vm/pi/
@@ -143,6 +148,24 @@ RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro 
     PNPM_SOURCE_DIR=/tmp/pnpm-source \
     sh /tmp/recipe-contract/run-install.sh pi-claude-bridge /opt/agent-vm/install-status/pi-claude-bridge sh /tmp/standard-tools/pi/install-pi-packages.sh
 
+# The Antigravity provider is the same kind of reviewed pnpm project as the
+# bridge, in its own prefix: one extension root, one status record, one version
+# slot. It installs no peer at all, because Pi supplies them through its loader.
+COPY tools/pi/antigravity/package.json tools/pi/antigravity/pnpm-lock.yaml tools/pi/antigravity/pnpm-workspace.yaml tools/pi/antigravity/pnpm-inputs.sha256 /opt/agent-vm/pi-antigravity/
+RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
+    --mount=type=bind,source=tools/pi,target=/tmp/standard-tools/pi,ro \
+    --mount=type=bind,source=tools/pnpm-project.py,target=/tmp/standard-tools/pnpm-project.py,ro \
+    --mount=type=bind,source=tools/pnpm-host-manager.py,target=/tmp/standard-tools/pnpm-host-manager.py,ro \
+    --mount=type=bind,source=pnpm,target=/tmp/pnpm-source,ro \
+    AGENT_INSTALL_SOFT_FAIL= \
+    AGENT_VM_CONTRACT_DIR=/tmp/recipe-contract \
+    AGENT_VM_PI_SOURCE_DIR=/tmp/standard-tools/pi \
+    AGENT_VM_PI_SHARED=/tmp/standard-tools/pnpm-project.py \
+    AGENT_VM_VERSION_PI_ANTIGRAVITY="${AGENT_VERSION_PI_ANTIGRAVITY}" \
+    AGENT_VM_INSTALL_STATUS_DIR=/opt/agent-vm/install-status \
+    PNPM_SOURCE_DIR=/tmp/pnpm-source \
+    sh /tmp/recipe-contract/run-install.sh pi-antigravity /opt/agent-vm/install-status/pi-antigravity sh /tmp/standard-tools/pi/install-pi-antigravity.sh
+
 COPY --chmod=0755 tools/pi/seed-claude-bridge-config.sh /opt/agent-vm/seed.d/20-pi-claude-bridge
 
 COPY tools/pi/extensions/guest-credential-warning.js tools/pi/extensions/agent-vm-codex.js /opt/agent-vm/pi-extensions/
@@ -162,6 +185,7 @@ RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro 
     AGENT_VM_PI_SHARED=/tmp/standard-tools/pnpm-project.py \
     AGENT_VM_VERSION_PI="${AGENT_VERSION_PI}" \
     AGENT_VM_VERSION_PI_CLAUDE_BRIDGE="${AGENT_VERSION_PI_CLAUDE_BRIDGE}" \
+    AGENT_VM_VERSION_PI_ANTIGRAVITY="${AGENT_VERSION_PI_ANTIGRAVITY}" \
     AGENT_VM_PI_TARGET_PLATFORM=linux/${TARGETARCH} \
     AGENT_VM_PI_RUNTIME_CHECK=/tmp/standard-tools/pi/check-runtime.mjs \
     AGENT_VM_PI_ENTRY=/opt/agent-vm/pi/node_modules/.bin/pi \
@@ -389,6 +413,7 @@ RUN --mount=type=bind,source=standard/verify-standard.sh,target=/tmp/verify-stan
     AGENT_VM_VERSION_PNPM="${AGENT_VERSION_PNPM}" \
     AGENT_VM_VERSION_PI="${AGENT_VERSION_PI}" \
     AGENT_VM_VERSION_PI_CLAUDE_BRIDGE="${AGENT_VERSION_PI_CLAUDE_BRIDGE}" \
+    AGENT_VM_VERSION_PI_ANTIGRAVITY="${AGENT_VERSION_PI_ANTIGRAVITY}" \
     AGENT_VM_VERSION_CODEX="${AGENT_VERSION_CODEX}" \
     AGENT_VM_VERSION_OPENCODE="${AGENT_VERSION_OPENCODE}" \
     AGENT_VM_VERSION_CLAUDE="${AGENT_VERSION_CLAUDE}" \

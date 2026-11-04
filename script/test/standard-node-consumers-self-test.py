@@ -263,6 +263,7 @@ def fake_docker(args):
             if action == 'initialize':
                 state['pi_version'] = command[3]
                 state['bridge_version'] = command[4]
+                state['antigravity_version'] = command[5]
                 state['pi_binding'] = command[1:]
                 version = command[3]
                 shape = PI_SHAPES[version]
@@ -315,6 +316,10 @@ def fake_docker(args):
                 output = ('install-pi-packages.sh: installed pi-claude-bridge '
                           f'{state.get("bridge_version", "0.8.0")} from the reviewed inputs\n')
                 failure = case == 'install-bridge'
+            elif action == 'install-antigravity':
+                output = ('install-pi-antigravity.sh: installed pi-antigravity '
+                          f'{state.get("antigravity_version", "0.11.0")} from the reviewed inputs\n')
+                failure = case == 'install-antigravity'
             elif action == 'runtime':
                 runtime = {'shape': shape['members'], 'genai': '2.21.0', 'protobuf': '7.6.6',
                            'platform': 'linux/arm64', 'command': 'dist/bundle/cli.js'}
@@ -331,13 +336,23 @@ def fake_docker(args):
                 failure = case == 'runtime'
             elif action == 'verify':
                 state['verify_calls'] = state.get('verify_calls', 0) + 1
-                record = {'status': 0, 'pi': 'installed', 'bridge': 'installed'}
+                record = {'status': 0, 'pi': 'installed', 'bridge': 'installed',
+                          'antigravity': 'installed'}
+                broken = state.get('broken')
                 if case == 'verify-fails':
-                    record = {'status': 1, 'pi': 'installed', 'bridge': 'pending'}
-                elif state['verify_calls'] == 2 and case != 'records-fail':
-                    record = {'status': 1, 'pi': 'installed', 'bridge': 'pending'}
-                elif case == 'records-fail' and state['verify_calls'] == 2:
-                    record = {'status': 1, 'pi': 'pending', 'bridge': 'pending'}
+                    record = {'status': 1, 'pi': 'installed', 'bridge': 'pending',
+                              'antigravity': 'installed'}
+                elif case == 'records-fail' and broken:
+                    # A defect the driver must refuse: a broken extension also
+                    # withheld the *independent* record of the other one.
+                    record = {'status': 1, 'pi': 'installed', 'bridge': 'pending',
+                              'antigravity': 'pending'}
+                elif broken:
+                    # The broken extension withholds its own record only: the Pi
+                    # record and the other extension stay independently installed.
+                    record = {'status': 1, 'pi': 'installed', 'bridge': 'installed',
+                              'antigravity': 'installed'}
+                    record[broken] = 'pending'
                 output = json.dumps({'verify': record})
             elif action == 'resolution':
                 # The payload shapes, not the report the driver wants. The reviewed
@@ -383,14 +398,26 @@ def fake_docker(args):
                             'entryInside': entries['sdk']['entryInside'], 'competing': []}}})
                 failure = case == 'resolution'
             elif action == 'registration':
-                # The harness's measured catalog is per measured (Pi, bridge) pair.
-                models = '14' if (version, state.get('bridge_version')) == ('1.4.0', '0.8.0') else '11'
-                if case == 'wrong-registration':
-                    models = '13'
-                record = {'status': 0, 'registered': [models], 'missing': 0, 'malformed': 0}
-                if case == 'ambiguous-registration':
-                    record = {'status': 0, 'registered': [models, models], 'missing': 0,
-                              'malformed': 0}
+                # Measured catalogs are per measured (Pi, extension) pair; the
+                # provider's catalog is measured once per Pi selection.
+                if len(command) > 1 and command[1] == 'antigravity':
+                    models = '8'
+                    if case == 'wrong-provider-registration':
+                        models = '7'
+                    record = {'provider': 'antigravity', 'status': 0, 'registered': [models],
+                              'missing': 0, 'malformed': 0}
+                    if case == 'ambiguous-provider-registration':
+                        record['registered'] = [models, models]
+                else:
+                    models = ('14' if (version, state.get('bridge_version')) == ('1.4.0', '0.8.0')
+                              else '11')
+                    if case == 'wrong-registration':
+                        models = '13'
+                    record = {'provider': 'bridge', 'status': 0, 'registered': [models],
+                              'missing': 0, 'malformed': 0}
+                    if case == 'ambiguous-registration':
+                        record = {'status': 0, 'registered': [models, models], 'missing': 0,
+                                  'malformed': 0}
                 output = json.dumps({'registration': record})
             elif action == 'read':
                 words = shape['dispatch']
@@ -417,8 +444,14 @@ def fake_docker(args):
                                                         'repairedStatus': 0}}))
                 lines.append(json.dumps({'mutants': PI_MUTANTS, 'count': len(PI_MUTANTS)}))
                 output = '\n'.join(lines)
-            elif action in ('break-bridge', 'repair-bridge'):
-                output = json.dumps({action.replace('-b', 'B'): 'ok'})
+            elif action in ('break-bridge', 'repair-bridge', 'break-provider',
+                            'repair-provider'):
+                slot = 'bridge' if action.endswith('bridge') else 'antigravity'
+                if action.startswith('break'):
+                    state['broken'] = slot
+                else:
+                    state.pop('broken', None)
+                output = json.dumps({action: 'ok'})
                 failure = case == action
             elif action == 'probe':
                 if case == 'missing-fixture':
@@ -426,11 +459,12 @@ def fake_docker(args):
                 else:
                     output = json.dumps({'piProbe': command[1], 'source': command[2],
                                          'pi': command[3], 'bridge': command[4],
-                                         'pair': command[5] + ':' + command[6], 'caps': 'zero',
+                                         'antigravity': command[5],
+                                         'pair': command[6] + ':' + command[7], 'caps': 'zero',
                                          'offline': True, 'wrapper': 'regular-file',
                                          'version': command[3]})
             elif action == 'clean':
-                output = json.dumps({'clean': {'work': 'empty', 'records': 2}})
+                output = json.dumps({'clean': {'work': 'empty', 'records': 3}})
                 failure = case == 'clean'
             else:
                 raise AssertionError('unhandled pi action: ' + repr(action))
@@ -1009,10 +1043,15 @@ def pi_tests(work, environment):
             assert actions[:5] == ['initialize', 'root-sri', 'selected-archive', 'install-pi', 'graph'], actions
             assert actions.index('root-sri') < actions.index('install-pi')
             assert actions.index('selected-archive') < actions.index('install-pi')
-            for required in ('archives', 'bytes', 'install-bridge', 'runtime', 'verify', 'registration',
-                             'resolution', 'read', 'seed', 'mutants', 'clean'):
+            for required in ('archives', 'bytes', 'install-bridge', 'install-antigravity',
+                             'runtime', 'verify', 'registration', 'resolution', 'read',
+                             'seed', 'mutants', 'clean'):
                 assert required in actions, (required, actions)
-            assert actions.count('verify') == 3, actions
+            assert actions.count('verify') == 4, actions
+            assert actions.count('registration') == 2, actions
+            assert actions.index('break-bridge') < actions.index('break-provider')
+            assert actions.index('install-bridge') < actions.index('install-antigravity')
+            assert actions.index('install-antigravity') < actions.index('verify')
             assert actions.count('probe') == 4, actions
             create = next(args for args in state['commands']
                           if args[0] == 'create' and args[args.index('--name') + 1].endswith('-probe'))
@@ -1041,7 +1080,8 @@ def pi_tests(work, environment):
             copies = sorted(args[2].split(':', 1)[1] for args in state['commands']
                             if args[0] == 'cp' and ':' in args[2] and args[1].startswith(str(ROOT)))
             assert copies == sorted(f'{prefix}/{name_}'
-                                    for prefix in ('/opt/agent-vm/pi', '/opt/agent-vm/pi-packages')
+                                    for prefix in ('/opt/agent-vm/pi', '/opt/agent-vm/pi-packages',
+                                                   '/opt/agent-vm/pi-antigravity')
                                     for name_ in ('package.json', 'pnpm-lock.yaml',
                                                   'pnpm-workspace.yaml', 'pnpm-inputs.sha256')), copies
         if name == 'changed':
@@ -1049,10 +1089,11 @@ def pi_tests(work, environment):
             assert layout and layout[0][layout[0].index('--expect-version') + 1] == '0.87.0', layout
             assert state['pi_version'] == '0.87.0'
             # The binding is what the container was initialized with, not what the
-            # flag asked for: token, source commit, Pi version, bridge version.
+            # flag asked for: token, source commit, Pi version, bridge version,
+            # provider version.
             assert state['pi_binding'][0].startswith('pnpm-primitives-'), state['pi_binding']
             assert hex_string(state['pi_binding'][1], 40), state['pi_binding']
-            assert state['pi_binding'][2:] == ['0.87.0', '0.8.0'], state['pi_binding']
+            assert state['pi_binding'][2:] == ['0.87.0', '0.8.0', '0.11.0'], state['pi_binding']
         if name == 'fake-success':
             assert ('did not report 6/6 Pi sibling archives and installed bytes verified'
                     in text_), text_[-2000:]
@@ -1068,8 +1109,9 @@ def pi_tests(work, environment):
         if name == 'verify-fails':
             assert 'verify-pi.sh failed; see the verification log' in text_, text_[-2000:]
         if name == 'records-fail':
-            assert 'a bridge failure cost the independently installed Pi record' in text_, text_[-2000:]
-            assert '"pi": "pending"' in text_ and '"bridge": "pending"' in text_, text_[-2000:]
+            assert ('a bridge failure withheld the independent antigravity record' in text_), \
+                text_[-2000:]
+            assert '"antigravity": "pending"' in text_, text_[-2000:]
         if name == 'no-shrinkwrap':
             assert ('the selected archive carries no npm-shrinkwrap.json, so the authenticated '
                     'import route cannot be the one exercised' in text_), text_[-2000:]

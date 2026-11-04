@@ -1,0 +1,11 @@
+{
+  "name": "agent-vm-guest-pi-antigravity",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pinned Pi provider package for the agent-vm guest image. The base pnpm installs the reviewed frozen graph with scripts disabled into /opt/agent-vm/pi-antigravity; the wrapper loads pi-antigravity from it as a third --extension. Pi supplies the peer declarations, so nothing from its own tree is installed here.",
+  "license": "MIT",
+  "packageManager": "pnpm@11.11.0",
+  "dependencies": {
+    "pi-antigravity": "0.11.0"
+  }
+}

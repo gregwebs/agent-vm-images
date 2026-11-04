@@ -337,6 +337,44 @@ capture "$standard" sh -c "rm -rf /opt/agent-vm/pi-packages; pi --mode rpc --no-
 [[ $CAP_STATUS -eq 0 ]] || fail "a removed pi-packages tree must not break pi, got $CAP_STATUS: $CAP_ERR"
 assert_warns "bridge-removed" "$CAP_OUT" absent
 
+# --- the image-owned provider: registration and removal ----------------------
+#
+# Same non-root case as the bridge, for the same reason (jiti's transpile cache
+# falls back to the OS temp dir), and the same opt-out: the provider is an
+# independent extension slot, so removing it must cost the provider, not pi.
+out=$(docker run --rm --user 1000:1000 -e HOME=/tmp -e PI_TELEMETRY=0 "$standard" sh -ec '
+    mkdir -p /tmp/probe
+    cat > /tmp/probe/provider.js <<\PROBE
+export default function (pi) {
+  pi.on("session_start", (_event, ctx) => {
+    const p = ctx.modelRegistry.getProvider("antigravity");
+    const n = p && typeof p.getModels === "function" ? p.getModels().length
+            : p && Array.isArray(p.models) ? p.models.length : 0;
+    ctx.ui.notify(p ? `AGENT-VM-ANTIGRAVITY-REGISTERED models=${n}` : "AGENT-VM-ANTIGRAVITY-MISSING",
+                  "warning");
+  });
+}
+PROBE
+    pi -e /tmp/probe/provider.js --mode rpc --no-session --no-approve </dev/null
+')
+grep -q 'agent-vm: signing in here' <<<"$out" \
+    || fail "the non-root provider run lost the mandatory warning: $out"
+case "$out" in
+    *AGENT-VM-ANTIGRAVITY-REGISTERED\ models=0*)
+        fail "as uid 1000 the provider registered with an empty model catalog: $out" ;;
+    *AGENT-VM-ANTIGRAVITY-REGISTERED*)
+        : ;;
+    *)  fail "as uid 1000 the provider did not register its provider: $out" ;;
+esac
+# The opt-out is its own hatch: the provider can throw in-process too.
+out=$(docker run --rm --user 1000:1000 -e HOME=/tmp -e PI_TELEMETRY=0 \
+    -e AGENT_VM_PI_NO_ANTIGRAVITY=1 "$standard" pi --mode rpc --no-session --no-approve </dev/null)
+grep -q 'agent-vm: signing in here' <<<"$out" \
+    || fail "opting out of the provider lost the mandatory warning: $out"
+capture "$standard" sh -c "rm -rf /opt/agent-vm/pi-antigravity; pi --mode rpc --no-session --no-approve </dev/null"
+[[ $CAP_STATUS -eq 0 ]] || fail "a removed pi-antigravity tree must not break pi, got $CAP_STATUS: $CAP_ERR"
+assert_warns "provider-removed" "$CAP_OUT" absent
+
 # Seed fixtures use standard's real Claude executable. Only the explicit
 # absence negative removes it in its own disposable container.
 seed_case() {

@@ -227,7 +227,7 @@ func stringSequence(values ...string) document.Value {
 func workspacePolicy(kind Kind) []policyItem {
 	common := []policyItem{
 		{"packages", stringSequence(".")},
-		{"autoInstallPeers", boolValue(kind != KindBridge)},
+		{"autoInstallPeers", boolValue(kind != KindBridge && kind != KindAntigravity)},
 		{"strictPeerDependencies", boolValue(false)},
 		{"enableGlobalVirtualStore", boolValue(false)},
 		{"pmOnFail", jsStringValue("error")},
@@ -251,6 +251,10 @@ func workspacePolicy(kind Kind) []policyItem {
 		return append(common,
 			policyItem{"nodeLinker", jsStringValue("hoisted")},
 			policyItem{"ignoredOptionalDependencies", stringSequence("@anthropic-ai/claude-agent-sdk-*")})
+	case KindAntigravity:
+		return append(common,
+			policyItem{"nodeLinker", jsStringValue("hoisted")},
+			policyItem{"trustPolicyExclude", stringSequence("pi-antigravity@0.11.0")})
 	default:
 		panic("pnpmlock: unhandled kind")
 	}

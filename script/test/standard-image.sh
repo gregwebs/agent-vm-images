@@ -205,7 +205,7 @@ recipe_keys() { # $1 recipe -> label suffixes
         copilot) printf '%s\n' copilot ;;
         agy) printf '%s\n' agy ;;
         dsh) printf '%s\n' dsh pnpm ;;
-        pi) printf '%s\n' pi pi-claude-bridge ;;
+        pi) printf '%s\n' pi pi-claude-bridge pi-antigravity ;;
         *) fail "unknown recipe: $1" ;;
     esac
 }
@@ -222,6 +222,7 @@ suffix_arg() { # $1 label suffix -> build ARG name
         pnpm) printf '%s\n' AGENT_VERSION_PNPM ;;
         pi) printf '%s\n' AGENT_VERSION_PI ;;
         pi-claude-bridge) printf '%s\n' AGENT_VERSION_PI_CLAUDE_BRIDGE ;;
+        pi-antigravity) printf '%s\n' AGENT_VERSION_PI_ANTIGRAVITY ;;
         *) fail "unknown label suffix: $1" ;;
     esac
 }
@@ -237,6 +238,7 @@ DEFAULT_PNPM=$(jq -r '.version' "$REPO_ROOT/images/pnpm/pin.json")
 DEFAULT_PI=$(jq -r '.dependencies["@earendil-works/pi-coding-agent"]' "$REPO_ROOT/images/tools/pi/package.json")
 DEFAULT_OPENCODE_CLAUDE=$(jq -r '.dependencies["@openchamber/opencode-claude"]' "$REPO_ROOT/images/tools/opencode/plugins/package.json")
 DEFAULT_BRIDGE=$(jq -r '.dependencies["pi-claude-bridge"]' "$REPO_ROOT/images/tools/pi/bridge/package.json")
+DEFAULT_ANTIGRAVITY=$(jq -r '.dependencies["pi-antigravity"]' "$REPO_ROOT/images/tools/pi/antigravity/package.json")
 
 default_selection() { # $1 recipe -> newline-separated suffix=value
     case "$1" in
@@ -247,7 +249,8 @@ default_selection() { # $1 recipe -> newline-separated suffix=value
         copilot) printf '%s\n' "copilot=$DEFAULT_COPILOT" ;;
         agy) printf '%s\n' "agy=$DEFAULT_AGY" ;;
         dsh) printf '%s\n' "dsh=$DEFAULT_DSH" "pnpm=$DEFAULT_PNPM" ;;
-        pi) printf '%s\n' "pi=$DEFAULT_PI" "pi-claude-bridge=$DEFAULT_BRIDGE" ;;
+        pi) printf '%s\n' "pi=$DEFAULT_PI" "pi-claude-bridge=$DEFAULT_BRIDGE" \
+            "pi-antigravity=$DEFAULT_ANTIGRAVITY" ;;
         *) fail "unknown recipe: $1" ;;
     esac
 }
@@ -273,11 +276,11 @@ assert_expected_selection() { # $1 image, $2 newline-separated suffix=value
 assert_selection_label_sets() { # base standard artifact-mode
     local want base_want
     base_want=$(for suffix in gh node pnpm; do echo "org.agent-vm.version.$suffix"; done | sort)
-    want=$(for suffix in codex opencode claude copilot agy dsh gh node pnpm pi pi-claude-bridge opencode-claude; do echo "org.agent-vm.version.$suffix"; done | sort)
+    want=$(for suffix in codex opencode claude copilot agy dsh gh node pnpm pi pi-claude-bridge pi-antigravity opencode-claude; do echo "org.agent-vm.version.$suffix"; done | sort)
     if [ "$3" = false ]; then
         [ "$(version_keys "$1")" = "$base_want" ] || { echo 'base must own exactly the node, gh and pnpm selections' >&2; return 1; }
     fi
-    [ "$(version_keys "$2")" = "$want" ] || { echo 'standard must have exactly twelve selection labels' >&2; return 1; }
+    [ "$(version_keys "$2")" = "$want" ] || { echo 'standard must have exactly thirteen selection labels' >&2; return 1; }
 }
 
 # assert_recipe_labels IMG RECIPE [EXPECTED_LABELS_FILE] [STRICT]
@@ -467,6 +470,8 @@ printf 'warn_rc=%s\n' "$?"
 printf 'warn=%s\n' "$(grep -c 'agent-vm: signing in here' /tmp/w.out || true)"
 printf 'bridgever=%s\n' \
     "$(jq -r .version /opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/package.json 2>/dev/null || echo MISSING)"
+printf 'agver=%s\n' \
+    "$(jq -r .version /opt/agent-vm/pi-antigravity/node_modules/pi-antigravity/package.json 2>/dev/null || echo MISSING)"
 printf '=== BRIDGE PROBE ===\n'
 cat > /tmp/probe.js <<'PROBE'
 export default function (pi) {
@@ -490,6 +495,23 @@ printf 'probe_rc=%s\n' "$?"
 bridge_marks </tmp/p.out >/tmp/p.marks
 printf 'probe=%s\n' "$(head -n 1 /tmp/p.marks)"
 printf 'probes=%s\n' "$(wc -l </tmp/p.marks | tr -d ' ')"
+printf '=== ANTIGRAVITY PROBE ===\n'
+cat > /tmp/ag-probe.js <<'PROBE'
+export default function (pi) {
+  pi.on("session_start", (_event, ctx) => {
+    const p = ctx.modelRegistry.getProvider("antigravity");
+    const n = p && typeof p.getModels === "function" ? p.getModels().length
+            : p && Array.isArray(p.models) ? p.models.length : 0;
+    ctx.ui.notify(p ? `AGENT-VM-ANTIGRAVITY-REGISTERED models=${n}` : "AGENT-VM-ANTIGRAVITY-MISSING",
+                  "warning");
+  });
+}
+PROBE
+PI_TELEMETRY=0 timeout --kill-after=5s 120 pi -e /tmp/ag-probe.js --mode rpc --no-session --no-approve </dev/null >/tmp/ag.out 2>/tmp/ag.err
+printf 'agprobe_rc=%s\n' "$?"
+bridge_marks AGENT-VM-ANTIGRAVITY </tmp/ag.out >/tmp/ag.marks
+printf 'agprobe=%s\n' "$(head -n 1 /tmp/ag.marks)"
+printf 'agprobes=%s\n' "$(wc -l </tmp/ag.marks | tr -d ' ')"
 printf '=== T5 ===\n'
 # The audit shell runs without `set -e`. Capture BOTH access checks separately
 # and combine them: the content check must not overwrite a failed Pi/seed-hook
@@ -500,7 +522,7 @@ t5_pi_content=0
 # The published subcommand list is read (not executed) by the warning wrapper for
 # an arbitrary runtime UID, so it is a controlled *content* audit member: a
 # 0644 root-owned data file is the reviewed shape.
-/contract/recipe-contract tool-access --content /opt/agent-vm/pi-extensions/guest-credential-warning.js /opt/agent-vm/pi-extensions/agent-vm-codex.js /opt/agent-vm/pi/agent-vm-subcommands /opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts || t5_pi_content=$?
+/contract/recipe-contract tool-access --content /opt/agent-vm/pi-extensions/guest-credential-warning.js /opt/agent-vm/pi-extensions/agent-vm-codex.js /opt/agent-vm/pi/agent-vm-subcommands /opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts /opt/agent-vm/pi-antigravity/node_modules/pi-antigravity/src/index.ts || t5_pi_content=$?
 t5rc=0
 [ "$t5_pi_seed" -eq 0 ] || t5rc=1
 [ "$t5_pi_content" -eq 0 ] || t5rc=1
@@ -508,6 +530,7 @@ printf 't5rc=%s\n' "$t5rc"
 printf '=== STATUS ===\n'
 printf 'status_b64=%s\n' "$(b64file /opt/agent-vm/install-status/pi)"
 printf 'bridgestatus_b64=%s\n' "$(b64file /opt/agent-vm/install-status/pi-claude-bridge)"
+printf 'agstatus_b64=%s\n' "$(b64file /opt/agent-vm/install-status/pi-antigravity)"
 EOS
             ;;
         *) fail "unknown recipe: $1" ;;
@@ -526,6 +549,7 @@ pi_audit_status_regression() {
         "$fixture/opt/agent-vm/pi" \
         "$fixture/opt/agent-vm/pi-extensions" \
         "$fixture/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src" \
+        "$fixture/opt/agent-vm/pi-antigravity/node_modules/pi-antigravity/src" \
         "$fixture/opt/agent-vm/install-status" "$fixture/bin"
     printf '#!/bin/sh\necho pi\n' >"$fixture/bin/pi"
     printf '#!/bin/sh\necho seed\n' >"$fixture/opt/agent-vm/seed.d/20-pi-claude-bridge"
@@ -533,13 +557,16 @@ pi_audit_status_regression() {
     printf 'export default function () {}\n' >"$fixture/opt/agent-vm/pi-extensions/guest-credential-warning.js"
     printf 'export default function () {}\n' >"$fixture/opt/agent-vm/pi-extensions/agent-vm-codex.js"
     printf 'export const bridge = true\n' >"$fixture/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts"
+    printf 'export const antigravity = true\n' >"$fixture/opt/agent-vm/pi-antigravity/node_modules/pi-antigravity/src/index.ts"
     printf 'installed\n' >"$fixture/opt/agent-vm/install-status/pi"
     printf 'installed\n' >"$fixture/opt/agent-vm/install-status/pi-claude-bridge"
+    printf 'installed\n' >"$fixture/opt/agent-vm/install-status/pi-antigravity"
     chmod 0755 "$fixture/bin/pi" "$fixture/opt/agent-vm/seed.d/20-pi-claude-bridge"
     chmod 0644 "$fixture/opt/agent-vm/pi/agent-vm-subcommands"
     chmod 0644 "$fixture/opt/agent-vm/pi-extensions/agent-vm-codex.js" \
         "$fixture/opt/agent-vm/pi-extensions/guest-credential-warning.js" \
-        "$fixture/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts"
+        "$fixture/opt/agent-vm/pi-packages/node_modules/pi-claude-bridge/src/index.ts" \
+        "$fixture/opt/agent-vm/pi-antigravity/node_modules/pi-antigravity/src/index.ts"
     generated="$(container_script pi)"
     expect_t5rc() { # $1 label, $2 expected t5rc
         local label="$1" want="$2" rc=0 out got
@@ -812,6 +839,15 @@ check_status() { # $1 recipe, $2 output
             return 1
         }
         [ "$got" = installed ] || { printf 'pi bridge status is not "installed": %s' "$got"; return 1; }
+        file="$TMP/status-check-antigravity.$$"
+        decode_b64 "$(kv "$out" agstatus_b64)" "$file" ||
+            { printf 'pi antigravity status record is missing'; return 1; }
+        got="$("$STATUS_VALIDATOR" install-status record "$file" 2>/dev/null)" || {
+            printf 'pi antigravity status record is not a valid record: %s' \
+                "$(tr -d '\0' <"$file" | head -c 200)"
+            return 1
+        }
+        [ "$got" = installed ] || { printf 'pi antigravity status is not "installed": %s' "$got"; return 1; }
     fi
     return 0
 }
@@ -829,8 +865,8 @@ check_status() { # $1 recipe, $2 output
 # Defined ONCE here and injected verbatim (via `declare -f`) into the container
 # audit in container_script(), so the parser the real build runs is exactly the
 # bytes oracle_self_test certifies against RAW probe output.
-bridge_marks() {
-    local line msg n
+bridge_marks() { # [MARKER] -- defaults to the bridge's probe marker
+    local marker="${1:-AGENT-VM-BRIDGE}" line msg n
     while IFS= read -r line || [ -n "$line" ]; do
         [ -n "$line" ] || continue
         msg="$line"
@@ -844,63 +880,75 @@ bridge_marks() {
                     :
                 else
                     case "$line" in
-                        *AGENT-VM-BRIDGE-REGISTERED* | *AGENT-VM-BRIDGE-MISSING*)
-                            printf 'AGENT-VM-BRIDGE-MALFORMED\n' ;;
+                        *"${marker}-REGISTERED"* | *"${marker}-MISSING"*)
+                            printf '%s-MALFORMED\n' "$marker" ;;
                     esac
                     continue
                 fi ;;
         esac
         case "$msg" in
-            AGENT-VM-BRIDGE-MISSING)
-                printf 'AGENT-VM-BRIDGE-MISSING\n' ;;
-            'AGENT-VM-BRIDGE-REGISTERED models='*)
-                n="${msg#AGENT-VM-BRIDGE-REGISTERED models=}"
+            "${marker}-MISSING")
+                printf '%s-MISSING\n' "$marker" ;;
+            "${marker}-REGISTERED models="*)
+                n="${msg#"${marker}-REGISTERED models="}"
                 case "$n" in
                     '' | *[!0-9]*)
-                        printf 'AGENT-VM-BRIDGE-MALFORMED\n' ;;
+                        printf '%s-MALFORMED\n' "$marker" ;;
                     *)
-                        printf 'AGENT-VM-BRIDGE-REGISTERED models=%s\n' "$n" ;;
+                        printf '%s-REGISTERED models=%s\n' "$marker" "$n" ;;
                 esac ;;
-            *AGENT-VM-BRIDGE-REGISTERED* | *AGENT-VM-BRIDGE-MISSING*)
-                printf 'AGENT-VM-BRIDGE-MALFORMED\n' ;;
+            *"${marker}-REGISTERED"* | *"${marker}-MISSING"*)
+                printf '%s-MALFORMED\n' "$marker" ;;
         esac
     done
 }
 
-# check_bridge CONTAINER_OUTPUT EXPECTED_BRIDGE_VERSION -- the behavioral probe
-# must report EXACTLY ONE registration result with a canonical strictly-positive
-# model count; metadata and a stale record are not proof. The probe/probes pair
-# is what the container audit emits, so the oracle validates the external result
-# independently of verify-pi.sh.
-check_bridge() { # $1 output, $2 expected bridge version
-    local out="$1" v1="$2" probe probes n
+# check_registration CONTAINER_OUTPUT VERSION MARKER LABEL PREFIX -- the
+# behavioral probe must report EXACTLY ONE registration result with a canonical
+# strictly-positive model count; metadata and a stale record are not proof. The
+# probe/probes pair is what the container audit emits, so the oracle validates the
+# external result independently of verify-pi.sh. One implementation serves both
+# image-owned extension packages; MARKER selects the probe's own marker and
+# PREFIX its `kv` field names.
+check_registration() { # $1 output, $2 version, $3 marker, $4 label, $5..$8 field names
+    local out="$1" v1="$2" marker="$3" label="$4" vfield="$5" pfield="$6" psfield="$7" rcfield="$8"
+    local probe probes n got
     [ "$(kv "$out" warn_rc)" = 0 ] || { printf 'pi rpc invocation exited %s' "$(kv "$out" warn_rc)"; return 1; }
     [ "$(kv "$out" warn)" != 0 ] || { printf 'pi does not load the mandatory warning extension'; return 1; }
-    [ "$(kv "$out" bridgever)" = "$v1" ] ||
-        { printf 'installed bridge %s != %s' "$(kv "$out" bridgever)" "$v1"; return 1; }
-    [ "$(kv "$out" probe_rc)" = 0 ] || { printf 'bridge probe exited %s' "$(kv "$out" probe_rc)"; return 1; }
-    probes="$(kv "$out" probes)"
-    probe="$(kv "$out" probe)"
+    got="$(kv "$out" "$vfield")"
+    [ "$got" = "$v1" ] || { printf 'installed %s %s != %s' "$label" "$got" "$v1"; return 1; }
+    [ "$(kv "$out" "$rcfield")" = 0 ] ||
+        { printf '%s probe exited %s' "$label" "$(kv "$out" "$rcfield")"; return 1; }
+    probes="$(kv "$out" "$psfield")"
+    probe="$(kv "$out" "$pfield")"
     [ "$probes" = 1 ] || {
         if [ "$probes" = 0 ]; then
-            printf 'bridge did not register its provider: "%s"' "$probe"
+            printf '%s did not register its provider: "%s"' "$label" "$probe"
         else
-            printf 'bridge emitted %s conflicting registration results' "$probes"
+            printf '%s emitted %s conflicting registration results' "$label" "$probes"
         fi
         return 1
     }
     case "$probe" in
-        AGENT-VM-BRIDGE-MISSING)
-            printf 'bridge did not register its provider'; return 1 ;;
-        'AGENT-VM-BRIDGE-REGISTERED models='*)
-            n="${probe#AGENT-VM-BRIDGE-REGISTERED models=}"
+        "${marker}-MISSING")
+            printf '%s did not register its provider' "$label"; return 1 ;;
+        "${marker}-REGISTERED models="*)
+            n="${probe#"${marker}-REGISTERED models="}"
             case "$n" in
-                '' | *[!0-9]*) printf 'bridge reported a non-numeric model count "%s"' "$n"; return 1 ;;
-                0 | 0*) printf 'bridge registered an empty model catalog'; return 1 ;;
+                '' | *[!0-9]*) printf '%s reported a non-numeric model count "%s"' "$label" "$n"; return 1 ;;
+                0 | 0*) printf '%s registered an empty model catalog' "$label"; return 1 ;;
             esac
             return 0 ;;
-        *) printf 'bridge did not register its provider: "%s"' "$probe"; return 1 ;;
+        *) printf '%s did not register its provider: "%s"' "$label" "$probe"; return 1 ;;
     esac
+}
+
+check_bridge() { # $1 output, $2 expected bridge version
+    check_registration "$1" "$2" AGENT-VM-BRIDGE bridge bridgever probe probes probe_rc
+}
+
+check_antigravity() { # $1 output, $2 expected provider version
+    check_registration "$1" "$2" AGENT-VM-ANTIGRAVITY antigravity agver agprobe agprobes agprobe_rc
 }
 
 # check_dsh_oracle CONTAINER_OUTPUT EXPECTED_DSH -- the independent in-container
@@ -951,7 +999,7 @@ oracle_self_test() {
         version_keys() {
             case "$1" in
                 fixture-base) for suffix in gh node pnpm; do echo "org.agent-vm.version.$suffix"; done | sort ;;
-                fixture-standard) for suffix in codex opencode claude copilot agy dsh gh node pnpm pi pi-claude-bridge opencode-claude; do echo "org.agent-vm.version.$suffix"; done | sort ;;
+                fixture-standard) for suffix in codex opencode claude copilot agy dsh gh node pnpm pi pi-claude-bridge pi-antigravity opencode-claude; do echo "org.agent-vm.version.$suffix"; done | sort ;;
                 *) echo 'unexpected base query in artifact mode' >&2; return 1 ;;
             esac
         }
@@ -1066,8 +1114,17 @@ stderr_b64=$(printf '' | blob)" >/dev/null ||
 
     check_status codex "status_b64=$(sblob installed)" >/dev/null ||
         fail "self-test: an installed codex status was rejected"
-    check_status pi "$(printf 'status_b64=%s\nbridgestatus_b64=%s\n' "$(sblob installed)" "$(sblob installed)")" >/dev/null ||
-        fail "self-test: an installed pi + bridge status was rejected"
+    check_status pi "$(printf 'status_b64=%s\nbridgestatus_b64=%s\nagstatus_b64=%s\n' \
+        "$(sblob installed)" "$(sblob installed)" "$(sblob installed)")" >/dev/null ||
+        fail "self-test: an installed pi + bridge + antigravity status was rejected"
+    reason="$(check_status pi "$(printf 'status_b64=%s\nbridgestatus_b64=%s\nagstatus_b64=%s\n' \
+        "$(sblob installed)" "$(sblob installed)" "$(sblob 'absent-pi')")")" &&
+        fail "self-test: a degraded antigravity status was accepted"
+    [ -n "$reason" ] || fail "self-test: a provider status rejection needs a reason"
+    reason="$(check_status pi "$(printf 'status_b64=%s\nbridgestatus_b64=%s\nagstatus_b64=MISSING\n' \
+        "$(sblob installed)" "$(sblob installed)")")" &&
+        fail "self-test: a missing antigravity status was accepted"
+    [ -n "$reason" ] || fail "self-test: a missing provider status needs a reason"
     local bad_status
     for bad_status in pending 'absent-transport 6' FAILED; do
         reason="$(check_status codex "status_b64=$(sblob "$bad_status")")" &&
@@ -1109,6 +1166,17 @@ stderr_b64=$(printf '' | blob)" >/dev/null ||
         fail "self-test: an empty registration result set was accepted"
     reason="$(check_bridge $'warn_rc=0\nwarn=1\nbridgever=0.7.0\nprobe_rc=0\nprobe=AGENT-VM-BRIDGE-REGISTERED models=3\nprobes=1' 0.8.0)" &&
         fail "self-test: a stale bridge version was accepted"
+    check_antigravity $'warn_rc=0\nwarn=1\nagver=0.11.0\nagprobe_rc=0\nagprobe=AGENT-VM-ANTIGRAVITY-REGISTERED models=8\nagprobes=1' 0.11.0 >/dev/null ||
+        fail 'self-test: a registering provider was rejected'
+    reason="$(check_antigravity $'warn_rc=0\nwarn=1\nagver=0.11.0\nagprobe_rc=0\nagprobe=AGENT-VM-ANTIGRAVITY-REGISTERED models=0\nagprobes=1' 0.11.0)" &&
+        fail 'self-test: an empty provider catalog was accepted'
+    [ -n "$reason" ] || fail 'self-test: a provider rejection needs a reason'
+    reason="$(check_antigravity $'warn_rc=0\nwarn=1\nagver=0.10.0\nagprobe_rc=0\nagprobe=AGENT-VM-ANTIGRAVITY-REGISTERED models=8\nagprobes=1' 0.11.0)" &&
+        fail 'self-test: a provider version mismatch was accepted'
+    [ -n "$reason" ] || fail 'self-test: a provider version rejection needs a reason'
+    reason="$(check_antigravity $'warn_rc=0\nwarn=1\nagver=0.11.0\nagprobe_rc=0\nagprobe=AGENT-VM-ANTIGRAVITY-MISSING\nagprobes=1' 0.11.0)" &&
+        fail 'self-test: a non-registering provider was accepted'
+    [ -n "$reason" ] || fail 'self-test: a non-registering provider needs a reason'
     reason="$(check_bridge $'warn_rc=0\nwarn=1\nbridgever=0.8.0\nprobe_rc=1\nprobe=AGENT-VM-BRIDGE-REGISTERED models=3\nprobes=1' 0.8.0)" &&
         fail "self-test: a nonzero bridge probe was accepted"
 
@@ -1220,7 +1288,11 @@ audit_image() { # $1 image, $2 recipe, $3 strict-label-exactness (default 1)
     esac
     v0="$(label_value "$img" "org.agent-vm.version.$k0")"
     v1=""
+    v2=""
     [ -n "${k1:-}" ] && v1="$(label_value "$img" "org.agent-vm.version.$k1")"
+    if [ "$recipe" = pi ]; then
+        v2="$(label_value "$img" "org.agent-vm.version.pi-antigravity")"
+    fi
 
     for uid in 0:0 12345:23456 12345:45678 54321:12345; do
         out="$(run_container "$img" "$recipe" "$uid" "$expected")"
@@ -1246,6 +1318,7 @@ audit_image() { # $1 image, $2 recipe, $3 strict-label-exactness (default 1)
             # The behavioral probe must run under a numeric uid too: metadata
             # and a stale `installed` record are not proof a working extension.
             reason="$(check_bridge "$out" "$v1")" || fail "pi ($uid) $reason"
+            reason="$(check_antigravity "$out" "$v2")" || fail "pi antigravity ($uid) $reason"
         fi
         if [ "$recipe" = dsh ]; then
             # The independent runtime oracle is a separate implementation from
@@ -1789,19 +1862,24 @@ default_version() { # $1 consumer kind
     case "$1" in
         pi) printf '%s' "$DEFAULT_PI" ;;
         bridge) printf '%s' "$DEFAULT_BRIDGE" ;;
+        antigravity) printf '%s' "$DEFAULT_ANTIGRAVITY" ;;
         *) printf '' ;;
     esac
 }
 
 check_migrated_projects() { # $1 image
-    local image="$1" expected_pi expected_bridge
+    local image="$1" expected_pi expected_bridge expected_antigravity
     expected_pi=$(printf '%s\n' "$EXPECTED" | sed -n 's/^pi=//p')
     expected_bridge=$(printf '%s\n' "$EXPECTED" | sed -n 's/^pi-claude-bridge=//p')
+    expected_antigravity=$(printf '%s\n' "$EXPECTED" | sed -n 's/^pi-antigravity=//p')
     [ -n "$expected_pi" ] || { printf 'the Pi selection is missing from --expect'; return 1; }
     [ -n "$expected_bridge" ] || { printf 'the bridge selection is missing from --expect'; return 1; }
+    [ -n "$expected_antigravity" ] || { printf 'the provider selection is missing from --expect'; return 1; }
     check_migrated_project "$image" pi /opt/agent-vm/pi images/tools/pi pi "$expected_pi" || return 1
     check_migrated_project "$image" bridge /opt/agent-vm/pi-packages images/tools/pi/bridge \
         bridge "$expected_bridge" || return 1
+    check_migrated_project "$image" antigravity /opt/agent-vm/pi-antigravity \
+        images/tools/pi/antigravity antigravity "$expected_antigravity" || return 1
 }
 
 # --- dsh extraction self-test (wiring controls, not runtime claims) ----------
@@ -2054,6 +2132,7 @@ oracle_wiring_self_test() {
             *version.pnpm) printf '%s\n' "$DEFAULT_PNPM" ;;
             *version.pi) printf '%s\n' "$DEFAULT_PI" ;;
             *version.pi-claude-bridge) printf '%s\n' "$DEFAULT_BRIDGE" ;;
+            *version.pi-antigravity) printf '%s\n' "$DEFAULT_ANTIGRAVITY" ;;
         esac
     }
     run_container() {
@@ -2112,7 +2191,9 @@ oracle_wiring_self_test() {
     # kv takes the first field; healthy has no stderr field, so this is genuine.
     if ( audit_image img codex ) >/dev/null 2>&1; then fail 'wrong stderr accepted'; fi
     local pi_wire
-    pi_wire=$(printf 'rc0=0\nt5rc=0\nreport_b64=%s\nstatus_b64=%s\nbridgestatus_b64=%s\nwarn_rc=0\nwarn=1\nbridgever=%s\nprobe_rc=0\nprobes=1\nprobe=AGENT-VM-BRIDGE-REGISTERED models=12\n' "$(printf '%s\n' "$DEFAULT_PI" | blob)" "$(sblob installed)" "$(sblob installed)" "$DEFAULT_BRIDGE")
+    pi_wire=$(printf 'rc0=0\nt5rc=0\nreport_b64=%s\nstatus_b64=%s\nbridgestatus_b64=%s\nagstatus_b64=%s\nwarn_rc=0\nwarn=1\nbridgever=%s\nprobe_rc=0\nprobes=1\nprobe=AGENT-VM-BRIDGE-REGISTERED models=12\nagver=%s\nagprobe_rc=0\nagprobes=1\nagprobe=AGENT-VM-ANTIGRAVITY-REGISTERED models=8\n' \
+        "$(printf '%s\n' "$DEFAULT_PI" | blob)" "$(sblob installed)" "$(sblob installed)" \
+        "$(sblob installed)" "$DEFAULT_BRIDGE" "$DEFAULT_ANTIGRAVITY")
     WIRE=$pi_wire
     audit_image img pi >/dev/null || fail 'healthy Pi wire rejected'
     for bad in 'AGENT-VM-BRIDGE-MISSING' 'AGENT-VM-BRIDGE-REGISTERED models=12"garbage' 'AGENT-VM-BRIDGE-REGISTERED models=0'; do
@@ -2121,6 +2202,17 @@ oracle_wiring_self_test() {
     done
     WIRE=$(printf '%s\n' "$pi_wire" | sed 's/^probes=1/probes=2/')
     if ( audit_image img pi ) >/dev/null 2>&1; then fail 'contradictory bridge wire accepted'; fi
+    for bad in 'AGENT-VM-ANTIGRAVITY-MISSING' 'AGENT-VM-ANTIGRAVITY-REGISTERED models=8"garbage' \
+        'AGENT-VM-ANTIGRAVITY-REGISTERED models=0'; do
+        WIRE=$(printf '%s\n' "$pi_wire" | sed "s/^agprobe=.*/agprobe=$bad/")
+        if ( audit_image img pi ) >/dev/null 2>&1; then fail 'malformed antigravity wire accepted'; fi
+    done
+    WIRE=$(printf '%s\n' "$pi_wire" | sed 's/^agprobes=1/agprobes=2/')
+    if ( audit_image img pi ) >/dev/null 2>&1; then fail 'contradictory antigravity wire accepted'; fi
+    WIRE=$(printf '%s\n' "$pi_wire" | sed 's/^agver=.*/agver=0.10.0/')
+    if ( audit_image img pi ) >/dev/null 2>&1; then fail 'stale antigravity version wire accepted'; fi
+    WIRE=$(printf '%s\n' "$pi_wire" | sed 's/^agstatus_b64=.*/agstatus_b64=MISSING/')
+    if ( audit_image img pi ) >/dev/null 2>&1; then fail 'missing antigravity status wire accepted'; fi
     local dsh_wire good_sub
     good_sub='{"stdout":"independent-dsh\n","exitCode":7,"disposed":true}'
     dsh_wire=$(printf 'rc0=0\nt5rc=0\nreport_b64=%s\nreport1_b64=%s\nrc1=0\nstatus_b64=%s\nircc=0\nioracle_b64=%s\n' \
@@ -2139,6 +2231,7 @@ oracle_wiring_self_test() {
         case "$2" in
             */opencode-plugins/*) committed=images/tools/opencode/plugins ;;
             */pi-packages/*) committed=images/tools/pi/bridge ;;
+            */pi-antigravity/*) committed=images/tools/pi/antigravity ;;
             */pi/*) committed=images/tools/pi ;;
         esac
         source="$(project_input_path "$committed" "$name")" || {
@@ -2181,7 +2274,9 @@ oracle_wiring_self_test() {
         fail 'the Pi layout oracle did not run with the caller expectation'
     grep -q -F -x "migrated-oracle bridge $TMP/bridge-image-root $DEFAULT_BRIDGE" "$TMP/migrated-seam" ||
         fail 'the bridge layout oracle did not run with the caller expectation'
-    for consumer in pi bridge; do
+    grep -q -F -x "migrated-oracle antigravity $TMP/antigravity-image-root $DEFAULT_ANTIGRAVITY" "$TMP/migrated-seam" ||
+        fail 'the provider layout oracle did not run with the caller expectation'
+    for consumer in pi bridge antigravity; do
         # One capture: the rejection and its reason are the same run, and a
         # failing substitution must not abort the suite before the case runs.
         if reason="$(MIGRATED_ORACLE_FAIL=$consumer check_locks img 2>&1)"; then
@@ -2197,7 +2292,7 @@ oracle_wiring_self_test() {
     done
     # Both projects are extracted into their own input directories, so one check
     # cannot stand in for the other.
-    for label in pi bridge; do
+    for label in pi bridge antigravity; do
         for file in package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256; do
             [ -f "$TMP/$label-inputs/$file" ] ||
                 fail "the $label extraction left no $file"
@@ -2309,8 +2404,8 @@ else
             --user "$pair" --tmpfs /home/probe:rw,exec,mode=1777 -e HOME=/home/probe \
             --entrypoint bash "$STANDARD_IMAGE" -c "$probe" released-agent-probe \
             "${pair%:*}" "${pair#*:}" "$DEFAULT_CODEX" "$DEFAULT_OPENCODE" "$DEFAULT_CLAUDE" \
-            "$DEFAULT_COPILOT" "$DEFAULT_DSH" "$DEFAULT_PNPM" "$DEFAULT_PI" "$DEFAULT_BRIDGE" "$DEFAULT_OPENCODE_CLAUDE" \
-            "$DEFAULT_AGY"
+            "$DEFAULT_COPILOT" "$DEFAULT_DSH" "$DEFAULT_PNPM" "$DEFAULT_PI" "$DEFAULT_BRIDGE" \
+            "$DEFAULT_ANTIGRAVITY" "$DEFAULT_OPENCODE_CLAUDE" "$DEFAULT_AGY"
     done
 fi
 echo 'finished standard image acceptance passed'

@@ -18,7 +18,7 @@ export AGENT_VM_CONTRACT_DIR AGENT_VM_INSTALL_STATUS_DIR PNPM_SOURCE_DIR
 tools="${AGENT_VM_TOOL_SOURCE_DIR:-/tmp/standard-tools}"
 
 require_installed() {
-    for name in dsh pi pi-claude-bridge codex opencode claude copilot agy opencode-claude; do
+    for name in dsh pi pi-claude-bridge pi-antigravity codex opencode claude copilot agy opencode-claude; do
         if record=$("$AGENT_VM_CONTRACT_DIR/recipe-contract" install-status record "$AGENT_VM_INSTALL_STATUS_DIR/$name"); then
             if [ "$record" = installed ]; then continue; fi
         fi

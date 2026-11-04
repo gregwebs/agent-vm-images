@@ -225,6 +225,7 @@ def selections() -> dict[str, str]:
         ('dsh', 'dsh', '@deepseek-ai/dsh'),
         ('pi', 'pi', '@earendil-works/pi-coding-agent'),
         ('pi-claude-bridge', 'pi/bridge', 'pi-claude-bridge'),
+        ('pi-antigravity', 'pi/antigravity', 'pi-antigravity'),
         ('opencode-claude', 'opencode/plugins', '@openchamber/opencode-claude')):
         selected[name] = c.read_json(ROOT / f'images/tools/{path}/package.json')['dependencies'][dependency]
     pnpm = c.read_json(ROOT / 'images/pnpm/pin.json')['version']

@@ -10,10 +10,11 @@ comparison), `0004-go-build-helpers.md` (no second YAML parser), `0005`–`0010`
 ## Context
 
 Pi and its Claude bridge were npm projects installed with `npm ci` plus flags
-(`--omit=optional --legacy-peer-deps` for the bridge). Base owns pnpm exactly
-11.11.0, and every other image-owned project already installs from four reviewed
-inputs (`package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`,
-`pnpm-inputs.sha256`) with scripts disabled. Pi and the bridge are the last
+(`--omit=optional --legacy-peer-deps` for the bridge). The Antigravity provider
+(ADR 0016) joined later on the same route, without an npm baseline to adopt.
+Base owns pnpm exactly 11.11.0, and every other image-owned project already
+installs from four reviewed inputs (`package.json`, `pnpm-lock.yaml`,
+`pnpm-workspace.yaml`, `pnpm-inputs.sha256`) with scripts disabled. Pi and the bridge were the last
 migrated consumers before Copilot (PR 4 of #42).
 
 Three facts make Pi different from dsh and from a plain `pnpm import`:

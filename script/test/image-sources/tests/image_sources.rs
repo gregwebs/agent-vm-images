@@ -40,6 +40,13 @@ fn bridge_pin() -> String {
         .to_string()
 }
 
+fn antigravity_pin() -> String {
+    read_json("images/tools/pi/antigravity/package.json")["dependencies"]["pi-antigravity"]
+        .as_str()
+        .expect("the provider manifest pins pi-antigravity")
+        .to_string()
+}
+
 fn dsh_pin() -> String {
     read_json("images/tools/dsh/package.json")["dependencies"]["@deepseek-ai/dsh"]
         .as_str()
@@ -224,6 +231,10 @@ fn pi_project() -> MigratedProject {
 
 fn bridge_project() -> MigratedProject {
     committed_project("bridge", "images/tools/pi/bridge")
+}
+
+fn antigravity_project() -> MigratedProject {
+    committed_project("antigravity", "images/tools/pi/antigravity")
 }
 
 /// The manifest's exact dependency pin for one root.
@@ -1527,6 +1538,75 @@ fn bridge_is_hoisted_javascript_sdk_without_aliases_or_payloads() {
 }
 
 #[test]
+fn antigravity_is_hoisted_with_one_reviewed_trust_exception() {
+    let project = antigravity_project();
+    let spec = PinSpec {
+        dependency: "pi-antigravity",
+    };
+    check_project_shape(&project, "agent-vm-guest-pi-antigravity", "pi-antigravity")
+        .expect("the provider project is a private single-root pnpm project");
+    let pinned = pinned_dependency(&project, &spec).expect("the manifest pins its root");
+    assert_eq!(
+        pinned,
+        version_label("pi-antigravity", "AGENT_VERSION_PI_ANTIGRAVITY"),
+        "the manifest and the image label select one provider version"
+    );
+    check_graph_pin_agrees(&project, &pinned).expect("the graph agrees with the label");
+    let workspace = std::fs::read_to_string(project.input("pnpm-workspace.yaml"))
+        .expect("the provider workspace is readable");
+    assert!(
+        workspace.contains("nodeLinker: hoisted"),
+        "the reviewed provider layout is hoisted so Pi's jiti loader can resolve it"
+    );
+    assert!(
+        workspace.contains("autoInstallPeers: false"),
+        "no peer may be installed: Pi supplies its own packages through the loader"
+    );
+    // The one reviewed exception is exact-versioned and dated in ADR 0016. A
+    // wildcard, a second entry or another version is a review stop, not a
+    // maintenance edit.
+    assert_eq!(
+        workspace.matches("trustPolicyExclude").count(),
+        1,
+        "the provider workspace carries exactly one reviewed trust exception"
+    );
+    assert!(
+        workspace.contains("trustPolicyExclude: ['pi-antigravity@0.11.0']"),
+        "the reviewed exception names the exact selected version"
+    );
+    assert!(
+        !workspace.contains("ignoredOptionalDependencies"),
+        "the provider declares no omitted optional dependency: undici is real runtime"
+    );
+    let graph = read_graph(&project).expect("the reviewed provider inputs form a valid graph");
+    check_graph_integrity_and_reachability(&graph)
+        .expect("every provider archive is hashed, canonical and reachable");
+    let names: Vec<String> = graph
+        .packages
+        .iter()
+        .map(|archive| archive.name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["pi-antigravity".to_string(), "undici".to_string()],
+        "the reviewed provider graph is the provider and its one runtime dependency"
+    );
+    assert!(
+        graph
+            .packages
+            .iter()
+            .find(|archive| archive.name == "pi-antigravity")
+            .is_some_and(|archive| archive
+                .peers
+                .iter()
+                .any(|(name, _)| name == "@earendil-works/pi-ai")),
+        "the provider declares Pi's own AI package as a peer (a declaration, never a resolution)"
+    );
+    check_no_loader_aliased_pi_package(&graph)
+        .expect("the provider installs no package Pi's loader aliases");
+}
+
+#[test]
 fn pi_and_bridge_graph_mutations_are_rejected() {
     // Re-pinned lock mutations: the workspace policy, the SRI grammar and the
     // archive identity are the adapter's own gates, so each is edited in the
@@ -1832,7 +1912,7 @@ fn edit_resolution_integrity(block: &str, integrity: &str) -> String {
 const RECIPES: [&str; 7] = ["dsh", "pi", "codex", "opencode", "claude", "copilot", "agy"];
 
 /// Nine standard-owned selections; pnpm is inherited from base.
-const VERSION_SLOTS: [(&str, &str); 9] = [
+const VERSION_SLOTS: [(&str, &str); 10] = [
     ("codex", "AGENT_VERSION_CODEX"),
     ("opencode", "AGENT_VERSION_OPENCODE"),
     ("claude", "AGENT_VERSION_CLAUDE"),
@@ -1841,6 +1921,7 @@ const VERSION_SLOTS: [(&str, &str); 9] = [
     ("dsh", "AGENT_VERSION_DSH"),
     ("pi", "AGENT_VERSION_PI"),
     ("pi-claude-bridge", "AGENT_VERSION_PI_CLAUDE_BRIDGE"),
+    ("pi-antigravity", "AGENT_VERSION_PI_ANTIGRAVITY"),
     ("opencode-claude", "AGENT_VERSION_OPENCODE_CLAUDE"),
 ];
 
@@ -2095,6 +2176,7 @@ fn multi_slot_args_are_empty_and_label_fallbacks_mirror_the_manifests() {
     let pi = standard_dockerfile();
     assert_eq!(dockerfile_arg(&pi, "AGENT_VERSION_PI"), "");
     assert_eq!(dockerfile_arg(&pi, "AGENT_VERSION_PI_CLAUDE_BRIDGE"), "");
+    assert_eq!(dockerfile_arg(&pi, "AGENT_VERSION_PI_ANTIGRAVITY"), "");
     assert_eq!(
         label_value(&pi, "org.agent-vm.version.pi"),
         format!("${{AGENT_VERSION_PI:-{}}}", pi_pin()),
@@ -2104,6 +2186,11 @@ fn multi_slot_args_are_empty_and_label_fallbacks_mirror_the_manifests() {
         label_value(&pi, "org.agent-vm.version.pi-claude-bridge"),
         format!("${{AGENT_VERSION_PI_CLAUDE_BRIDGE:-{}}}", bridge_pin()),
         "the bridge label fallback must mirror images/tools/pi/bridge/package.json"
+    );
+    assert_eq!(
+        label_value(&pi, "org.agent-vm.version.pi-antigravity"),
+        format!("${{AGENT_VERSION_PI_ANTIGRAVITY:-{}}}", antigravity_pin()),
+        "the provider label fallback must mirror images/tools/pi/antigravity/package.json"
     );
 }
 
@@ -2118,7 +2205,7 @@ fn every_shipped_version_label_is_present_exactly_once() {
     expected.sort();
     assert_eq!(
         seen, expected,
-        "the standard-owned version labels drifted from the nine-slot contract"
+        "the standard-owned version labels drifted from the ten-slot contract"
     );
 }
 

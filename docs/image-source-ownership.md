@@ -120,17 +120,20 @@ transaction, so no Codex proposal may carry a Claude edit.
 ## Current pnpm ownership
 
 Base owns `images/pnpm/`, authenticated bootstrap and the pnpm selection label.
-dsh, Pi and the Pi bridge own their four pnpm inputs (`package.json`,
-`pnpm-lock.yaml`, `pnpm-workspace.yaml`, `pnpm-inputs.sha256`) and their
-build-only preparation/comparison/install/runtime-check helpers; all three
-inherit the base launcher without a private pnpm package. Copilot retains its
-npm path until PR 4 of #42. The build-only Pi/bridge helpers are mounted
+dsh, Pi and its two extension projects (the Claude bridge and the Antigravity
+provider) own their four pnpm inputs (`package.json`, `pnpm-lock.yaml`,
+`pnpm-workspace.yaml`, `pnpm-inputs.sha256`) and their build-only
+preparation/comparison/install/runtime-check helpers; all four inherit the base
+launcher without a private pnpm package. Copilot retains its
+npm path until PR 4 of #42. The build-only Pi/extension helpers are mounted
 read-only during the install and verify RUNs and never COPYed into the image:
 whole directories (`images/tools/pi/`), the shared filesystem module
 (`images/tools/pnpm-project.py`, `images/tools/pnpm-host-manager.py`), the pnpm
 sources and the composed `recipe-contract` directory. The new
 `images/tools/pi/prepare-project.py` is the single owning preparation driver for
-a changed or refreshed Pi/bridge selection, and the maintainer-only
+a changed or refreshed Pi/extension selection (its `bootstrap` verb creates a
+project that has no npm baseline to adopt, which is how the provider project was
+created), and the maintainer-only
 `script/dev/adopt-pi-bridge-pnpm.py` is the initial adoption driver that reads
 the fixed reviewed baseline git objects and never runs from an ordinary
 preparation. Historical transfer entries below are historical, not current
@@ -195,6 +198,10 @@ READMEs may be adapted to their new owner):
   the bridge moved to the four pnpm inputs; the reviewed bytes remain in git
   history
 - `images/tools/pi/bridge/prepare-lock.sh`
+- `images/tools/pi/antigravity/package.json`, `pnpm-lock.yaml`,
+  `pnpm-workspace.yaml`, `pnpm-inputs.sha256` — the reviewed four pnpm inputs
+- `images/tools/pi/antigravity/prepare-lock.sh`,
+  `images/tools/pi/antigravity/upgrade-antigravity.sh`
 - `images/tools/codex/install-codex.sh`
 - `images/tools/codex/verify-codex.sh`
 - `images/tools/codex/pin.json`
@@ -610,9 +617,10 @@ dsh is now an image-owned pnpm project. Its owning sources are:
 - Shared build-only boundary: `images/tools/pnpm-project.py` and
   `images/tools/pnpm-host-manager.py`. The filesystem/manager/publication
   implementation moved here when Pi and its bridge began sharing it, so one
-  security boundary serves all three consumers instead of three drifting copies.
+  security boundary serves all four consumers instead of four drifting copies.
   A frozen consumer table (`dsh` `/opt/agent-vm/dsh`, `pi` `/opt/agent-vm/pi`,
-  `bridge` `/opt/agent-vm/pi-packages`) carries each production prefix, command,
+  `bridge` `/opt/agent-vm/pi-packages`, `antigravity`
+  `/opt/agent-vm/pi-antigravity`) carries each production prefix, command,
   scratch token and host-acquisition variable prefix; capabilities carry their
   consumer, so scratch, cleanup, manager selection and publication derive policy
   from the authorized object and never re-select it from an argument. The module
@@ -630,7 +638,7 @@ dsh is now an image-owned pnpm project. Its owning sources are:
   install and verify RUNs add one read-only mount of
   `tools/pnpm-project.py` at `/tmp/pnpm-project.py`, which is where the adapter's
   `../pnpm-project.py` resolves. The shared CLI requires
-  `--consumer dsh|pi|bridge`; the adapters reject the flag.
+  `--consumer dsh|pi|bridge|antigravity`; the adapters reject the flag.
 - Other build-only dsh helpers: `images/tools/dsh/{check-runtime.mjs,probe-dsh.py}`.
   The shared module authorizes the composed contract
   directory **before** anything in it is executed (the environment guard included)

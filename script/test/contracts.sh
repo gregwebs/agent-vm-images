@@ -121,7 +121,7 @@ if [ "$guard_only" = false ]; then
     python3 script/test/gopls-closure-maintenance.py --go-root "$selected_goroot"
     for suite in agent-versions apt-sources agy-installer claude-installer codex-installer copilot-installer copilot-verify \
         opencode-installer opencode-pnpm-prepare-lock opencode-pnpm-install opencode-pnpm-upgrade \
-        opencode-plugins-verify run-pnpm dsh-prepare-lock dsh-verify pi-install pi-bridge-install \
+        opencode-plugins-verify run-pnpm dsh-prepare-lock dsh-verify pi-install pi-bridge-install pi-antigravity-install \
         pi-prepare-lock pi-verify pi-wrapper shipped-installer-contracts tool-access \
         vendored-installers upgrade-scripts \
         install-build-ca install-shellcheck install-zellij install-pnpm host-watchdog transactional-publish \

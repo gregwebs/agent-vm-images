@@ -18,6 +18,7 @@ const (
 	KindDsh Kind = iota
 	KindPi
 	KindBridge
+	KindAntigravity
 )
 
 // String is the wire name the CLI and the graph JSON use.
@@ -29,6 +30,8 @@ func (k Kind) String() string {
 		return "pi"
 	case KindBridge:
 		return "bridge"
+	case KindAntigravity:
+		return "antigravity"
 	default:
 		return fmt.Sprintf("Kind(%d)", k)
 	}
@@ -43,6 +46,8 @@ func ParseKind(text string) (Kind, bool) {
 		return KindPi, true
 	case "bridge":
 		return KindBridge, true
+	case "antigravity":
+		return KindAntigravity, true
 	default:
 		return KindDsh, false
 	}
@@ -57,6 +62,8 @@ func (k Kind) Root() PackageName {
 		return PackageName{value: "@earendil-works/pi-coding-agent"}
 	case KindBridge:
 		return PackageName{value: "pi-claude-bridge"}
+	case KindAntigravity:
+		return PackageName{value: "pi-antigravity"}
 	default:
 		panic("pnpmlock: unhandled kind")
 	}

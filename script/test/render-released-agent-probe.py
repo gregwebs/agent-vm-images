@@ -20,6 +20,8 @@ SOURCES = {
     "released-agent-report.py": "script/test/fixtures/released-agent-report.py",
     "released-agent-dsh-layout.py": "script/test/fixtures/released-agent-dsh-layout.py",
     "released-agent-bridge-report.py": "script/test/fixtures/released-agent-bridge-report.py",
+    "released-agent-antigravity-report.py":
+        "script/test/fixtures/released-agent-antigravity-report.py",
 }
 # Consumer-qualified input pins. The guest path is a literal whitelist, so a
 # hash scalar can never steer a check at another file or directory.
@@ -40,6 +42,10 @@ INPUTS = {
         "/opt/agent-vm/pi-packages",
         ("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "pnpm-inputs.sha256"),
     ),
+    "pi-antigravity": (
+        "/opt/agent-vm/pi-antigravity",
+        ("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "pnpm-inputs.sha256"),
+    ),
 }
 # The committed sources of each consumer's pinned inputs.
 SOURCES_OF_INPUTS = {
@@ -47,6 +53,7 @@ SOURCES_OF_INPUTS = {
     "dsh": "images/tools/dsh",
     "pi": "images/tools/pi",
     "pi-packages": "images/tools/pi/bridge",
+    "pi-antigravity": "images/tools/pi/antigravity",
 }
 
 

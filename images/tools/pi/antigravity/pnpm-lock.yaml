@@ -1,0 +1,34 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: false
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      pi-antigravity:
+        specifier: 0.11.0
+        version: 0.11.0
+
+packages:
+
+  pi-antigravity@0.11.0:
+    resolution: {integrity: sha512-oCiwNp6yQ8B1hPbQTqdTUsKJOiG7o5RSJmqLsS3wgYXg9y+2goL/TjaF0xZHLgN/S7zSBv7hX3ksnug1fNhabw==}
+    engines: {node: '>=22.15.0'}
+    peerDependencies:
+      '@earendil-works/pi-ai': '>=0.80.0'
+      '@earendil-works/pi-coding-agent': '>=0.80.0'
+
+  undici@8.12.3:
+    resolution: {integrity: sha512-+fdndUTwBP86cVjihTp21hZHo7d6oj1c/47XPA3lL8mM0XHs+C4EkcjmgRsFnFk2f/UONGDy9ItBItmXsLOQHw==}
+    engines: {node: '>=22.19.0'}
+
+snapshots:
+
+  pi-antigravity@0.11.0:
+    dependencies:
+      undici: 8.12.3
+
+  undici@8.12.3: {}

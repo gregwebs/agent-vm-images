@@ -33,7 +33,7 @@ A network request that applies to every launch of an image, whichever agent runs
 _Avoid_: Layer allowance, global host
 
 **Agent request**:
-A network request that applies only when one named agent is launched from the image. A single-vendor agent requests its vendor's service hosts. A multi-provider agent requests only what it contacts before the user picks a provider; hosts reached only through a provider choice or a link to another agent (such as the Pi Claude bridge) are the user's decision, not requests.
+A network request that applies only when one named agent is launched from the image. A single-vendor agent requests its vendor's service hosts. A multi-provider agent requests only what it contacts before the user picks a provider; hosts reached only through a provider choice or a link to another agent (such as the Pi Claude bridge or the Pi Antigravity provider) are the user's decision, not requests.
 _Avoid_: Tool allowance, provider allow list
 
 **Recipe contract**:

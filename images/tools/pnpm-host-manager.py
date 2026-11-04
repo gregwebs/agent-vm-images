@@ -6,9 +6,9 @@ downloads that distribution, checks it against the reviewed pin and hands back
 argv for the extracted copy. It is developer-only: production starts the fixed
 base launcher instead, so the acquisition variables are refused there.
 
-The consumer is a closed profile, not a caller option with a default: dsh, Pi and
-the bridge each name their own acquisition variables, and no consumer can claim
-another's manager.
+The consumer is a closed profile, not a caller option with a default: every
+consumer names its own acquisition variables, and no consumer can claim another's
+manager.
 """
 import argparse
 import importlib.util
