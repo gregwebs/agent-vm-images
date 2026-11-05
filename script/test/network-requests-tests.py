@@ -795,8 +795,12 @@ class CommittedValues(unittest.TestCase):
             'image.base': 'api.github.com,files.pythonhosted.org,github.com,'
                           'pypi.org,registry.npmjs.org'},
         'images/standard/Dockerfile': {
+            'agent.agy': 'cloudcode-pa.googleapis.com,daily-cloudcode-pa.googleapis.com,'
+                         'oauth2.googleapis.com,www.googleapis.com',
             'agent.claude': 'api.anthropic.com,mcp-proxy.anthropic.com,platform.claude.com',
             'agent.codex': 'api.openai.com,auth.openai.com,chatgpt.com',
+            'agent.copilot': 'api.business.githubcopilot.com,api.enterprise.githubcopilot.com,'
+                             'api.githubcopilot.com,api.individual.githubcopilot.com',
             'agent.dsh': '',
             'agent.opencode': 'models.opencode.ai',
             'agent.pi': 'pi.dev'},
@@ -816,17 +820,21 @@ class CommittedValues(unittest.TestCase):
                     {label.key.label(): str(label.value) for label in labels},
                     {nr.PREFIX + name: value for name, value in expected.items()})
 
-    def test_copilot_and_agy_are_absent(self):
-        # #143 owns their inventory; an absent key means "not inventoried".
-        # Compared as whole keys restricted to the agent scope: a set of bare
-        # component names can never contain "agent.copilot", so a comparison
-        # against one would pass whatever the recipe declared.
+    def test_copilot_and_agy_declare_a_named_host_list(self):
+        # An empty value means "inventoried, contacts nothing", which is true of
+        # dsh and false of these two. #143 made copilot and agy inventoried, so a
+        # later edit that dropped either one's hosts to "" would turn a review
+        # into a silent claim of no traffic. Only these two are asserted here;
+        # test_committed_values_match_reviewed_table owns every agent's value.
         labels = nr.source_labels(REPO_ROOT / 'images/standard/Dockerfile',
                                  root=REPO_ROOT)
-        declared = {label.key for label in labels if label.key.scope is nr.Scope.AGENT}
+        declared = {label.key: str(label.value) for label in labels
+                    if label.key.scope is nr.Scope.AGENT}
         for component in ('copilot', 'agy'):
             with self.subTest(component=component):
-                self.assertNotIn(nr.RequestKey(nr.Scope.AGENT, component), declared)
+                key = nr.RequestKey(nr.Scope.AGENT, component)
+                self.assertIn(key, declared)
+                self.assertNotEqual(declared[key], '')
 
     def test_real_repository_passes(self):
         report = nr.check_sources(REPO_ROOT)
