@@ -12,8 +12,9 @@ maintenance commands are in [CONTRIBUTING](../../CONTRIBUTING.md).
 
 An OCI image's config carries a flat `Labels` map, and `agent-vm` can read it
 before a VM boots. That makes labels the one place an image can say which hosts
-its software will try to reach. Agents under copilot and agy are not inventoried
-yet ([#143](https://github.com/gregwebs/agent-vm-images/issues/143)), and the
+its software will try to reach. Two agents, copilot and agy, were not inventoried
+when this was written; [#143](https://github.com/gregwebs/agent-vm-images/issues/143)
+inventoried them from their pinned artifacts (evidence I and J below), and the
 launcher that reads the labels is a separate change (#505).
 
 A `FROM parent` build inherits the parent's labels, and a child `LABEL` with the
@@ -92,8 +93,10 @@ port as `tcp://h:p` and accepts either.
 
 **Empty** means "inventoried, contacts nothing". **Absent** means "not
 inventoried". `agent.dsh`, `image.chrome-devtools` and `image.wirenboard-cpp`
-ship as empty strings, and the launcher can tell that apart from copilot and agy,
-whose keys are absent.
+ship as empty strings. No key in this repository is absent: every component here
+has been inventoried, so absent is now only a state a Dockerfile outside these
+recipes can express, and the launcher must keep reading it as "not inventoried"
+rather than as "contacts nothing".
 
 ### The agent-request rule
 
@@ -102,6 +105,14 @@ requests only what it contacts before the user picks a provider. Hosts reached
 only through a provider choice, or through a link to another agent — the Pi
 Claude bridge, the `agent-vm-codex` Pi extension, the `opencode-claude` plugin —
 are the user's decision and are not that agent's request.
+
+A host the vendor assigns per account is declared for every value the vendor
+documents, because the image cannot know the launch's seat: copilot names its
+service base in the sign-in response and GitHub publishes one host per plan
+family, so `agent.copilot` carries all four. Declaring a host a given seat never
+contacts is the same reviewed over-declaration as `crates.io` in
+`image.rust-dev`, and it keeps a plan change from silently becoming an
+undeclared request.
 
 That makes the image's lists narrower than the launcher's own built-in catalog
 for Pi and OpenCode, which is intended rather than drift: the catalog entry
@@ -152,7 +163,8 @@ source check catches the same overwrite independently.
 
 Agent rows cite agent-vm `docs/default-tool-network-requests.md` and its
 executable source `crates/agent-vm/src/default-tools.toml` at commit
-`8ca1b712a32f142a29302b04a51e8c3b4a8c21c2`.
+`8ca1b712a32f142a29302b04a51e8c3b4a8c21c2`. Sources I and J are the static
+artifact inspections of the pinned copilot and agy selections, recorded below.
 
 | Key | Value | Source |
 |---|---|---|
@@ -163,8 +175,9 @@ executable source `crates/agent-vm/src/default-tools.toml` at commit
 | `agent.codex` | `api.openai.com`, `auth.openai.com`, `chatgpt.com` | row B: API-key inference, first-party OAuth refresh, subscription inference |
 | `agent.opencode` | `models.opencode.ai` | row D, credential-free provider-catalog refresh only |
 | `agent.pi` | `pi.dev` | row G: `/model` provider-catalog refresh, credential-free, cached |
+| `agent.copilot` | `api.business.githubcopilot.com`, `api.enterprise.githubcopilot.com`, `api.githubcopilot.com`, `api.individual.githubcopilot.com` | source I: the compiled Copilot service base plus the three seat bases GitHub publishes; the CLI's GitHub hosts are `image.base` |
+| `agent.agy` | `cloudcode-pa.googleapis.com`, `daily-cloudcode-pa.googleapis.com`, `oauth2.googleapis.com`, `www.googleapis.com` | source J: inference and quota/onboarding on Cloud Code PA and its daily-channel variant, first-party token refresh, the account-validation lookups its literals name |
 | `agent.dsh` | *(empty)* | dsh resolves models from an embedded catalog |
-| `agent.copilot`, `agent.agy` | *(absent)* | not inventoried ([#143](https://github.com/gregwebs/agent-vm-images/issues/143)) |
 | `image.rust-dev` | `index.crates.io`, `static.crates.io`, `crates.io` | cargo's sparse index, crate downloads, search/publish API |
 | `image.go-dev` | `proxy.golang.org`, `sum.golang.org` | the `GOPROXY`/`GOSUMDB` defaults; the recipe sets `GOTOOLCHAIN=local`, so no toolchain is downloaded |
 | `image.chrome-devtools` | *(empty)* | browsing is project-dependent; Chromium's background services are not needed |
@@ -178,6 +191,133 @@ different question and would be a reviewed label change.
 The same table is written literally in
 `script/test/network-requests-tests.py::test_committed_values_match_reviewed_table`,
 so moving a value is a two-file reviewed edit.
+
+### I — Copilot 1.0.90 (static artifact inspection)
+
+Inspected the artifact the image actually installs. `@github/copilot-linux-arm64@1.0.90`
+from `registry.npmjs.org`, SHA-512 integrity
+`sha512-lwc/dL93eacvmm7uTM+QZ5HHUniWaXu+p49rTN1Utg4+dGx6VeBuJ1pg5x4/3MhMeKRPiwFk3WSacazSpOI/nw==`,
+tar SHA-256 `19bde7b8274432964337eccb1301611b1cfc9b2993729a9dd3afffb298a1130b`.
+The `@github/copilot-linux-x64@1.0.90` artifact was inspected the same way: its
+tar SHA-256 `ffb3399216bccc7295cf2e7c579e6f161648fe355f6ec5eeea96ae736c1f30b1`
+and its embedded `package/prebuilds/linux-x64/runtime.node` SHA-256
+`d60c778cd03ef97cb261abf5f4cb9703f01fc60edfd95ba1f55693a95ae48160` are the two
+digests agent-vm's own study records, and `package/app.js` is byte-identical
+across the two architectures (SHA-256
+`f84061b62eeb1cd78a655555890fe1a776509203fca68144745467e26e443813`), so one
+inspection covers both native images.
+
+The binary is a Node SEA whose embedded `package/app.js` and
+`prebuilds/*/runtime.node` were extracted and read as text. Findings:
+
+- **`api.githubcopilot.com`** — the compiled Copilot service base, a literal in
+  `runtime.node` alongside the session API and the GitHub MCP server path
+  `https://api.githubcopilot.com/mcp`. Used when nothing overrides it.
+- **the three seat bases** — neither architecture's `runtime.node` carries a
+  seat hostname. The CLI reads its base from `settings.copilotUrl`, then
+  `COPILOT_API_URL`, then the `CopilotUser.endpoints.api` field of the sign-in
+  response fetched from `https://api.github.com/copilot_internal/user`, and only
+  then falls back to the compiled literal. The allowlist reference publishes the
+  plan families (`*.individual`, `*.business`, `*.enterprise.githubcopilot.com`)
+  and calls `*.githubcopilot.com` the host that serves "authorized users
+  regardless of Copilot plan"; its sibling re-usable
+  [`cloud-agent-required-hosts.md`](https://github.com/github/docs/blob/main/data/reusables/copilot/cloud-agent-required-hosts.md)
+  names the exact member of each family — `api.individual`, `api.business` and
+  `api.enterprise.githubcopilot.com`, one per plan — which is why the declared
+  names are those three and not a wildcard: the grammar cannot express one, and
+  the exact members are the vendor's own published names. An enterprise tenant on
+  `*.ghe.com` is outside this image's default selection.
+- **the GitHub hosts are not repeated here.** `api.github.com` (the sign-in user
+  lookup, `copilot_internal/managed_settings`, `copilot_internal/content_exclusion`)
+  and `github.com` (device sign-in) are already `image.base`, which every launch
+  of this image carries; repeating them under the agent would add no coverage.
+- **Excluded.** The MCP servers a user configures, even when one lands on a
+  declared host (`GITHUB_MCP_URL_OVERRIDE`, `api.github.com/cmc_internal/…`), the
+  agent and MCP catalogue (`agentfinder.github.com`), enterprise identity
+  brokering (`login.microsoftonline.com` and the `sts.windows.net` family, reached
+  only for an Entra-brokered account), and a tenant host from
+  `COPILOT_GH_HOST`/`GH_HOST` — each is a user or tenant choice, exactly as the
+  agent-request rule treats them.
+- **Absent, not excluded.** The allowlist reference's remaining entries do not
+  occur in either artifact: the legacy suggestion proxies
+  (`copilot-proxy`, `origin-tracker.githubusercontent.com`), client telemetry
+  (`copilot-telemetry.githubusercontent.com`), analytics (`collector.github.com`)
+  and the asset hosts (`github.githubassets.com`,
+  `avatars.githubusercontent.com`). That is a statement about this CLI build, not
+  about the Copilot product, which is why this key is narrower than the document.
+
+This is static inspection: it executed no binary and collected no transport
+trace, so it proves which names the artifact carries and what it does with them,
+not a credentialed routing of every seat. agent-vm's
+[#340](https://github.com/gregwebs/agent-vm/issues/340) still owns a consented
+routing study, and its deferral note there stays accurate about what this does not
+certify.
+
+### J — agy 1.4.11 (static artifact inspection)
+
+The release archive `agy_cli_linux_arm64.tar.gz` from the committed
+[pin](../../images/tools/agy/pin.json), SHA-256
+`debb2c056e387be63fdf86d48dfcc99ed1f523e51c5067abd119d78bd36e8a18`, and its
+`linux/amd64` sibling `agy_cli_linux_x64.tar.gz`, SHA-256
+`d17c426977326361f3d81f3ea22820e967164285923de020247e460dcb9d15c3`. Each archive's
+single member `antigravity` is the installed `/usr/local/bin/agy` (SHA-256
+`3e9f9909f11ca15e442b0aca839be9ed9e0055f5f18dba622b18cadffebfc666` arm64,
+`4341b80b43fc3b4437ff65041673f0f71c950e49d69a6256e3b6f212c4694ed4` amd64). Each
+is a stripped Go executable. Their string pools are not identical — the arches
+carry their own runtime strings, such as `ld-linux-aarch64` against an x86-64
+AES module — so the claim here is narrower: every endpoint literal listed below
+was found in both binaries, once unless noted, and the counts match.
+
+The evidence is exactly this: the literals, and the path and RPC names compiled
+beside them. It shows which names the artifact carries and what each is for. It
+does **not** establish that a given account's launch reaches them, in what order,
+or under which condition — a stripped binary has no readable call graph, and the
+account paths need credentials this repository will not use. Findings:
+
+- **`cloudcode-pa.googleapis.com`** — the compiled Cloud Code base for the
+  Google-account path: inference (`/v1beta/models/…:generateContent`), model
+  discovery, quota and onboarding (`LoadCodeAssist`, `OnboardUser`,
+  `FetchAvailableModels`), the plugin listing and the URL antivirus check the
+  agent's guard calls. The binary reads a `CLOUD_CODE_URL` override; this image
+  sets none.
+- **`daily-cloudcode-pa.googleapis.com`** — the daily-channel variant of the same
+  service, another endpoint literal in the binary. Declared rather than omitted,
+  for the same reason `pi-antigravity` declares its daily fallbacks: the channel
+  a launch uses is not readable from here, the same family is what that key
+  declares, and the cost of a never-used entry is one unused entry rather than a
+  missing one. This inspection shows the literal exists, not which account
+  reaches it.
+- **`oauth2.googleapis.com`** — `/token` for refresh and `/device/code` for the
+  device authorization flow, both literals in the binary.
+- **`www.googleapis.com`** — the binary's literals for account validation
+  (`/oauth2/v2/userinfo`, `/oauth2/v3/tokeninfo`). Its other occurrences are OAuth
+  *scope* identifiers (`/auth/drive`, `/auth/cloud-platform`) and the user-invoked
+  Drive connector, which is not a default. Declared because account validation is
+  in the baseline and these are the only literals that do it; whether a given
+  sign-in runs them is one of the things this inspection cannot show.
+- **Excluded.** Browser sign-in (`accounts.google.com/o/oauth2/auth` and the
+  `antigravity.google/oauth-callback` redirect), which the baseline excludes for
+  every agent; telemetry, `play.googleapis.com/log`, which the CLI gates on a
+  server setting it reports as "failed to read telemetry setting from server,
+  defaulting to disabled" — excluded by the baseline's telemetry rule, which means
+  no request label here names it, so a launch whose egress does not cover it loses
+  the telemetry rather than being told about it, unless some other source declares
+  that host (a layer's own label, or the launcher's catalog); the URL
+  guard's direct `safebrowsing.googleapis.com` v5 call, which the binary reports
+  as "SafeBrowsing not configured" and no default here configures; API-key and
+  Vertex provider modes (`generativelanguage.googleapis.com`,
+  `aiplatform.googleapis.com`, `iamcredentials.googleapis.com`,
+  `sts.googleapis.com`), which are the user's provider choice; the dev/sandbox
+  channel hosts (`preprod-daily-…`, `autopush-….sandbox.googleapis.com`); and the
+  updater at `antigravity-cli-auto-updater-….run.app`, which the image disables
+  with `AGY_CLI_DISABLE_AUTO_UPDATE=1`.
+
+This is static inspection: no binary was executed, no account was used and no
+transport was traced, so it does not prove a login path or any given call order,
+and `agy` remains certified only for `--version` (ADR 0012). Read it as the set of
+vendor endpoints the reviewed artifact carries for the Google-account path, which
+is what this repository accepts for an agent row whose paths need credentials —
+not as a certified route.
 
 ## Verification: what the restricted-egress smoke proves
 
@@ -241,6 +381,11 @@ them.
 
 ## Consequences
 
+- **Every shipped component is now inventoried.** `agent.copilot` and
+  `agent.agy` joined the table after #143, so a launch of this image reports a
+  request list for every agent it ships rather than "not inventoried" for two of
+  them. Changing what either agent installs, or a new version's default base,
+  means re-reading sources I and J and editing the same two files.
 - **A stacked layer keeps its parent's requests.** Nothing needs a repin: the
   example layers build `FROM` the released, digest-pinned standard image, so they
   carry the new base and standard labels only from the next standard release. Until

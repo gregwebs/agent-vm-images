@@ -322,7 +322,11 @@ COPY --chmod=0755 tools/claude/seed-claude-plugins.sh /opt/agent-vm/seed.d/10-cl
 ARG AGENT_VERSION_COPILOT=1.0.90
 
 LABEL org.agent-vm.version.copilot="${AGENT_VERSION_COPILOT}"
-# No agent network request yet: copilot is not inventoried (#143).
+# GitHub publishes one Copilot service host per plan family, and the sign-in
+# response may name another base; the GitHub hosts the CLI signs in through are
+# image.base. MCP servers and the agentfinder catalogue are the user's choice
+# (ADR 0014).
+LABEL org.agent-vm.network-requests.agent.copilot="api.business.githubcopilot.com,api.enterprise.githubcopilot.com,api.githubcopilot.com,api.individual.githubcopilot.com"
 
 RUN --mount=type=bind,source=tools/copilot/install-copilot.sh,target=/tmp/install-copilot.sh,ro \
     AGENT_INSTALL_SOFT_FAIL= \
@@ -368,7 +372,11 @@ RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro 
 ARG AGENT_VERSION_AGY=1.4.11
 
 LABEL org.agent-vm.version.agy="${AGENT_VERSION_AGY}"
-# No agent network request yet: agy is not inventoried (#143).
+# Google-account inference and its quota/onboarding calls, the daily channel's
+# variant of the same service, first-party token refresh and the
+# account-validation lookups its literals name. Browser sign-in, telemetry and the
+# updater are excluded (ADR 0014).
+LABEL org.agent-vm.network-requests.agent.agy="cloudcode-pa.googleapis.com,daily-cloudcode-pa.googleapis.com,oauth2.googleapis.com,www.googleapis.com"
 
 # The background self-update would replace the reviewed binary in a guest.
 ENV AGY_CLI_DISABLE_AUTO_UPDATE=1
