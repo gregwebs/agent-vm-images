@@ -61,9 +61,7 @@ def main() -> int:
 
         def check(phase: str, *, tar: int | None = None) -> None:
             stats = storage.measure(scratch, storage_file)
-            st, space = scratch.stat(), os.statvfs(scratch)
-            host = capacity.Filesystem(stats['scratch_host'], str(st.st_dev), str(scratch), space.f_bavail * space.f_frsize)
-            daemon = tuple(capacity.Filesystem.parse(x) for x in stats['daemon_filesystems'])
+            host, daemon = capacity.snapshot(stats)
             result = capacity.check(phase, host, daemon, uncompressed=c.UNCOMPRESSED_CAP,
                                     compressed=c.COMPRESSED_CAP, build=25 * capacity.GIB, tar_bytes=tar)
             c.atomic_json(scratch / (phase + '-capacity.json'), result)
