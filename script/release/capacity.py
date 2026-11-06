@@ -36,6 +36,17 @@ class Filesystem:
         return cls(**value)
 
 
+def snapshot(value: dict) -> tuple[Filesystem, tuple[Filesystem, ...]]:
+    """Validate a storage measurement: the schema is load-bearing, and the
+    scratch filesystem's free bytes are only ever read from it."""
+    if set(value) != {'scratch_filesystem', 'daemon_filesystems'}:
+        raise ValueError('unknown storage measurement schema')
+    daemon = value['daemon_filesystems']
+    if not isinstance(daemon, list):
+        raise ValueError('daemon filesystems must be a list')
+    return Filesystem.parse(value['scratch_filesystem']), tuple(Filesystem.parse(x) for x in daemon)
+
+
 def check(phase: str, scratch: Filesystem, daemon: tuple[Filesystem, ...],
           *, uncompressed: int, compressed: int, build: int,
           tar_bytes: int | None = None) -> dict:
@@ -100,8 +111,8 @@ def main() -> int:
     sub = parser.add_subparsers(dest='command', required=True)
     cli = sub.add_parser('check')
     cli.add_argument('--phase', required=True, choices=('initial', 'build', 'load', 'stage'))
-    cli.add_argument('--scratch', required=True, type=Path)
-    cli.add_argument('--daemon-stats', required=True, type=Path)
+    cli.add_argument('--daemon-stats', required=True, type=Path,
+                     help='a storage.py measurement to replay; the verdict is only as fresh as that file')
     cli.add_argument('--uncompressed-cap-bytes', type=int, default=8 * GIB)
     cli.add_argument('--compressed-cap-bytes', type=int, default=4 * GIB)
     cli.add_argument('--build-cap-bytes', type=int, default=25 * GIB)
@@ -109,16 +120,8 @@ def main() -> int:
     args = parser.parse_args()
     try:
         stats = json.loads(args.daemon_stats.read_text())
-        if set(stats) != {'scratch_host', 'daemon_filesystems'}:
-            raise ValueError('unknown storage measurement schema')
-        stat = os.stat(args.scratch)
-        space = os.statvfs(args.scratch)
-        scratch = Filesystem.parse({'host': stats['scratch_host'],
-                                    'filesystem': str(stat.st_dev),
-                                    'path': str(args.scratch.resolve()),
-                                    'free_bytes': space.f_bavail * space.f_frsize})
-        result = check(args.phase, scratch,
-                       tuple(Filesystem.parse(x) for x in stats['daemon_filesystems']),
+        scratch, daemon = snapshot(stats)
+        result = check(args.phase, scratch, daemon,
                        uncompressed=args.uncompressed_cap_bytes,
                        compressed=args.compressed_cap_bytes,
                        build=args.build_cap_bytes, tar_bytes=args.tar_bytes)

@@ -24,7 +24,7 @@ class FilesystemRecord(TypedDict):
 
 
 class StorageSnapshot(TypedDict):
-    scratch_host: str
+    scratch_filesystem: FilesystemRecord
     daemon_filesystems: list[FilesystemRecord]
 
 
@@ -87,7 +87,12 @@ def measure(scratch: Path, output: Path) -> StorageSnapshot:
         stats, space = backing.stat(), os.statvfs(backing.parent)
         records.append({'host': client_host, 'filesystem': str(stats.st_dev), 'path': str(backing),
                         'free_bytes': space.f_bavail * space.f_frsize})
-    value: StorageSnapshot = {'scratch_host': client_host, 'daemon_filesystems': records}
+    # The scratch filesystem is measured here rather than by each caller, so one
+    # record owns the host identity and the free bytes capacity decisions read.
+    stat, space = scratch.stat(), os.statvfs(scratch)
+    scratch_filesystem: FilesystemRecord = {'host': client_host, 'filesystem': str(stat.st_dev),
+                                            'path': str(scratch), 'free_bytes': space.f_bavail * space.f_frsize}
+    value: StorageSnapshot = {'scratch_filesystem': scratch_filesystem, 'daemon_filesystems': records}
     atomic_json(output, value)
     return value
 

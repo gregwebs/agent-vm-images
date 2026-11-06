@@ -36,6 +36,7 @@ preflight = module('preflight')
 capacity = module('capacity')
 attestations = module('attestations')
 operations = module('operations')
+storage = module('storage')
 build = module('build')
 verify = module('verify')
 # ci-boot-bind.sh asserts the same trace2 children, so the predicate lives in one module (#88).
@@ -309,6 +310,67 @@ class CapacityTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 capacity.Filesystem.parse({'host': 'native', 'filesystem': 'disk',
                                            'path': '/owned', 'free_bytes': value})
+
+    def test_snapshot_takes_the_scratch_record_and_refuses_a_foreign_schema(self):
+        record = {'host': 'native', 'filesystem': 'disk', 'path': '/owned', 'free_bytes': 100 * capacity.GIB}
+        scratch, daemon = capacity.snapshot({'scratch_filesystem': record, 'daemon_filesystems': [record]})
+        self.assertEqual((scratch, daemon), (self.fs(), (self.fs(),)))
+        # The scratch free bytes are the snapshot's, so a shape without that
+        # record (the old `scratch_host` key) must not be read as one.
+        for value in ({'scratch_host': 'native', 'daemon_filesystems': [record]},
+                      {'scratch_filesystem': record}, {'scratch_filesystem': record, 'daemon_filesystems': {}},
+                      {'scratch_filesystem': record, 'daemon_filesystems': [], 'extra': 1}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                capacity.snapshot(value)
+
+    def test_measure_records_the_scratch_filesystem_and_the_daemon_probe(self):
+        # One measurement owns both facts: which filesystem the scratch is on and
+        # what the daemon filesystems have free.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scratch = root / 'scratch'; scratch.mkdir()
+            output = root / 'storage.json'
+            info = {'DriverStatus': [['driver-type', 'io.containerd.snapshotter.v1']], 'ID': 'fixture-daemon',
+                    'DockerRootDir': '/daemon-root',
+                    'Containerd': {'Address': '/run/docker/containerd/containerd.sock'}}
+            probe = ('179\n/dev/root 100 0 8388608 0 0\n180\n/dev/containerd 100 0 4194304 0 0\n'
+                     '181\n/dev/buildkit 100 0 2097152 0 0\n')
+            context = [{'Endpoints': {'docker': {'Host': 'unix:///var/run/podman.sock'}}}]
+            probes = []
+
+            def check_output(argv, **kwargs):
+                if argv[:2] == ['docker', 'info']: return json.dumps(info).encode()
+                if argv[:3] == ['docker', 'context', 'inspect']: return json.dumps(context).encode()
+                if argv[:2] == ['docker', 'run']:
+                    probes.append(argv)
+                    return probe.encode()
+                raise AssertionError(argv)
+
+            # Distinctive block counts: the recorded bytes are this filesystem's.
+            statvfs = mock.Mock(return_value=mock.Mock(f_bavail=1234, f_frsize=2))
+            with mock.patch.object(storage.platform, 'system', return_value='Linux'), \
+                 mock.patch.object(storage.os, 'statvfs', statvfs), \
+                 mock.patch.object(storage.subprocess, 'check_output', side_effect=check_output):
+                snapshot = storage.measure(scratch, output)
+            self.assertEqual(json.loads(output.read_text()), snapshot)
+            record = snapshot['scratch_filesystem']
+            self.assertEqual(record, {'host': 'client:' + platform.node(),
+                                       'filesystem': str(scratch.stat().st_dev), 'path': str(scratch),
+                                       'free_bytes': 1234 * 2})
+            statvfs.assert_called_once_with(scratch)
+            # The probe binds the three configured paths and reads them in order.
+            self.assertEqual(len(probes), 1)
+            self.assertEqual([value for value in probes[0] if value.startswith('type=bind')],
+                             ['type=bind,src=/daemon-root,dst=/probe/0,readonly',
+                              'type=bind,src=/daemon-root/containerd/daemon,dst=/probe/1,readonly',
+                              'type=bind,src=/daemon-root/buildkit,dst=/probe/2,readonly'])
+            self.assertIn('for p in /probe/0 /probe/1 /probe/2;', probes[0][-1])
+            # Each probed path keeps its own device; KiB becomes bytes.
+            self.assertEqual([(x['host'], x['filesystem'], x['free_bytes'], x['path'])
+                              for x in snapshot['daemon_filesystems']],
+                             [('daemon:fixture-daemon', '179', 8 * capacity.GIB, '/daemon-root'),
+                              ('daemon:fixture-daemon', '180', 4 * capacity.GIB, '/daemon-root/containerd/daemon'),
+                              ('daemon:fixture-daemon', '181', 2 * capacity.GIB, '/daemon-root/buildkit')])
 
 
 DOCKER_FAKE = """#!/usr/bin/env python3
@@ -893,8 +955,11 @@ class ReviewRegressionTests(unittest.TestCase):
                 'org.opencontainers.image.version': '0.1.0', 'org.opencontainers.image.revision': sha,
                 'org.opencontainers.image.source': content.SOURCE}}}
             original = operations.run
-            stats = {'scratch_host': 'fixture-client', 'daemon_filesystems': [{'host': 'fixture-daemon',
-                'filesystem': 'disk', 'path': '/owned', 'free_bytes': 100 * capacity.GIB}]}
+            scratch_fs = {'host': 'fixture-client', 'filesystem': 'disk', 'path': '/owned',
+                          'free_bytes': 100 * capacity.GIB}
+            daemon_fs = [{'host': 'fixture-daemon', 'filesystem': 'disk', 'path': '/owned',
+                          'free_bytes': 100 * capacity.GIB}]
+            stats = {'scratch_filesystem': scratch_fs, 'daemon_filesystems': daemon_fs}
             phases = [(phase, False) for phase in (None, 'base', 'standard', 'archive', 'load', 'audit', 'sbom', 'cleanup')]
             # A rehearsal build must pass the same end-to-end path, including the
             # packaging step that records the run identity.
@@ -962,6 +1027,59 @@ class ReviewRegressionTests(unittest.TestCase):
                     self.assertEqual(content.PlatformInventory.parse(content.read_json(out / 'platform.json')).selections,
                                      tuple(sorted(selected.items())))
                 self.assertEqual(subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo), b'')
+
+    def test_capacity_refusal_reads_the_declared_scratch_measurement(self):
+        # The scratch filesystem's free bytes come from the measurement, so the
+        # refusal is provable here whatever this host has left on its own disk.
+        import platform
+        arch = 'arm64' if platform.machine() in ('arm64', 'aarch64') else 'amd64'
+        daemon = [{'host': 'fixture-daemon', 'filesystem': 'disk', 'path': '/owned',
+                   'free_bytes': 100 * capacity.GIB}]
+        cases = [
+            # One gigabyte cannot pay the initial allocation.
+            ('declared one gigabyte', {'scratch_filesystem': {'host': 'fixture-client',
+                                                              'filesystem': 'declared-disk',
+                                                              'path': '/declared/scratch',
+                                                              'free_bytes': capacity.GIB},
+                                       'daemon_filesystems': daemon},
+             'insufficient space on fixture-client:declared-disk'),
+            # A snapshot without the record must not fall back to this disk.
+            ('no scratch record', {'daemon_filesystems': daemon}, 'unknown storage measurement schema'),
+        ]
+        for label, stats, reason in cases:
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                repo, sha = build_repo(base)
+                original = operations.run
+                calls = []
+
+                def command(argv, **kwargs):
+                    calls.append(argv)
+                    if argv[0] == 'git':
+                        return original(argv, **kwargs)
+                    if argv[:3] == ['docker', 'context', 'show']: return b'fixture-builder\n'
+                    if argv[:3] == ['docker', 'buildx', 'inspect']: return b'Driver: docker\n'
+                    return b''
+
+                out, scratch = base / 'out', base / 'scratch'
+                env = {'GITHUB_REPOSITORY': preflight.REPO, 'GITHUB_SHA': sha, 'GITHUB_REF': 'refs/heads/main',
+                       'GITHUB_RUN_ID': '264', 'GITHUB_RUN_ATTEMPT': '1'}
+                with mock.patch.dict(os.environ, env), mock.patch.object(operations, 'ROOT', repo), \
+                     mock.patch.object(operations, 'run', side_effect=command), \
+                     mock.patch.object(build.capability, 'check'), \
+                     mock.patch.object(build.storage, 'measure', return_value=stats), \
+                     mock.patch.object(build.peaks.Sampler, 'start'), \
+                     mock.patch.object(build.peaks.Sampler, 'stop'), \
+                     mock.patch.object(os, 'statvfs', return_value=mock.Mock(f_bavail=1024 ** 4, f_frsize=1)), \
+                     mock.patch.object(sys, 'argv', ['build', '--arch', arch, '--version', '0.1.0',
+                                                    '--out', str(out), '--scratch-root', str(scratch)]):
+                    with mock.patch('sys.stderr', new=io.StringIO()) as stderr:
+                        self.assertEqual(build.main(), 1, label)
+                # The refusal is the capacity decision, before any recipe build.
+                # This host reports a terabyte free, so only the record can refuse.
+                self.assertIn(reason, stderr.getvalue(), label)
+                self.assertFalse([argv for argv in calls if 'Dockerfile' in ' '.join(argv)], (label, calls))
+                self.assertEqual(list(out.iterdir()), [], label)
 
     def test_public_build_and_trust_refuse_build_material(self):
         operations.public_trust({operations.BUILD_CA_LABEL: ''})
@@ -1031,8 +1149,11 @@ class ReviewRegressionTests(unittest.TestCase):
     def test_base_build_trust_label_stops_publication(self):
         import platform
         arch = 'arm64' if platform.machine() in ('arm64', 'aarch64') else 'amd64'
-        stats = {'scratch_host': 'fixture-client', 'daemon_filesystems': [{'host': 'fixture-daemon',
-            'filesystem': 'disk', 'path': '/owned', 'free_bytes': 100 * capacity.GIB}]}
+        scratch_fs = {'host': 'fixture-client', 'filesystem': 'disk', 'path': '/owned',
+                      'free_bytes': 100 * capacity.GIB}
+        daemon_fs = [{'host': 'fixture-daemon', 'filesystem': 'disk', 'path': '/owned',
+                      'free_bytes': 100 * capacity.GIB}]
+        stats = {'scratch_filesystem': scratch_fs, 'daemon_filesystems': daemon_fs}
         cases = [
             ('nonempty CA label', json.dumps({operations.BUILD_CA_LABEL: 'a' * 64}).encode(),
              False, 'public release base carries build trust material'),
