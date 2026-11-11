@@ -17,7 +17,7 @@ GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=110
+SELF_TEST_CASES=114
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -234,8 +234,8 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         fail 'rust-dev: missing the no-implicit-install contract (ENV RUSTUP_AUTO_INSTALL=0)'
     grep -qxF 'ENV RUSTUP_HOME=/opt/rustup' "$rustdir/Dockerfile" ||
         fail 'rust-dev: RUSTUP_HOME ENV'
-    grep -qxE 'ENV PATH=/opt/kache/bin:/opt/cargo/bin:/opt/verus/verus-x86-linux:\$\{PATH\}' "$rustdir/Dockerfile" ||
-        fail 'rust-dev: PATH must stay additive'
+    grep -qxE 'ENV PATH=/opt/kache/shims:/opt/kache/bin:/opt/cargo/bin:/opt/verus/verus-x86-linux:\$\{PATH\}' "$rustdir/Dockerfile" ||
+        fail 'rust-dev: PATH must stay additive and lead with the kache shims'
     grep -qxF 'ENV RUSTC_WRAPPER=/opt/kache/bin/kache' "$rustdir/Dockerfile" ||
         fail 'rust-dev: the guest cargo wrapper must be the pinned kache'
     if grep -qE '^ENV ([A-Za-z_]+=)*CARGO_HOME=' "$rustdir/Dockerfile"; then
@@ -261,7 +261,7 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         fail 'rust-dev: Verus smoke must not swallow failures'
     fi
     for token in 'doctor --probe --json' 'kache-engine' \
-        '"${RUSTC_WRAPPER:-}" = "$KACHE_DIR/bin/kache"'; do
+        '"${RUSTC_WRAPPER:-}" = "$KACHE_DIR/bin/kache"' '.kache-shims' 'cc -o'; do
         grep -qF -- "$token" "$verifier" || fail "rust-dev: kache smoke lacks: $token"
     done
     # --- rust-dev: the pinned kache compiler cache ---------------------------
@@ -297,12 +297,57 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         fail 'rust-dev: kache/release-key.asc does not hash to the KACHE_RELEASE_CERT_SHA256 pin'
     grep -qxF -- '-----BEGIN PGP PUBLIC KEY BLOCK-----' "$kachedir/release-key.asc" ||
         fail 'rust-dev: kache/release-key.asc is not an armored public key'
-    reviewed_kache_installer='RUN --mount=type=bind,source=install-kache.sh,target=/tmp/install-kache.sh,ro --mount=type=bind,source=kache,target=/tmp/kache-pin,ro KACHE_VERSION=$KACHE_VERSION KACHE_AMD64_SHA256=$KACHE_AMD64_SHA256 KACHE_ARM64_SHA256=$KACHE_ARM64_SHA256 KACHE_RELEASE_CERT_SHA256=$KACHE_RELEASE_CERT_SHA256 KACHE_DIR=$KACHE_DIR KACHE_DATA=/tmp/kache-pin bash /tmp/install-kache.sh'
+    reviewed_kache_installer='RUN --mount=type=bind,source=install-kache.sh,target=/tmp/install-kache.sh,ro --mount=type=bind,source=kache,target=/tmp/kache-pin,ro KACHE_VERSION=$KACHE_VERSION KACHE_AMD64_SHA256=$KACHE_AMD64_SHA256 KACHE_ARM64_SHA256=$KACHE_ARM64_SHA256 KACHE_RELEASE_CERT_SHA256=$KACHE_RELEASE_CERT_SHA256 KACHE_DIR=$KACHE_DIR KACHE_DATA=/tmp/kache-pin KACHE_SHIM_DIR=$KACHE_DIR/shims bash /tmp/install-kache.sh'
     kache_installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-kache.sh' || true)
     [ "$kache_installer_runs" -eq 1 ] || fail 'rust-dev: the kache installer RUN must appear exactly once'
     kache_installer_line=$(printf '%s\n' "$instructions" | grep -F 'install-kache.sh')
     [ "$(normalize_instruction "$kache_installer_line")" = "$reviewed_kache_installer" ] ||
         fail "rust-dev: the kache installer RUN must be exactly the reviewed invocation (got: $(normalize_instruction "$kache_installer_line"))"
+    # --- rust-dev: the C/C++ shims, which are image state ---------------------
+    # They are not a guest setup step (ADR 0015): the installer creates them from
+    # the pinned binary (and asserts the marker-and-six-links shape itself), the
+    # image PATH leads with their directory, and the offline verifier requires
+    # `kache doctor` to report them active. A farm that stops being installed, a
+    # PATH that stops leading with it, and a doctor finding that quietly becomes
+    # optional again all fail here instead of in a guest.
+    for token in 'init --shims' '--canonical-only' '.kache-shims' 'KACHE_SHIM_DIR'; do
+        grep -qF -- "$token" "$installer" || fail "rust-dev: install-kache.sh lacks the shim farm: $token"
+    done
+    grep -qF -- 'KACHE_SHIM_DIR=$KACHE_DIR/shims' "$rustdir/Dockerfile" ||
+        fail 'rust-dev: the kache installer RUN must create the shim farm'
+    # The probe file's absence is the GUARDED sweep's message; this only reads it.
+    if [ -f "$rustdir/kache_probe.py" ]; then
+        grep -qF -- 'C/C++ shims' "$rustdir/kache_probe.py" ||
+            fail 'rust-dev: kache_probe.py must require the C/C++ shims to be active'
+    fi
+    # --- rust-dev: the shared kache remote, which is configuration state -----
+    # The policy is an image input like the pins: the reviewed RUN that installs
+    # it, the ENV that selects it, its three effective values, and its position
+    # after the verifier are contracts. The ordering is the subtle one: the
+    # verifier decides a `doctor --probe` report taken with no remote configured,
+    # and a configured remote makes the daemon checks mandatory, so installing
+    # the policy earlier would change what the verifier is able to pass on.
+    kache_config=$rustdir/kache-config.toml
+    [ -f "$kache_config" ] || fail 'rust-dev: missing kache-config.toml'
+    for token in 'local_max_size = "20G"' 'type = "filesystem"' 'path = "/mnt/kache-remote"'; do
+        grep -qxF -- "$token" "$kache_config" ||
+            fail "rust-dev: kache-config.toml must keep: $token"
+    done
+    if grep -v '^[[:space:]]*#' "$kache_config" | grep -qF -- 'atomic_write_dir'; then
+        fail 'rust-dev: kache-config.toml must not stage uploads across filesystems'
+    fi
+    grep -qxF 'ENV KACHE_CONFIG=/opt/kache/config.toml' "$rustdir/Dockerfile" ||
+        fail 'rust-dev: the kache policy must be selected with KACHE_CONFIG'
+    reviewed_kache_config='RUN --mount=type=bind,source=kache-config.toml,target=/tmp/kache-config.toml,ro install -D -m 0644 /tmp/kache-config.toml /opt/kache/config.toml && mkdir -p /mnt/kache-remote && kache_check=$(mktemp -d) && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.remote.type | grep -qx filesystem && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.remote.path | grep -qxF /mnt/kache-remote && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.local_max_size | grep -qxF 20G && rm -rf "$kache_check"'
+    kache_config_runs=$(printf '%s\n' "$instructions" | grep -cF 'source=kache-config.toml' || true)
+    [ "$kache_config_runs" -eq 1 ] || fail 'rust-dev: the kache policy RUN must appear exactly once'
+    kache_config_line=$(printf '%s\n' "$instructions" | grep -F 'source=kache-config.toml')
+    [ "$(normalize_instruction "$kache_config_line")" = "$reviewed_kache_config" ] ||
+        fail "rust-dev: the kache policy RUN must be exactly the reviewed invocation (got: $(normalize_instruction "$kache_config_line"))"
+    verifier_at=$(printf '%s\n' "$instructions" | grep -nF '/run/rust-verify/verify-toolchain.sh' | cut -d: -f1)
+    config_at=$(printf '%s\n' "$instructions" | grep -nF 'source=kache-config.toml' | cut -d: -f1)
+    { [ -n "$verifier_at" ] && [ -n "$config_at" ] && [ "$verifier_at" -lt "$config_at" ]; } ||
+        fail 'rust-dev: the kache policy must be installed after the verifier'
     for arg in GO_AMD64_SHA256 GO_ARM64_SHA256 GOLANGCI_LINT_AMD64_SHA256 GOLANGCI_LINT_ARM64_SHA256; do
         grep -qE "^ARG $arg=[0-9a-f]{64}$" "$LAYERS/go-dev/Dockerfile" || fail "go-dev: digest ARG shape: $arg"
     done
@@ -869,6 +914,17 @@ self_test() {
                 expected='does not hash to the KACHE_RELEASE_CERT_SHA256 pin' ;;
             110) rm "$tree/$LAYERS/rust-dev/kache_probe.py"
                 expected='guarded script missing: rust-dev/kache_probe.py' ;;
+            # 111-113: the C/C++ shims, which the image installs instead of
+            # leaving to a guest's `kache init`.
+            111) rewrite "$tree/$LAYERS/rust-dev/Dockerfile" 's|ENV PATH=/opt/kache/shims:|ENV PATH=|'
+                expected='PATH must stay additive and lead with the kache shims' ;;
+            112) rewrite "$tree/$LAYERS/rust-dev/install-kache.sh" 's|--canonical-only||'
+                expected='install-kache.sh lacks the shim farm: --canonical-only' ;;
+            113) rewrite "$tree/$LAYERS/rust-dev/kache_probe.py" 's|C/C++ shims|shims|'
+                expected='kache_probe.py must require the C/C++ shims to be active' ;;
+            # 114: the shared remote's policy is an input, not a preference.
+            114) rewrite "$tree/$LAYERS/rust-dev/kache-config.toml" 's|"20G"|"10G"|'
+                expected='kache-config.toml must keep: local_max_size = "20G"' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac

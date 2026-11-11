@@ -4,9 +4,10 @@
 `kache doctor` reports findings and still exits 0, so its exit status alone
 proves nothing: a broken store, wrapper or probe is a line of output. This reads
 the versioned JSON document instead and refuses a report that says `success` is
-false, that a non-optional check failed, or that the compile/store/restore probe
-did not pass. Optional findings (a daemon not yet started, shims not installed)
-are expected in the image and are not failures.
+false, that a non-optional check failed, that the compile/store/restore probe did
+not pass, or that the C/C++ shims are not active. A daemon that has not been
+started yet is the one finding the image does not install for itself, so it stays
+optional.
 
 Usage: kache_probe.py REPORT
 """
@@ -15,6 +16,7 @@ import json
 import sys
 
 PROBE_LABEL = "Cache probe"
+SHIMS_LABEL = "C/C++ shims"
 
 
 def fail(message: str) -> int:
@@ -48,6 +50,14 @@ def main(argv: list[str]) -> int:
         status = fail(f"expected exactly one {PROBE_LABEL} check, found {len(probes)}")
     elif not probes[0].get("pass"):
         status = fail(f"the kache compile/store/restore probe did not pass: {probes[0].get('detail')}")
+    # `doctor` grades the shims as optional because a Rust-only setup may skip
+    # them, but this image installs them and puts them first on PATH, so a report
+    # that says otherwise means the shims stopped being active.
+    shims = [check for check in checks if check.get("label") == SHIMS_LABEL]
+    if len(shims) != 1:
+        status = fail(f"expected exactly one {SHIMS_LABEL} check, found {len(shims)}")
+    elif not shims[0].get("pass"):
+        status = fail(f"the C/C++ shims are not active: {shims[0].get('detail')}")
     return status
 
 

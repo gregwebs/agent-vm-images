@@ -162,7 +162,7 @@ bash script/dev/upgrade-gopls.sh v0.23.0    # expected: unchanged
 bash script/dev/upgrade-gopls.sh --check    # offline verification
 python3 script/test/gopls-closure-pins.py --go-root /abs/native/go1.27.3
 python3 script/test/gopls-closure-maintenance.py --go-root /abs/native/go1.27.3
-bash script/test/example-layers.sh --self-test       # 110 cases
+bash script/test/example-layers.sh --self-test       # 114 cases
 bash script/test/go-example.sh --self-test           # harness controls, no daemon
 ```
 

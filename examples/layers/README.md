@@ -188,7 +188,8 @@ the vendored `msb` (agent-vm's own gates do not);
 `libcap-ng-dev`, `libdbus-1-dev` — plus `musl-tools` for that musl target, and
 `shellcheck` for agent-vm's `script/test/ci-contracts.sh`;
 - **kache** (Apache-2.0, [kunobi-ninja/kache](https://github.com/kunobi-ninja/kache)),
-installed as `RUSTC_WRAPPER` so every cargo compile in the guest is cached (see
+installed as `RUSTC_WRAPPER` and as the C/C++ compiler shims on `PATH`, so every
+cargo and C/C++ compile in the guest is cached (see
 [kache build cache](#kache-build-cache));
 - the **pinned Verus release** CI verifies with, on `linux/amd64` (see the
 Apple Silicon note below).
@@ -240,28 +241,79 @@ under `/opt/kache/bin` and exports:
 RUSTC_WRAPPER=/opt/kache/bin/kache
 ```
 
-so the ordinary `cargo` loop is cached without a guest setup step. Nothing else
-is shared: the store, its index, the diagnostic log and the per-user daemon live
-in the guest's own writable `$HOME/.cache/kache`, so two launches of the same
-project reuse each other's work while the shared `/opt` tree stays read-only. The
-daemon is started by the first cache-enabled compile (no systemd user session is
-needed, which is why `kache init`'s login service is not installed);
-`kache daemon status`, `kache monitor` and `kache stats` show what it did.
+so the ordinary `cargo` loop is cached without a guest setup step, while the
+shared `/opt` tree stays read-only.
+
+C and C++ compiles are cached the same way, through a farm of compiler-name
+shims the installer creates from the pinned binary:
+
+```sh
+PATH=/opt/kache/shims:/opt/kache/bin:/opt/cargo/bin:/opt/verus/verus-x86-linux:$PATH
+```
+
+`/opt/kache/shims` holds native symlinks named `cc`, `c++`, `gcc`, `g++`,
+`clang`, `clang++` plus kache's `.kache-shims` marker, and it comes first on
+`PATH` because a shim only works as the first compiler name the shell finds.
+When kache is invoked that way it skips the marked directory, runs the real
+compiler it finds later on `PATH`, and caches the object. This is the mechanism
+the vendor packages ship (Debian's postinst runs `kache init --shims
+/usr/lib/kache --force --canonical-only`; nixpkgs exports a `shims` output), and
+it exists at build time, not as a guest step: `kache doctor` in a guest reports
+`C/C++ shims: cc on PATH is a kache shim (/opt/kache/shims)`. The farm holds no
+`cargo` or `rustdoc` link — Rust keeps running through `RUSTC_WRAPPER`, and the
+`cargo` shim moves direct `cargo check`/`clippy` output to
+`<workspace>/target/check` and holds off target cleanup, which this image does
+not decide. `--canonical-only` also leaves versioned names (`gcc-13`,
+`clang-19`) alone, as the Debian package does: they belong to the base image,
+not to this layer.
+
+The cache is split in two, because its halves have opposite requirements. The
+**store** — the SQLite index, its WAL, the diagnostic log and the per-user daemon
+— lives in the guest's own writable `$HOME/.cache/kache` and is never mounted:
+that index needs single-writer local storage with working file locking, and a
+shared or FUSE mount corrupts it. The **remote** is an immutable,
+content-addressed blob tree, where write-once objects named by digest make
+concurrent guests safe by construction rather than by locking.
+`/opt/kache/config.toml` selects it, and `KACHE_CONFIG` points at that file, so a
+guest needs no setup step:
+
+```toml
+[cache]
+local_max_size = "20G"
+
+[cache.remote]
+type = "filesystem"
+path = "/mnt/kache-remote"
+```
+
+`/mnt/kache-remote` is the contract with the launcher: it bind-mounts one host
+directory there for every guest, so compiled crates are reused across VMs,
+worktrees and launches without any guest sharing its store. A guest launched
+without that mount still builds — `kache doctor` stops reporting a remote at all
+rather than failing — and caches locally only. Collapsing the two halves by
+mounting the store itself is the mistake that corrupts the index, so the image
+leaves the mountpoint empty and guest-local.
+
+The daemon is started by the first cache-enabled compile (no systemd user session
+is needed, which is why `kache init`'s login service is not installed);
+`kache daemon status`, `kache monitor` and `kache stats` show what it did, and
+`kache stats --full` reports remote hits and uploads separately from local ones.
 
 Turn it off for one command with `KACHE_DISABLED=1`, or for a whole session with
-`env -u RUSTC_WRAPPER`. `kache init --no-service` adds what the image does not: a
-`cargo` shim that protects target directories, the C/C++ compiler shims, test
-pacing and shell completions. The C/C++ shims matter only when a project compiles
-C natively; Rust needs no shims.
+`env -u RUSTC_WRAPPER`; a build that must not go through the C/C++ shims takes
+`/opt/kache/shims` off `PATH` or names the real compiler (`CC=/usr/bin/gcc`).
+`kache init --no-service` adds what the image does not: test pacing, shell
+completions, a login service, the `cargo` shim, and `--from-path` links for the
+versioned compiler names. It is not needed for either cache to work.
 
 `cargo verus` is unaffected by the wrapper: it sets `RUSTC_WRAPPER` to Verus's
 own driver, which overrides the image value, so verification never runs through
 the cache.
 
-What it adds to the network: nothing. The store is local and remote backends are
-opt-in, so `org.agent-vm.network-requests.image.rust-dev` keeps the three crates
-hosts and the layer requests no new one (`kache doctor` reports the same: no
-remote configured).
+What it adds to the network: nothing. The remote is a bind-mounted filesystem,
+not a service, so no host is contacted; the S3, GCS and OCI remote backends exist
+but are not configured here. `org.agent-vm.network-requests.image.rust-dev`
+therefore keeps the three crates hosts and the layer requests no new one.
 
 #### Pinned inputs
 
@@ -281,10 +333,13 @@ tarball whose detached OpenPGP signature does not verify against the committed
 key, an archive member outside `{kache, kache-engine, kache.asc,
 kache-engine.asc}`, and a binary that does not report `kache <KACHE_VERSION>`. A
 refused download installs nothing; `layer-build.sh` exercises that against a
-404 and against wrong bytes. The verifier then re-checks both versions behind
-`RUSTC_WRAPPER` and runs `kache doctor --probe` with no network: it compiles,
-stores and restores a small library in an isolated cache, so a broken wrapper,
-daemon or store fails the build instead of a guest.
+404 and against wrong bytes. The installer then creates the C/C++ shim farm from
+the bytes it just verified and refuses any shape but the marker and the six
+C/C++ links. The verifier re-checks both versions behind `RUSTC_WRAPPER`,
+compiles and runs one C file through the shim, and runs `kache doctor --probe`
+with no network: it compiles, stores and restores a small library in an isolated
+cache and must report the shims active, so a broken wrapper, shim, daemon or
+store fails the build instead of a guest.
 
 Bump it on a maintainer host: download the new per-architecture tarballs, their
 sidecars and the key, confirm the digests, replace `kache/` and move the four
@@ -361,7 +416,8 @@ native daemon builds this recipe at the committed default parent, re-runs the
 verifier with `--network none`, and exercises the toolchain as root and as numeric
 uids with an empty writable `HOME`, a project `rust-toolchain.toml` and negative
 first-use legs — each of those cargo runs also exercises kache as
-`RUSTC_WRAPPER`, so a broken wrapper, daemon or store fails the suite. Add
+`RUSTC_WRAPPER`, and each leg additionally compiles a C file through the shim, so
+a broken wrapper, shim, daemon or store fails the suite. Add
 `--no-cache` for acceptance evidence: a cached
 toolchain-install stage proves nothing about the installer, so every run records
 `build-toolchain-install cached=0|1` and a cached stage is called out in its log. Its first-use policy legs run on an `--internal` canary network

@@ -646,9 +646,15 @@ run_docker() { # ARGS...
         *'env | sort'*)
             printf 'RUSTUP_AUTO_INSTALL=0\n'
             printf 'RUSTC_WRAPPER=/opt/kache/bin/kache\n'
+            printf 'KACHE_CONFIG=/opt/kache/config.toml\n'
+            printf 'PATH=/opt/kache/shims:/opt/kache/bin:/opt/cargo/bin:/opt/verus/verus-x86-linux:/usr/local/bin:/usr/bin:/bin\n'
             printf '755 root:root /opt/cargo/bin/rustup\n'
             printf '644 root:root /opt/rustup/settings.toml\n'
             printf '755 root:root /opt/kache/bin/kache\n'
+            printf '755 root:root /opt/kache/shims\n'
+            printf '644 root:root /opt/kache/shims/.kache-shims\n'
+            printf '644 root:root /opt/kache/config.toml\n'
+            printf '/opt/kache/bin/kache\n'
             printf 'ls: cannot access /tmp/rust_prepare: No such file or directory\n'
             exit 0 ;;
     esac
@@ -1085,17 +1091,26 @@ record "image id=$IMAGE_ID size=$IMAGE_SIZE parent=$PARENT_REF parent-id=$PARENT
 PHASE=inspect
 run_bounded inspect-env "$RUN_SECONDS" "$LOG_DIR/inspect.log" \
     "$DOCKER" run --rm --network none --label "$LABEL" --entrypoint /bin/bash "$TAG" -c \
-    'env | sort; stat -c "%a %U:%G %n" /opt /opt/rustup /opt/cargo /opt/cargo/bin /opt/cargo/bin/rustup /opt/rustup/settings.toml /opt/kache /opt/kache/bin /opt/kache/bin/kache 2>&1; ls -d /run/rust-verify 2>&1 || true; ls /tmp/rust_toolchain.py /tmp/install-rust.sh 2>&1 || true; ls -d /tmp/rust-prepare-* /tmp/rust-install-* /tmp/rust-verify-* /tmp/kache-pin 2>&1 || true' \
+    'env | sort; stat -c "%a %U:%G %n" /opt /opt/rustup /opt/cargo /opt/cargo/bin /opt/cargo/bin/rustup /opt/rustup/settings.toml /opt/kache /opt/kache/bin /opt/kache/bin/kache /opt/kache/shims /opt/kache/shims/.kache-shims /opt/kache/config.toml 2>&1; readlink /opt/kache/shims/cc 2>&1; ls -d /run/rust-verify 2>&1 || true; ls /tmp/rust_toolchain.py /tmp/install-rust.sh /tmp/kache-config.toml 2>&1 || true; ls -d /tmp/rust-prepare-* /tmp/rust-install-* /tmp/rust-verify-* /tmp/kache-pin 2>&1 || true' \
     || true
+# The C/C++ shims are image state, not a guest setup step (ADR 0015): the image
+# PATH leads with the farm, and the farm is a read-only part of /opt like the
+# toolchain it shadows.
 if grep -qx 'RUSTUP_AUTO_INSTALL=0' "$LOG_DIR/inspect.log" &&
     grep -qx 'RUSTC_WRAPPER=/opt/kache/bin/kache' "$LOG_DIR/inspect.log" &&
+    grep -qx 'KACHE_CONFIG=/opt/kache/config.toml' "$LOG_DIR/inspect.log" &&
+    grep -qE '^PATH=/opt/kache/shims:/opt/kache/bin:' "$LOG_DIR/inspect.log" &&
     ! grep -q '^CARGO_HOME=' "$LOG_DIR/inspect.log" &&
     ! grep -q '^RUSTUP_TOOLCHAIN=' "$LOG_DIR/inspect.log"; then
-    pass 'image ENV: RUSTUP_AUTO_INSTALL=0, kache as RUSTC_WRAPPER, no CARGO_HOME and no forced toolchain'
+    pass 'image ENV: RUSTUP_AUTO_INSTALL=0, kache as RUSTC_WRAPPER, the C/C++ shims first on PATH, the kache policy selected, no CARGO_HOME and no forced toolchain'
 else
     fail 'image ENV contract'
 fi
 if grep -q '^755 root:root /opt/cargo/bin/rustup$' "$LOG_DIR/inspect.log" &&
+    grep -q '^755 root:root /opt/kache/shims$' "$LOG_DIR/inspect.log" &&
+    grep -q '^644 root:root /opt/kache/shims/.kache-shims$' "$LOG_DIR/inspect.log" &&
+    grep -q '^644 root:root /opt/kache/config.toml$' "$LOG_DIR/inspect.log" &&
+    grep -qxF '/opt/kache/bin/kache' "$LOG_DIR/inspect.log" &&
     grep -q '^644 root:root /opt/rustup/settings.toml$' "$LOG_DIR/inspect.log" &&
     ! grep -qE '^(7[0-9]7|77[0-9]|[0-7]7[0-9]|[0-7]77) ' "$LOG_DIR/inspect.log" &&
     grep -q 'No such file' "$LOG_DIR/inspect.log"; then
@@ -1169,6 +1184,11 @@ runtime_leg() { # LABEL UID:GID CMD
         -w /tmp --entrypoint /bin/bash "$TAG" -c "$command"
 }
 runtime_checks="cp -R /work/. /tmp/project && cd /tmp/project &&
+    [ \"\$(command -v cc)\" = /opt/kache/shims/cc ] &&
+    [ \"\$(readlink /opt/kache/shims/cc)\" = /opt/kache/bin/kache ] &&
+    [ -f /opt/kache/shims/.kache-shims ] &&
+    printf 'int main(void) { return 0; }\n' > /tmp/shim.c &&
+    cc -o /tmp/shim /tmp/shim.c && /tmp/shim &&
     cargo build --offline && cargo test --offline &&
     cargo clippy --offline -- -D warnings && cargo fmt -- --check &&
     rustc --version && printf 'fn main() { println!(\"ok\"); }\n' > /tmp/main.rs &&
@@ -1178,7 +1198,7 @@ for leg in 'root:0:0' 'one:12345:23456' 'two:9999:9999'; do
     label=${leg%%:*}
     rest=${leg#*:}
     if runtime_leg "$label" "${rest%%:*}:${rest##*:}" "$runtime_checks"; then
-        pass "runtime leg $label ($rest): build/test/clippy/fmt/rustc/musl without network"
+        pass "runtime leg $label ($rest): build/test/clippy/fmt/rustc/musl and a C compile through the shim without network"
     else
         fail "runtime leg $label ($rest)"
     fi

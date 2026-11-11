@@ -12,8 +12,9 @@
 # It provides the toolchain agent-vm pins (its rust-toolchain.toml) with clippy and
 # rustfmt, the musl target a vendored agentd/msb build needs, the native libraries
 # agent-vm's ci.yml installs, shellcheck for its script/test/ci-contracts.sh, the
-# pinned kache compiler cache that reuses builds across worktrees, and the pinned
-# Verus release CI verifies with. See examples/layers/README.md and agent-vm's
+# pinned kache compiler cache whose Rust wrapper and C/C++ shims reuse builds
+# across worktrees, and the pinned Verus release CI verifies with. See
+# examples/layers/README.md and agent-vm's
 # docs/adr/0035-consume-user-owned-boot-images.md.
 #
 # The steps that need real shell live as standalone, independently runnable
@@ -64,7 +65,8 @@ ARG RUSTUP_HOME=/opt/rustup
 ARG CARGO_HOME=/opt/cargo
 
 # Where kache keeps its two binaries. /opt so the arbitrary-uid guest (ADR-0001)
-# can read them; its cache and log stay in each guest's own $HOME.
+# can read them; its cache and log stay in each guest's own $HOME. The C/C++
+# shims go beside them in /opt/kache/shims, and are first on PATH (below).
 ARG KACHE_DIR=/opt/kache
 
 # Native build dependencies for cargo build/test/clippy on this workspace,
@@ -108,6 +110,7 @@ RUN --mount=type=bind,source=install-kache.sh,target=/tmp/install-kache.sh,ro \
     KACHE_VERSION=$KACHE_VERSION \
     KACHE_AMD64_SHA256=$KACHE_AMD64_SHA256 KACHE_ARM64_SHA256=$KACHE_ARM64_SHA256 \
     KACHE_RELEASE_CERT_SHA256=$KACHE_RELEASE_CERT_SHA256 KACHE_DIR=$KACHE_DIR KACHE_DATA=/tmp/kache-pin \
+    KACHE_SHIM_DIR=$KACHE_DIR/shims \
     bash /tmp/install-kache.sh
 
 # Verus, the SMT-backed verifier for the verus! contracts (ADR-0018). Pinned
@@ -120,20 +123,26 @@ RUN --mount=type=bind,source=install-verus.sh,target=/tmp/install-verus.sh,ro \
 ENV RUSTUP_HOME=/opt/rustup
 # Every cargo compile in a guest goes through the pinned cache: the wrapper is
 # installed at a fixed path and the cache lives in the guest's own writable
-# $HOME, so nothing is shared but the binaries. `KACHE_DISABLED=1` turns it off
-# for one command, and a guest that wants the C/C++ shims or a login service runs
-# `kache init`. Verus is unaffected: `cargo verus` overrides RUSTC_WRAPPER with
-# its own driver, so those invocations never reach kache.
+# $HOME, so nothing is shared but the binaries. Every C/C++ compile goes through
+# the shim farm the installer created under /opt/kache/shims, which is first on
+# PATH below; a guest needs no setup step for either. `KACHE_DISABLED=1` turns
+# both off for one command, and `kache init --no-service` still adds what the
+# image deliberately leaves alone (test pacing, completions, a login service, and
+# versioned compiler names). Verus is unaffected: `cargo verus` overrides
+# RUSTC_WRAPPER with its own driver, so those invocations never reach kache.
 ENV RUSTC_WRAPPER=/opt/kache/bin/kache
 # A project's rust-toolchain file must never make a guest command fetch a
 # toolchain: with automatic installation disabled an absent channel fails
 # locally. There is deliberately no RUSTUP_TOOLCHAIN and no CARGO_HOME here, so
 # project selection still works and cargo keeps a per-user $HOME/.cargo cache.
 ENV RUSTUP_AUTO_INSTALL=0
-# PATH stays additive: the base's entries are preserved via ${PATH}, the kache
-# directory is what RUSTC_WRAPPER names, and the Verus directory is harmless on a
-# host that skipped it.
-ENV PATH=/opt/kache/bin:/opt/cargo/bin:/opt/verus/verus-x86-linux:${PATH}
+# PATH stays additive: the base's entries are preserved via ${PATH}. The shim farm
+# comes first because a shim only works as the first `cc`, `gcc` or `clang` the
+# shell finds; kache then skips that directory (its `.kache-shims` marker) and
+# runs the real compiler it found further down PATH. The kache directory is what
+# RUSTC_WRAPPER names, and the Verus directory is harmless on a host that skipped
+# it.
+ENV PATH=/opt/kache/shims:/opt/kache/bin:/opt/cargo/bin:/opt/verus/verus-x86-linux:${PATH}
 
 # Post-install sanity with no network at all: a present-but-broken binary, a
 # missing component/target or a stale layer fails the build here instead of
@@ -147,3 +156,45 @@ RUN --network=none \
     --mount=type=bind,source=rust-toolchain,target=/run/rust-verify/rust-toolchain,ro \
     RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus PYTHONDONTWRITEBYTECODE=1 \
     /bin/bash /run/rust-verify/verify-toolchain.sh
+
+# --- the shared kache remote -----------------------------------------------
+#
+# This deliberately comes after the verifier, and the ordering is a contract,
+# not an accident. The verifier is specified to exercise kache with *no* remote
+# configured: kache_probe.py decides a `doctor --probe` report taken against an
+# isolated local cache, and configuring a remote changes what that report says —
+# kache then requires its daemon, because the daemon performs remote fetches, so
+# the daemon checks stop being optional and the report can no longer pass in a
+# build where no daemon was ever started. Installing the policy afterwards keeps
+# the verifier proving exactly what it was written to prove, and still fails the
+# build on a malformed config or a wrong value (below).
+#
+# The policy splits the cache in two, because its halves have opposite
+# requirements (kache-config.toml states them): the store is SQLite plus a WAL
+# index that needs single-writer local storage, while the remote is an immutable
+# content-addressed blob tree that any number of guests may share. So the store,
+# its index and the daemon stay in each guest's own writable $HOME/.cache/kache,
+# and only the remote crosses a boundary — through /mnt/kache-remote, which the
+# launcher bind-mounts from the host for every guest (the contract is in
+# examples/layers/README.md#kache-build-cache). Mounting the *store* there
+# instead is what corrupts its index on a virtio-fs share.
+#
+# `config get` is the check rather than `doctor`: it reads the installed file with
+# the pinned binary, so an unparsable file or a wrong value fails the build, and
+# it does not need a daemon or a mounted remote to answer.
+RUN --mount=type=bind,source=kache-config.toml,target=/tmp/kache-config.toml,ro \
+    install -D -m 0644 /tmp/kache-config.toml /opt/kache/config.toml \
+ && mkdir -p /mnt/kache-remote \
+ && kache_check=$(mktemp -d) \
+ && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml \
+        /opt/kache/bin/kache config get cache.remote.type | grep -qx filesystem \
+ && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml \
+        /opt/kache/bin/kache config get cache.remote.path | grep -qxF /mnt/kache-remote \
+ && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml \
+        /opt/kache/bin/kache config get cache.local_max_size | grep -qxF 20G \
+ && rm -rf "$kache_check"
+
+# Image-owned under /opt (readable by the arbitrary-uid guest, ADR-0001) rather
+# than in $HOME, because $HOME is per-guest and writable while this policy is
+# neither.
+ENV KACHE_CONFIG=/opt/kache/config.toml
