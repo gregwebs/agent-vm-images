@@ -268,23 +268,43 @@ not decide. `--canonical-only` also leaves versioned names (`gcc-13`,
 not to this layer.
 
 The cache is split in two, because its halves have opposite requirements. The
-**store** — the SQLite index, its WAL, the diagnostic log and the per-user daemon
-— lives in the guest's own writable `$HOME/.cache/kache` and is never mounted:
-that index needs single-writer local storage with working file locking, and a
-shared or FUSE mount corrupts it. The **remote** is an immutable,
-content-addressed blob tree, where write-once objects named by digest make
-concurrent guests safe by construction rather than by locking.
-`/opt/kache/config.toml` selects it, and `KACHE_CONFIG` points at that file, so a
-guest needs no setup step:
+**store** — the SQLite index (index.db with its `-wal`/`-shm`), `store/<digest>/`
+blobs, the diagnostic log and the per-sandbox daemon — lives in `/var/tmp/kache`
+on the sandbox's own disk and is never mounted. That index is a WAL database with
+exactly one writer, so it needs working file locking and local storage; in a
+sandbox `$HOME` is a host-backed virtio-fs mount, and kache says so:
+
+```
+[kache] the cache directory is on a FUSE filesystem … which is not host-local
+[kache] storage. … it can be silently CORRUPTED
+```
+
+which is what happened here once with the default `$HOME/.cache/kache`. The
+**remote** is an immutable, content-addressed blob tree, where write-once objects
+named by digest make concurrent guests safe by construction rather than by
+locking. `/opt/kache/config.toml` records both halves, and `KACHE_CONFIG` plus
+`KACHE_CACHE_DIR` point at them, so a guest needs no setup step:
 
 ```toml
 [cache]
-local_max_size = "20G"
+local_store = "/var/tmp/kache"
+local_max_size = "4G"
+gc_evict_shared = false
 
 [cache.remote]
 type = "filesystem"
 path = "/mnt/kache-remote"
 ```
+
+`local_max_size` is bounded by the sandbox disk (15.7 GiB where it was measured;
+kache's default would overrun it) and the remote is the durable tier, so this only
+bounds what one sandbox accumulates between evictions. `gc_evict_shared = false`
+keeps eviction local: one guest's disk pressure must never delete another's
+artifacts. The store is per *sandbox*, not per uid — kache creates
+`/var/tmp/kache` `0700` for the first uid that builds, so a second uid in the
+same sandbox should set its own `KACHE_CACHE_DIR`. Its builds keep working if it
+does not (kache runs the real compiler when the store is unusable) but it caches
+nothing, and `kache doctor` says so with a failed `Store DB` check.
 
 `/mnt/kache-remote` is the contract with the launcher: it bind-mounts one host
 directory there for every guest, so compiled crates are reused across VMs,
@@ -339,7 +359,10 @@ C/C++ links. The verifier re-checks both versions behind `RUSTC_WRAPPER`,
 compiles and runs one C file through the shim, and runs `kache doctor --probe`
 with no network: it compiles, stores and restores a small library in an isolated
 cache and must report the shims active, so a broken wrapper, shim, daemon or
-store fails the build instead of a guest.
+store fails the build instead of a guest. The report's `Cache FS` finding is
+required as well: it is kache's own judgement of the filesystem under the store,
+and a WAL index on a network or FUSE mount is the corruption case described
+above.
 
 Bump it on a maintainer host: download the new per-architecture tarballs, their
 sidecars and the key, confirm the digests, replace `kache/` and move the four

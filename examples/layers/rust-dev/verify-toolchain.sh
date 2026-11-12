@@ -21,6 +21,9 @@
 #   RUST_TOOLCHAIN  required; the exact channel the pins record
 #   KACHE_VERSION   required; the exact kache release the pins record
 #   KACHE_SHIM_DIR  default /opt/kache/shims
+#   KACHE_CONFIG, KACHE_CACHE_DIR  dropped: the verifier proves the installed
+#                   binaries against an isolated scratch store, not the image's
+#                   policy (which is checked by the Dockerfile separately)
 #   VERUS_DIR       default /opt/verus
 set -euo pipefail
 
@@ -47,7 +50,13 @@ rustfmt --version
 # kache: the wrapper every guest cargo invocation runs through, both binaries of
 # the paired release at the pinned version, and a real compile-store-restore
 # cycle. The probe is given a scratch HOME because kache logs and caches under it
-# even for `--version`, and the image must not carry that state.
+# even for `--version`, and the image must not carry that state. The image's own
+# kache policy is dropped for the duration: this step proves the installed
+# binaries work, and it is specified against a kache with no config file, no
+# remote and a local store it can throw away. Without this the same script, run
+# inside the finished image (and it is, from script/test/rust-example.sh), would
+# inherit KACHE_CONFIG and KACHE_CACHE_DIR and silently prove something else.
+unset KACHE_CONFIG KACHE_CACHE_DIR
 kache_scratch=$(mktemp -d)
 [ "${RUSTC_WRAPPER:-}" = "$KACHE_DIR/bin/kache" ] || {
     rm -rf "$kache_scratch"

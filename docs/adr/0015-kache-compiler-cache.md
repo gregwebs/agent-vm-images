@@ -169,3 +169,63 @@ point: upstream runs the real compiler unchanged when it cannot prove an
 invocation is safe to cache, so the failure mode is a cache miss, not a wrong
 build. The escape hatches are `KACHE_DISABLED=1`, a `PATH` without the farm, or
 naming the real compiler in `CC`/`CXX`.
+
+## Amended: the store is on the sandbox's own disk (2026-11-12)
+
+The previous amendment left the store where kache puts it by default:
+`$HOME/.cache/kache`, described as "the guest's own writable `$HOME`" and
+therefore implicitly local. In a sandbox that premise is false — `$HOME` is a
+host-backed virtio-fs mount — and the index corrupted once, which is exactly what
+kache warns about at such a path:
+
+```
+[kache] the cache directory is on a FUSE filesystem … which is not host-local
+[kache] storage. The cache index is a WAL-mode SQLite database … it can be
+[kache] silently CORRUPTED
+```
+
+**What changes.** `kache-config.toml` sets `cache.local_store = "/var/tmp/kache"`,
+and the image also exports `KACHE_CACHE_DIR=/var/tmp/kache` (kache's environment
+wins over its files, so the wrapper and the daemon it starts agree without
+consulting anything). `/var/tmp` is the sandbox's own disk, so the index needs no
+mount and no setup step, and nothing about it crosses a sandbox boundary.
+
+**What the split is, concretely.** Measured on a sandbox:
+
+| path | lives | contents |
+| --- | --- | --- |
+| `/var/tmp/kache` | sandbox local disk | `index.db` (+`-wal`/`-shm`), `store/<digest>/`, `probes/`, `prestage/`, `scheduler/`, `out-dirs/`, `events.jsonl` |
+| `/mnt/kache-remote/artifacts` | shared mount | `v3/packs/<crate>/<key>.tar.zst`, `v3/manifests/<crate>/<key>.json`, `_manifests/id/…` |
+| `/mnt/kache-remote/.kache-tmp` | shared mount | upload staging, staged then renamed inside the mount |
+
+A store is one index plus its blobs, and there is exactly one index per store, so
+the store cannot be the thing that is shared: several sandboxes on one index *is*
+the "single writing machine and working file locking" case. The remote is
+write-once, digest-named and lock-free, which is why it is the only part that
+crosses a boundary.
+
+Two bounds come with the move. `local_max_size = "4G"`, because the sandbox disk
+measured 15.7 GiB and kache's own default would overrun it: the remote is the
+durable tier, so this only bounds what one sandbox accumulates between evictions.
+And `gc_evict_shared = false`, so eviction stays local and one guest's disk
+pressure cannot delete another's artifacts.
+
+**What it costs.** The store is per *sandbox*, not per uid: kache creates
+`/var/tmp/kache` `0700` for the first uid that builds, so a second uid in the same
+sandbox must set its own `KACHE_CACHE_DIR`. Measured, that uid's build still
+succeeds — kache runs the real compiler when the store is unusable — but it
+caches nothing, and `kache doctor` reports a failed `Store DB` with the
+permission error, so the state is visible instead of silent. That is a narrower
+guarantee than the per-`$HOME` default gave, and it is the price of the index
+living anywhere other than the mount.
+
+**How it is held in place.** The reviewed config RUN reads all five values back
+with the pinned binary (`kache config get`), `script/test/example-layers.sh`
+requires both `ENV`s and the five file values (self-test cases 115–116 fail on a
+store moved back to the default or an `ENV` removed), and
+`script/test/rust-example.sh` asserts from a guest that `kache config get
+cache.local_store` is `/var/tmp/kache` and that the index is at
+`/var/tmp/kache/index.db` and not under `$HOME`. `kache_probe.py` also requires
+the `Cache FS` finding: it is kache's own verdict on the filesystem under the
+store, so a future layout that lands it on a network or FUSE mount fails the
+build instead of a sandbox.
