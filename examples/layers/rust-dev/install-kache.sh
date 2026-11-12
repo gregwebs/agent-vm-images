@@ -10,6 +10,7 @@
 #   KACHE_ARM64_SHA256          required; sha256 of the aarch64 static musl tarball
 #   KACHE_RELEASE_CERT_SHA256   required; sha256 of the committed release key
 #   KACHE_DIR                   default /opt/kache
+#   KACHE_SHIM_DIR              optional; create the C/C++ compiler-name shims here
 #   KACHE_DATA                  default kache/ beside this script
 #
 # Upstream publishes one static musl tarball per host plus a `.sha256` sidecar
@@ -136,5 +137,46 @@ for binary in kache kache-engine; do
     [ "$reported" = "kache $KACHE_VERSION" ] ||
         { echo "install-kache: $binary reports '$reported', not 'kache $KACHE_VERSION'" >&2; exit 1; }
 done
+
+# The C/C++ compiler-name shims, created by the pinned binary: native symlinks to
+# it plus the `.kache-shims` marker, which is what makes kache skip the directory
+# when it resolves the real compiler later on PATH. Doing it here, from the bytes
+# that were just verified, is what keeps "the image has kache" from meaning "a
+# guest must run kache init first" (ADR 0015); the marker and the links belong to
+# the read-only /opt tree, so a guest writes nothing to activate them.
+#
+# The farm keeps the C/C++ names only. `kache init --shims` links its whole
+# canonical set, which also holds `cargo` and `rustdoc`; this image keeps Rust on
+# RUSTC_WRAPPER alone, and the cargo shim additionally moves direct `cargo
+# check`/`clippy` output to <workspace>/target/check and holds off target
+# cleanup. Neither is a decision this image makes, so those two links go and the
+# resulting shape is asserted below rather than assumed.
+if [ -n "$KACHE_SHIM_DIR" ]; then
+    case "$KACHE_SHIM_DIR" in
+        /*) ;;
+        *) echo "install-kache: KACHE_SHIM_DIR must be absolute (got $KACHE_SHIM_DIR)" >&2; exit 1 ;;
+    esac
+    echo "==> install-kache: C/C++ shims in $KACHE_SHIM_DIR"
+    # PATH decides which kache the links name: the first one on it is the stable
+    # path this release is installed at, not a temporary or version directory.
+    PATH="$KACHE_DIR/bin:$PATH" HOME="$work/home" \
+        "$KACHE_DIR/bin/kache" init --shims "$KACHE_SHIM_DIR" --canonical-only
+    rm -f "$KACHE_SHIM_DIR/cargo" "$KACHE_SHIM_DIR/rustdoc"
+    chmod -R a+rX "$KACHE_SHIM_DIR"
+    # Exactly the marker and the six C/C++ names, each a symlink to the pinned
+    # binary: a release that adds, drops or retargets a link fails the build here
+    # instead of silently changing the compiler every guest runs.
+    installed=$(find "$KACHE_SHIM_DIR" -mindepth 1 -maxdepth 1 -printf '%f\n' |
+        LC_ALL=C sort | tr '\n' ' ')
+    [ "$installed" = '.kache-shims c++ cc clang clang++ g++ gcc ' ] ||
+        { echo "install-kache: $KACHE_SHIM_DIR holds '$installed', not the marker and the six C/C++ shims" >&2; exit 1; }
+    for name in cc c++ gcc g++ clang clang++; do
+        if [ "$(readlink "$KACHE_SHIM_DIR/$name" 2>/dev/null)" != "$KACHE_DIR/bin/kache" ] ||
+            [ ! -x "$KACHE_SHIM_DIR/$name" ]; then
+            echo "install-kache: $KACHE_SHIM_DIR/$name is not an executable symlink to $KACHE_DIR/bin/kache" >&2
+            exit 1
+        fi
+    done
+fi
 
 echo "==> install-kache: $KACHE_VERSION ($arch) installed from committed pins"

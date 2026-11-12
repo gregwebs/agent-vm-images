@@ -1,0 +1,31 @@
+# kache configuration for the rust-dev image.
+#
+# Installed as /opt/kache/config.toml and selected with ENV KACHE_CONFIG (see
+# the Dockerfile). The split below is the whole point of the file: the store
+# stays local, and only the remote is shared.
+#
+#   local store   $HOME/.cache/kache (kache's default). A SQLite database plus a
+#                 WAL index, so it needs single-writer local storage with working
+#                 file locking. kache warns about this and the index corrupts when
+#                 the directory is a shared, network or FUSE mount, so the image
+#                 deliberately does not mount it.
+#   remote        An immutable, content-addressed blob tree. Sharing it is safe
+#                 for the reason the store is not: objects are write-once and
+#                 named by digest, so there is no lock or WAL to corrupt. The
+#                 launcher bind-mounts one host directory here for every guest.
+#
+# A guest launched without the mount still builds: `kache doctor` simply stops
+# reporting a remote (it does not fail), and the cache degrades to local-only.
+# The launcher-side contract is in ../README.md#kache-build-cache.
+
+[cache]
+# Per-guest ceiling, bounded by the guest's own disk. The durable cache is the
+# remote; this only bounds what one guest accumulates before GC evicts.
+local_max_size = "20G"
+
+[cache.remote]
+# No atomic_write_dir: uploads stage and rename inside the remote, so no staging
+# write ever crosses a filesystem boundary.
+type = "filesystem"
+# Must match the mount destination the launcher uses for the shared remote.
+path = "/mnt/kache-remote"
