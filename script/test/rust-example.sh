@@ -647,6 +647,7 @@ run_docker() { # ARGS...
             printf 'RUSTUP_AUTO_INSTALL=0\n'
             printf 'RUSTC_WRAPPER=/opt/kache/bin/kache\n'
             printf 'KACHE_CONFIG=/opt/kache/config.toml\n'
+            printf 'KACHE_CACHE_DIR=/var/tmp/kache\n'
             printf 'PATH=/opt/kache/shims:/opt/kache/bin:/opt/cargo/bin:/opt/verus/verus-x86-linux:/usr/local/bin:/usr/bin:/bin\n'
             printf '755 root:root /opt/cargo/bin/rustup\n'
             printf '644 root:root /opt/rustup/settings.toml\n'
@@ -1099,10 +1100,11 @@ run_bounded inspect-env "$RUN_SECONDS" "$LOG_DIR/inspect.log" \
 if grep -qx 'RUSTUP_AUTO_INSTALL=0' "$LOG_DIR/inspect.log" &&
     grep -qx 'RUSTC_WRAPPER=/opt/kache/bin/kache' "$LOG_DIR/inspect.log" &&
     grep -qx 'KACHE_CONFIG=/opt/kache/config.toml' "$LOG_DIR/inspect.log" &&
+    grep -qx 'KACHE_CACHE_DIR=/var/tmp/kache' "$LOG_DIR/inspect.log" &&
     grep -qE '^PATH=/opt/kache/shims:/opt/kache/bin:' "$LOG_DIR/inspect.log" &&
     ! grep -q '^CARGO_HOME=' "$LOG_DIR/inspect.log" &&
     ! grep -q '^RUSTUP_TOOLCHAIN=' "$LOG_DIR/inspect.log"; then
-    pass 'image ENV: RUSTUP_AUTO_INSTALL=0, kache as RUSTC_WRAPPER, the C/C++ shims first on PATH, the kache policy selected, no CARGO_HOME and no forced toolchain'
+    pass 'image ENV: RUSTUP_AUTO_INSTALL=0, kache as RUSTC_WRAPPER, the C/C++ shims first on PATH, the kache policy and store selected, no CARGO_HOME and no forced toolchain'
 else
     fail 'image ENV contract'
 fi
@@ -1187,8 +1189,10 @@ runtime_checks="cp -R /work/. /tmp/project && cd /tmp/project &&
     [ \"\$(command -v cc)\" = /opt/kache/shims/cc ] &&
     [ \"\$(readlink /opt/kache/shims/cc)\" = /opt/kache/bin/kache ] &&
     [ -f /opt/kache/shims/.kache-shims ] &&
+    [ \"\$(kache config get cache.local_store)\" = /var/tmp/kache ] &&
     printf 'int main(void) { return 0; }\n' > /tmp/shim.c &&
     cc -o /tmp/shim /tmp/shim.c && /tmp/shim &&
+    [ -f /var/tmp/kache/index.db ] && [ ! -f \"\$HOME/.cache/kache/index.db\" ] &&
     cargo build --offline && cargo test --offline &&
     cargo clippy --offline -- -D warnings && cargo fmt -- --check &&
     rustc --version && printf 'fn main() { println!(\"ok\"); }\n' > /tmp/main.rs &&
@@ -1198,7 +1202,7 @@ for leg in 'root:0:0' 'one:12345:23456' 'two:9999:9999'; do
     label=${leg%%:*}
     rest=${leg#*:}
     if runtime_leg "$label" "${rest%%:*}:${rest##*:}" "$runtime_checks"; then
-        pass "runtime leg $label ($rest): build/test/clippy/fmt/rustc/musl and a C compile through the shim without network"
+        pass "runtime leg $label ($rest): the store on the sandbox's own disk, build/test/clippy/fmt/rustc/musl and a C compile through the shim without network"
     else
         fail "runtime leg $label ($rest)"
     fi

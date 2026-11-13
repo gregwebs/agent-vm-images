@@ -276,7 +276,7 @@ python3 script/test/fixtures/gopls-closure/sandbox-feasibility.py --go-root /abs
 ```
 
 Static: `bash script/test/example-layers.sh` and
-`bash script/test/example-layers.sh --self-test` (114 cases, including the
+`bash script/test/example-layers.sh --self-test` (116 cases, including the
 numeric label-sequence guard), plus the repository-wide `contracts.sh`. Native
 evidence: `bash script/test/go-example.sh --platform linux/arm64|linux/amd64
 --no-cache` on a native daemon, whose phases are the build with the retained

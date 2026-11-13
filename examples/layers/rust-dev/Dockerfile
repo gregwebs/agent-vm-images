@@ -122,13 +122,13 @@ RUN --mount=type=bind,source=install-verus.sh,target=/tmp/install-verus.sh,ro \
 
 ENV RUSTUP_HOME=/opt/rustup
 # Every cargo compile in a guest goes through the pinned cache: the wrapper is
-# installed at a fixed path and the cache lives in the guest's own writable
-# $HOME, so nothing is shared but the binaries. Every C/C++ compile goes through
-# the shim farm the installer created under /opt/kache/shims, which is first on
-# PATH below; a guest needs no setup step for either. `KACHE_DISABLED=1` turns
-# both off for one command, and `kache init --no-service` still adds what the
-# image deliberately leaves alone (test pacing, completions, a login service, and
-# versioned compiler names). Verus is unaffected: `cargo verus` overrides
+# installed at a fixed path and the store is that guest's own, so nothing is
+# shared but the binaries and the artifacts below. Every C/C++ compile goes
+# through the shim farm the installer created under /opt/kache/shims, which is
+# first on PATH below; a guest needs no setup step for either. `KACHE_DISABLED=1`
+# turns both off for one command, and `kache init --no-service` still adds what
+# the image deliberately leaves alone (test pacing, completions, a login service,
+# and versioned compiler names). Verus is unaffected: `cargo verus` overrides
 # RUSTC_WRAPPER with its own driver, so those invocations never reach kache.
 ENV RUSTC_WRAPPER=/opt/kache/bin/kache
 # A project's rust-toolchain file must never make a guest command fetch a
@@ -157,7 +157,7 @@ RUN --network=none \
     RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus PYTHONDONTWRITEBYTECODE=1 \
     /bin/bash /run/rust-verify/verify-toolchain.sh
 
-# --- the shared kache remote -----------------------------------------------
+# --- the shared kache remote and the cache layout ---------------------------
 #
 # This deliberately comes after the verifier, and the ordering is a contract,
 # not an accident. The verifier is specified to exercise kache with *no* remote
@@ -172,12 +172,13 @@ RUN --network=none \
 # The policy splits the cache in two, because its halves have opposite
 # requirements (kache-config.toml states them): the store is SQLite plus a WAL
 # index that needs single-writer local storage, while the remote is an immutable
-# content-addressed blob tree that any number of guests may share. So the store,
-# its index and the daemon stay in each guest's own writable $HOME/.cache/kache,
-# and only the remote crosses a boundary — through /mnt/kache-remote, which the
-# launcher bind-mounts from the host for every guest (the contract is in
-# examples/layers/README.md#kache-build-cache). Mounting the *store* there
-# instead is what corrupts its index on a virtio-fs share.
+# content-addressed blob tree that any number of guests may share. The store
+# therefore lives in /var/tmp/kache on the sandbox's own disk, *not* in
+# $HOME/.cache/kache: in a sandbox $HOME is a host-backed virtio-fs mount, and a
+# WAL index on it has corrupted here once. Only the remote crosses a boundary —
+# through /mnt/kache-remote, which the launcher bind-mounts from the host for
+# every guest (the contract is in examples/layers/README.md#kache-build-cache).
+# Mounting the *store* there instead is the mistake that corrupts its index.
 #
 # `config get` is the check rather than `doctor`: it reads the installed file with
 # the pinned binary, so an unparsable file or a wrong value fails the build, and
@@ -187,14 +188,27 @@ RUN --mount=type=bind,source=kache-config.toml,target=/tmp/kache-config.toml,ro 
  && mkdir -p /mnt/kache-remote \
  && kache_check=$(mktemp -d) \
  && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml \
+        /opt/kache/bin/kache config get cache.local_store | grep -qxF /var/tmp/kache \
+ && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml \
+        /opt/kache/bin/kache config get cache.local_max_size | grep -qxF 4G \
+ && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml \
+        /opt/kache/bin/kache config get cache.gc_evict_shared | grep -qx false \
+ && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml \
         /opt/kache/bin/kache config get cache.remote.type | grep -qx filesystem \
  && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml \
         /opt/kache/bin/kache config get cache.remote.path | grep -qxF /mnt/kache-remote \
- && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml \
-        /opt/kache/bin/kache config get cache.local_max_size | grep -qxF 20G \
  && rm -rf "$kache_check"
 
 # Image-owned under /opt (readable by the arbitrary-uid guest, ADR-0001) rather
 # than in $HOME, because $HOME is per-guest and writable while this policy is
 # neither.
 ENV KACHE_CONFIG=/opt/kache/config.toml
+
+# The store's location, next to the config that records it. kache's environment
+# wins over its files, so this is the effective value even if a host layer or a
+# project file disagrees, and the wrapper and the daemon it starts resolve the
+# same path without consulting anything else. It is *not* under $HOME on purpose:
+# see the block above and kache-config.toml. The directory is left for kache to
+# create, 0700 for the guest uid that builds first — pre-creating it as root
+# would make every guest unable to write it.
+ENV KACHE_CACHE_DIR=/var/tmp/kache

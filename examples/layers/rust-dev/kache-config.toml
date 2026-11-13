@@ -2,26 +2,47 @@
 #
 # Installed as /opt/kache/config.toml and selected with ENV KACHE_CONFIG (see
 # the Dockerfile). The split below is the whole point of the file: the store
-# stays local, and only the remote is shared.
+# stays on the sandbox's own disk, and only the remote is shared.
 #
-#   local store   $HOME/.cache/kache (kache's default). A SQLite database plus a
-#                 WAL index, so it needs single-writer local storage with working
-#                 file locking. kache warns about this and the index corrupts when
-#                 the directory is a shared, network or FUSE mount, so the image
-#                 deliberately does not mount it.
-#   remote        An immutable, content-addressed blob tree. Sharing it is safe
-#                 for the reason the store is not: objects are write-once and
-#                 named by digest, so there is no lock or WAL to corrupt. The
-#                 launcher bind-mounts one host directory here for every guest.
+#   store    /var/tmp/kache, deliberately not kache's default of
+#            $HOME/.cache/kache. In a sandbox $HOME is a host-backed virtio-fs
+#            mount, and a store is a WAL-mode SQLite index (index.db, plus -wal
+#            and -shm) beside store/<digest>/ blobs. There is exactly one index
+#            per store, and it needs single-writer local storage with working
+#            file locking; on that mount kache advises
+#            "the cache directory is on a FUSE filesystem ... can be silently
+#            CORRUPTED", and it has corrupted here once. /var/tmp is the VM's own
+#            disk, so the index is local and nothing has to be mounted for it.
+#   remote   /mnt/kache-remote, an immutable, content-addressed blob tree.
+#            Sharing it is safe for the reason the store is not: objects are
+#            write-once and named by digest, so there is no lock or WAL to
+#            corrupt. The launcher bind-mounts one host directory here for every
+#            guest, and kache creates artifacts/ and .kache-tmp/ inside it.
 #
-# A guest launched without the mount still builds: `kache doctor` simply stops
-# reporting a remote (it does not fail), and the cache degrades to local-only.
-# The launcher-side contract is in ../README.md#kache-build-cache.
+# So the remote is the only thing that crosses a sandbox boundary. A guest
+# launched without the mount still builds: `kache doctor` simply stops reporting
+# a remote (it does not fail), and the cache degrades to its local store. The
+# launcher-side contract is in ../README.md#kache-build-cache.
+#
+# The store is per sandbox, not per uid: a second uid in one sandbox needs its
+# own KACHE_CACHE_DIR, because the first one owns /var/tmp/kache (kache creates
+# it 0700, which is also why the image does not pre-create it as root). That uid
+# still builds if it does not set one - kache runs the real compiler when the
+# store is unusable - but it caches nothing, and `kache doctor` says so.
 
 [cache]
-# Per-guest ceiling, bounded by the guest's own disk. The durable cache is the
-# remote; this only bounds what one guest accumulates before GC evicts.
-local_max_size = "20G"
+# VM-local disk, and see above for why it is not $HOME. ENV KACHE_CACHE_DIR in
+# the image names the same path: the environment wins over this file in kache's
+# precedence, and both are set so neither is the only record of where the index
+# lives.
+local_store = "/var/tmp/kache"
+# Bounded by the sandbox's own disk (15.7 GiB where this was measured), not by
+# the host: the shipped default of 20G would overrun it. The durable cache is the
+# remote; this only bounds what one sandbox accumulates before GC evicts.
+local_max_size = "4G"
+# No sandbox prunes the shared tree. Eviction stays local, so one guest's disk
+# pressure can never delete another guest's artifacts.
+gc_evict_shared = false
 
 [cache.remote]
 # No atomic_write_dir: uploads stage and rename inside the remote, so no staging

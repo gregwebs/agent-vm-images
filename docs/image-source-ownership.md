@@ -440,16 +440,26 @@ shape, so a release that adds, drops or retargets a link fails the build instead
 of changing the compiler a guest runs. Nothing resolves `latest`, and a refused
 download installs nothing. `kache_probe.py` then decides the `kache doctor
 --probe --json` report in the `--network=none` verifier, because `doctor` exits 0
-with findings, and requires the report to call the shims active.
+with findings, and requires the report to call the shims active and the store's
+filesystem host-local.
 
 `kache-config.toml` is the layer's other kache input: an image-owned policy
-installed as `/opt/kache/config.toml` and selected with `ENV KACHE_CONFIG`, which
-keeps the store in each guest's own `$HOME/.cache/kache` and points only the
-content-addressed remote at `/mnt/kache-remote`. It is installed after the
+installed as `/opt/kache/config.toml` and selected with `ENV KACHE_CONFIG`, with
+`ENV KACHE_CACHE_DIR` naming the same store path so kache's environment wins
+over any file. It keeps the store on the sandbox's own disk
+(`/var/tmp/kache`) — never in `$HOME`, which is a host-backed mount in a sandbox
+and whose WAL index has corrupted once — and points only the content-addressed
+remote at `/mnt/kache-remote`, with a 4 GiB local bound and
+`gc_evict_shared = false` so eviction stays local. It is installed after the
 verifier on purpose — the verifier is specified against a kache with no remote
 configured, and a remote makes the daemon checks mandatory — and the build reads
-its three effective values back with the pinned binary, so an unparsable file or
-a wrong value fails here rather than in a guest.
+all five effective values back with the pinned binary, so an unparsable file or a
+wrong value fails here rather than in a guest.
+
+The verifier itself never sees that policy: it unsets `KACHE_CONFIG` and
+`KACHE_CACHE_DIR`, because it proves the installed binaries against a scratch
+store it can delete, and the same script runs a second time inside the finished
+image (from `script/test/rust-example.sh`), where those variables are inherited.
 
 The decision and its rejected alternatives are in
 [ADR 0015](adr/0015-kache-compiler-cache.md).
@@ -497,10 +507,11 @@ key identity, manifest signature, manifest-derived selection, ARG equality), the
 exact installer/verifier RUN shapes and mounts, `--network=none` on the verifier,
 the absence of a runtime `CARGO_HOME`/`RUSTUP_TOOLCHAIN`, the kache wrapper ENV,
 the C/C++ shim farm its installer creates and the PATH that leads with it, its
-installer shape, the kache policy file, the ENV that selects it and that it is
-installed after the verifier, the kache evidence hashing to its ARGs, banned
-live-bootstrap or mutable-channel tokens, and the Verus smoke shape — by
-`script/test/example-layers.sh` (114 cases). Hermetic behaviour:
+installer shape, the kache policy file, the two ENVs that select it (including
+the store's path outside `$HOME`) and that it is installed after the verifier,
+the kache evidence hashing to its ARGs, banned live-bootstrap or
+mutable-channel tokens, and the Verus smoke shape — by
+`script/test/example-layers.sh` (116 cases). Hermetic behaviour:
 `python3 script/test/rust-toolchain-pins.py` and
 `python3 script/test/rust-toolchain-maintenance.py`. Native evidence:
 `bash script/test/rust-example.sh --platform linux/arm64|linux/amd64` on a
@@ -565,7 +576,7 @@ all four ARG-derived assertions), the exact installer/verifier RUN shapes and
 mounts, `--network=none` on the verifier, exactly one `ENV GOTOOLCHAIN=local`, the
 absence of any other `GO*` policy ENV, and banned unpinned-install /
 graph-regeneration / checksum-bypass tokens — by `script/test/example-layers.sh`
-(114 cases). Hermetic behaviour on a pinned native Go:
+(116 cases). Hermetic behaviour on a pinned native Go:
 `python3 script/test/gopls-closure-pins.py --go-root PATH` and
 `python3 script/test/gopls-closure-maintenance.py --go-root PATH`. Native
 evidence: `bash script/test/go-example.sh --platform linux/arm64|linux/amd64

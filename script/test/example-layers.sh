@@ -17,7 +17,7 @@ GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=114
+SELF_TEST_CASES=116
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -320,25 +320,33 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         grep -qF -- 'C/C++ shims' "$rustdir/kache_probe.py" ||
             fail 'rust-dev: kache_probe.py must require the C/C++ shims to be active'
     fi
-    # --- rust-dev: the shared kache remote, which is configuration state -----
+    # --- rust-dev: the cache layout and the shared remote, which are
+    # --- configuration state -------------------------------------------------
     # The policy is an image input like the pins: the reviewed RUN that installs
-    # it, the ENV that selects it, its three effective values, and its position
-    # after the verifier are contracts. The ordering is the subtle one: the
-    # verifier decides a `doctor --probe` report taken with no remote configured,
-    # and a configured remote makes the daemon checks mandatory, so installing
-    # the policy earlier would change what the verifier is able to pass on.
+    # it, the two ENVs that select it, its five effective values, and its
+    # position after the verifier are contracts. The store's location is the
+    # value that corrupts something if it drifts: /var/tmp is the sandbox's own
+    # disk, while $HOME is a host-backed virtio-fs mount whose WAL index has
+    # already corrupted once, so a "tidy-up" back to the default is a data bug,
+    # not a preference. The ordering is the subtle one: the verifier decides a
+    # `doctor --probe` report taken with no remote configured, and a configured
+    # remote makes the daemon checks mandatory, so installing the policy earlier
+    # would change what the verifier is able to pass on.
     kache_config=$rustdir/kache-config.toml
     [ -f "$kache_config" ] || fail 'rust-dev: missing kache-config.toml'
-    for token in 'local_max_size = "20G"' 'type = "filesystem"' 'path = "/mnt/kache-remote"'; do
+    for token in 'local_store = "/var/tmp/kache"' 'local_max_size = "4G"' \
+        'gc_evict_shared = false' 'type = "filesystem"' 'path = "/mnt/kache-remote"'; do
         grep -qxF -- "$token" "$kache_config" ||
             fail "rust-dev: kache-config.toml must keep: $token"
     done
     if grep -v '^[[:space:]]*#' "$kache_config" | grep -qF -- 'atomic_write_dir'; then
         fail 'rust-dev: kache-config.toml must not stage uploads across filesystems'
     fi
-    grep -qxF 'ENV KACHE_CONFIG=/opt/kache/config.toml' "$rustdir/Dockerfile" ||
-        fail 'rust-dev: the kache policy must be selected with KACHE_CONFIG'
-    reviewed_kache_config='RUN --mount=type=bind,source=kache-config.toml,target=/tmp/kache-config.toml,ro install -D -m 0644 /tmp/kache-config.toml /opt/kache/config.toml && mkdir -p /mnt/kache-remote && kache_check=$(mktemp -d) && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.remote.type | grep -qx filesystem && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.remote.path | grep -qxF /mnt/kache-remote && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.local_max_size | grep -qxF 20G && rm -rf "$kache_check"'
+    for env in 'ENV KACHE_CONFIG=/opt/kache/config.toml' 'ENV KACHE_CACHE_DIR=/var/tmp/kache'; do
+        grep -qxF "$env" "$rustdir/Dockerfile" ||
+            fail "rust-dev: the kache policy must be selected with ${env#ENV }"
+    done
+    reviewed_kache_config='RUN --mount=type=bind,source=kache-config.toml,target=/tmp/kache-config.toml,ro install -D -m 0644 /tmp/kache-config.toml /opt/kache/config.toml && mkdir -p /mnt/kache-remote && kache_check=$(mktemp -d) && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.local_store | grep -qxF /var/tmp/kache && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.local_max_size | grep -qxF 4G && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.gc_evict_shared | grep -qx false && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.remote.type | grep -qx filesystem && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.remote.path | grep -qxF /mnt/kache-remote && rm -rf "$kache_check"'
     kache_config_runs=$(printf '%s\n' "$instructions" | grep -cF 'source=kache-config.toml' || true)
     [ "$kache_config_runs" -eq 1 ] || fail 'rust-dev: the kache policy RUN must appear exactly once'
     kache_config_line=$(printf '%s\n' "$instructions" | grep -F 'source=kache-config.toml')
@@ -923,8 +931,16 @@ self_test() {
             113) rewrite "$tree/$LAYERS/rust-dev/kache_probe.py" 's|C/C++ shims|shims|'
                 expected='kache_probe.py must require the C/C++ shims to be active' ;;
             # 114: the shared remote's policy is an input, not a preference.
-            114) rewrite "$tree/$LAYERS/rust-dev/kache-config.toml" 's|"20G"|"10G"|'
-                expected='kache-config.toml must keep: local_max_size = "20G"' ;;
+            114) rewrite "$tree/$LAYERS/rust-dev/kache-config.toml" 's|"4G"|"20G"|'
+                expected='kache-config.toml must keep: local_max_size = "4G"' ;;
+            # 115-116: the store is on the sandbox's own disk. Its old home,
+            # $HOME/.cache/kache, is a host-backed virtio-fs mount, and a WAL
+            # index there has corrupted once; both the file and the ENV that
+            # name the new path have to stay.
+            115) rewrite "$tree/$LAYERS/rust-dev/kache-config.toml" '/^local_store = /d'
+                expected='kache-config.toml must keep: local_store = "/var/tmp/kache"' ;;
+            116) rewrite "$tree/$LAYERS/rust-dev/Dockerfile" '/^ENV KACHE_CACHE_DIR=/d'
+                expected='must be selected with KACHE_CACHE_DIR=/var/tmp/kache' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac
