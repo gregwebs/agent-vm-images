@@ -21,16 +21,16 @@ Node 22, base-owned pnpm, fetch/diagnostic facilities, explicit optional trust a
 
 | Label suffix | Docker ARG | Committed selection / spelling |
 |---|---|---|
-| codex | AGENT_VERSION_CODEX | rust-v0.159.3 / rust-vPINSELECTED (see [Codex payload closure](codex/vendor/README.md)) |
-| opencode | AGENT_VERSION_OPENCODE | v2.0.29 / v2.SEMVER |
-| claude | AGENT_VERSION_CLAUDE | 2.1.286 / SEMVER (pin-selected, see [ADR 0013](../../docs/adr/0013-claude-native-payload-pin.md)) |
-| copilot | AGENT_VERSION_COPILOT | 1.0.90 / SEMVER |
+| codex | AGENT_VERSION_CODEX | rust-v0.163.0 / rust-vPINSELECTED (see [Codex payload closure](codex/vendor/README.md)) |
+| opencode | AGENT_VERSION_OPENCODE | v2.1.4 / v2.SEMVER |
+| claude | AGENT_VERSION_CLAUDE | 2.1.319 / SEMVER (pin-selected, see [ADR 0013](../../docs/adr/0013-claude-native-payload-pin.md)) |
+| copilot | AGENT_VERSION_COPILOT | 1.0.106 / SEMVER |
 | agy | AGENT_VERSION_AGY | 1.4.11 / X.Y.Z (pin-selected, see [ADR 0012](../../docs/adr/0012-agy-hash-only-artifact-pin.md)) |
 | dsh | AGENT_VERSION_DSH | manifest 0.2.1-rc.5 / SEMVER |
 | pnpm (inherited base) | AGENT_VERSION_PNPM (compatibility only) | base pin.json 11.11.0 / SEMVER |
-| pi | AGENT_VERSION_PI | manifest 1.4.0 / SEMVER |
-| opencode-claude | AGENT_VERSION_OPENCODE_CLAUDE | plugin manifest 1.4.1 / SEMVER |
-| pi-claude-bridge | AGENT_VERSION_PI_CLAUDE_BRIDGE | bridge manifest 0.8.0 / SEMVER |
+| pi | AGENT_VERSION_PI | manifest 1.5.0 / SEMVER |
+| opencode-claude | AGENT_VERSION_OPENCODE_CLAUDE | plugin manifest 1.7.0 / SEMVER |
+| pi-claude-bridge | AGENT_VERSION_PI_CLAUDE_BRIDGE | bridge manifest 0.10.0 / SEMVER |
 | pi-antigravity | AGENT_VERSION_PI_ANTIGRAVITY | provider manifest 0.11.0 / SEMVER |
 
 Single-slot defaults are exact nonempty ARGs; empty values, dist-tags, ranges,
@@ -224,9 +224,11 @@ by a version number and never as a fallback:
   shrinkwrap, no "refill"; the exact selection is resolved under the reviewed
   workspace and the complete identity/SRI/edge/optional/peer delta is reviewed.
 
-The family shape is a reviewed per-selection expectation, not a constant: 1.4.0
-reaches six members (`pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-mcp`,
-`pi-telemetry`, `pi-tui`; five direct root edges) and 0.87.0 the historical five
+The family shape is a reviewed per-selection expectation, not a constant: 1.5.0
+reaches seven members (`pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-mcp`,
+`pi-schema`, `pi-telemetry`, `pi-tui`; five direct root edges, with `pi-schema`
+reached through its core/ai siblings), 1.4.0 six (the same set without
+`pi-schema`) and 0.87.0 the historical five
 (`chord`, `pi-agent-core`, `pi-ai`, `pi-telemetry`, `pi-tui`; four direct edges).
 1.4.0's published `chord` is unreachable and has no `esbuild` dependency.
 

@@ -36,6 +36,11 @@ assert_absent() {
 }
 
 [[ -d "$REPO_ROOT/images/tools/pi/bridge" ]] || fail "the committed bridge project is missing"
+# The committed selection's own version, read from the owning manifest: these
+# cases exercise that selection, so a reviewed bump must move them with it.
+BRIDGE_SELECTION="$(jq -er '.dependencies["pi-claude-bridge"]' \
+    "$REPO_ROOT/images/tools/pi/bridge/package.json")" ||
+    { echo 'error: cannot read the committed bridge selection' >&2; exit 1; }
 
 new_case() {
     unset FAKE_MANAGER_VERSION FAKE_INSTALL_STATUS FAKE_LAYOUT
@@ -61,13 +66,18 @@ case "$1" in
     pnpm-lock)
         shift
         case "$1" in
-            check) echo 0.8.0 ;;
+            check) echo @BRIDGE_SELECTION@ ;;
             graph) echo '{}' ;;
         esac
         exit 0 ;;
 esac
 exit 0
 SH
+    # The fixture contract answers with the committed selection, substituted here
+    # because the helper itself is a quoted heredoc (its bodies are shell).
+    sed "s|@BRIDGE_SELECTION@|$BRIDGE_SELECTION|" \
+        "$dir/recipe-contract" >"$dir/recipe-contract.next"
+    mv "$dir/recipe-contract.next" "$dir/recipe-contract"
     chmod +x "$dir/recipe-contract"
     cat >"$dir/run-pnpm.sh" <<'SH'
 #!/bin/sh
@@ -156,7 +166,7 @@ require_hard() { # require_hard DIAGNOSTIC
 new_case happy
 run_installer
 [[ $RUN_STATUS -eq 0 ]] || fail "the bridge installer failed: $RUN_ERROR"
-assert_contains "$RUN_OUTPUT" 'installed pi-claude-bridge 0.8.0 from the reviewed inputs'
+assert_contains "$RUN_OUTPUT" "installed pi-claude-bridge $BRIDGE_SELECTION from the reviewed inputs"
 [[ -d "$CASE/root/bridge/node_modules" ]] || fail 'the bridge payload is missing'
 # No record and no absence: publishing belongs to the verifier alone.
 assert_absent "$CASE/root/install-status/pi"

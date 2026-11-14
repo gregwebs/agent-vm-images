@@ -2,7 +2,7 @@
 
 Installs the GitHub Copilot CLI from npm at an exact, committed version.
 
-- [`../../standard/Dockerfile`](../../standard/Dockerfile) pins `AGENT_VERSION_COPILOT` (default `1.0.90`) and labels the
+- [`../../standard/Dockerfile`](../../standard/Dockerfile) pins `AGENT_VERSION_COPILOT` (default `1.0.106`) and labels the
   image `org.agent-vm.version.copilot=<that value>`. The label records the
   *selection*; the build gate decides health.
 - `install-copilot.sh` validates the supplied slot as canonical semver before
@@ -21,7 +21,8 @@ npm lookup. Use the central-source maintenance workflow; see [CONTRIBUTING](../.
 
 ## Recorded transcript
 
-Captured from `@github/copilot@1.0.90` on linux/arm64, exit 0:
+Captured from `@github/copilot@1.0.90` on linux/arm64, exit 0 (before the
+current `1.0.106` pin; not re-captured):
 
 ```text
 GitHub Copilot CLI 1.0.90.

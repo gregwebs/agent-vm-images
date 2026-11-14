@@ -20,7 +20,7 @@ migrated consumers before Copilot (PR 4 of #42).
 Three facts make Pi different from dsh and from a plain `pnpm import`:
 
 1. A published Pi archive may carry an upstream **npm-shrinkwrap.json**. The
-   current default, 1.4.0, does not; the historical 0.87.0 tarball does
+   current default, 1.5.0, does not (nor did 1.4.0); the historical 0.87.0 tarball does
    (`lockfileVersion: 3`, matching root identity, exactly five sibling records
    with no `integrity` field). Which route applies must be decided by the
    authenticated archive's *contents*, never by a version threshold.
@@ -121,6 +121,7 @@ The reachable Pi family is not a constant:
 
 | selected Pi | reachable family members | direct root edges | package-root generated bins |
 |---|---|---|---|
+| 1.5.0 | `pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-mcp`, `pi-schema`, `pi-telemetry`, `pi-tui` (modern seven) | five (schema and telemetry are transitive) | core→`pi-ai`; ai→`anthropic-ai-sdk`; tui→`marked`; codemode/mcp/schema/telemetry→none |
 | 1.4.0 | `pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-mcp`, `pi-telemetry`, `pi-tui` (modern six) | five (telemetry is transitive) | core→`pi-ai`; ai→`anthropic-ai-sdk`; tui→`marked`; codemode/mcp/telemetry→none |
 | 0.87.0 | `chord`, `pi-agent-core`, `pi-ai`, `pi-telemetry`, `pi-tui` (historical five) | four (telemetry is transitive) | chord→`esbuild`; core→`pi-ai`,`yaml`; ai→`anthropic-ai-sdk`; tui→`marked`; telemetry→none |
 
@@ -268,8 +269,9 @@ kills it:
   instance. `check-runtime.mjs` checks the resolved target inside the payload, not
   one relative spelling, because the real install produced the second shape.
 
-Measured registry facts for the ledger: the reviewed bridge `0.8.0` registers 14
-models beside Pi `1.4.0` and 11 beside the authenticated legacy `0.87.0` graph
+Measured registry facts for the ledger: the reviewed bridge `0.10.0` registers 14
+models beside Pi `1.5.0`, `0.8.0` registered 14 beside `1.4.0`, and 11 beside the
+authenticated legacy `0.87.0` graph
 (the bridge enumerates the providers the *selected* Pi SDK ships). The harness
 records both counts per selection so a change stops review, while the verifier
 keeps accepting one canonical positive N.

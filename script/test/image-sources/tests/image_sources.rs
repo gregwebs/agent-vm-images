@@ -91,14 +91,16 @@ struct PinSpec<'a> {
 }
 
 /// The reviewed Pi family, in the two shapes the project has had. The default
-/// `1.4.0` selection is the modern six; the `0.87.0` changed-selection leg keeps
-/// the historical five. Both are named here rather than derived from the graph,
-/// so a new or missing sibling is a review event.
-const PI_FAMILY_MODERN: [&str; 6] = [
+/// `1.5.0` selection is the modern seven (1.4.0's six plus the shared
+/// `pi-schema`); the `0.87.0` changed-selection leg keeps the historical five.
+/// Both are named here rather than derived from the graph, so a new or missing
+/// sibling is a review event.
+const PI_FAMILY_MODERN: [&str; 7] = [
     "pi-agent-core",
     "pi-ai",
     "pi-codemode",
     "pi-mcp",
+    "pi-schema",
     "pi-telemetry",
     "pi-tui",
 ];
@@ -109,11 +111,12 @@ const PI_FAMILY_HISTORICAL: [&str; 5] =
 /// sibling -> the bin-providing dependency identities. Independently authored
 /// from the C4 investigation, which recorded the same table for the default
 /// selection; the checker re-derives the targets from the provider manifests.
-const PI_GENERATED_BINS: [(&str, &[&str]); 6] = [
-    ("pi-agent-core", &["@earendil-works/pi-ai@1.4.0"]),
+const PI_GENERATED_BINS: [(&str, &[&str]); 7] = [
+    ("pi-agent-core", &["@earendil-works/pi-ai@1.5.0"]),
     ("pi-ai", &["@anthropic-ai/sdk@0.129.0"]),
     ("pi-codemode", &[]),
     ("pi-mcp", &[]),
+    ("pi-schema", &[]),
     ("pi-telemetry", &[]),
     ("pi-tui", &["marked@18.0.11"]),
 ];
@@ -121,17 +124,17 @@ const PI_GENERATED_BINS: [(&str, &[&str]); 6] = [
 /// The reviewed package counts. These are review thresholds, not invariants: the
 /// ticket asks for the changed count to be compared and reviewed, never for
 /// "SRI and edges unchanged" to be assumed from an equal identity count.
-const PI_DEFAULT_PACKAGES: usize = 120;
+const PI_DEFAULT_PACKAGES: usize = 122;
 const BRIDGE_DEFAULT_PACKAGES: usize = 96;
 
 /// The selected Pi root archive's registry SRI, independently taken from the
 /// release metadata during the C4 delta review rather than read back from this
 /// graph. It is the one identity every byte proof is anchored on.
-const PI_ROOT_INTEGRITY: &str = "sha512-Z41LpZ3yYHSC/UUps6Mr39UMFPwH8elhJBG9DY1P7kuzsE5qSK/6eMj2EHzO5evJRQWLbKSqUMw+4nCNtIyiQg==";
-const BRIDGE_ROOT_INTEGRITY: &str = "sha512-CaSXdCdMWLGcvvG4IZuKeyUIyLio2m8nEO7cUFZdxKPdkwWuf8Eq46Ys2z3VlSjCidlIpasLwiCdJStXSt6EZQ==";
+const PI_ROOT_INTEGRITY: &str = "sha512-xNDZ5kqowO6Z03FS2gwAkPEGk1ssxVcYKQ6qZId84mFEvwACvvyc2l0vAMOS+c5zvxLRMLBE9r4y44IGYkMJaQ==";
+const BRIDGE_ROOT_INTEGRITY: &str = "sha512-rco458XBiIrE56o9gs4hp+EkP2oIbseIWt5Wc004WF3wrKJY2wRD3/tAE0LxXqhLYg0s4BGD+oxqvVJmOPQFyA==";
 /// The Claude Agent SDK package that must stay installed as JavaScript while its
 /// eight platform payloads are the reviewed omission.
-const BRIDGE_SDK_INTEGRITY: &str = "sha512-JTbluTKmY3wKQPIXzeCTvz/K0FElTuQU5Y7ueLgUOBrHcks8cHlGugEgIRezffhc13WzBAqYtaY15tJ+Bfunzg==";
+const BRIDGE_SDK_INTEGRITY: &str = "sha512-oda1EZ4wjculEQWjakYSEM12qiB4hU2jgMEhg9bvNhW++tvp8CKZ9ad6gVAl3psADktEg6C8MYGlfNpvnO47Ug==";
 
 // ---------------------------------------------------------------------------
 // Migrated pnpm projects: one reviewed four-input set, read through the shared
@@ -1442,7 +1445,7 @@ fn pi_project_is_one_pinned_pnpm_root_read_by_the_graph_adapter() {
 fn pi_family_is_the_reviewed_shape_at_the_selected_version() {
     let project = pi_project();
     let graph = read_graph(&project).expect("the reviewed Pi inputs form a valid graph");
-    check_pi_family(&graph).expect("the default selection is the reviewed modern six");
+    check_pi_family(&graph).expect("the default selection is the reviewed modern seven");
     let reachable = reachable_keys(&graph).expect("every root edge resolves");
     let family: Vec<&str> = reachable
         .iter()
@@ -1457,7 +1460,7 @@ fn pi_family_is_the_reviewed_shape_at_the_selected_version() {
     assert_eq!(
         family.len(),
         PI_FAMILY_MODERN.len() + 1,
-        "the six siblings plus the root are the only @earendil-works identities"
+        "the reviewed siblings plus the root are the only @earendil-works identities"
     );
     for banned in ["chord", "esbuild"] {
         assert!(
@@ -1854,9 +1857,9 @@ fn pi_and_bridge_graph_mutations_are_rejected() {
         let mut payload = graph.clone();
         payload.packages.push(GraphArchive {
             name: "@anthropic-ai/claude-agent-sdk-linux-x64".to_string(),
-            version: "0.3.281".to_string(),
+            version: "0.3.308".to_string(),
             integrity: BRIDGE_SDK_INTEGRITY.to_string(),
-            tarball: "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-linux-x64/-/claude-agent-sdk-linux-x64-0.3.281.tgz".to_string(),
+            tarball: "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk-linux-x64/-/claude-agent-sdk-linux-x64-0.3.308.tgz".to_string(),
             has_bin: false,
             platform: GraphPlatform {
                 os: vec!["linux".to_string()],
@@ -10186,8 +10189,8 @@ fn check_codex_helper_sources(hook: &str, loader: &str) -> Result<(), String> {
 #[test]
 fn codex_pin_selects_both_reviewed_payloads() {
     let pin = parse_codex_pin(&read_text(CODEX_PIN)).expect("the committed pin parses");
-    assert_eq!(pin.release, "rust-v0.159.3");
-    assert_eq!(pin.version, "0.159.3");
+    assert_eq!(pin.release, "rust-v0.163.0");
+    assert_eq!(pin.version, "0.163.0");
     assert_eq!(
         pin.platforms
             .keys()
@@ -10202,7 +10205,7 @@ fn codex_pin_selects_both_reviewed_payloads() {
         assert_eq!(
             entry.url,
             format!(
-                "https://github.com/openai/codex/releases/download/rust-v0.159.3/{}",
+                "https://github.com/openai/codex/releases/download/rust-v0.163.0/{}",
                 entry.asset
             )
         );
@@ -10216,7 +10219,7 @@ fn codex_pin_selects_both_reviewed_payloads() {
     assert_eq!(pin.authentication.verifier_version, CODEX_VERIFIER_VERSION);
     assert_eq!(
         pin.authentication.identity,
-        format!("{CODEX_WORKFLOW}@refs/tags/rust-v0.159.3")
+        format!("{CODEX_WORKFLOW}@refs/tags/rust-v0.163.0")
     );
     // Direct presence assertions: the generic helper inventory is a known
     // separate defect (#116), so this does not lean on it.
@@ -10441,10 +10444,10 @@ fn codex_recipe_requires_readonly_pin_source() {
         recipe.replace(CODEX_RUN_INSTALL, "true"),
         recipe.replace(
             "LABEL org.agent-vm.version.codex=\"${AGENT_VERSION_CODEX}\"",
-            "LABEL org.agent-vm.version.codex=\"rust-v0.159.3\"",
+            "LABEL org.agent-vm.version.codex=\"rust-v0.163.0\"",
         ),
         recipe.replace(
-            "ARG AGENT_VERSION_CODEX=rust-v0.159.3",
+            "ARG AGENT_VERSION_CODEX=rust-v0.163.0",
             "ARG AGENT_VERSION_CODEX=latest",
         ),
     ];

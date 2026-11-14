@@ -186,7 +186,7 @@ READMEs may be adapted to their new owner):
 - `images/tools/pi/README.md`
 - `images/tools/pi/package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`,
   `pnpm-inputs.sha256` — the reviewed four pnpm inputs
-- `images/tools/pi/dispatch/{1.4.0,0.87.0}.txt` — reviewed per-selection
+- `images/tools/pi/dispatch/{1.5.0,1.4.0,0.87.0}.txt` — reviewed per-selection
   subcommand expectations used by the installer-generated dispatch data
 - `images/tools/pi/package-lock.json` — historical: removed in #52 when Pi moved
   to the four pnpm inputs; the reviewed bytes remain in git history. No current

@@ -33,7 +33,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 GATE = REPO_ROOT / 'script' / 'test' / 'shipped-installer-network.sh'
 ADDON = REPO_ROOT / 'script' / 'test' / 'fixtures' / 'installer-egress' / 'addon.py'
 
-RELEASE = 'rust-v0.159.3'
+# Read off the committed closure so a reviewed bump moves this expectation with
+# the pin instead of leaving the case asserting an older release.
+RELEASE = 'rust-v' + json.loads(
+    (REPO_ROOT / 'images' / 'tools' / 'codex' / 'pin.json').read_text())['version']
 CDN = ('https://release-assets.githubusercontent.com/github-production-release-asset'
        '/x/y.tar.gz?sig=REVIEW-SIGNED-SECRET&token=REVIEW-TOKEN')
 PAYLOAD = ''          # derived from the production config, see payload_for

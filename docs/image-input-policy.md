@@ -205,7 +205,14 @@ and GitHub CLI sense. The decision and its rejected alternatives are in
 
 | Selected | Committed identity | Authentication |
 |---|---|---|
-| `rust-v0.159.3` (`org.agent-vm.version.codex`, `ARG AGENT_VERSION_CODEX`) | `images/tools/codex/pin.json`: exact `linux/amd64` and `linux/arm64` package URLs plus SHA-256, the original exact-tag API metadata, the original `codex-package_SHA256SUMS`, and both original `.sigstore` bundles | pin-time `cosign verify-blob` (v2.4.1) under the exact workflow identity and OIDC issuer, with default certificate-chain, SCT and Rekor verification |
+| `rust-v0.163.0` (`org.agent-vm.version.codex`, `ARG AGENT_VERSION_CODEX`) | `images/tools/codex/pin.json`: exact `linux/amd64` and `linux/arm64` package URLs plus SHA-256, the original exact-tag API metadata, the original `codex-package_SHA256SUMS`, and both original `.sigstore` bundles | pin-time `cosign verify-blob` (v2.4.1) under the exact workflow identity and OIDC issuer, with default certificate-chain, SCT and Rekor verification |
+
+**Why this selection and not a newer one.** `rust-v0.166.0` and later declare a
+package-metadata key the committed package policy does not accept (`execServer`,
+naming a second entrypoint and directory) and `rust-v0.164.0` is the first release
+whose `install.sh` the committed vendor patch no longer applies to. Either one is
+a reviewed policy change, not a version edit, so the selection stops at
+`rust-v0.163.0`; its installer snapshot is byte-identical to the earlier one.
 
 **Build ordering.** The hook derives the pin directory from the owning source
 directory, runs the real offline `check` for the exact slot, and only then runs
@@ -251,7 +258,7 @@ transaction (which it reuses from `script/dev/pin-artifact.py`). Typical command
 
 ```bash
 python3 script/dev/pin-codex.py --check
-python3 script/dev/pin-codex.py --version rust-v0.159.3 --cosign /absolute/path/to/cosign
+python3 script/dev/pin-codex.py --version rust-v0.163.0 --cosign /absolute/path/to/cosign
 bash script/build/agent-versions.sh --check
 bash script/build/agent-versions.sh --write --cosign /absolute/path/to/cosign
 ```
@@ -343,7 +350,7 @@ section is the canonical policy.
 
 | Selected | Committed identity | Authentication |
 |---|---|---|
-| `2.1.286` (`org.agent-vm.version.claude`, `ARG AGENT_VERSION_CLAUDE`) | `images/tools/claude/pin.json`: the signed upstream `manifest.json` and its detached `manifest.json.sig` as committed evidence, the hand-committed release key, and for `linux/amd64` / `linux/arm64` the exact executable URL, SHA-256 and byte size | upstream OpenPGP: the detached signature over the committed manifest is verified with the committed release key, and the pin's fingerprint must be that key's single primary and the signature's `VALIDSIG` primary |
+| `2.1.319` (`org.agent-vm.version.claude`, `ARG AGENT_VERSION_CLAUDE`) | `images/tools/claude/pin.json`: the signed upstream `manifest.json` and its detached `manifest.json.sig` as committed evidence, the hand-committed release key, and for `linux/amd64` / `linux/arm64` the exact executable URL, SHA-256 and byte size | upstream OpenPGP: the detached signature over the committed manifest is verified with the committed release key, and the pin's fingerprint must be that key's single primary and the signature's `VALIDSIG` primary |
 
 **Build ordering.** `install-claude.sh` requires the committed closure, refuses an
 exact-but-unpinned version before the vendored installer runs, and exports the pin
@@ -404,7 +411,7 @@ transaction, after printing a field-by-field payload delta. Typical commands:
 
 ```bash
 python3 script/dev/pin-claude.py --check
-python3 script/dev/pin-claude.py --version 2.1.286
+python3 script/dev/pin-claude.py --version 2.1.319
 bash script/build/agent-versions.sh --check
 bash script/build/agent-versions.sh --write --cosign /absolute/path/to/cosign
 bash script/test/shipped-installer-network.sh agent-vm-base:local --platform linux/arm64 --tool claude

@@ -42,6 +42,20 @@ assert_absent() {
 
 [[ -d "$REPO_ROOT/images/tools/pi" ]] || fail "the committed Pi project is missing"
 [[ -d "$REPO_ROOT/images/tools/pi/bridge" ]] || fail "the committed bridge project is missing"
+# The committed selection's own version, read from the owning manifest, so a
+# reviewed bump moves these cases with it.
+PI_SELECTION="$(jq -er '.dependencies["@earendil-works/pi-coding-agent"]' \
+    "$REPO_ROOT/images/tools/pi/package.json")" ||
+    { echo 'error: cannot read the committed Pi selection' >&2; exit 1; }
+PEER_BRIDGE="$(jq -er '.dependencies["pi-claude-bridge"]' \
+    "$REPO_ROOT/images/tools/pi/bridge/package.json")" ||
+    { echo 'error: cannot read the committed bridge selection' >&2; exit 1; }
+PEER_PROVIDER="$(jq -er '.dependencies["pi-antigravity"]' \
+    "$REPO_ROOT/images/tools/pi/antigravity/package.json")" ||
+    { echo 'error: cannot read the committed provider selection' >&2; exit 1; }
+# The generated wrapper is a quoted heredoc, so the committed versions reach it
+# through the environment rather than by interpolation.
+export PI_SELECTION PEER_BRIDGE PEER_PROVIDER
 
 # --- fixtures ----------------------------------------------------------------
 make_wrapper() { # make_wrapper PATH
@@ -56,7 +70,7 @@ fi
 for argument in "$@"; do
     case "$argument" in
         --version)
-            echo "${FAKE_VERSION:-1.4.0}"
+            echo "${FAKE_VERSION:-${PI_SELECTION:?}}"
             [ -z "${FAKE_VERSION_TRAILER-}" ] || echo "${FAKE_VERSION_TRAILER}"
             exit "${FAKE_VERSION_STATUS-0}" ;;
         --help)
@@ -101,7 +115,7 @@ new_case() {
     cp "$REPO_ROOT"/images/tools/pi/bridge/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,pnpm-inputs.sha256} "$CASE/root/pi-packages/"
     cp "$REPO_ROOT"/images/tools/pi/antigravity/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,pnpm-inputs.sha256} "$CASE/root/pi-antigravity/"
     cp "$REPO_ROOT/images/pnpm/pin.json" "$CASE/root/pnpm/pin.json"
-    cp "$REPO_ROOT/images/tools/pi/dispatch/1.4.0.txt" "$CASE/root/pi/agent-vm-subcommands"
+    cp "$REPO_ROOT/images/tools/pi/dispatch/$PI_SELECTION.txt" "$CASE/root/pi/agent-vm-subcommands"
     : >"$CASE/root/pi-extensions/guest-credential-warning.js"
     : >"$CASE/root/pi-extensions/agent-vm-codex.js"
     cat >"$CASE/root/seed.d/20-pi-claude-bridge" <<'SH'
@@ -113,12 +127,12 @@ SH
     chmod 0755 "$CASE/root/seed.d/20-pi-claude-bridge"
     printf '#!/bin/sh\nexit 0\n' >"$CASE/root/pi/node_modules/.bin/pi"
     chmod 0755 "$CASE/root/pi/node_modules/.bin/pi"
-    printf '{"name":"pi-claude-bridge","version":"0.8.0"}\n' \
+    printf '{"name":"pi-claude-bridge","version":"%s"}\n' "$PEER_BRIDGE" \
         >"$CASE/root/pi-packages/node_modules/pi-claude-bridge/package.json"
     : >"$CASE/root/pi-packages/node_modules/pi-claude-bridge/src/index.ts"
     printf '{"name":"@anthropic-ai/claude-agent-sdk","version":"0.3.281"}\n' \
         >"$CASE/root/pi-packages/node_modules/@anthropic-ai/claude-agent-sdk/package.json"
-    printf '{"name":"pi-antigravity","version":"0.11.0"}\n' \
+    printf '{"name":"pi-antigravity","version":"%s"}\n' "$PEER_PROVIDER" \
         >"$CASE/root/pi-antigravity/node_modules/pi-antigravity/package.json"
     : >"$CASE/root/pi-antigravity/node_modules/pi-antigravity/src/index.ts"
     printf '{"name":"undici","version":"8.12.3"}\n' \
@@ -270,6 +284,7 @@ run_gate() {
         "FAKE_HELP_FILE=${FAKE_HELP_FILE-$CASE/help.txt}"
         "AGENT_VM_PI_GATE_SKIP_BRIDGE=${SKIP_BRIDGE-}"
         "AGENT_VM_PI_GATE_SKIP_ANTIGRAVITY=${SKIP_ANTIGRAVITY-}"
+        "PI_SELECTION=$PI_SELECTION"
         "FAKE_VERSION=${FAKE_VERSION-}"
         "FAKE_VERSION_TRAILER=${FAKE_VERSION_TRAILER-}"
         "FAKE_VERSION_STATUS=${FAKE_VERSION_STATUS-0}"
@@ -306,7 +321,7 @@ require_failure() { # require_failure DIAGNOSTIC
 new_case healthy
 run_gate
 [[ $RUN_STATUS -eq 0 ]] || fail "the healthy gate failed: $RUN_ERROR"
-assert_contains "$RUN_OUTPUT" 'subcommand list matches the installed CLI and the reviewed 1.4.0 expectation'
+assert_contains "$RUN_OUTPUT" "subcommand list matches the installed CLI and the reviewed $PI_SELECTION expectation"
 [[ "$(cat "$CASE/root/install-status/pi")" == installed ]] || fail 'no pi record'
 [[ "$(cat "$CASE/root/install-status/pi-claude-bridge")" == installed ]] || fail 'no bridge record'
 assert_contains "$RUN_OUTPUT" 'readable and executable by any uid'
@@ -512,7 +527,7 @@ require_failure 'the image-owned subcommand list is missing or unreadable'
 new_case dispatch-not-reviewed
 cp "$REPO_ROOT/images/tools/pi/dispatch/0.87.0.txt" "$CASE/root/pi/agent-vm-subcommands"
 run_gate
-require_failure 'is not the reviewed 1.4.0 list'
+require_failure "is not the reviewed $PI_SELECTION list"
 
 new_case dispatch-help-drift
 sed -i.bak '/pi mcp /d' "$CASE/help.txt"
@@ -844,7 +859,7 @@ printf '{"name":"pi-claude-bridge","version":"0.9.0"}\n' \
     >"$CASE/root/pi-packages/node_modules/pi-claude-bridge/package.json"
 run_gate
 [[ $RUN_STATUS -eq 1 ]] || fail 'a bridge version mismatch must be hard'
-assert_contains "$RUN_ERROR" "pi-claude-bridge installed '0.9.0' but the manifest pins '0.8.0'"
+assert_contains "$RUN_ERROR" "pi-claude-bridge installed '0.9.0' but the manifest pins '$PEER_BRIDGE'"
 # The bridge slot is not published, but the healthy Pi slot is: separate records.
 [[ "$(cat "$CASE/root/install-status/pi")" == installed ]] ||
     fail 'a bridge-only failure must still record a healthy Pi'
@@ -999,7 +1014,7 @@ new_case antigravity-version-mismatch
 printf '{"name":"pi-antigravity","version":"0.10.0"}\n' \
     >"$CASE/root/pi-antigravity/node_modules/pi-antigravity/package.json"
 run_gate
-require_failure "pi-antigravity installed '0.10.0' but the manifest pins '0.11.0'"
+require_failure "pi-antigravity installed '0.10.0' but the manifest pins '$PEER_PROVIDER'"
 assert_absent "$CASE/root/install-status/pi-antigravity"
 [[ "$(cat "$CASE/root/install-status/pi")" == installed ]] ||
     fail 'a provider-only failure must still record a healthy Pi'

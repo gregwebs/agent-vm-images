@@ -38,9 +38,23 @@ PI_ROOT_SRI = 'sha512-ROOTARCHIVE'
 # oracle's expectation is that manifest's own selection. A literal here would
 # assert a stale adoption instead of the harness's selection derivation.
 DSH_SELECTION = json.loads((ROOT / 'images/tools/dsh/package.json').read_text())['dependencies']['@deepseek-ai/dsh']
+# Likewise for the Pi cases without `--version`: they model the committed
+# selection, so the expected diagnostics move with a reviewed bump.
+PI_SELECTION = json.loads((ROOT / 'images/tools/pi/package.json').read_text())[
+    'dependencies']['@earendil-works/pi-coding-agent']
+BRIDGE_SELECTION = json.loads((ROOT / 'images/tools/pi/bridge/package.json').read_text())[
+    'dependencies']['pi-claude-bridge']
+PROVIDER_SELECTION = json.loads((ROOT / 'images/tools/pi/antigravity/package.json').read_text())[
+    'dependencies']['pi-antigravity']
 # The self-test's own family/dispatch tables: plumbing only. The real
 # vectors are authored in standard-node-pi.py from the authenticated archives.
-PI_SHAPES = {'1.4.0': {'members': ['pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp',
+PI_SHAPES = {'1.5.0': {'members': ['pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp',
+                                   'pi-schema', 'pi-telemetry', 'pi-tui'],
+                       'direct': ['pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp', 'pi-tui'],
+                       'providers': ['marked@18.0.11', '@anthropic-ai/sdk@0.129.0'],
+                       'dispatch': ['auth', 'config', 'install', 'list', 'mcp', 'remove',
+                                    'uninstall', 'update']},
+             '1.4.0': {'members': ['pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp',
                                    'pi-telemetry', 'pi-tui'],
                        'direct': ['pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp', 'pi-tui'],
                        'providers': ['marked@18.0.11', '@anthropic-ai/sdk@0.129.0'],
@@ -401,7 +415,8 @@ def fake_docker(args):
                 # Measured catalogs are per measured (Pi, extension) pair; the
                 # provider's catalog is measured once per Pi selection.
                 if len(command) > 1 and command[1] == 'antigravity':
-                    models = '8'
+                    # Measured per Pi selection: 9 beside the legacy 0.87.0 graph.
+                    models = '9' if version == '0.87.0' else '8'
                     if case == 'wrong-provider-registration':
                         models = '7'
                     record = {'provider': 'antigravity', 'status': 0, 'registered': [models],
@@ -409,8 +424,8 @@ def fake_docker(args):
                     if case == 'ambiguous-provider-registration':
                         record['registered'] = [models, models]
                 else:
-                    models = ('14' if (version, state.get('bridge_version')) == ('1.4.0', '0.8.0')
-                              else '11')
+                    models = ('14' if (version, state.get('bridge_version')) in
+                              (('1.5.0', '0.10.0'), ('1.4.0', '0.8.0')) else '11')
                     if case == 'wrong-registration':
                         models = '13'
                     record = {'provider': 'bridge', 'status': 0, 'registered': [models],
@@ -1093,9 +1108,13 @@ def pi_tests(work, environment):
             # provider version.
             assert state['pi_binding'][0].startswith('pnpm-primitives-'), state['pi_binding']
             assert hex_string(state['pi_binding'][1], 40), state['pi_binding']
-            assert state['pi_binding'][2:] == ['0.87.0', '0.8.0', '0.11.0'], state['pi_binding']
+            # The changed leg selects another Pi and keeps the committed bridge and
+            # provider, exactly like the CI invocation it models.
+            assert state['pi_binding'][2:] == ['0.87.0', BRIDGE_SELECTION, PROVIDER_SELECTION], \
+                state['pi_binding']
         if name == 'fake-success':
-            assert ('did not report 6/6 Pi sibling archives and installed bytes verified'
+            size = len(PI_SHAPES[PI_SELECTION]['members'])
+            assert (f'did not report {size}/{size} Pi sibling archives and installed bytes verified'
                     in text_), text_[-2000:]
         if name == 'missing-fixture':
             assert 'missing/ambiguous evidence: initialize' in text_, text_[-2000:]
@@ -1118,8 +1137,11 @@ def pi_tests(work, environment):
         if name == 'wrong-registration':
             # The measured catalog is bound to the (Pi, bridge) pair, so the
             # diagnostic names both versions.
-            assert ('the bridge registered 13 models; the measured catalog for Pi 1.4.0 '
-                    'with bridge 0.8.0 is 14' in text_), text_[-2000:]
+            # What this self-test's fake bridge reports for that pair, one
+            # model short of the authored catalog.
+            expected = 14
+            assert (f'the bridge registered 13 models; the measured catalog for Pi {PI_SELECTION} '
+                    f'with bridge {BRIDGE_SELECTION} is {expected}' in text_), text_[-2000:]
         if name == 'ambiguous-registration':
             assert 'registration is not one unambiguous positive' in text_, text_[-2000:]
         if name == 'wrong-mutant':
