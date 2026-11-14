@@ -135,8 +135,22 @@ else
     cp "$REPO_ROOT/images/pnpm/pin.json" "$work/pnpm/pin.json"
     export AGENT_VM_SCRATCH_ROOT=$work
 fi
+# The Docker client is the one tool whose configuration is not manager state: its
+# config file carries `currentContext` and `cliPluginsExtraDirs`, and both it and
+# the TLS defaults are discovered through `$DOCKER_CONFIG`, else `$HOME/.docker`
+# (`docker --help`, `--config`). The private HOME below is for the manager only, so
+# capture the client directory first and export it again after the redirect. A
+# caller with neither has nothing to preserve: no path is invented or created.
+if [ -n "${DOCKER_CONFIG-}" ]; then
+    docker_config=$DOCKER_CONFIG
+elif [ -n "${HOME-}" ] && [ -d "$HOME/.docker" ]; then
+    docker_config=$HOME/.docker
+else
+    docker_config=''
+fi
 export HOME=$work/home XDG_CONFIG_HOME=$work/config XDG_CACHE_HOME=$work/cache
 export XDG_DATA_HOME=$work/data XDG_STATE_HOME=$work/state TMPDIR=$work/tmp
+if [ -n "$docker_config" ]; then export DOCKER_CONFIG=$docker_config; fi
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$TMPDIR"
 export PNPM_CONFIG_MINIMUM_RELEASE_AGE=1440 PNPM_CONFIG_MINIMUM_RELEASE_AGE_STRICT=true
 export PNPM_CONFIG_MINIMUM_RELEASE_AGE_IGNORE_MISSING_TIME=false
