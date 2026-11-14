@@ -42,7 +42,7 @@ version bump, Rust application build, submodule or launcher packaging is needed.
   exact `rustup-init` per architecture, the signed channel manifest and the hash
   and detached signature of every selected archive, verified before anything
   executes. Its `rustup-init` hash-only exception is dated and scoped in
-  `examples/layers/rust-dev/rust-toolchain/pin.json` and is only renewed by a
+  `examples/layers/rust-dev/data/rust-toolchain/pin.json` and is only renewed by a
   reviewer ([ADR 0007](docs/adr/0007-rust-example-toolchain-pins.md)).
   Node and the GitHub CLI are
   [pinned release artifacts](docs/image-input-policy.md#pinned-third-party-release-artifacts):
@@ -109,7 +109,7 @@ bash images/build.sh base    # then: bash script/test/node-toolchain.sh agent-vm
 ## Rust example toolchain maintenance
 
 Only `script/dev/upgrade-rust-toolchain.sh` writes
-`examples/layers/rust-dev/rust-toolchain/` and the example's
+`examples/layers/rust-dev/data/rust-toolchain/` and the example's
 `ARG RUST_TOOLCHAIN` assertion, on a maintainer host (it refuses
 `GITHUB_ACTIONS=true`; `--check` stays usable offline):
 
@@ -151,7 +151,7 @@ not this suite.
 ## Go example gopls maintenance
 
 Only `script/dev/upgrade-gopls.sh` writes
-`examples/layers/go-dev/gopls-closure/` and the example's
+`examples/layers/go-dev/data/gopls-closure/` and the example's
 `ARG GOPLS_VERSION` assertion, on a maintainer host (it refuses
 `GITHUB_ACTIONS=true`; `--check` stays usable offline):
 

@@ -7,8 +7,8 @@ cd "$ROOT"
 # shellcheck source=/dev/null
 . "$ROOT/script/build/chrome-mcp-provenance.sh"
 MCP_HELPER=examples/layers/chrome-devtools/chrome-devtools-mcp.sh
-MCP_INPUTS=examples/layers/chrome-devtools/chrome-devtools-mcp
-MCP_BUNDLE=examples/layers/chrome-devtools/chrome-devtools-mcp.sigstore.json
+MCP_INPUTS=examples/layers/chrome-devtools/data/chrome-devtools-mcp
+MCP_BUNDLE=examples/layers/chrome-devtools/data/chrome-devtools-mcp.sigstore.json
 MCP_PREFIX=/opt/agent-vm/chrome-devtools-mcp
 RUN_ID=$(printf '%s' "${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$$-$(date +%s)" | tr 'A-Z' 'a-z')
 PLATFORM=''

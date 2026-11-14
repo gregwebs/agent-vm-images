@@ -56,7 +56,7 @@ Passed = 0
 FAKE_PYTHON = 'python3'
 STAGER = 'script/dev/gopls-closure-update.py'
 WRITER = 'script/dev/upgrade-gopls.sh'
-DATA_RELATIVE = 'examples/layers/go-dev/gopls-closure'
+DATA_RELATIVE = 'examples/layers/go-dev/data/gopls-closure'
 # The probe module the settings classifier builds. A module, not a bare file, so
 # the compiler records a `go` directive's DefaultGODEBUG exactly as it does for the
 # closure.
@@ -831,7 +831,7 @@ def tmpdir_guard_check(root: Path) -> dict:
         'no_mktemp': 'mktemp invoked' not in invocations,
         'no_stager': 'stager invoked' not in invocations,
         'no_work': not list(shim_work.iterdir()) and not list((guard_tree / 'tmp').iterdir()),
-        'no_publish': not (guard_tree / 'examples/layers/go-dev/gopls-closure').exists(),
+        'no_publish': not (guard_tree / 'examples/layers/go-dev/data/gopls-closure').exists(),
         'detail': result.stderr[-300:],
     }
 

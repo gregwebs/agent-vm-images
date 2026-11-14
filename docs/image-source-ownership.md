@@ -333,13 +333,13 @@ name agent-vm records.
 `chrome-devtools-mcp` selection a maintained payload rather than a build-time
 fetch. Its owned files are:
 
-- `examples/layers/chrome-devtools/chrome-devtools-mcp/`: the four pinned inputs
+- `examples/layers/chrome-devtools/data/chrome-devtools-mcp/`: the four pinned inputs
   `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml` and
   `pnpm-inputs.sha256` that the image installs from.
 - `examples/layers/chrome-devtools/chrome-devtools-mcp.sh`: the build helper
   (`check`, `install`, `verify`, `resolve`), bind-mounted at build time and never
   stored in the image.
-- `examples/layers/chrome-devtools/chrome-devtools-mcp.sigstore.json`: the npm
+- `examples/layers/chrome-devtools/data/chrome-devtools-mcp.sigstore.json`: the npm
   SLSA provenance bundle kept as review evidence; not copied into the image.
 - `script/build/chrome-mcp-provenance.sh`: repo-only trusted identity and
   verification helpers, sourced by the updater and by
@@ -384,13 +384,13 @@ selection (both Verus values together), citing the agent-vm commit.
 kache is the exception: no other repository pins it, so this example owns the
 selection and its bump order. `ARG KACHE_VERSION`, `ARG KACHE_AMD64_SHA256`,
 `ARG KACHE_ARM64_SHA256` and `ARG KACHE_RELEASE_CERT_SHA256` move together with the
-evidence in `examples/layers/rust-dev/kache/` — the two published `.sha256`
+evidence in `examples/layers/rust-dev/data/kache/` — the two published `.sha256`
 sidecars and the release key. A version bumped without re-downloading that
 evidence fails `script/test/example-layers.sh` and then the build.
 
 #### Rust: reviewed closure, not a channel name (#102)
 
-`examples/layers/rust-dev/rust-toolchain/` is the reviewed input set for the
+`examples/layers/rust-dev/data/rust-toolchain/` is the reviewed input set for the
 Rust layer and the example owns it, like the Chrome MCP pin:
 
 - exact `rustup-init` per architecture with its original upstream `.sha256`
@@ -415,7 +415,7 @@ alternatives: [ADR 0007](adr/0007-rust-example-toolchain-pins.md).
 
 #### kache: a signature-verified release artifact
 
-`examples/layers/rust-dev/kache/` holds the reviewed evidence for the pinned
+`examples/layers/rust-dev/data/kache/` holds the reviewed evidence for the pinned
 kache release: the published `.sha256` sidecar for each static musl tarball and
 the release key ("Kunobi Release Signing <feedback@kunobi.ninja>", RSA-4096,
 fingerprint `6069 18FD A7F1 854E 78B6 83CE 9A99 0E6B CBCC A73B`). The key is
@@ -520,7 +520,7 @@ machine-checked (see below).
 
 #### Go: reviewed gopls closure (#103)
 
-`examples/layers/go-dev/gopls-closure/` is the reviewed input set for the Go
+`examples/layers/go-dev/data/gopls-closure/` is the reviewed input set for the Go
 layer's language server, and the example owns it:
 
 - `go.mod`: the canonical wrapper module (`tool golang.org/x/tools/gopls`, every

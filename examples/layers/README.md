@@ -92,6 +92,13 @@ registered in `images/parent-pins.json.recipes` (the source-policy gate requires
 exact agreement with the discovered `Dockerfile`s), and a new script beside a
 recipe is added to `script/test/example-layers.sh`'s guarded list.
 
+A layer directory holds its `Dockerfile`, its `README.md`, shebang scripts and a
+`data/` directory for everything else — the one convention that suite enforces. A
+script is named in `GUARDED`; any other input lives under `data/` and is named in
+`GUARDED_DATA`, one entry per file. Nothing else is allowed: a file dropped at a
+layer root fails by name, and a file under `data/` that nobody listed fails as an
+unreviewed input, whether or not a `Dockerfile` mounts it.
+
 ## Declaring network requests
 
 A user-owned layer is a component: it installs software, and that software
@@ -338,7 +345,7 @@ therefore keeps the three crates hosts and the layer requests no new one.
 #### Pinned inputs
 
 The layer owns this selection: nothing else pins kache, so there is no mirrored
-pin to follow. Four `ARG`s and [`kache/`](rust-dev/kache/) move together:
+pin to follow. Four `ARG`s and [`data/kache/`](rust-dev/data/kache/) move together:
 `KACHE_VERSION` plus the per-architecture tarball digest and the release
 certificate's digest.
 `kache/` commits the published `.sha256` sidecar for each static musl tarball and
@@ -372,7 +379,7 @@ alternatives are in [ADR 0015](../../docs/adr/0015-kache-compiler-cache.md).
 ### Reviewed toolchain closure (#102)
 
 Nothing in this layer resolves a channel or trusts the server's word for the
-bytes. [`rust-toolchain/`](rust-dev/rust-toolchain/) commits, for both
+bytes. [`data/rust-toolchain/`](rust-dev/data/rust-toolchain/) commits, for both
 `linux/amd64` and `linux/arm64`:
 
 - the exact `rustup-init` (1.28.2) SHA-256 per host, with its original upstream
@@ -549,7 +556,7 @@ hostname allow list.) A project that must not depend on the network can
 `go install golang.org/x/tools/gopls@v0.23.0` used to let the `go` command pick
 gopls's module graph during the build and accept checksum-database answers that
 were never committed or reviewed here. The layer now commits the selection in
-[`go-dev/gopls-closure/`](go-dev/gopls-closure/):
+[`go-dev/data/gopls-closure/`](go-dev/data/gopls-closure/):
 
 - a tiny wrapper module (`tool golang.org/x/tools/gopls`, every selected module
   as an indirect requirement) and the full tidy `go.sum` — 23 modules, 34 zip
@@ -634,7 +641,7 @@ It installs Chromium, the Chrome DevTools MCP integration and one pinned
 
 The Dockerfile installs `chrome-devtools-mcp` at build time into
 `/opt/agent-vm/chrome-devtools-mcp`. The inputs are four committed files in
-[`chrome-devtools-mcp/`](chrome-devtools/chrome-devtools-mcp/): `package.json`
+[`data/chrome-devtools-mcp/`](chrome-devtools/data/chrome-devtools-mcp/): `package.json`
 (one exact selection plus `packageManager: pnpm@11.11.0`),
 `pnpm-workspace.yaml` (the install policy), `pnpm-lock.yaml` (a single-package
 closure) and `pnpm-inputs.sha256` (SHA-256 of the other three). A bind-mounted

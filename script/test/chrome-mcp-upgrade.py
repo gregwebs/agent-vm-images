@@ -28,8 +28,8 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / 'script/test/fixtures/chrome-mcp-upgrade/tools.py'
 EXAMPLE = 'examples/layers/chrome-devtools'
-INPUTS = EXAMPLE + '/chrome-devtools-mcp'
-BUNDLE = EXAMPLE + '/chrome-devtools-mcp.sigstore.json'
+INPUTS = EXAMPLE + '/data/chrome-devtools-mcp'
+BUNDLE = EXAMPLE + '/data/chrome-devtools-mcp.sigstore.json'
 UPDATER = 'script/dev/upgrade-chrome-devtools-mcp.sh'
 SOURCES = [UPDATER, 'script/build/npm-pin.sh', 'script/build/transactional-publish.sh',
            'script/build/chrome-mcp-provenance.sh']

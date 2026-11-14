@@ -27,7 +27,7 @@ def main() -> int:
     # recipe, the two adapters, the helper and the five committed closure files.
     paths = [layer / name for name in ('Dockerfile', 'install-gopls.sh',
                                        'verify-toolchain.sh', 'gopls_closure.py')]
-    paths += sorted(path for path in (layer / 'gopls-closure').iterdir()
+    paths += sorted(path for path in (layer / 'data' / 'gopls-closure').iterdir()
                     if path.is_file())
     lines = [f'{hashlib.sha256(path.read_bytes()).hexdigest()}  '
              f'{path.relative_to(root)}' for path in paths]

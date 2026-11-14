@@ -39,7 +39,7 @@ COPY --chmod=0755 agent-vm-chrome-mcp /usr/local/bin/agent-vm-chrome-mcp
 # The reviewed selection is installed here, at build time, from the committed
 # inputs (#41). The helper verifies bytes and pins before it runs pnpm and
 # fails the build on any deviation: first use never resolves or fetches.
-COPY chrome-devtools-mcp/ /opt/agent-vm/chrome-devtools-mcp/
+COPY data/chrome-devtools-mcp/ /opt/agent-vm/chrome-devtools-mcp/
 RUN --mount=type=bind,source=chrome-devtools-mcp.sh,target=/tmp/chrome-devtools-mcp.sh,ro \
     sh /tmp/chrome-devtools-mcp.sh install
 RUN chromium --version \
