@@ -1,7 +1,7 @@
 # Pi runtime payloads
 
-Pi (`@earendil-works/pi-coding-agent`, default `1.4.0`) and the two image-owned
-extension projects — the Claude bridge (`pi-claude-bridge`, default `0.8.0`) and
+Pi (`@earendil-works/pi-coding-agent`, default `1.5.0`) and the two image-owned
+extension projects — the Claude bridge (`pi-claude-bridge`, default `0.10.0`) and
 the Antigravity provider (`pi-antigravity`, default `0.11.0`) — are **reviewed
 pnpm projects**, not npm projects. Each carries the same four inputs as dsh —
 `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `pnpm-inputs.sha256`
@@ -93,17 +93,21 @@ Docker CMD. Registration probes are not authenticated session evidence.
 | `prepare-project.py` | The one owning process for a changed/refreshed selection: candidate stage, import or resolve, comparison, pin, frozen validation, four-input publication | Parsing YAML independently, a fallback route, a caller-supplied policy switch |
 
 Reviewed family expectations (independently authored, not derived from an
-installed tree): 1.4.0 reaches six members with root-level bins
-`core`→`pi-ai`, `ai`→`anthropic-ai-sdk`, `tui`→`marked`; 0.87.0 reaches the
-historical five including `chord`→`esbuild` and `core`→`pi-ai`,`yaml`. 1.4.0's
+installed tree): 1.5.0 reaches seven members with root-level bins
+`core`→`pi-ai`, `ai`→`anthropic-ai-sdk`, `tui`→`marked`; 1.4.0 reached six (no
+`pi-schema`); 0.87.0 reached the
+historical five including `chord`→`esbuild` and `core`→`pi-ai`,`yaml`. 1.5.0's
+`pi-schema` is a shared leaf its core/ai siblings import; 1.4.0's
 `chord` is published but unreachable and has no `esbuild` dependency.
 
 ## Registered catalog (measured, not inherited)
 
-The bridge registers **14** models on the reviewed `0.8.0` payload beside Pi
-`1.4.0`, and **11** beside the authenticated legacy `0.87.0` graph (it enumerates
-the providers the selected Pi SDK ships); the planning investigation saw 12. The
-generic verifier keeps accepting one canonical positive
+The bridge registers **14** models on the reviewed `0.10.0` payload beside Pi
+`1.5.0`, **14** on the `0.8.0` payload beside `1.4.0`, and **11** beside the
+authenticated legacy `0.87.0` graph (it enumerates
+ the providers the selected Pi SDK ships); the planning investigation saw 12. The
+provider registers **8** beside each of 1.5.0 and 1.4.0 and **9** beside 0.87.0.
+The generic verifier keeps accepting one canonical positive
 `AGENT-VM-BRIDGE-REGISTERED models=N` with a non-empty count, and the focused
 harness records both measured counts per selection so a change is a review stop.
 

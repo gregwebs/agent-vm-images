@@ -99,8 +99,8 @@ ARG AGENT_VERSION_PI=
 ARG AGENT_VERSION_PI_CLAUDE_BRIDGE=
 ARG AGENT_VERSION_PI_ANTIGRAVITY=
 
-LABEL org.agent-vm.version.pi="${AGENT_VERSION_PI:-1.4.0}" \
-      org.agent-vm.version.pi-claude-bridge="${AGENT_VERSION_PI_CLAUDE_BRIDGE:-0.8.0}" \
+LABEL org.agent-vm.version.pi="${AGENT_VERSION_PI:-1.5.0}" \
+      org.agent-vm.version.pi-claude-bridge="${AGENT_VERSION_PI_CLAUDE_BRIDGE:-0.10.0}" \
       org.agent-vm.version.pi-antigravity="${AGENT_VERSION_PI_ANTIGRAVITY:-0.11.0}"
 
 # Pi's own request is its provider-catalog refresh. Hosts reached through the
@@ -194,7 +194,7 @@ RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro 
     sh /tmp/standard-tools/pi/verify-pi.sh
 
 # codex
-ARG AGENT_VERSION_CODEX=rust-v0.159.3
+ARG AGENT_VERSION_CODEX=rust-v0.163.0
 
 LABEL org.agent-vm.version.codex="${AGENT_VERSION_CODEX}"
 LABEL org.agent-vm.network-requests.agent.codex="api.openai.com,auth.openai.com,chatgpt.com"
@@ -222,7 +222,7 @@ RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro 
     sh /tmp/verify-codex.sh
 
 # opencode
-ARG AGENT_VERSION_OPENCODE=v2.0.29
+ARG AGENT_VERSION_OPENCODE=v2.1.4
 
 LABEL org.agent-vm.version.opencode="${AGENT_VERSION_OPENCODE}"
 # Credential-free provider-catalog refresh only; provider hosts follow the user's choice.
@@ -249,7 +249,7 @@ RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro 
     sh /tmp/verify-opencode.sh
 
 # claude
-ARG AGENT_VERSION_CLAUDE=2.1.286
+ARG AGENT_VERSION_CLAUDE=2.1.319
 
 LABEL org.agent-vm.version.claude="${AGENT_VERSION_CLAUDE}"
 LABEL org.agent-vm.network-requests.agent.claude="api.anthropic.com,mcp-proxy.anthropic.com,platform.claude.com"
@@ -319,7 +319,7 @@ RUN mkdir -p /opt/agent-vm/claude-seed \
 COPY --chmod=0755 tools/claude/seed-claude-plugins.sh /opt/agent-vm/seed.d/10-claude-plugins
 
 # copilot
-ARG AGENT_VERSION_COPILOT=1.0.90
+ARG AGENT_VERSION_COPILOT=1.0.106
 
 LABEL org.agent-vm.version.copilot="${AGENT_VERSION_COPILOT}"
 # GitHub publishes one Copilot service host per plan family, and the sign-in

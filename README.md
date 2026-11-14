@@ -68,7 +68,7 @@ The equivalent convenience commands (native client platform only) are:
 bash images/build.sh base
 bash images/build.sh standard
 # Additional ordinary Docker options, as argv:
-bash images/build.sh standard -- --build-arg AGENT_VERSION_CLAUDE=2.1.286 --progress=plain
+bash images/build.sh standard -- --build-arg AGENT_VERSION_CLAUDE=2.1.319 --progress=plain
 ```
 
 The default needs Docker only. For optional host Go compilation, use

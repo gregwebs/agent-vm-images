@@ -1499,8 +1499,17 @@ class FixtureRepo:
                         pin_dir / 'claude-code-release-key.asc')
         shutil.copyfile(self.closure / 'claude_pin.py', pin_dir / 'claude_pin.py')
         dockerfile = (ROOT / 'images' / 'standard' / 'Dockerfile').read_text()
-        dockerfile = dockerfile.replace(f'{DOCKERFILE_ARG}2.1.286',
-                                        f'{DOCKERFILE_ARG}{dockerfile_version}')
+        # The fixture rewrites whatever exact Claude ARG the committed Dockerfile
+        # carries into its own synthetic version, so a reviewed bump does not
+        # leave this suite pinned to the release it last saw.
+        lines = dockerfile.splitlines(keepends=True)
+        matches = [index for index, line in enumerate(lines)
+                   if line.startswith(DOCKERFILE_ARG)]
+        if len(matches) != 1:
+            raise AssertionError('the committed Dockerfile must carry exactly one '
+                                 f'{DOCKERFILE_ARG}: {matches}')
+        lines[matches[0]] = f'{DOCKERFILE_ARG}{dockerfile_version}\n'
+        dockerfile = ''.join(lines)
         (self.root / 'images' / 'standard').mkdir(parents=True)
         (self.root / 'images' / 'standard' / 'Dockerfile').write_text(dockerfile)
         (self.root / 'script' / 'dev').mkdir(parents=True)

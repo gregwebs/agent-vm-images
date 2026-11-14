@@ -1,11 +1,15 @@
 # codex — vendored installer
 
 `install.upstream.sh` is a verbatim snapshot of OpenAI's published Codex
-installer from the exact release it installs:
+installer. Upstream did not change it between `rust-v0.159.3` and
+`rust-v0.163.0`, so one snapshot still serves the current pin byte-for-byte:
 
-- source: `https://github.com/openai/codex/releases/download/rust-v0.159.3/install.sh`
-- retrieved: 2026-10-01
+- source: `https://github.com/openai/codex/releases/download/rust-v0.163.0/install.sh`
+- retrieved: 2026-10-01 from `rust-v0.159.3`; confirmed identical in
+  `rust-v0.163.0` on 2026-11-13
 - SHA-256: `150e3cf675682efeaac115aa3747add3f27887896d04ce6d0b56478d8b428bf6`
+- first upstream change: `rust-v0.164.0`, whose `install.sh` the committed
+  `install.patch` no longer applies to
 
 It is provenance, not an executable guard target, and is never run. The snapshot
 is byte-identical to the release asset.

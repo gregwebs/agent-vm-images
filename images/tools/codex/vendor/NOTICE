@@ -5,10 +5,11 @@ are derived from OpenAI's published Codex installer and are redistributed here
 under the upstream project's license.
 
 - upstream project: `openai/codex` (https://github.com/openai/codex)
-- pinned release: `rust-v0.159.3`
+- pinned release: `rust-v0.163.0` (snapshot bytes are identical back to the
+  `rust-v0.159.3` release they were retrieved from)
 - snapshot source:
-  `https://github.com/openai/codex/releases/download/rust-v0.159.3/install.sh`
-- retrieved: 2026-10-01
+  `https://github.com/openai/codex/releases/download/rust-v0.163.0/install.sh`
+- retrieved: 2026-10-01; re-verified identical 2026-11-13
 - snapshot SHA-256: `150e3cf675682efeaac115aa3747add3f27887896d04ce6d0b56478d8b428bf6`
 - license: Apache License 2.0 (SPDX: `Apache-2.0`)
 - copyright: Copyright 2025 OpenAI

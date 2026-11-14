@@ -45,6 +45,12 @@ assert_absent() {
 }
 
 [[ -d "$REPO_ROOT/images/tools/pi" ]] || fail "the committed Pi project is missing"
+# The committed selection's own version, read from the owning manifest: these
+# cases exercise *that* selection, so a reviewed bump must move them with it
+# rather than leave a stale number and a missing dispatch expectation behind.
+PI_SELECTION="$(jq -er '.dependencies["@earendil-works/pi-coding-agent"]' \
+    "$REPO_ROOT/images/tools/pi/package.json")" ||
+    { echo 'error: cannot read the committed Pi selection' >&2; exit 1; }
 REAL_JQ="$(command -v jq || true)"
 REAL_PYTHON="$(command -v python3 || true)"
 # The composed Go helper: the four-input case needs the REAL pinned-input check,
@@ -60,17 +66,17 @@ make_archive() {
     local staging
     staging="$(mktemp -d "$TEST_ROOT/archive.XXXXXX")"
     mkdir -p "$staging/package"
-    printf '{"name":"@earendil-works/pi-ai","version":"1.4.0","license":"MIT"}\n' \
+    printf '{"name":"@earendil-works/pi-ai","version":"$PI_SELECTION","license":"MIT"}\n' \
         >"$staging/package/package.json"
     printf 'export const fixture = 1;\n' >"$staging/package/index.js"
     # Built by the committed helper: Python's tarfile, no host metadata (the
     # real extractor refuses AppleDouble `._package` members, as it should).
     "$REAL_PYTHON" "$REPO_ROOT/script/test/fixtures/pi-install/make-archive.py" \
-        @earendil-works/pi-ai 1.4.0 "$destination"
+        @earendil-works/pi-ai "$PI_SELECTION" "$destination"
     rm -rf "$staging"
 }
 
-ARCHIVE="$TEST_ROOT/pi-ai-1.4.0.tgz"
+ARCHIVE="$TEST_ROOT/pi-ai-$PI_SELECTION.tgz"
 make_archive "$ARCHIVE"
 ARCHIVE_SRI="sha512-$(openssl dgst -sha512 -binary "$ARCHIVE" | openssl base64 -A)"
 
@@ -93,7 +99,7 @@ new_case() {
     make_runtime_checker "$CASE/root/runtime-check.mjs"
     : >"$CASE/order.log"
     make_pi_stub "$CASE/pi-stub"
-    for version in 1.4.0 0.87.0; do
+    for version in "$PI_SELECTION" 0.87.0; do
         cp "$REPO_ROOT/images/tools/pi/dispatch/$version.txt" "$CASE/root/dispatch/$version.txt"
     done
 }
@@ -108,7 +114,7 @@ case "$1" in
         shift
         case "$1" in
             check) [ -n "${FAKE_CONTRACT_CHECK_FAIL:-}" ] && { echo 'fixture: pins disagree' >&2; exit 1; }
-                   echo 1.4.0 ;;
+                   echo "$PI_SELECTION" ;;
             graph) echo '{}' ;;
         esac
         exit 0 ;;
@@ -199,9 +205,9 @@ const args = process.argv.slice(2);
 if (args.length === 2 && args[0] === 'inventory') {
   process.stdout.write(JSON.stringify({
     platform: 'linux/arm64',
-    family: [{name: '@earendil-works/pi-ai', version: '1.4.0',
+    family: [{name: '@earendil-works/pi-ai', version: '$PI_SELECTION',
               integrity: '$ARCHIVE_SRI',
-              tarball: 'https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-1.4.0.tgz'}],
+              tarball: 'https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-$PI_SELECTION.tgz'}],
     providers: [],
   }) + '\n');
   process.exit(0);
@@ -301,7 +307,7 @@ mkdir -p "$WORK_PARENT"
 before="$(cd "$CASE/root/pi" && shasum -a 256 package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256 2>/dev/null || sha256sum package.json pnpm-lock.yaml pnpm-workspace.yaml pnpm-inputs.sha256)"
 run_installer
 [[ $RUN_STATUS -eq 0 ]] || fail "the installer failed: $RUN_ERROR"
-assert_contains "$RUN_OUTPUT" 'installed pi 1.4.0 from the reviewed inputs'
+assert_contains "$RUN_OUTPUT" "installed pi $PI_SELECTION from the reviewed inputs"
 assert_contains "$RUN_OUTPUT" '1/1 Pi sibling archives and installed bytes verified'
 # Installed Pi code is the last thing that may run: the authenticated byte proof and
 # the runtime identity proof both precede the `--help` that executes the payload.
@@ -316,7 +322,7 @@ assert_contains "$RUN_OUTPUT" '1/1 Pi sibling archives and installed bytes verif
 # The dispatch list is data: one canonical sorted word per line, 0644.
 dispatch="$CASE/root/pi/agent-vm-subcommands"
 [[ -f "$dispatch" ]] || fail 'the installer did not publish the subcommand list'
-[[ "$(cat "$dispatch")" == "$(cat "$REPO_ROOT/images/tools/pi/dispatch/1.4.0.txt")" ]] ||
+[[ "$(cat "$dispatch")" == "$(cat "$REPO_ROOT/images/tools/pi/dispatch/$PI_SELECTION.txt")" ]] ||
     fail "the published subcommand list is [$(tr '\n' ' ' <"$dispatch")]"
 [[ "$(ls -l "$dispatch" | cut -c1-10)" == -rw-r--r-- ]] ||
     fail "the subcommand list is not 0644: $(ls -l "$dispatch")"
@@ -380,7 +386,7 @@ process.stderr.write('check-installed-bytes.mjs: pi-ai dist/index.js does not ma
 process.exit(1);
 JS
 cat >"$CASE/inventory.json" <<JSON
-{"platform":"linux/arm64","family":[{"name":"@earendil-works/pi-ai","version":"1.4.0","integrity":"$ARCHIVE_SRI","tarball":"https://registry.npmjs.org/x.tgz"}],"providers":[]}
+{"platform":"linux/arm64","family":[{"name":"@earendil-works/pi-ai","version":"$PI_SELECTION","integrity":"$ARCHIVE_SRI","tarball":"https://registry.npmjs.org/x.tgz"}],"providers":[]}
 JSON
 run_installer
 require_hard 'pi-ai dist/index.js does not match the authenticated archive bytes'
@@ -395,16 +401,16 @@ assert_contains "$RUN_ERROR" 'reviewed inputs failed pinned-input validation'
 [[ ! -s "$CASE/manager.log" ]] || fail 'tampered inputs reached the manager'
 
 new_case no-dispatch-expectation
-rm "$CASE/root/dispatch/1.4.0.txt"
+rm "$CASE/root/dispatch/$PI_SELECTION.txt"
 run_installer
-require_hard 'no reviewed dispatch expectation for Pi 1.4.0'
+require_hard "no reviewed dispatch expectation for Pi $PI_SELECTION"
 
 new_case dispatch-drift
-# A Pi whose `--help` advertises a different set than the reviewed 1.4.0 list.
+# A Pi whose `--help` advertises a different set than the reviewed list.
 sed -i.bak '/pi mcp /d' "$CASE/pi-stub" 2>/dev/null || true
 rm -f "$CASE/pi-stub.bak"
 run_installer
-require_hard 'the reviewed 1.4.0 list is'
+require_hard "the reviewed $PI_SELECTION list is"
 
 # --- the curl-only soft branch ----------------------------------------------
 for soft in 1 0; do

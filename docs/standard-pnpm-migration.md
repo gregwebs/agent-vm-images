@@ -319,8 +319,9 @@ workspace, the settings, an override selector or a record outside that closure.
   with native `@esbuild/linux-arm64`, the seven-command dispatch list, both
   records, and the harness's own pre-preparation SRI as the comparator anchor. See
   ADR 0011's implementation-status section.
-- **Measured, not inherited.** The reviewed bridge `0.8.0` registers **14** models
-  beside Pi `1.4.0` and **11** beside the authenticated legacy `0.87.0` graph (it
+- **Measured, not inherited.** The reviewed bridge `0.10.0` registers **14** models
+  beside Pi `1.5.0`, `0.8.0` registered **14** beside `1.4.0`, and **11** beside the
+  authenticated legacy `0.87.0` graph (it
   enumerates the providers the selected Pi SDK ships); the planning investigation
   recorded 12. The focused harness records both counts per selection (a change is
   a review stop) while the verifier keeps accepting one canonical positive

@@ -164,6 +164,14 @@ NATIVE_PAYLOAD = {
 # generated `.bin` inventory; the link *targets* are still derived from each
 # authenticated/installed dependency's own `bin` declaration and locked edge.
 PI_FAMILY = {
+    '1.5.0': {
+        'members': ('pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp', 'pi-schema',
+                    'pi-telemetry', 'pi-tui'),
+        'direct': ('pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp', 'pi-tui'),
+        'bins': {'pi-agent-core': ('pi-ai',), 'pi-ai': ('anthropic-ai-sdk',),
+                 'pi-codemode': (), 'pi-mcp': (), 'pi-schema': (), 'pi-telemetry': (),
+                 'pi-tui': ('marked',)},
+    },
     '1.4.0': {
         'members': ('pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp', 'pi-telemetry', 'pi-tui'),
         'direct': ('pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp', 'pi-tui'),

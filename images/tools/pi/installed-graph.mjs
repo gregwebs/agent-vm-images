@@ -27,13 +27,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const ROOT_SCOPE = '@earendil-works';
-const FAMILY_VOCABULARY = ['chord', 'pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp', 'pi-telemetry', 'pi-tui'];
-// The two reviewed reachable shapes, selected by authenticated membership rather
-// than by a version threshold: the historical release that still ships `chord`
-// and the modern release that ships codemode/mcp instead.
+const FAMILY_VOCABULARY = ['chord', 'pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp', 'pi-schema',
+  'pi-telemetry', 'pi-tui'];
+// The three reviewed reachable shapes, selected by authenticated membership
+// rather than by a version threshold: the historical release that still ships
+// `chord`, the release that ships codemode/mcp instead, and the release that adds
+// the shared `pi-schema` package its siblings import.
 const REVIEWED_FAMILY_SHAPES = [
   ['chord', 'pi-agent-core', 'pi-ai', 'pi-telemetry', 'pi-tui'],
   ['pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp', 'pi-telemetry', 'pi-tui'],
+  ['pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp', 'pi-schema', 'pi-telemetry', 'pi-tui'],
 ];
 const VIRTUAL_STORE = path.join('node_modules', '.pnpm');
 const GRAPH_TIMEOUT_MS = 120_000;

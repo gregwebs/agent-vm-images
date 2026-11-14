@@ -68,6 +68,12 @@ EXACT = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
 # every package-root generated `.bin` command. Written from the authenticated
 # archive manifests during review; never derived from an installed tree.
 PI_FAMILY = {
+    '1.5.0': {'members': ('pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp', 'pi-schema',
+                          'pi-telemetry', 'pi-tui'),
+              'direct': ('pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp', 'pi-tui'),
+              'bins': {'pi-agent-core': ('pi-ai',), 'pi-ai': ('anthropic-ai-sdk',),
+                       'pi-codemode': (), 'pi-mcp': (), 'pi-schema': (), 'pi-telemetry': (),
+                       'pi-tui': ('marked',)}},
     '1.4.0': {'members': ('pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp',
                           'pi-telemetry', 'pi-tui'),
               'direct': ('pi-agent-core', 'pi-ai', 'pi-codemode', 'pi-mcp', 'pi-tui'),
@@ -83,7 +89,8 @@ PI_FAMILY = {
 PI_ROOT = '@earendil-works/pi-coding-agent'
 PI_ROOT_BIN = 'dist/bundle/cli.js'
 # The reviewed per-selection subcommand lists the installer publishes as data.
-DISPATCH = {'1.4.0': ('auth', 'config', 'install', 'list', 'mcp', 'remove', 'uninstall', 'update'),
+DISPATCH = {'1.5.0': ('auth', 'config', 'install', 'list', 'mcp', 'remove', 'uninstall', 'update'),
+            '1.4.0': ('auth', 'config', 'install', 'list', 'mcp', 'remove', 'uninstall', 'update'),
             '0.87.0': ('auth', 'config', 'install', 'list', 'remove', 'uninstall', 'update')}
 # `pi --help` on 1.4.0 advertises no chord/esbuild transform dependency; the
 # historical selection ships chord and its native esbuild package.
@@ -94,6 +101,9 @@ MODERN_ABSENT = ('@earendil-works/chord', 'esbuild')
 # 2026-10-28, linux/arm64) registered 14. The same bridge payload beside the
 # authenticated legacy Pi 0.87.0 graph registered 11: the bridge enumerates the
 # providers the selected Pi SDK ships, and 0.87.0 ships an older, smaller catalog.
+# The 1.5.0 + 0.10.0 pair registered 14 and the 0.87.0 + 0.10.0 pair 11, both
+# measured on linux/arm64 on 2026-11-13 (the second pair is what the
+# changed-selection leg installs: a changed Pi beside the committed bridge).
 # Both numbers are measurements of a verified graph (the byte proof and the
 # independent shrinkwrap comparison pass in the same run), recorded here so a
 # *change* still fails: an unknown pair or a different count is a stop for review,
@@ -101,15 +111,17 @@ MODERN_ABSENT = ('@earendil-works/chord', 'esbuild')
 # is not the proof -- `resolution_leg` pins the resolved bridge and SDK directories
 # -- so keying this table by the Pi version only would let a bridge bump inherit a
 # number nobody measured.
-BRIDGE_MODELS = {('1.4.0', '0.8.0'): 14, ('0.87.0', '0.8.0'): 11}
+BRIDGE_MODELS = {('1.5.0', '0.10.0'): 14, ('1.4.0', '0.8.0'): 14,
+                  ('0.87.0', '0.10.0'): 11, ('0.87.0', '0.8.0'): 11}
 # The provider's registered catalog, measured on the reviewed 0.11.0 payload
-# beside each reviewed Pi selection: 8 beside 1.4.0 and 9 beside 0.87.0. The
-# count follows the selected Pi SDK's own model catalog, exactly as the bridge's
-# does (14 versus 11), so it is a per-selection measurement and never a constant.
+# beside each reviewed Pi selection: 8 beside 1.5.0, 8 beside 1.4.0 and 9 beside
+# 0.87.0. The count follows the selected Pi SDK's own model catalog, exactly as
+# the bridge's does (14 versus 11), so it is a per-selection measurement and never
+# a constant.
 # It is an independent expectation authored from those measurements, never
 # derived from the installed tree; a different number is a review stop
 # (ADR 0016).
-PROVIDER_MODELS = {('1.4.0', '0.11.0'): 8, ('0.87.0', '0.11.0'): 9}
+PROVIDER_MODELS = {('1.5.0', '0.11.0'): 8, ('1.4.0', '0.11.0'): 8, ('0.87.0', '0.11.0'): 9}
 # The three reviewed representation normalisations of the authenticated 0.87.0
 # shrinkwrap -> pnpm import conversion (ADR 0011, pending operator acceptance).
 # They are named explicitly so any *new* delta fails instead of averaging in.

@@ -90,7 +90,16 @@ interest in it; it is not supported, certified or security-reviewed here.
 
 ## Image-owned Claude plugin
 
-OpenCode is pinned to v2.0.29 and `@openchamber/opencode-claude` to 1.4.1.
+OpenCode is pinned to v2.1.4 and `@openchamber/opencode-claude` to 1.4.1. The pin
+stops at 2.1.4 because 2.2.0 (measured 2026-11-13) no longer loads this plugin: the
+image's own probe fails there with "expected one active local Claude plugin", and
+upstream marks every plugin release from 1.4.2 on deprecated because OpenCode
+2.2.3+ supports Claude Code natively. Moving past 2.1.4 therefore needs the
+native-Claude-Code migration or plugin removal, not a version edit.
+Every published version from `1.4.2` on is marked deprecated upstream ("no longer
+needed: OpenCode 2.2.3+ supports Claude Code natively"), so `1.4.1` is the last
+release whose purpose upstream still documents. Bumping it is therefore not
+maintenance: replacing or removing the plugin is an open maintainer decision.
 This is the named exception in the [installer policy](../README.md); credential
 replay is prohibited, and no general community-plugin exemption is implied.
 Registration is not account eligibility, quota, authentication or a successful
