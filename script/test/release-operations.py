@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import gzip
+import inspect
 import io
+import re
 import shutil
 import tarfile
+import tokenize
+from collections.abc import Iterator
 from dataclasses import replace
 import hashlib
 import importlib.util
@@ -485,10 +489,99 @@ def commit_fixture(repo: Path) -> str:
     # fixture, including the release code's; tolerant cleanup would also hide real leaks.
     # gc.auto=0 covers older git, where commit ran gc --auto itself. A global core.fsmonitor=true
     # (Scalar sets it) makes the first index read detach `git fsmonitor--daemon` into .git (#89).
+    # FixtureRepositoryTests then reads the suite's own sources for git init/commit outside this
+    # function, so a hand-rolled fixture fails there rather than flaking here. That census is a
+    # source-shape assertion, not a behaviour test: a legitimate new pattern (a shell fixture, a
+    # clone) needs a reviewed HAND_ROLLED_EXEMPT entry, and it cannot see a fixture that copies
+    # these pins correctly by hand.
     for argv in (['init', '-q'], ['config', 'maintenance.auto', 'false'], ['config', 'gc.auto', '0'],
                  ['config', 'core.fsmonitor', 'false'], ['add', '.'], [*FIXTURE_AUTHOR, 'commit', '-qm', 'fixture']):
         subprocess.run(['git', '-C', str(repo), *argv], check=True, capture_output=True)
     return subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).decode().strip()
+
+
+# The subcommands that mark a hand-rolled repository: a fixture runs init before it commits, and commit is
+# what starts a maintenance child.
+REPOSITORY_WRITING_SUBCOMMANDS = frozenset({'init', 'commit'})
+
+# Fixture repositories the census reviewed outside commit_fixture(): the reviewed site count, then why that
+# count is right. A legitimate new hand-rolled pattern is a deliberate edit here, so the number is the
+# review and not a permit for the next site in the same file.
+HAND_ROLLED_EXEMPT = {
+    'script/test/ci-boot-bind.sh': (3, 'pins both repositories itself, by value and by effect (#85, #92)'),
+    'script/test/base-inputs.py': (2, 'commits in setUp and is removed only with the whole fixture, not next to a commit'),
+    'script/test/parent-pins.py': (3, 'commits while the fixture is still in use; no commit sits next to its removal'),
+    'script/test/recipe-contract-oracle.py': (1, 'init only: a repository with no commit starts no maintenance child'),
+    'script/test/release-operations.py': (2, 'the #85 controls, which must re-enable maintenance to prove both directions'),
+}
+
+SITE_WORD = re.compile(r'[A-Za-z_][\w.-]*')
+SITE_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"|\'[^\']*\'')
+SITE_COMMENT = re.compile(r'(^|\s)#.*$')
+
+
+def literal_words(token: str) -> list[str]:
+    """The words a string literal contributes, prose excluded.
+
+    An argv element ('commit') is one word. A whole-command literal ('git commit -qm x') counts only when it
+    starts with git, so a docstring or a failure message that happens to name git and a commit cannot pass
+    for a call site.
+    """
+    body = token.lstrip('rbuRBUfF')
+    if body[:1] in ('"', "'"):
+        body = body[1:body.rindex(body[0])] if body[0] in body[1:] else ''
+    words = body.split()
+    return words if len(words) == 1 or words[:1] == ['git'] else []
+
+
+def shell_statements(path: Path) -> Iterator[tuple[int, list[str]]]:
+    """Words per shell command; continuations joined, quoted text and comments dropped so a message is not a call."""
+    words, start = [], None
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        if start is None:
+            if not line.strip() or line.lstrip().startswith('#'):
+                continue
+            start = number
+        words.extend(SITE_WORD.findall(SITE_QUOTED.sub(' ', SITE_COMMENT.sub(' ', line))))
+        if not line.rstrip().endswith('\\'):
+            yield start, words
+            words, start = [], None
+    if words:
+        yield start, words
+
+
+def python_statements(path: Path) -> Iterator[tuple[int, list[str]]]:
+    """Words per logical line: the tokenizer keeps a multi-line argv literal whole where line joining would not."""
+    words, start = [], None
+    for token in tokenize.generate_tokens(io.StringIO(path.read_text()).readline):
+        if token.type == tokenize.NEWLINE:
+            if words:
+                yield start, words
+            words, start = [], None
+        elif token.type in (tokenize.NAME, tokenize.STRING):
+            start = token.start[0] if start is None else start
+            words.extend([token.string] if token.type == tokenize.NAME else literal_words(token.string))
+    if words:
+        yield start, words
+
+
+def hand_rolled_repository_sites() -> dict[str, list[int]]:
+    """Suite source statements (Python and shell; an .mjs suite is not scanned) that name git and write a repository."""
+    helper_file = Path(inspect.getsourcefile(commit_fixture)).resolve().relative_to(ROOT).as_posix()
+    helper_source, helper_first = inspect.getsourcelines(commit_fixture)
+    helper_lines = set(range(helper_first, helper_first + len(helper_source)))
+    sites: dict[str, list[int]] = {}
+    for path in sorted(p for p in (ROOT / 'script/test').rglob('*') if p.suffix in ('.py', '.sh')):
+        name = path.relative_to(ROOT).as_posix()
+        statements = shell_statements(path) if path.suffix == '.sh' else python_statements(path)
+        for line, words in statements:
+            if name == helper_file and line in helper_lines:
+                continue
+            # git must be named before its subcommand: `rev-parse '^{commit}'` and prose are not call sites.
+            if any(word == 'git' and REPOSITORY_WRITING_SUBCOMMANDS.intersection(words[index + 1:])
+                   for index, word in enumerate(words)):
+                sites.setdefault(name, []).append(line)
+    return sites
 
 
 def build_repo(base: Path) -> tuple[Path, str]:
@@ -547,6 +640,24 @@ def stop_fsmonitor_daemons(*repos: Path) -> list[str]:
 
 
 class FixtureRepositoryTests(unittest.TestCase):
+    def test_fixture_repositories_are_created_only_by_commit_fixture(self):
+        """A hand-rolled fixture reintroduces the #85 cleanup race, so the suite refuses to hold one."""
+        problems = []
+        for name, lines in sorted(hand_rolled_repository_sites().items()):
+            reviewed, reason = HAND_ROLLED_EXEMPT.get(name, (0, 'no reviewed exemption'))
+            if len(lines) != reviewed:
+                problems.append(f'{name}: ' + ', '.join(map(str, lines))
+                                + f' (reviewed {reviewed}: {reason})')
+        if problems:
+            self.fail(
+                'hand-rolled fixture repository outside commit_fixture():\n  '
+                + '\n  '.join(problems)
+                + "\nA fixture that runs git init/add/commit itself reintroduces the race #85 removed: the"
+                " commit's detached `git maintenance run --auto` is still writing .git when the test removes"
+                " the directory, so cleanup fails with `ENOTEMPTY: '.git'`. Build the fixture with"
+                ' commit_fixture() in script/test/release-operations.py, or review the site into'
+                ' HAND_ROLLED_EXEMPT with a one-line reason.')
+
     def test_fixture_commit_leaves_no_background_maintenance(self):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory) / 'repo'; repo.mkdir()
