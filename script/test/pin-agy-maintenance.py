@@ -21,6 +21,7 @@ needs an older committed agy closure than the release it serves).
 from __future__ import annotations
 
 import argparse
+import datetime
 import gzip
 import importlib.util
 import io
@@ -574,6 +575,82 @@ def case_repeat_is_byte_identical(work: Path) -> None:
     report('only the re-rendered manifest changes; the other keeps its bytes')
 
 
+def case_clock(work: Path) -> None:
+    """`verified_on` is the UTC date, and a repeat keeps the committed date.
+
+    The two extreme zones differ from UTC in opposite directions (Kiritimati is
+    UTC+14, Etc/GMT+12 is UTC-12), so at least one of them always has a local date
+    other than the UTC date. Running both is what makes a writer that stamps the
+    host's local date fail at every hour instead of at some of them.
+    """
+    utc_now = datetime.datetime.now(datetime.timezone.utc)
+    zones = (('Pacific/Kiritimati', datetime.timedelta(hours=14)),
+             ('Etc/GMT+12', datetime.timedelta(hours=-12)))
+    differing = [zone for zone, offset in zones
+                 if (utc_now + offset).date() != utc_now.date()]
+    if not differing:
+        fail('a candidate zone has a local date other than the UTC date',
+             str([zone for zone, _ in zones]))
+        return
+
+    for zone in [zone for zone, _ in zones]:
+        case = work / f'clock-{zone.replace("/", "-")}'
+        repo = Repository(case / 'repo')
+        assets = Assets(case / 'assets', Upstream())
+        before = datetime.datetime.now(datetime.timezone.utc).date()
+        result = run_writer(repo, '--version', VERSION, assets=assets,
+                            environment={'TZ': zone})
+        after = datetime.datetime.now(datetime.timezone.utc).date()
+        if result.returncode != 0:
+            fail(f'a writer under TZ={zone} publishes', result.stderr.strip())
+            return
+        stamped = json.loads(repo.read(f'{PIN_DIRECTORY}/pin.json'))[
+            'authentication']['verified_on']
+        # A run that straddles UTC midnight legitimately stamps either date.
+        if stamped not in (before.isoformat(), after.isoformat()):
+            fail(f'a writer under TZ={zone} stamps the UTC date',
+                 f'it stamped {stamped}, not the UTC date {after}')
+            return
+        report(f'a writer under TZ={zone} stamps the UTC date {after}')
+
+    # A same-release repeat keeps the committed `verified_on` instead of moving it
+    # to today's UTC date, so a UTC stamp cannot perturb a byte-identical re-pin.
+    case = work / 'clock-repeat'
+    repo = Repository(case / 'repo')
+    assets = Assets(case / 'assets', Upstream(VERSION, download_count=4111))
+    result = run_writer(repo, '--version', VERSION, assets=assets,
+                        environment={'TZ': differing[0]})
+    if result.returncode != 0:
+        fail('the committed closure for the repeat run', result.stderr.strip())
+        return
+    pin_path = f'{PIN_DIRECTORY}/pin.json'
+    raw = repo.read(pin_path)
+    published_on = json.loads(raw)['authentication']['verified_on']
+    field = f'"verified_on": "{published_on}"'.encode()
+    if raw.count(field) != 1:
+        fail('the committed closure carries exactly one verified_on',
+             f'{raw.count(field)} occurrences')
+        return
+    pinned_on = '2026-01-02'
+    repo.write(pin_path, raw.replace(field, f'"verified_on": "{pinned_on}"'.encode()))
+    before = repo.tree()
+    assets.write(Upstream(VERSION, download_count=9999))
+    result = run_writer(repo, '--version', VERSION, assets=assets,
+                        environment={'TZ': differing[0]})
+    if result.returncode != 0:
+        fail('a dated same-release repeat publishes', result.stderr.strip())
+        return
+    if 'unchanged' not in result.stdout:
+        fail('a dated same-release repeat reports unchanged', result.stdout.strip())
+        return
+    if repo.tree() != before:
+        fail('a dated same-release repeat keeps every committed byte',
+             'the tree changed')
+        return
+    report(f'a same-release repeat under TZ={differing[0]} keeps verified_on '
+           f'{pinned_on}')
+
+
 def case_adoption_and_dockerfile(work: Path) -> None:
     """A first adoption, a partial old state, and the three Dockerfile shapes.
 
@@ -979,6 +1056,7 @@ def main() -> int:
         case_proposal_only_tamper(work)
         case_latest_only_and_rewrite(work)
         case_repeat_is_byte_identical(work)
+        case_clock(work)
         case_adoption_and_dockerfile(work)
         case_ci_and_origins(work)
         case_module_binding(work)

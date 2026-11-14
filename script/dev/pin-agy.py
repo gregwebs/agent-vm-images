@@ -448,6 +448,18 @@ def _write_proposal(files: Mapping[str, bytes], directory: Path) -> None:
         path.write_bytes(raw)
 
 
+def utc_today() -> datetime.date:
+    """The date `verified_on` is stamped with, in UTC.
+
+    A pin is written on one maintainer host and read by reviewers and builders in
+    every zone, so the stamp has to be one instant rather than the writer's local
+    calendar: a local stamp west of UTC records yesterday and misattributes the
+    review, and east of UTC it records a date UTC readers still see as tomorrow
+    (#136).
+    """
+    return datetime.datetime.now(datetime.timezone.utc).date()
+
+
 def stage_agy(version: str, repo_root: Path, work: Path, *,
               fetch: Fetcher) -> StagedAgy:
     """Resolve, corroborate, preflight and render one release. Writes only in `work`."""
@@ -484,7 +496,7 @@ def stage_agy(version: str, repo_root: Path, work: Path, *,
                 for platform in model.PLATFORMS}
 
     same_release = committed is not None and committed.version == version
-    verified_on = datetime.date.today().isoformat()
+    verified_on = utc_today().isoformat()
     if same_release:
         for platform in model.PLATFORMS:
             archive = archives[platform]

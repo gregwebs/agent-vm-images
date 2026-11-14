@@ -972,7 +972,7 @@ def stage_codex(release: str, repo_root: Path, work: Path, *,
         checksums = (repo_root / CHECKSUMS_FILE).read_bytes()
         verified_on = committed.authentication.verified_on
     else:
-        verified_on = datetime.date.today()
+        verified_on = module.utc_today()
 
     staged: dict[str, bytes] = {
         PIN_FILE: _render_pin(module, release, version, metadata, checksums,
