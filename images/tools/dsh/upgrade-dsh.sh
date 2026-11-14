@@ -39,7 +39,6 @@ REPO_ROOT="$(cd "$DIR/../../.." && pwd -P)"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/script/build/transactional-publish.sh"
 require_tools jq npm node python3 timeout docker curl git
-python3 "$DIR/project.py" guard "$DIR"
 base=$(jq -er .version "$REPO_ROOT/images/pnpm/pin.json")
 [ "$base" = 11.11.0 ] || fail 'unsupported base manager'
 [ -z "$pnpm_version" ] || [ "$pnpm_version" = "$base" ] || fail '--pnpm must equal the reviewed base pin'
@@ -47,12 +46,14 @@ base=$(jq -er .version "$REPO_ROOT/images/pnpm/pin.json")
 # The contract directory executes policy, so project.py authorizes it before the
 # first graph check. A caller-selected directory is authorized by the same rules
 # as a build mount or a fixture copy; an unset one means a host checkout, whose
-# composed helper comes from the native adapter it also authorizes below.
+# composed helper comes from the native adapter below. The build therefore has to
+# precede the guard, which authorizes the directory before executing anything in it.
 if [ -z "${AGENT_VM_CONTRACT_DIR-}" ]; then
     context=$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native) ||
         fail 'cannot build the native recipe-contract helper'
     export AGENT_VM_CONTRACT_DIR="$context/out"
 fi
+python3 "$DIR/project.py" guard "$DIR"
 CONTRACT=$(python3 "$DIR/project.py" contract-dir "$DIR") || fail 'contract directory rejected'
 "$CONTRACT/recipe-contract" pnpm-lock check dsh "$DIR"
 current=$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$DIR/package.json")
