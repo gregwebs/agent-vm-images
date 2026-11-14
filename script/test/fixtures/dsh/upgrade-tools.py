@@ -194,6 +194,15 @@ def main():
             # between two of the five copies.
             time.sleep(float(os.environ.get('DSH_TEST_SLEEP_SECONDS', '2')))
         return subprocess.call(['/bin/cp', *args])
+    if name == 'rm':
+        # The EXIT-trap scratch removal fails only for the case that asks for it,
+        # exactly as a real `rm -rf` does when the redirected HOME holds a
+        # read-only entry (#138). Every other removal is the real one.
+        failing = os.environ.get('DSH_TEST_RM_FAILS', '')
+        if args[:1] == ['-rf'] and failing and args[-1].startswith(failing):
+            print('rm: ' + args[-1] + '/home/.cache/go-build: Permission denied', file=sys.stderr)
+            return 1
+        return subprocess.call(['/bin/rm', *args])
     if name == 'go':
         # The consumer harness records the mounted helper's compiler; the fixture
         # context is not a real Go binary, so `go version BINARY` is fixture data.

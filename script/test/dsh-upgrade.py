@@ -91,7 +91,7 @@ class Case:
         native = self.tools / 'tools.py'
         native.write_text('#!' + sys.executable + '\n' + script.split('\n', 1)[1])
         native.chmod(0o755)
-        for tool in ['npm', 'pnpm-fixture', 'cp', 'docker', 'python3', 'git', 'go']:
+        for tool in ['npm', 'pnpm-fixture', 'cp', 'docker', 'python3', 'git', 'go', 'rm']:
             (self.tools / tool).symlink_to('tools.py')
         # The authorized manager seam intentionally refuses symlink executables.
         (self.tools / 'pnpm-fixture').unlink()
@@ -122,11 +122,13 @@ class Case:
                         DSH_TEST_REPO=str(ROOT), DSH_TEST_GRAPH=str(self.graph), DSH_TEST_LOG=str(self.log),
                         DSH_TEST_TARGETS=json.dumps(list(map(str, self.targets))), AVM_FAKE_STATE=str(self.state))
 
-    def run(self, args=(), mode='', gate='positive', publish='', rollback='', upstream=''):
+    def run(self, args=(), mode='', gate='positive', publish='', rollback='', upstream='',
+            cleanup_failure=False):
         self.log.write_text('')
         self.state.write_text(json.dumps({'commands': [], 'containers': [], 'volume': None, 'network': None}))
         env = dict(self.env, DSH_TEST_MODE=mode, AVM_FAKE_CASE=gate, DSH_TEST_PUBLISH=str(publish),
-                   DSH_TEST_ROLLBACK=str(rollback), DSH_TEST_UPSTREAM=upstream)
+                   DSH_TEST_ROLLBACK=str(rollback), DSH_TEST_UPSTREAM=upstream,
+                   DSH_TEST_RM_FAILS=str(self.root / 'dsh-upgrade.') if cleanup_failure else '')
         with tempfile.TemporaryFile() as output:
             result = subprocess.run(['/bin/bash', str(self.prefix / 'upgrade-dsh.sh'), *args], env=env, stdout=output, stderr=output, timeout=70)
             output.seek(0)
@@ -469,6 +471,31 @@ def main():
         assert json.loads(case.targets[0].read_text())['dependencies']['@deepseek-ai/dsh'] == '0.1.5-rc.1'
         case.clean()
         print('dsh upgrade: signal after the recovery decision exits 3 and keeps recovery PASS')
+        # #138: the EXIT trap must report the status the script decided, not the
+        # removal's. The fixture `rm` fails for this case's own scratch alone,
+        # exactly as a real `rm -rf` does when the redirected HOME holds a
+        # read-only Go cache entry. The publication already completed, so the run
+        # still reports success and names the leftover once; nothing is retained
+        # as recovery material, because nothing is left to recover.
+        case = Case(root, 'cleanup-failure', fast_gate=True)
+        assert case.run(cleanup_failure=True) == 0, (case.status, case.output)
+        assert 'Permission denied' in case.output, case.output
+        failures = [line for line in case.output.splitlines()
+                    if line.startswith('error: invocation scratch cleanup failed; ')]
+        assert len(failures) == 1, case.output
+        leftover = Path(failures[0].split('; ', 1)[1].rsplit(' left behind', 1)[0])
+        assert leftover.is_absolute() and leftover.parent == case.root.resolve(), failures[0]
+        assert (leftover / 'final/pnpm-workspace.yaml').is_file(), failures[0]
+        assert '==> pinned @deepseek-ai/dsh@0.1.5-rc.2' in case.output, case.output
+        assert 'error: recovery material retained' not in case.output, case.output
+        assert json.loads(case.targets[0].read_text())['dependencies']['@deepseek-ai/dsh'] == '0.1.5-rc.2', case.output
+        assert case.targets[-1].read_bytes() == case.dockerfile_with_label('0.1.5-rc.2'), case.output
+        # Remove what the injected failure left behind: the scratch is real, so the
+        # suite stays re-runnable.
+        shutil.rmtree(leftover)
+        assert not leftover.exists()
+        case.clean()
+        print('dsh upgrade: a failed scratch cleanup keeps the decided success PASS')
         case = Case(root, 'final-drift', fast_gate=True)
         proposal = case.root / 'reviewed.json'
         proposal.write_text(json.dumps(expected))
