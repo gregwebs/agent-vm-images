@@ -15,7 +15,7 @@
 # restored); 2 usage; 3 undecided or incomplete recovery ($work retained and
 # printed); 128+N when a signal arrives and the sources were restored.
 set -euo pipefail
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=/dev/null
 . "$ROOT/script/build/transactional-publish.sh"
 

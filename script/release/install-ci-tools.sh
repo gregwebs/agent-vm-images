@@ -2,7 +2,7 @@
 # Provision only invocation-owned tools on disposable Actions Linux hosts.
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 [ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_OS:-}" = Linux ] || { echo 'disposable Linux Actions runner only' >&2; exit 1; }
 case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) exit 1 ;; esac
 bash "$ROOT/script/ci/apt-install.sh" skopeo coreutils jq python3

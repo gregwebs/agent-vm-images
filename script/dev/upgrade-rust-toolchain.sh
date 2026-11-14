@@ -16,7 +16,7 @@ set -euo pipefail
 # Ordinary checks must not write generated state into the checkout: every
 # Python child (including the test launcher) inherits this.
 export PYTHONDONTWRITEBYTECODE=1
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=/dev/null
 . "$ROOT/script/build/transactional-publish.sh"
 

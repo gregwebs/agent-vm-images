@@ -45,10 +45,7 @@
 
 set -euo pipefail
 
-case "${BASH_SOURCE[0]}" in
-    */*) script_dir_path="${BASH_SOURCE[0]%/*}" ;;
-    *) script_dir_path=. ;;
-esac
+script_dir_path="$(dirname "${BASH_SOURCE[0]}")"
 # shellcheck source=/dev/null
 . "$script_dir_path/npm-pin.sh"
 

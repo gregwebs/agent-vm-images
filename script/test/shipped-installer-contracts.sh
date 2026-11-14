@@ -11,7 +11,7 @@
 # cases (checksum/EINTEGRITY/unknown/arbitrary 75) are the point of the suite.
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONTRACT="$REPO_ROOT/images/recipe-contract"
 
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/installer-contracts.XXXXXX")"

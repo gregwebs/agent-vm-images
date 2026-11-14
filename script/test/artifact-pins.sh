@@ -4,4 +4,4 @@
 # beside this wrapper; see script/test/artifact-pins.py.
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
-exec python3 "${BASH_SOURCE[0]%/*}/artifact-pins.py" "$@"
+exec python3 "$(dirname "${BASH_SOURCE[0]}")/artifact-pins.py" "$@"

@@ -32,7 +32,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FIXTURES="$REPO_ROOT/script/test/fixtures/installer-egress"
 SELECTIONS="$FIXTURES/selections.tsv"
 

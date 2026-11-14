@@ -8,7 +8,7 @@
 # ways an orphaned `docker run`/buildx client could survive a harness timeout.
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WATCHDOG="$REPO_ROOT/script/test/host-watchdog.py"
 
 command -v python3 >/dev/null 2>&1 || { echo "FAIL: python3 is required" >&2; exit 1; }

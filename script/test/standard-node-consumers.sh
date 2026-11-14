@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The watchdog owns the entire invocation, including setup and cleanup.
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # Reject preload injection before any Node subprocess can start.
 [ -z "${NODE_OPTIONS:-}${NODE_PATH:-}${BUN_OPTIONS:-}" ] || {
     echo 'standard-node-consumers: manager runtime overrides are unsupported' >&2

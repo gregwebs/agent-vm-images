@@ -32,7 +32,7 @@ set -euo pipefail
 VERUS_DIR=${VERUS_DIR:-/opt/verus}
 KACHE_DIR=${KACHE_DIR:-/opt/kache}
 KACHE_SHIM_DIR=${KACHE_SHIM_DIR:-/opt/kache/shims}
-VERIFY_DIR=$(cd "${BASH_SOURCE[0]%/*}" && pwd)
+VERIFY_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export PYTHONDONTWRITEBYTECODE=1
 # The image's own PATH (see the Dockerfile): the shim farm first, so `cc` and
 # friends are kache, then the two toolchain directories.

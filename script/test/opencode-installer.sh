@@ -4,7 +4,7 @@
 # vendored installer patch reproduction.
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VENDOR_SRC="$REPO_ROOT/images/tools/opencode/vendor"
 INSTALL="$REPO_ROOT/images/tools/opencode/install-opencode.sh"
 VERIFY="$REPO_ROOT/images/tools/opencode/verify-opencode.sh"

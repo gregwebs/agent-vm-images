@@ -7,7 +7,7 @@
 # hashed into a fixture policy manifest, so the byte comparison, keyring set and
 # configuration rules under test are the real ones.
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CHECKER="$ROOT/images/apt-policy/check-sources.sh"
 COMMITTED_POLICY="$ROOT/images/apt-policy"
 work=$(mktemp -d "${TMPDIR:-/tmp}/apt-sources.XXXXXX")
