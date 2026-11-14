@@ -436,11 +436,18 @@ assert_contains "$RUN_OUTPUT" "$CASE/checkout/recipe-contract"
 
 # `/tmp/recipe-contract` is a build mount, not a directory this gate may execute
 # from. A decoy there must never run: the helpers come from contract-dir, so an
-# unset environment still resolves the authorized copy. Skipped only if a real
-# mount already occupies the path.
+# unset environment still resolves the authorized copy. An occupied path fails the
+# suite by default, because a real mount or a concurrent build would otherwise
+# remove this coverage unseen; AGENT_VM_DSH_VERIFY_SKIP_CONTRACT_DECOY (non-empty)
+# is the only opt-out, and under it the case is reported skipped, never passed.
 CONTRACT_DECOY=/tmp/recipe-contract
+CONTRACT_DECOY_SKIPPED=0
 if [ -e "$CONTRACT_DECOY" ]; then
-    echo "note: $CONTRACT_DECOY exists; the contract decoy case is skipped" >&2
+    if [ -z "${AGENT_VM_DSH_VERIFY_SKIP_CONTRACT_DECOY:-}" ]; then
+        fail "$CONTRACT_DECOY is occupied (a build mount, image build or concurrent suite is using it), so the contract decoy case cannot run; free the path or set AGENT_VM_DSH_VERIFY_SKIP_CONTRACT_DECOY=1 to run without that case"
+    fi
+    CONTRACT_DECOY_SKIPPED=1
+    echo "note: $CONTRACT_DECOY exists; contract-decoy is skipped (AGENT_VM_DSH_VERIFY_SKIP_CONTRACT_DECOY is set)" >&2
 else
     new_case contract-decoy
     stage
@@ -655,4 +662,8 @@ grep -Fq 'contract-dir "$PREFIX"' "$GATE" \
 ! grep -Fq '/tmp/recipe-contract' "$GATE" \
     || fail 'the gate names the build-mount contract path'
 
-echo 'dsh-verify black-box tests passed'
+if [ "$CONTRACT_DECOY_SKIPPED" = 1 ]; then
+    echo 'dsh-verify black-box tests passed; skipped: contract-decoy'
+else
+    echo 'dsh-verify black-box tests passed'
+fi
