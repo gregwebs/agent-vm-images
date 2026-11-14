@@ -455,6 +455,19 @@ def _platform(value: object, platform: Platform, release: str) -> PlatformPin:
                        digest=_digest(members['sha256'], f'{what} sha256'), bundle=bundle)
 
 
+def utc_today() -> datetime.date:
+    """The date `verified_on` is stamped and checked against, in UTC.
+
+    A pin is written on one maintainer host and re-checked on builders in every
+    zone, so the stamp has to be one instant rather than the writer's local
+    calendar: a local stamp east of UTC records a date UTC-or-west checkers still
+    read as tomorrow and refuse as future, which leaves a reviewed pin unbuildable
+    for up to ~14 hours (#136). `script/dev/pin-codex.py` stamps with this same
+    function, so there is one definition of "today".
+    """
+    return datetime.datetime.now(datetime.timezone.utc).date()
+
+
 def _authentication(value: object, release: str) -> Authentication:
     what = 'authentication'
     members = _object(value, AUTHENTICATION_KEYS, what)
@@ -486,7 +499,7 @@ def _authentication(value: object, release: str) -> Authentication:
         day = datetime.date.fromisoformat(verified_on)
     except ValueError:
         raise Refusal(f'{what} verified_on is not a calendar date: {verified_on!r}') from None
-    if day > datetime.date.today():
+    if day > utc_today():
         raise Refusal(f'{what} verified_on {verified_on} is in the future')
     return Authentication(verifier_version=version, trust_root=trust_root,
                           identity=found_identity, issuer=found_issuer, verified_on=day)
