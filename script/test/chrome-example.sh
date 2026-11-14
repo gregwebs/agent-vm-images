@@ -537,7 +537,7 @@ if [ "$SKIP_MUTATIONS" = true ]; then
 else
     for case in M1 M2 M3 M4; do
         ctx=$EVID/mutate/$case/context
-        mcp=$ctx/chrome-devtools-mcp
+        mcp=$ctx/data/chrome-devtools-mcp
         mkdir -p "$EVID/mutate/$case"
         cp -R examples/layers/chrome-devtools "$ctx"
         case "$case" in
