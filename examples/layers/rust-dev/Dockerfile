@@ -97,7 +97,7 @@ RUN apt-get update \
 # the image; the installed /opt toolchain is.
 RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro \
     --mount=type=bind,source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro \
-    --mount=type=bind,source=rust-toolchain,target=/tmp/rust-toolchain,ro \
+    --mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro \
     bash /tmp/install-rust.sh
 
 # kache, the compiler cache every guest cargo invocation runs through. Both
@@ -106,7 +106,7 @@ RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro \
 # before extraction. The helper and the evidence are mounted read-only for this
 # one step and are not part of the image.
 RUN --mount=type=bind,source=install-kache.sh,target=/tmp/install-kache.sh,ro \
-    --mount=type=bind,source=kache,target=/tmp/kache-pin,ro \
+    --mount=type=bind,source=data/kache,target=/tmp/kache-pin,ro \
     KACHE_VERSION=$KACHE_VERSION \
     KACHE_AMD64_SHA256=$KACHE_AMD64_SHA256 KACHE_ARM64_SHA256=$KACHE_ARM64_SHA256 \
     KACHE_RELEASE_CERT_SHA256=$KACHE_RELEASE_CERT_SHA256 KACHE_DIR=$KACHE_DIR KACHE_DATA=/tmp/kache-pin \
@@ -153,7 +153,7 @@ RUN --network=none \
     --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro \
     --mount=type=bind,source=kache_probe.py,target=/run/rust-verify/kache_probe.py,ro \
     --mount=type=bind,source=rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro \
-    --mount=type=bind,source=rust-toolchain,target=/run/rust-verify/rust-toolchain,ro \
+    --mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro \
     RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus PYTHONDONTWRITEBYTECODE=1 \
     /bin/bash /run/rust-verify/verify-toolchain.sh
 
@@ -183,7 +183,7 @@ RUN --network=none \
 # `config get` is the check rather than `doctor`: it reads the installed file with
 # the pinned binary, so an unparsable file or a wrong value fails the build, and
 # it does not need a daemon or a mounted remote to answer.
-RUN --mount=type=bind,source=kache-config.toml,target=/tmp/kache-config.toml,ro \
+RUN --mount=type=bind,source=data/kache-config.toml,target=/tmp/kache-config.toml,ro \
     install -D -m 0644 /tmp/kache-config.toml /opt/kache/config.toml \
  && mkdir -p /mnt/kache-remote \
  && kache_check=$(mktemp -d) \

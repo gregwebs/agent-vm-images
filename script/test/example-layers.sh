@@ -13,11 +13,17 @@ EXAMPLES='chrome-devtools go-dev rust-dev wirenboard-cpp'
 # Known space-free paths, explicitly moved from agent-vm's ci-contracts.sh:
 # deletion/rename must fail rather than silently leave lint coverage.
 GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp.sh go-dev/gopls_closure.py go-dev/install-go.sh go-dev/install-golangci-lint.sh go-dev/install-gopls.sh go-dev/verify-toolchain.sh rust-dev/install-kache.sh rust-dev/kache_probe.py rust-dev/install-rust.sh rust-dev/install-verus.sh rust-dev/rust_toolchain.py rust-dev/verify-toolchain.sh'
+# The other half of the same contract, with the same weight: every committed
+# input that is not a script is a file under its layer's `data/` directory and is
+# named here. One entry is one file, so a reviewer of a new pin sees it in the
+# diff; a listed file that vanishes fails as `guarded script missing`, and a file
+# under `data/` that is listed nowhere fails as `unreviewed layer input`.
+GUARDED_DATA='chrome-devtools/data/chrome-devtools-mcp.sigstore.json chrome-devtools/data/chrome-devtools-mcp/package.json chrome-devtools/data/chrome-devtools-mcp/pnpm-inputs.sha256 chrome-devtools/data/chrome-devtools-mcp/pnpm-lock.yaml chrome-devtools/data/chrome-devtools-mcp/pnpm-workspace.yaml go-dev/data/gopls-closure/go.mod go-dev/data/gopls-closure/go.sum go-dev/data/gopls-closure/gopls.go.mod go-dev/data/gopls-closure/pin.json go-dev/data/gopls-closure/THIRD_PARTY_LICENSES rust-dev/data/kache-config.toml rust-dev/data/kache/README.md rust-dev/data/kache/kache-aarch64-unknown-linux-musl.tar.gz.sha256 rust-dev/data/kache/kache-x86_64-unknown-linux-musl.tar.gz.sha256 rust-dev/data/kache/release-key.asc rust-dev/data/rust-toolchain/channel.toml rust-dev/data/rust-toolchain/channel.toml.asc rust-dev/data/rust-toolchain/channel.toml.sha256 rust-dev/data/rust-toolchain/evidence/amd64-cargo.asc rust-dev/data/rust-toolchain/evidence/amd64-clippy-preview.asc rust-dev/data/rust-toolchain/evidence/amd64-rust-std-musl.asc rust-dev/data/rust-toolchain/evidence/amd64-rust-std.asc rust-dev/data/rust-toolchain/evidence/amd64-rustc.asc rust-dev/data/rust-toolchain/evidence/amd64-rustfmt-preview.asc rust-dev/data/rust-toolchain/evidence/arm64-cargo.asc rust-dev/data/rust-toolchain/evidence/arm64-clippy-preview.asc rust-dev/data/rust-toolchain/evidence/arm64-rust-std-musl.asc rust-dev/data/rust-toolchain/evidence/arm64-rust-std.asc rust-dev/data/rust-toolchain/evidence/arm64-rustc.asc rust-dev/data/rust-toolchain/evidence/arm64-rustfmt-preview.asc rust-dev/data/rust-toolchain/evidence/rustup-amd64.sha256 rust-dev/data/rust-toolchain/evidence/rustup-arm64.sha256 rust-dev/data/rust-toolchain/pin.json rust-dev/data/rust-toolchain/rust-release-key.asc'
 # The self-test table's case count. The case labels are checked against it as a
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=116
+SELF_TEST_CASES=119
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -100,7 +106,14 @@ logical_instructions() {
 check() {
     [ -d "$ROOT" ] && [ -r "$ROOT" ] && [ -x "$ROOT" ] || fail "root missing: $ROOT"
     cd "$ROOT" || fail "root missing: $ROOT"
-    local example dockerfile instructions first refs token wrapper arg file rel
+    local example dockerfile instructions first refs token wrapper arg file rel rest
+    # Presence before content, because a guarded file that is gone is the sweep's
+    # own message and not a shell or grep error from an assertion that reads it.
+    # The data list is consulted at the end instead: the layer helpers read those
+    # files first and report a deletion as their own `missing input: ...`.
+    for rel in $GUARDED; do
+        [ -f "$LAYERS/$rel" ] || fail "guarded script missing: $rel"
+    done
     for example in $EXAMPLES; do
         dockerfile="$LAYERS/$example/Dockerfile"
         [ -f "$dockerfile" ] || fail "parent pin: ARG shape: $example Dockerfile missing"
@@ -126,7 +139,6 @@ check() {
     grep -qxF "COPY --chmod=0755 agent-vm-chrome-mcp $CHROME_WRAPPER" "$dockerfile" || fail "Chrome wrapper must be installed at $CHROME_WRAPPER"
     [ "$(tail -n 1 "$dockerfile")" = " && : > $CHROME_MARKER" ] || fail 'Chrome marker must be written last'
     wrapper="$LAYERS/chrome-devtools/agent-vm-chrome-mcp"
-    [ -f "$wrapper" ] || fail 'guarded script missing: chrome-devtools/agent-vm-chrome-mcp'
     for token in 'failed to prepare chrome NSS DB' 'sudo -u chrome -H -n' 'cannot cd to HOME'; do
         grep -qF "$token" "$wrapper" || fail "Chrome wrapper lacks: $token"
     done
@@ -134,11 +146,10 @@ check() {
     # The preinstalled MCP selection is installed by exactly one reviewed helper
     # invocation over the committed inputs; nothing at first use resolves or
     # fetches (issue #41).
-    mcpdir="$LAYERS/chrome-devtools/chrome-devtools-mcp"
+    mcpdir="$LAYERS/chrome-devtools/data/chrome-devtools-mcp"
     helper="$LAYERS/chrome-devtools/chrome-devtools-mcp.sh"
-    [ -f "$helper" ] || fail 'guarded script missing: chrome-devtools/chrome-devtools-mcp.sh'
     instructions=$(logical_instructions "$dockerfile" chrome-devtools) || exit 1
-    grep -qxF 'COPY chrome-devtools-mcp/ /opt/agent-vm/chrome-devtools-mcp/' "$dockerfile" ||
+    grep -qxF 'COPY data/chrome-devtools-mcp/ /opt/agent-vm/chrome-devtools-mcp/' "$dockerfile" ||
         fail 'Chrome MCP inputs must be copied to /opt/agent-vm/chrome-devtools-mcp'
     install_line='RUN --mount=type=bind,source=chrome-devtools-mcp.sh,target=/tmp/chrome-devtools-mcp.sh,ro     sh /tmp/chrome-devtools-mcp.sh install'
     [ "$(printf '%s\n' "$instructions" | grep -cF 'chrome-devtools-mcp.sh')" -eq 1 ] ||
@@ -151,7 +162,7 @@ check() {
     selected=$(sh "$helper" check "$mcpdir" 2>&1) || fail "Chrome MCP inputs: $selected"
     # Static provenance binding: the committed bundle must name the locked
     # tarball. Phase A of chrome-example.sh verifies it cryptographically.
-    bundle="$LAYERS/chrome-devtools/chrome-devtools-mcp.sigstore.json"
+    bundle="$LAYERS/chrome-devtools/data/chrome-devtools-mcp.sigstore.json"
     lock="$mcpdir/pnpm-lock.yaml"
     hex=$(sed -n 's/.*integrity: sha512-\([A-Za-z0-9+/=]*\).*/\1/p' "$lock" | base64 -d | od -An -v -tx1 | tr -d ' \n')
     jq -e --arg n "pkg:npm/chrome-devtools-mcp@$selected" --arg h "$hex" '
@@ -174,16 +185,15 @@ check() {
         grep -qE "$token" "$dockerfile" || fail "rust-dev pins: $token"
     done
     file="$LAYERS/rust-dev/install-verus.sh"
-    [ -f "$file" ] || fail 'guarded script missing: rust-dev/install-verus.sh'
     checksum_token "$file" || fail 'rust-dev: install-verus.sh lacks non-comment sha256sum token'
     # --- rust-dev: reviewed toolchain closure (#102) -------------------------
     # The committed data directory is the reviewed input set; the helper is the
-    # only program that verifies and installs it. Presence is checked before the
-    # helper is invoked so a missing file reports itself instead of a shell error.
+    # only program that verifies and installs it. Directory presence is checked
+    # before the helper is invoked so a whole missing directory reports itself;
+    # the missing files inside it are the helper's own `missing input: ...`.
     rustdir=$LAYERS/rust-dev
     helper=$rustdir/rust_toolchain.py
-    datadir=$rustdir/rust-toolchain
-    [ -f "$helper" ] || fail 'guarded script missing: rust-dev/rust_toolchain.py'
+    datadir=$rustdir/data/rust-toolchain
     [ -d "$datadir" ] || fail 'rust-dev: missing Rust input directory'
     rust_arg=$(sed -nE 's/^ARG RUST_TOOLCHAIN=(.*)$/\1/p' "$rustdir/Dockerfile")
     [ -n "$rust_arg" ] || fail 'rust-dev pins: ARG RUST_TOOLCHAIN'
@@ -194,13 +204,13 @@ check() {
     # Normalized for comparison: `logical_instructions` keeps a continuation's
 # spacing, so runs of blanks are collapsed before the exact shape comparison.
 normalize_instruction() { printf '%s' "$1" | tr -s ' \t' ' ' | sed -e 's/^ //' -e 's/ $//'; }
-reviewed_installer='RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro --mount=type=bind,source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro --mount=type=bind,source=rust-toolchain,target=/tmp/rust-toolchain,ro bash /tmp/install-rust.sh'
-reviewed_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro --mount=type=bind,source=kache_probe.py,target=/run/rust-verify/kache_probe.py,ro --mount=type=bind,source=rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro --mount=type=bind,source=rust-toolchain,target=/run/rust-verify/rust-toolchain,ro RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/rust-verify/verify-toolchain.sh'
+reviewed_installer='RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro --mount=type=bind,source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro --mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro bash /tmp/install-rust.sh'
+reviewed_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro --mount=type=bind,source=kache_probe.py,target=/run/rust-verify/kache_probe.py,ro --mount=type=bind,source=rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro --mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/rust-verify/verify-toolchain.sh'
 installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || true)
     [ "$installer_runs" -eq 1 ] || fail 'rust-dev: installer RUN must appear exactly once'
     installer_line=$(printf '%s\n' "$instructions" | grep -F 'install-rust.sh')
     for token in 'source=install-rust.sh' 'source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro' \
-        'source=rust-toolchain,target=/tmp/rust-toolchain,ro'; do
+        'source=data/rust-toolchain,target=/tmp/rust-toolchain,ro'; do
         case "$installer_line" in
             *"$token"*) ;;
             *) fail "rust-dev: installer RUN lacks the reviewed runtime bind: $token" ;;
@@ -220,7 +230,7 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     for token in 'verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro' \
         'kache_probe.py,target=/run/rust-verify/kache_probe.py,ro' \
         'rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro' \
-        'rust-toolchain,target=/run/rust-verify/rust-toolchain,ro' \
+        'data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro' \
         'RUST_TOOLCHAIN=$RUST_TOOLCHAIN' 'KACHE_VERSION=$KACHE_VERSION' 'VERUS_DIR=/opt/verus' \
         'PYTHONDONTWRITEBYTECODE=1'; do
         case "$verifier_line" in
@@ -270,9 +280,8 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     # detached signature over the tarball before anything is extracted. The
     # committed evidence and the Dockerfile ARGs are checked against each other
     # here so a re-pin cannot leave one of them behind.
-    kachedir=$rustdir/kache
+    kachedir=$rustdir/data/kache
     installer=$rustdir/install-kache.sh
-    [ -f "$installer" ] || fail 'guarded script missing: rust-dev/install-kache.sh'
     checksum_token "$installer" || fail 'rust-dev: install-kache.sh lacks non-comment sha256sum token'
     awk '!/^[[:space:]]*#/ && /sha256sum -c/ { found=1 } END { exit !found }' "$installer" ||
         fail 'rust-dev: install-kache.sh must verify the tarball with sha256sum -c'
@@ -287,17 +296,17 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         kache_asset=kache-${kache_host}-unknown-linux-musl.tar.gz
         kache_sha=$(sed -nE "s/^ARG KACHE_${kache_arch^^}_SHA256=(.*)\$/\1/p" "$rustdir/Dockerfile")
         [ -f "$kachedir/$kache_asset.sha256" ] ||
-            fail "rust-dev: missing kache evidence: kache/$kache_asset.sha256"
+            fail "rust-dev: missing kache evidence: data/kache/$kache_asset.sha256"
         [ "$(cat "$kachedir/$kache_asset.sha256")" = "$kache_sha  $kache_asset" ] ||
-            fail "rust-dev: kache/$kache_asset.sha256 does not record the KACHE_${kache_arch^^}_SHA256 pin"
+            fail "rust-dev: data/kache/$kache_asset.sha256 does not record the KACHE_${kache_arch^^}_SHA256 pin"
     done
     [ -f "$kachedir/release-key.asc" ] || fail 'rust-dev: missing kache/release-key.asc'
     [ "$(sha256sum "$kachedir/release-key.asc" | cut -d' ' -f1)" = \
         "$(sed -nE 's/^ARG KACHE_RELEASE_CERT_SHA256=(.*)$/\1/p' "$rustdir/Dockerfile")" ] ||
-        fail 'rust-dev: kache/release-key.asc does not hash to the KACHE_RELEASE_CERT_SHA256 pin'
+        fail 'rust-dev: data/kache/release-key.asc does not hash to the KACHE_RELEASE_CERT_SHA256 pin'
     grep -qxF -- '-----BEGIN PGP PUBLIC KEY BLOCK-----' "$kachedir/release-key.asc" ||
-        fail 'rust-dev: kache/release-key.asc is not an armored public key'
-    reviewed_kache_installer='RUN --mount=type=bind,source=install-kache.sh,target=/tmp/install-kache.sh,ro --mount=type=bind,source=kache,target=/tmp/kache-pin,ro KACHE_VERSION=$KACHE_VERSION KACHE_AMD64_SHA256=$KACHE_AMD64_SHA256 KACHE_ARM64_SHA256=$KACHE_ARM64_SHA256 KACHE_RELEASE_CERT_SHA256=$KACHE_RELEASE_CERT_SHA256 KACHE_DIR=$KACHE_DIR KACHE_DATA=/tmp/kache-pin KACHE_SHIM_DIR=$KACHE_DIR/shims bash /tmp/install-kache.sh'
+        fail 'rust-dev: data/kache/release-key.asc is not an armored public key'
+    reviewed_kache_installer='RUN --mount=type=bind,source=install-kache.sh,target=/tmp/install-kache.sh,ro --mount=type=bind,source=data/kache,target=/tmp/kache-pin,ro KACHE_VERSION=$KACHE_VERSION KACHE_AMD64_SHA256=$KACHE_AMD64_SHA256 KACHE_ARM64_SHA256=$KACHE_ARM64_SHA256 KACHE_RELEASE_CERT_SHA256=$KACHE_RELEASE_CERT_SHA256 KACHE_DIR=$KACHE_DIR KACHE_DATA=/tmp/kache-pin KACHE_SHIM_DIR=$KACHE_DIR/shims bash /tmp/install-kache.sh'
     kache_installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-kache.sh' || true)
     [ "$kache_installer_runs" -eq 1 ] || fail 'rust-dev: the kache installer RUN must appear exactly once'
     kache_installer_line=$(printf '%s\n' "$instructions" | grep -F 'install-kache.sh')
@@ -315,11 +324,10 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     done
     grep -qF -- 'KACHE_SHIM_DIR=$KACHE_DIR/shims' "$rustdir/Dockerfile" ||
         fail 'rust-dev: the kache installer RUN must create the shim farm'
-    # The probe file's absence is the GUARDED sweep's message; this only reads it.
-    if [ -f "$rustdir/kache_probe.py" ]; then
-        grep -qF -- 'C/C++ shims' "$rustdir/kache_probe.py" ||
-            fail 'rust-dev: kache_probe.py must require the C/C++ shims to be active'
-    fi
+    # No presence guard: a missing probe is already the sweep's message, checked
+    # before any layer assertion runs.
+    grep -qF -- 'C/C++ shims' "$rustdir/kache_probe.py" ||
+        fail 'rust-dev: kache_probe.py must require the C/C++ shims to be active'
     # --- rust-dev: the cache layout and the shared remote, which are
     # --- configuration state -------------------------------------------------
     # The policy is an image input like the pins: the reviewed RUN that installs
@@ -332,12 +340,12 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     # `doctor --probe` report taken with no remote configured, and a configured
     # remote makes the daemon checks mandatory, so installing the policy earlier
     # would change what the verifier is able to pass on.
-    kache_config=$rustdir/kache-config.toml
-    [ -f "$kache_config" ] || fail 'rust-dev: missing kache-config.toml'
+    kache_config=$rustdir/data/kache-config.toml
+    [ -f "$kache_config" ] || fail 'rust-dev: missing data/kache-config.toml'
     for token in 'local_store = "/var/tmp/kache"' 'local_max_size = "4G"' \
         'gc_evict_shared = false' 'type = "filesystem"' 'path = "/mnt/kache-remote"'; do
         grep -qxF -- "$token" "$kache_config" ||
-            fail "rust-dev: kache-config.toml must keep: $token"
+            fail "rust-dev: data/kache-config.toml must keep: $token"
     done
     if grep -v '^[[:space:]]*#' "$kache_config" | grep -qF -- 'atomic_write_dir'; then
         fail 'rust-dev: kache-config.toml must not stage uploads across filesystems'
@@ -346,14 +354,14 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         grep -qxF "$env" "$rustdir/Dockerfile" ||
             fail "rust-dev: the kache policy must be selected with ${env#ENV }"
     done
-    reviewed_kache_config='RUN --mount=type=bind,source=kache-config.toml,target=/tmp/kache-config.toml,ro install -D -m 0644 /tmp/kache-config.toml /opt/kache/config.toml && mkdir -p /mnt/kache-remote && kache_check=$(mktemp -d) && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.local_store | grep -qxF /var/tmp/kache && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.local_max_size | grep -qxF 4G && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.gc_evict_shared | grep -qx false && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.remote.type | grep -qx filesystem && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.remote.path | grep -qxF /mnt/kache-remote && rm -rf "$kache_check"'
-    kache_config_runs=$(printf '%s\n' "$instructions" | grep -cF 'source=kache-config.toml' || true)
+    reviewed_kache_config='RUN --mount=type=bind,source=data/kache-config.toml,target=/tmp/kache-config.toml,ro install -D -m 0644 /tmp/kache-config.toml /opt/kache/config.toml && mkdir -p /mnt/kache-remote && kache_check=$(mktemp -d) && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.local_store | grep -qxF /var/tmp/kache && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.local_max_size | grep -qxF 4G && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.gc_evict_shared | grep -qx false && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.remote.type | grep -qx filesystem && HOME=$kache_check TMPDIR=$kache_check KACHE_CONFIG=/opt/kache/config.toml /opt/kache/bin/kache config get cache.remote.path | grep -qxF /mnt/kache-remote && rm -rf "$kache_check"'
+    kache_config_runs=$(printf '%s\n' "$instructions" | grep -cF 'source=data/kache-config.toml' || true)
     [ "$kache_config_runs" -eq 1 ] || fail 'rust-dev: the kache policy RUN must appear exactly once'
-    kache_config_line=$(printf '%s\n' "$instructions" | grep -F 'source=kache-config.toml')
+    kache_config_line=$(printf '%s\n' "$instructions" | grep -F 'source=data/kache-config.toml')
     [ "$(normalize_instruction "$kache_config_line")" = "$reviewed_kache_config" ] ||
         fail "rust-dev: the kache policy RUN must be exactly the reviewed invocation (got: $(normalize_instruction "$kache_config_line"))"
     verifier_at=$(printf '%s\n' "$instructions" | grep -nF '/run/rust-verify/verify-toolchain.sh' | cut -d: -f1)
-    config_at=$(printf '%s\n' "$instructions" | grep -nF 'source=kache-config.toml' | cut -d: -f1)
+    config_at=$(printf '%s\n' "$instructions" | grep -nF 'source=data/kache-config.toml' | cut -d: -f1)
     { [ -n "$verifier_at" ] && [ -n "$config_at" ] && [ "$verifier_at" -lt "$config_at" ]; } ||
         fail 'rust-dev: the kache policy must be installed after the verifier'
     for arg in GO_AMD64_SHA256 GO_ARM64_SHA256 GOLANGCI_LINT_AMD64_SHA256 GOLANGCI_LINT_ARM64_SHA256; do
@@ -367,15 +375,11 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     # --- go-dev: the reviewed gopls closure (#103) ---------------------------
     # The committed data directory is the reviewed module selection (graph, sums,
     # notices and the record binding them); gopls_closure.py is the only program
-    # that verifies or installs it. Presence is reported by the same message the
-    # GUARDED sweep below uses, so a deletion fails on the file, not on a shell
-    # error from the invocation that needs it.
+    # that verifies or installs it. A whole missing directory is reported here;
+    # the missing files inside it are the helper's own `missing input: ...`.
     godir=$LAYERS/go-dev
     helper=$godir/gopls_closure.py
-    datadir=$godir/gopls-closure
-    [ -f "$helper" ] || fail 'guarded script missing: go-dev/gopls_closure.py'
-    [ -f "$godir/install-gopls.sh" ] || fail 'guarded script missing: go-dev/install-gopls.sh'
-    [ -f "$godir/verify-toolchain.sh" ] || fail 'guarded script missing: go-dev/verify-toolchain.sh'
+    datadir=$godir/data/gopls-closure
     [ -d "$datadir" ] || fail 'go-dev: missing the gopls closure input directory'
     gopls_arg=$(sed -nE 's/^ARG GOPLS_VERSION=(.*)$/\1/p' "$godir/Dockerfile")
     go_arg=$(sed -nE 's/^ARG GO_VERSION=(.*)$/\1/p' "$godir/Dockerfile")
@@ -387,14 +391,14 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         --expect-gopls "$gopls_arg" --expect-go "$go_arg" 2>&1) || fail "go-dev pins: $selected"
     [ "$selected" = "$gopls_arg" ] || fail 'go-dev pins: the closure and ARG GOPLS_VERSION disagree'
     instructions=$(logical_instructions "$godir/Dockerfile" go-dev) || exit 1
-    reviewed_gopls_installer='RUN --mount=type=bind,source=install-gopls.sh,target=/tmp/install-gopls.sh,ro --mount=type=bind,source=gopls_closure.py,target=/tmp/gopls_closure.py,ro --mount=type=bind,source=gopls-closure,target=/tmp/gopls-closure,ro bash /tmp/install-gopls.sh'
-    reviewed_go_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/go-verify/verify-toolchain.sh,ro --mount=type=bind,source=gopls_closure.py,target=/run/go-verify/gopls_closure.py,ro --mount=type=bind,source=gopls-closure,target=/run/go-verify/gopls-closure,ro PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/go-verify/verify-toolchain.sh'
+    reviewed_gopls_installer='RUN --mount=type=bind,source=install-gopls.sh,target=/tmp/install-gopls.sh,ro --mount=type=bind,source=gopls_closure.py,target=/tmp/gopls_closure.py,ro --mount=type=bind,source=data/gopls-closure,target=/tmp/gopls-closure,ro bash /tmp/install-gopls.sh'
+    reviewed_go_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/go-verify/verify-toolchain.sh,ro --mount=type=bind,source=gopls_closure.py,target=/run/go-verify/gopls_closure.py,ro --mount=type=bind,source=data/gopls-closure,target=/run/go-verify/gopls-closure,ro PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/go-verify/verify-toolchain.sh'
     gopls_installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-gopls.sh' || true)
     [ "$gopls_installer_runs" -eq 1 ] || fail 'go-dev: the gopls installer RUN must appear exactly once'
     gopls_installer_line=$(printf '%s\n' "$instructions" | grep -F 'install-gopls.sh')
     for token in 'source=install-gopls.sh,target=/tmp/install-gopls.sh,ro' \
         'source=gopls_closure.py,target=/tmp/gopls_closure.py,ro' \
-        'source=gopls-closure,target=/tmp/gopls-closure,ro'; do
+        'source=data/gopls-closure,target=/tmp/gopls-closure,ro'; do
         case "$gopls_installer_line" in
             *"$token"*) ;;
             *) fail "go-dev: installer RUN lacks the reviewed runtime bind: $token" ;;
@@ -413,7 +417,7 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     esac
     for token in 'verify-toolchain.sh,target=/run/go-verify/verify-toolchain.sh,ro' \
         'gopls_closure.py,target=/run/go-verify/gopls_closure.py,ro' \
-        'gopls-closure,target=/run/go-verify/gopls-closure,ro' 'PYTHONDONTWRITEBYTECODE=1'; do
+        'data/gopls-closure,target=/run/go-verify/gopls-closure,ro' 'PYTHONDONTWRITEBYTECODE=1'; do
         case "$gopls_verifier_line" in
             *"$token"*) ;;
             *) fail "go-dev: verifier RUN lacks the reviewed delivery: $token" ;;
@@ -444,14 +448,38 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
             fail "recipe text contains Chrome token: $file"
         fi
     done
-    for rel in $GUARDED; do
+    # The data list is the backstop, so it is read after the layer assertions that
+    # read those files: a listed file that is gone is this comment's message, and
+    # a file under data/ that nobody listed is an unreviewed input.
+    for rel in $GUARDED_DATA; do
         [ -f "$LAYERS/$rel" ] || fail "guarded script missing: $rel"
     done
+    # Every regular file under a layer is classified here, and only these three
+    # classes exist: a shebang script in GUARDED, any other input under the
+    # layer's data/ in GUARDED_DATA, and the layer's own Dockerfile and README.md.
+    # That makes coverage exhaustive without parsing mounts: a bind source is a
+    # file in the layer, so a mounted file listed nowhere is caught as an
+    # unclassified file, and a stray file at a layer root fails by name.
     while IFS= read -r -d '' file; do
+        rel=${file#"$LAYERS/"}
+        case "$rel" in
+            README.md) continue ;; # this directory's own README
+            */*) ;;
+            *) fail "unclassified example file: $rel" ;;
+        esac
+        rest=${rel#*/}
+        case "$rest" in
+            Dockerfile | README.md) continue ;;
+        esac
         if [ "$(head -c 2 "$file")" = '#!' ]; then
-            rel=${file#"$LAYERS/"}
-            case " $GUARDED " in *" $rel "*) ;; *) fail "unguarded example script: $rel" ;; esac
+            case " $GUARDED " in *" $rel "*) continue ;; esac
+            fail "unguarded example script: $rel"
         fi
+        case "$rest" in
+            data/*) ;;
+            *) fail "unclassified example file: $rel" ;;
+        esac
+        case " $GUARDED_DATA " in *" $rel "*) ;; *) fail "unreviewed layer input: $rel" ;; esac
     done < <(find "$LAYERS" -type f -print0)
     # Lint by interpreter: the Python helper's single `check` invocation above is
     # its parser, so there is no bash -n, no ShellCheck and no second `check`
@@ -476,7 +504,7 @@ rewrite() {
 }
 # Re-pin a copied tree's inputs: the byte pins are what a mutation must trip.
 repin() {
-    ( cd "$1/$LAYERS/chrome-devtools/chrome-devtools-mcp" &&
+    ( cd "$1/$LAYERS/chrome-devtools/data/chrome-devtools-mcp" &&
         sha256sum package.json pnpm-lock.yaml pnpm-workspace.yaml > pnpm-inputs.sha256 )
 }
 # Re-pin the copied gopls closure for a *test-only* tree: recompute `files` for
@@ -485,7 +513,7 @@ repin() {
 # pin/go.sum disagreement that an automatic repair would hide -- and so are the
 # reviewer/date, which no test may invent.
 repin_gopls() { # TREE
-    local dir=$1/$LAYERS/go-dev/gopls-closure digests=$SCRATCH/gopls-digests
+    local dir=$1/$LAYERS/go-dev/data/gopls-closure digests=$SCRATCH/gopls-digests
     ( cd "$dir" && sha256sum go.mod go.sum gopls.go.mod THIRD_PARTY_LICENSES ) > "$digests"
     jq --rawfile digests "$digests" '
         ($digests | split("\n") | map(select(length > 0))
@@ -580,17 +608,17 @@ self_test() {
         cp "$ROOT/images/standard/Dockerfile" "$tree/images/standard/"
         chrome="$tree/$LAYERS/chrome-devtools/Dockerfile"
         wrapper="$tree/$LAYERS/chrome-devtools/agent-vm-chrome-mcp"
-        pnpmdir="$tree/$LAYERS/chrome-devtools/chrome-devtools-mcp"
-        bundle="$tree/$LAYERS/chrome-devtools/chrome-devtools-mcp.sigstore.json"
+        pnpmdir="$tree/$LAYERS/chrome-devtools/data/chrome-devtools-mcp"
+        bundle="$tree/$LAYERS/chrome-devtools/data/chrome-devtools-mcp.sigstore.json"
         lock="$pnpmdir/pnpm-lock.yaml"
         go="$tree/$LAYERS/go-dev/Dockerfile"
         rust="$tree/$LAYERS/rust-dev/install-verus.sh"
-        rusttool="$tree/$LAYERS/rust-dev/rust-toolchain"
+        rusttool="$tree/$LAYERS/rust-dev/data/rust-toolchain"
         rustdocker="$tree/$LAYERS/rust-dev/Dockerfile"
         rustverify="$tree/$LAYERS/rust-dev/verify-toolchain.sh"
         godir="$tree/$LAYERS/go-dev"
         godocker="$godir/Dockerfile"
-        goplsdir="$godir/gopls-closure"
+        goplsdir="$godir/data/gopls-closure"
         goplshelper="$godir/gopls_closure.py"
         expected=''
         # SELF_TEST_TABLE_BEGIN
@@ -764,8 +792,8 @@ self_test() {
                 rewrite "$rustdocker" '/source=rust_toolchain.py,target=\/tmp\/rust_toolchain.py,ro/d'
                 expected='installer RUN lacks the reviewed runtime bind: source=rust_toolchain.py' ;;
             65)
-                rewrite "$rustdocker" '/source=rust-toolchain,target=\/tmp\/rust-toolchain,ro/d'
-                expected='installer RUN lacks the reviewed runtime bind: source=rust-toolchain' ;;
+                rewrite "$rustdocker" '/source=data\/rust-toolchain,target=\/tmp\/rust-toolchain,ro/d'
+                expected='installer RUN lacks the reviewed runtime bind: source=data/rust-toolchain' ;;
             66)
                 rewrite "$rustdocker" 's|bash /tmp/install-rust.sh|bash /tmp/install-rust.sh \|\| echo skipped|'
                 expected='installer RUN must be exactly' ;;
@@ -911,14 +939,14 @@ self_test() {
                 expected='the guest cargo wrapper must be the pinned kache' ;;
             105) rewrite "$tree/$LAYERS/rust-dev/Dockerfile" '/^ARG KACHE_AMD64_SHA256=/s/.$//'
                 expected='rust-dev pins: ^ARG KACHE_AMD64_SHA256' ;;
-            106) printf ' ' >> "$tree/$LAYERS/rust-dev/kache/kache-x86_64-unknown-linux-musl.tar.gz.sha256"
+            106) printf ' ' >> "$tree/$LAYERS/rust-dev/data/kache/kache-x86_64-unknown-linux-musl.tar.gz.sha256"
                 expected='does not record the KACHE_AMD64_SHA256 pin' ;;
             107) rewrite "$tree/$LAYERS/rust-dev/install-kache.sh" '/^[[:space:]]*[(]cd "[$]work" && echo /d'
                 expected='must verify the tarball with sha256sum -c' ;;
             108)
                 rewrite "$tree/$LAYERS/rust-dev/Dockerfile" 's|bash /tmp/install-kache.sh|: # bash /tmp/install-kache.sh|'
                 expected='the kache installer RUN must be exactly' ;;
-            109) cp "$rusttool/rust-release-key.asc" "$tree/$LAYERS/rust-dev/kache/release-key.asc"
+            109) cp "$rusttool/rust-release-key.asc" "$tree/$LAYERS/rust-dev/data/kache/release-key.asc"
                 expected='does not hash to the KACHE_RELEASE_CERT_SHA256 pin' ;;
             110) rm "$tree/$LAYERS/rust-dev/kache_probe.py"
                 expected='guarded script missing: rust-dev/kache_probe.py' ;;
@@ -931,16 +959,27 @@ self_test() {
             113) rewrite "$tree/$LAYERS/rust-dev/kache_probe.py" 's|C/C++ shims|shims|'
                 expected='kache_probe.py must require the C/C++ shims to be active' ;;
             # 114: the shared remote's policy is an input, not a preference.
-            114) rewrite "$tree/$LAYERS/rust-dev/kache-config.toml" 's|"4G"|"20G"|'
+            114) rewrite "$tree/$LAYERS/rust-dev/data/kache-config.toml" 's|"4G"|"20G"|'
                 expected='kache-config.toml must keep: local_max_size = "4G"' ;;
             # 115-116: the store is on the sandbox's own disk. Its old home,
             # $HOME/.cache/kache, is a host-backed virtio-fs mount, and a WAL
             # index there has corrupted once; both the file and the ENV that
             # name the new path have to stay.
-            115) rewrite "$tree/$LAYERS/rust-dev/kache-config.toml" '/^local_store = /d'
+            115) rewrite "$tree/$LAYERS/rust-dev/data/kache-config.toml" '/^local_store = /d'
                 expected='kache-config.toml must keep: local_store = "/var/tmp/kache"' ;;
             116) rewrite "$tree/$LAYERS/rust-dev/Dockerfile" '/^ENV KACHE_CACHE_DIR=/d'
                 expected='must be selected with KACHE_CACHE_DIR=/var/tmp/kache' ;;
+            # 117-119: the sweep's default is now guarded for every file. A
+            # non-script input is covered because it is a file in the layer, so
+            # these three are the failure directions the directory convention
+            # buys: an unclassified file at a layer root, an unreviewed file
+            # under data/, and a reviewed file that does not exist.
+            117) printf 'a note\n' > "$tree/$LAYERS/rust-dev/notes.txt"
+                expected='unclassified example file: rust-dev/notes.txt' ;;
+            118) printf 'unreviewed\n' > "$tree/$LAYERS/rust-dev/data/notes.txt"
+                expected='unreviewed layer input: rust-dev/data/notes.txt' ;;
+            119) rm "$tree/$LAYERS/rust-dev/data/kache/README.md"
+                expected='guarded script missing: rust-dev/data/kache/README.md' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac

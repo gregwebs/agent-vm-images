@@ -41,7 +41,7 @@ sys.path.insert(0, str(FIXTURES))
 # its own first.
 sys.path.append(str(RUST_FIXTURES))
 MODEL_DIRECTORY = REPOSITORY_ROOT / 'examples' / 'layers' / 'go-dev'
-COMMITTED_DATA = MODEL_DIRECTORY / 'gopls-closure'
+COMMITTED_DATA = MODEL_DIRECTORY / 'data' / 'gopls-closure'
 sys.path.insert(0, str(MODEL_DIRECTORY))
 # The test-side scratch remover: Go writes its module and build caches read-only,
 # so a plain rmtree cannot unlink them and leaves the whole tree behind.

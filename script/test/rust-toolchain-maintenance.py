@@ -243,8 +243,8 @@ def main() -> int:
         # --- first adoption ---------------------------------------------------
         print('first adoption')
         work = tree(root / 'repo-first', fixture_root, launcher_dir)
-        data = work / 'examples/layers/rust-dev/rust-toolchain'
-        added = Path(work / 'examples/layers/rust-dev/rust-toolchain/evidence')
+        data = work / 'examples/layers/rust-dev/data/rust-toolchain'
+        added = Path(work / 'examples/layers/rust-dev/data/rust-toolchain/evidence')
         result = run_writer(fixture_root, work, launcher_dir,
                             [fixture.CHANNEL, '--rustup', fixture.RUSTUP_VERSION,
                              '--key', key, '--review-bootstrap-exception', '2026-01-02',
@@ -291,8 +291,8 @@ def main() -> int:
         # --- partial pinned state --------------------------------------------
         print('partial state')
         broken = tree(root / 'repo-partial', fixture_root, launcher_dir)
-        shutil.copytree(data, broken / 'examples/layers/rust-dev/rust-toolchain')
-        (broken / 'examples/layers/rust-dev/rust-toolchain/pin.json').unlink()
+        shutil.copytree(data, broken / 'examples/layers/rust-dev/data/rust-toolchain')
+        (broken / 'examples/layers/rust-dev/data/rust-toolchain/pin.json').unlink()
         result = run_writer(fixture_root, broken, launcher_dir,
                             [fixture.CHANNEL, '--rustup', fixture.RUSTUP_VERSION,
                              '--key', key, '--review-bootstrap-exception', '2026-01-02',
@@ -310,7 +310,7 @@ def main() -> int:
                 ('wrong archive digest', 'archive-digest'),
         ):
             work = tree(root / f'repo-{setup}', fixture_root, launcher_dir)
-            data = work / 'examples/layers/rust-dev/rust-toolchain'
+            data = work / 'examples/layers/rust-dev/data/rust-toolchain'
             shutil.copytree(fixture_root.pinned, data)
             before = snapshot(data)
             recovery_before = recovery_material()
@@ -331,7 +331,7 @@ def main() -> int:
         # --- renewed bootstrap review ----------------------------------------
         print('bootstrap exception renewal')
         work = tree(root / 'repo-renew', fixture_root, launcher_dir)
-        data = work / 'examples/layers/rust-dev/rust-toolchain'
+        data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         shutil.copytree(fixture_root.pinned, data)
         # Upstream bootstrap bytes change: the committed exception no longer
         # describes them, so the writer must demand a renewed review.
@@ -363,7 +363,7 @@ def main() -> int:
         args = [fixture.CHANNEL, '--rustup', fixture.RUSTUP_VERSION, '--key', key,
                 '--review-bootstrap-exception', '2026-01-02', '--reviewer', 'fixture-reviewer']
         work = tree(root / 'repo-adopt-fail', fixture_root, launcher_dir)
-        data = work / 'examples/layers/rust-dev/rust-toolchain'
+        data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         dockerfile = work / 'examples/layers/rust-dev/Dockerfile'
         dockerfile_before = dockerfile.read_bytes()
         publisher = work / 'script/build/transactional-publish.sh'
@@ -390,7 +390,7 @@ def main() -> int:
         print('interruption during directory creation')
         for label, mode, expected in (('signal', 'signal', 143), ('failure', 'fail', 1)):
             work = tree(root / f'repo-dirs-{mode}', fixture_root, launcher_dir)
-            data = work / 'examples/layers/rust-dev/rust-toolchain'
+            data = work / 'examples/layers/rust-dev/data/rust-toolchain'
             shim_dir = write_mkdir_shim(root / f'shim-{mode}', mode)
             env = environment(fixture_root, work, launcher_dir)
             recovery_before = recovery_material()
@@ -415,7 +415,7 @@ def main() -> int:
         fixture.save(second, fixture.respawn(fixture_root.dist, second))
         fixture_second = driver.load_fixture(second, fixture_root.pinned)
         work = tree(root / 'repo-rollback', fixture_second, launcher_dir)
-        data = work / 'examples/layers/rust-dev/rust-toolchain'
+        data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         shutil.copytree(fixture_root.pinned, data)
         dockerfile = work / 'examples/layers/rust-dev/Dockerfile'
         dockerfile_before = (dockerfile.read_bytes(), dockerfile.stat().st_mode)
@@ -445,7 +445,7 @@ def main() -> int:
         # The same fault against a publisher with rollback disabled must fail the
         # assertions above; that is what makes them a rollback oracle.
         work = tree(root / 'repo-no-rollback', fixture_second, launcher_dir)
-        data = work / 'examples/layers/rust-dev/rust-toolchain'
+        data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         shutil.copytree(fixture_root.pinned, data)
         dockerfile = work / 'examples/layers/rust-dev/Dockerfile'
         dockerfile_before = (dockerfile.read_bytes(), dockerfile.stat().st_mode)
@@ -465,7 +465,7 @@ def main() -> int:
         # --- incomplete backup: zero writes, zero restoration ----------------
         print('incomplete backup')
         work = tree(root / 'repo-backup-fail', fixture_second, launcher_dir)
-        data = work / 'examples/layers/rust-dev/rust-toolchain'
+        data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         shutil.copytree(fixture_root.pinned, data)
         dockerfile = work / 'examples/layers/rust-dev/Dockerfile'
         dockerfile_before = (dockerfile.read_bytes(), dockerfile.stat().st_mode)
@@ -490,7 +490,7 @@ def main() -> int:
         # --- restoration failure: status 3 with usable recovery evidence -----
         print('restoration failure')
         work = tree(root / 'repo-restore-fail', fixture_second, launcher_dir)
-        data = work / 'examples/layers/rust-dev/rust-toolchain'
+        data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         shutil.copytree(fixture_root.pinned, data)
         blocked = data / 'evidence/rustup-amd64.sha256'
         before = full_snapshot(data)
@@ -515,8 +515,9 @@ def main() -> int:
                       all({'path', 'existed', 'backup'} <= set(entry)
                           for entry in plan['destinations']))
                 check('the recovery map records the directories this run owned',
-                      plan['owned_directories'] == ['examples/layers/rust-dev/rust-toolchain',
-                                                    'examples/layers/rust-dev/rust-toolchain/evidence'])
+                      plan['owned_directories'] == ['examples/layers/rust-dev/data',
+                                                    'examples/layers/rust-dev/data/rust-toolchain',
+                                                    'examples/layers/rust-dev/data/rust-toolchain/evidence'])
         finally:
             os.chmod(blocked, 0o600)
             if retained is not None:
@@ -535,7 +536,7 @@ def main() -> int:
         }
         for label, (where, needle, replacement, code, message) in windows.items():
             work = tree(root / f'repo-signal-{label}', fixture_second, launcher_dir)
-            data = work / 'examples/layers/rust-dev/rust-toolchain'
+            data = work / 'examples/layers/rust-dev/data/rust-toolchain'
             shutil.copytree(fixture_root.pinned, data)
             before = full_snapshot(data)
             dockerfile = work / 'examples/layers/rust-dev/Dockerfile'
@@ -575,7 +576,7 @@ def main() -> int:
                  'decided=1\npublishing=0\nkill -TERM $$', 3, 'undecided'),
         ):
             work = tree(root / f'repo-signal-{label}', fixture_second, launcher_dir)
-            data = work / 'examples/layers/rust-dev/rust-toolchain'
+            data = work / 'examples/layers/rust-dev/data/rust-toolchain'
             shutil.copytree(fixture_root.pinned, data)
             before = full_snapshot(data)
             dockerfile = work / 'examples/layers/rust-dev/Dockerfile'
@@ -686,7 +687,7 @@ def main() -> int:
         # --- documented commands write no bytecode ---------------------------
         print('no bytecode in a read-only checkout')
         work = tree(root / 'repo-bytecode', fixture_root, launcher_dir)
-        data = work / 'examples/layers/rust-dev/rust-toolchain'
+        data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         shutil.copytree(fixture_root.pinned, data)
         clean_env = {name: value for name, value in
                      environment(fixture_root, work, launcher_dir).items()
@@ -717,7 +718,7 @@ def main() -> int:
         # --- signal during staging -------------------------------------------
         print('signal during staging')
         work = tree(root / 'repo-signal-stage', fixture_root, launcher_dir)
-        data = work / 'examples/layers/rust-dev/rust-toolchain'
+        data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         shutil.copytree(fixture_root.pinned, data)
         before = snapshot(data)
         env = environment(fixture_root, work, launcher_dir)

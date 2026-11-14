@@ -1130,10 +1130,10 @@ fi
 PHASE=verifier
 mkdir -p "$BUNDLE"
 cp "$ROOT/$EXAMPLE/verify-toolchain.sh" "$ROOT/$EXAMPLE/kache_probe.py" "$ROOT/$EXAMPLE/rust_toolchain.py" "$BUNDLE/"
-cp -R "$ROOT/$EXAMPLE/rust-toolchain" "$BUNDLE/rust-toolchain"
+cp -R "$ROOT/$EXAMPLE/data/rust-toolchain" "$BUNDLE/rust-toolchain"
 if ! run_bounded pin-check "$RUN_SECONDS" "$LOG_DIR/pin-check.log" \
         env PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/$EXAMPLE/rust_toolchain.py" \
-        check "$ROOT/$EXAMPLE/rust-toolchain"; then
+        check "$ROOT/$EXAMPLE/data/rust-toolchain"; then
     fail 'the committed pin data does not verify; no native phase is meaningful'
     exit 1
 fi
@@ -1405,7 +1405,7 @@ PHASE=negative
 MUTANT_ROOT="$LOG_DIR/mutant"
 mkdir -p "$MUTANT_ROOT"
 cp -R "$ROOT/$EXAMPLE/." "$MUTANT_ROOT/"
-printf ' ' >>"$MUTANT_ROOT/rust-toolchain/channel.toml"
+printf ' ' >>"$MUTANT_ROOT/data/rust-toolchain/channel.toml"
 if run_bounded build-mutant "$BUILD_SECONDS" "$LOG_DIR/build-mutant.log" \
         "$DOCKER" build --no-cache --builder "$runner" --platform "$PLATFORM" --progress plain \
         --label "$LABEL" --build-arg "BASE_IMAGE=$PARENT_REF" -t "$MUTANT_TAG" "$MUTANT_ROOT"; then

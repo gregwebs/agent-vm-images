@@ -35,7 +35,7 @@ FIXTURES = Path(__file__).resolve().parent / 'fixtures' / 'rust-toolchain'
 sys.path.insert(0, str(FIXTURES))
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 # The shipped input set, read only by the real-manifest selection controls.
-REAL_DATADIR = REPOSITORY_ROOT / 'examples' / 'layers' / 'rust-dev' / 'rust-toolchain'
+REAL_DATADIR = REPOSITORY_ROOT / 'examples' / 'layers' / 'rust-dev' / 'data' / 'rust-toolchain'
 
 # The Python guard cannot see a native child, and this suite's real gpg tree --
 # key generation, signing, every verification -- is exactly that. So the suite

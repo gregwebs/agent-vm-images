@@ -21,7 +21,7 @@ behaviour, and on the separate digest-pinned amd64-only Verus install.
 
 Commit a reviewed finite closure and let rustup install only from it.
 
-- `examples/layers/rust-dev/rust-toolchain/` holds the exact per-architecture
+- `examples/layers/rust-dev/data/rust-toolchain/` holds the exact per-architecture
   `rustup-init` digest (with its original `.sha256` sidecar bytes as evidence),
   the original `channel-rust-<version>.toml` plus its `.sha256` and detached
   `.asc`, Rust's release key, and the SHA-256 and detached signature of every

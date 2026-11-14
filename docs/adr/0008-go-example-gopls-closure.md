@@ -32,7 +32,7 @@ Two properties of the Go module system matter for what a fix can honestly claim:
 
 Commit the selection, then let one deep helper compile from it.
 
-- `examples/layers/go-dev/gopls-closure/` holds a tiny wrapper Go module
+- `examples/layers/go-dev/data/gopls-closure/` holds a tiny wrapper Go module
   (`module agent-vm.invalid/go-dev/gopls-closure`, `tool golang.org/x/tools/gopls`,
   every selected module as an indirect requirement), the full tidy `go.sum`, the
   root module's own upstream `go.mod` bytes as evidence, a `THIRD_PARTY_LICENSES`

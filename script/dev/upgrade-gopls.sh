@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Maintainer-host writer for the go-dev example's committed gopls closure (#103).
 #
-# This is the only writer of examples/layers/go-dev/gopls-closure/ and of the
+# This is the only writer of examples/layers/go-dev/data/gopls-closure/ and of the
 # example's ARG GOPLS_VERSION assertion. Ordinary builds verify those committed
 # bytes; they never resolve a gopls version, regenerate the module graph or
 # refresh a checksum. Every run stages the whole two-architecture closure with the
@@ -26,7 +26,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
 UPDATER=script/dev/gopls-closure-update.py
 EXAMPLE=examples/layers/go-dev
-DATA=$EXAMPLE/gopls-closure
+DATA=$EXAMPLE/data/gopls-closure
 DOCKERFILE=$EXAMPLE/Dockerfile
 
 usage() {
@@ -76,7 +76,7 @@ restore_sources() { # signal path only; mirrors publish_transactional inclusivel
 # The fixed directories this writer may create. A left-over empty parent after a
 # restored failure would make the next first adoption look like a partial pinned
 # state, so cleanup only ever removes directories rmdir reports as empty.
-owned_directories=("$DATA")
+owned_directories=("$EXAMPLE/data" "$DATA")
 
 remove_owned_directories() {
     local index=${#owned_directories[@]}
@@ -277,8 +277,8 @@ check_ancestors() {
         elif [ -e "$absolute" ]; then
             refuse "non-directory destination ancestor: $prefix"
         else
-            case "$prefix" in
-                "$DATA") ;;
+            case " ${owned_directories[*]} " in
+                *" $prefix "*) ;;
                 *) refuse "missing destination ancestor: $prefix" ;;
             esac
         fi
@@ -512,7 +512,7 @@ cat <<'EOF'
 Next gates for this change:
   bash script/dev/upgrade-gopls.sh --check
   python3 examples/layers/go-dev/gopls_closure.py check \
-    examples/layers/go-dev/gopls-closure --expect-gopls VERSION --expect-go GOVERSION
+    examples/layers/go-dev/data/gopls-closure --expect-gopls VERSION --expect-go GOVERSION
   python3 script/dev/gopls-closure-update.py compare PROPOSAL_DIR DATA_DIR
   python3 script/test/gopls-closure-pins.py --go-root PATH
   python3 script/test/gopls-closure-maintenance.py --go-root PATH

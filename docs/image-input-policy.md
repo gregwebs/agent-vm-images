@@ -437,7 +437,7 @@ a staged Claude ARG difference. Key rotation is manual:
 `examples/layers/rust-dev` is a *checked-in example*, so its Rust inputs are in
 scope: the example commits a reviewed finite closure and rustup installs only
 from it. The record is
-[`rust-toolchain/pin.json`](../examples/layers/rust-dev/rust-toolchain/pin.json)
+[`rust-toolchain/pin.json`](../examples/layers/rust-dev/data/rust-toolchain/pin.json)
 and the decision is [ADR 0007](adr/0007-rust-example-toolchain-pins.md).
 
 What the closure contains, for `linux/amd64` and `linux/arm64`: the exact
@@ -497,7 +497,7 @@ identity, and publishes nothing until a reviewer re-dates it.
 The example no longer runs `go install golang.org/x/tools/gopls@VERSION`, which
 let the `go` command choose the module graph and accept sums it obtained during
 the build. It commits the whole selection instead: the record is
-[`gopls-closure/pin.json`](../examples/layers/go-dev/gopls-closure/pin.json) and
+[`gopls-closure/pin.json`](../examples/layers/go-dev/data/gopls-closure/pin.json) and
 the decision is [ADR 0008](adr/0008-go-example-gopls-closure.md).
 
 What is committed: a tiny wrapper Go module (`tool golang.org/x/tools/gopls` plus
