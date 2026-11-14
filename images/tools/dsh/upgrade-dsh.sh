@@ -59,7 +59,18 @@ current=$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$DIR/package.json")
 work=$(mktemp -d "${TMPDIR:-/tmp}/dsh-upgrade.XXXXXX")
 work=$(cd "$work" && pwd -P)
 keep_recovery=false
-trap 'if [ "$keep_recovery" = false ]; then rm -rf "$work"; fi' EXIT
+# The trap reports the status this script decided: a removal that fails - a Go
+# cache written read-only under the redirected HOME is the observed case (#138) -
+# must not turn a completed adoption into a failure. The leftover is named so an
+# operator can remove it, and retained recovery material is never touched.
+cleanup() {
+    local status=$?
+    if [ "$keep_recovery" = false ] && ! rm -rf "$work"; then
+        echo "error: invocation scratch cleanup failed; $work left behind" >&2
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
 # The five publication destinations, in publication order. Every backup below is
 # taken before the first copy, so a signal mid-publication can restore them all.
 publish_backup=$work/publish-backup
