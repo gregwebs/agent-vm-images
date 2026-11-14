@@ -128,7 +128,7 @@ class Case:
         self.state.write_text(json.dumps({'commands': [], 'containers': [], 'volume': None, 'network': None}))
         env = dict(self.env, DSH_TEST_MODE=mode, AVM_FAKE_CASE=gate, DSH_TEST_PUBLISH=str(publish),
                    DSH_TEST_ROLLBACK=str(rollback), DSH_TEST_UPSTREAM=upstream,
-                   DSH_TEST_RM_FAILS=str(self.root / 'dsh-upgrade.') if cleanup_failure else '')
+                   DSH_TEST_RM_FAILS_CASE=str(self.root) if cleanup_failure else '')
         with tempfile.TemporaryFile() as output:
             result = subprocess.run(['/bin/bash', str(self.prefix / 'upgrade-dsh.sh'), *args], env=env, stdout=output, stderr=output, timeout=70)
             output.seek(0)
@@ -472,11 +472,12 @@ def main():
         case.clean()
         print('dsh upgrade: signal after the recovery decision exits 3 and keeps recovery PASS')
         # #138: the EXIT trap must report the status the script decided, not the
-        # removal's. The fixture `rm` fails for this case's own scratch alone,
-        # exactly as a real `rm -rf` does when the redirected HOME holds a
-        # read-only Go cache entry. The publication already completed, so the run
-        # still reports success and names the leftover once; nothing is retained
-        # as recovery material, because nothing is left to recover.
+        # removal's. The fixture `rm` fails for this case's own scratch alone -
+        # the one `dsh-upgrade.*` directory directly under the case root, never a
+        # path inside it - exactly as a real `rm -rf` does when the redirected HOME
+        # holds a read-only Go cache entry. The publication already completed, so
+        # the run still reports success and names the leftover once; nothing is
+        # retained as recovery material, because nothing is left to recover.
         case = Case(root, 'cleanup-failure', fast_gate=True)
         assert case.run(cleanup_failure=True) == 0, (case.status, case.output)
         assert 'Permission denied' in case.output, case.output
@@ -485,6 +486,7 @@ def main():
         assert len(failures) == 1, case.output
         leftover = Path(failures[0].split('; ', 1)[1].rsplit(' left behind', 1)[0])
         assert leftover.is_absolute() and leftover.parent == case.root.resolve(), failures[0]
+        assert leftover.name.startswith('dsh-upgrade.'), failures[0]
         assert (leftover / 'final/pnpm-workspace.yaml').is_file(), failures[0]
         assert '==> pinned @deepseek-ai/dsh@0.1.5-rc.2' in case.output, case.output
         assert 'error: recovery material retained' not in case.output, case.output

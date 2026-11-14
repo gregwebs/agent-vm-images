@@ -197,11 +197,19 @@ def main():
     if name == 'rm':
         # The EXIT-trap scratch removal fails only for the case that asks for it,
         # exactly as a real `rm -rf` does when the redirected HOME holds a
-        # read-only entry (#138). Every other removal is the real one.
-        failing = os.environ.get('DSH_TEST_RM_FAILS', '')
-        if args[:1] == ['-rf'] and failing and args[-1].startswith(failing):
-            print('rm: ' + args[-1] + '/home/.cache/go-build: Permission denied', file=sys.stderr)
-            return 1
+        # read-only entry (#138). Only the trap's own target matches: the
+        # invocation scratch is a single `dsh-upgrade.*` component directly under
+        # the case root. A removal nested inside that scratch - a helper's own
+        # `rm -rf` of its temporary copy, which Linux runs where macOS does not -
+        # is delegated to the real one, so the script's decided status is still
+        # its own by the time the trap runs.
+        case_root = os.environ.get('DSH_TEST_RM_FAILS_CASE', '')
+        if args[:1] == ['-rf'] and case_root:
+            assert len(args) >= 2, args
+            target = Path(args[-1]).resolve()
+            if target.parent == Path(case_root).resolve() and target.name.startswith('dsh-upgrade.'):
+                print('rm: ' + args[-1] + '/home/.cache/go-build: Permission denied', file=sys.stderr)
+                return 1
         return subprocess.call(['/bin/rm', *args])
     if name == 'go':
         # The consumer harness records the mounted helper's compiler; the fixture
