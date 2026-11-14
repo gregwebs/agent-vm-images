@@ -18,7 +18,9 @@ re-download or an extraction.
 """
 from __future__ import annotations
 
+import datetime
 import http.server
+import importlib.util
 import io
 import json
 import os
@@ -29,6 +31,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1629,6 +1632,194 @@ def case_ordering(work: Path, fixture: Fixture) -> None:
     report('both replayed ordering regressions are caught by the event log')
 
 
+# --- writer clock -------------------------------------------------------------
+
+# The writer is not covered by the installer cases above: it is the only site that
+# stamps `verified_on`. The two extreme zones differ from UTC in opposite
+# directions (Kiritimati is UTC+14, Etc/GMT+12 is UTC-12), so at least one of the
+# two always has a local date other than the UTC date. That is what makes the pair
+# time-of-day independent instead of a coin flip.
+CLOCK_ZONES = ('Pacific/Kiritimati', 'Etc/GMT+12')
+WRITER = ROOT / 'script' / 'dev' / 'pin-artifact.py'
+
+
+def load_writer():
+    spec = importlib.util.spec_from_file_location('pin_artifact_under_test', WRITER)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def utc_date() -> datetime.date:
+    return datetime.datetime.now(datetime.timezone.utc).date()
+
+
+def behind_utc() -> datetime.datetime:
+    """A simulated host wall clock one day behind the UTC date, naive.
+
+    The shift is measured from UTC, not from whatever local date the host running
+    this suite happens to have, so the simulated local date is always exactly the
+    UTC date minus one.
+    """
+    return (datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(days=1)).replace(tzinfo=None)
+
+
+class WestModule:
+    """The writer's `datetime` as a host whose local date lags UTC by a day.
+
+    `verified_on` used to be stamped with the host's *local* date, so the local
+    accessors are what an unfixed writer reaches for -- and every one of them moves
+    here: `date.today()`, `datetime.now()` with no zone and `datetime.today()`.
+    Overriding only some of them leaves the rest inherited and real, and a writer
+    using one of the unshifted spellings then escapes the simulation. The UTC
+    accessors stay real: UTC is the same instant everywhere.
+    """
+
+    timezone = datetime.timezone
+
+    class date(datetime.date):  # noqa: N801 - stands in for datetime.date
+        @classmethod
+        def today(cls) -> datetime.date:
+            return behind_utc().date()
+
+    class datetime(datetime.datetime):  # noqa: N801
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return behind_utc()
+            return datetime.datetime.now(tz)
+
+        @classmethod
+        def today(cls):
+            return behind_utc()
+
+        @classmethod
+        def utcnow(cls):
+            return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
+def with_zone(zone: str):
+    """Run one case with the process timezone set to `zone`, then restore it."""
+
+    class _Zone:
+        def __enter__(self):
+            self.saved = os.environ.get('TZ')
+            os.environ['TZ'] = zone
+            time.tzset()
+            return self
+
+        def __exit__(self, *_exception):
+            if self.saved is None:
+                os.environ.pop('TZ', None)
+            else:
+                os.environ['TZ'] = self.saved
+            time.tzset()
+            return False
+
+    return _Zone()
+
+
+def at_a_stable_utc_date(call) -> None:
+    """Run `call(today)` unless the UTC date rolls over mid-case, then retry once.
+
+    Every assertion here compares a stamp with "the UTC date right now". A case
+    that straddles UTC midnight would compare against a date the process no longer
+    agrees with, so a genuine rollover is retried rather than reported -- but only
+    when the date really moved, never to excuse a mutant.
+    """
+    for _ in range(2):
+        today = utc_date()
+        try:
+            call(today)
+        except AssertionError:
+            if utc_date() == today:
+                raise
+            continue
+        if utc_date() == today:
+            return
+    raise AssertionError('the UTC date rolled over twice while this case ran')
+
+
+def case_writer_clock(work: Path) -> None:
+    """`verified_on` is the UTC date, never the maintainer host's local date.
+
+    A pin is written on one host and read by reviewers and builders in every zone,
+    so the stamp has to be one instant. Both extreme zones are exercised because
+    at least one of them always has a local date other than the UTC date; then the
+    writer's own `datetime` is moved a day behind UTC, so a stamp that consults any
+    local accessor is wrong at every hour rather than at some of them.
+    """
+    writer = load_writer()
+
+    def pins():
+        signed = {'manifest_digest': 'a' * 64, 'signature_digest': 'b' * 64,
+                  'key_digest': 'c' * 64, 'fingerprint': 'D' * 40}
+        return {
+            'node': writer.render('node', VERSION, {}, {}, signed,
+                                  {'npm': NPM_VERSION}),
+            'gh': writer.render('gh', VERSION, {}, {'checksums': b'gh checksums\n'},
+                                None),
+        }
+
+    label = 'clock_writer_stamps_the_utc_date'
+
+    def extreme_zones(today: datetime.date) -> None:
+        differing = False
+        for zone in CLOCK_ZONES:
+            with with_zone(zone):
+                local = datetime.date.today()
+                if local == today:
+                    continue
+                differing = True
+                for name, pin in pins().items():
+                    stamped = pin['authentication']['verified_on']
+                    assert stamped == today.isoformat(), (
+                        f'under TZ={zone}, where the local date is {local}, the '
+                        f'{name} pin is stamped {stamped}, not the UTC date {today}')
+        assert differing, 'no candidate zone differs from the UTC date'
+
+    try:
+        at_a_stable_utc_date(extreme_zones)
+    except AssertionError as error:
+        fail(label, error)
+    else:
+        report(label)
+
+    label = 'clock_writer_ignores_a_lagging_local_date'
+    today = utc_date()
+    behind = today - datetime.timedelta(days=1)
+    for spelling, found in (
+            ('date.today()', WestModule.date.today()),
+            ('datetime.now()', WestModule.datetime.now().date()),
+            ('datetime.today()', WestModule.datetime.today().date())):
+        if found != behind:
+            fail(label, f'the simulated host reports {spelling} as {found}, not the '
+                        f'lagging local date {behind}')
+            return
+    for spelling, found in (
+            ('datetime.now(timezone.utc)',
+             WestModule.datetime.now(datetime.timezone.utc).date()),
+            ('datetime.utcnow()', WestModule.datetime.utcnow().date())):
+        if found != today:
+            fail(label, f'the simulated host reports {spelling} as {found}, not the '
+                        f'UTC date {today}, so the case no longer simulates a zone')
+            return
+    original = writer.datetime
+    writer.datetime = WestModule
+    try:
+        shifted = pins()
+    finally:
+        writer.datetime = original
+    wrong = {name: pin['authentication']['verified_on'] for name, pin in shifted.items()
+             if pin['authentication']['verified_on'] != today.isoformat()}
+    if wrong:
+        fail(label, f'the writer on a host one day behind UTC stamped {wrong}, not '
+                    f'the UTC date {today}')
+    else:
+        report(label)
+
 
 def main() -> int:
     if shutil.which('gpg') is None:
@@ -1655,6 +1846,7 @@ def main() -> int:
         case_attestation_before_publication(work, fixture)
         case_bundled_npm(work, fixture)
         case_ordering(work, fixture)
+        case_writer_clock(work)
         case_agy_install(work, agy)
         case_agy_committed_corroboration(work, agy)
         case_agy_archive_bytes(work, agy)
