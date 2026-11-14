@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -70,6 +71,10 @@ DOCKERFILE_RELATIVE = 'examples/layers/go-dev/Dockerfile'
 WRITER_TOOLS = ('bash', 'sh', 'cp', 'mv', 'rm', 'rmdir', 'mkdir', 'mktemp', 'cat', 'cmp',
                 'sha256sum', 'grep', 'sed', 'head', 'tail', 'dirname', 'basename', 'env',
                 'sleep', 'true', 'uname', 'chmod', 'stat')
+# A runnable file the writer's own list must not name, so the copy probe asks about
+# an identity the boundary never allowlisted. ``false`` first: the writer never
+# starts it, so PATH order cannot put it in the inventory.
+UNLISTED_CANDIDATES = ('/usr/bin/false', '/bin/false', '/usr/bin/true', '/bin/true')
 SYSTEM_SHELLS = ('/bin/bash', '/usr/bin/bash', '/bin/sh', '/usr/bin/sh', '/usr/bin/env')
 
 
@@ -274,15 +279,52 @@ def boundary_readable(go_root: Path, alternate: Path | None) -> list[str]:
     return readable
 
 
-def full_inventory(go_root: Path, launcher_dir: Path,
+def full_inventory(go_root: Path, launcher_dir: Path, writer_tools: list[str],
                    alternate: Path | None) -> list[str]:
-    allowed = set(writer_inventory(go_root, launcher_dir))
+    allowed = set(writer_inventory(go_root, launcher_dir, writer_tools))
     if alternate is not None:
         allowed |= set(go_executables(alternate))
     return sorted(allowed)
 
 
-def writer_inventory(go_root: Path, launcher_dir: Path) -> list[str]:
+# The tail of the writer child's PATH: the base system, and deliberately nothing
+# from this suite's own PATH. A homebrew ``gnubin`` entry first there names a
+# different build of the same tool than the writer starts.
+BASE_WRITER_PATH = ('/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin')
+
+
+def writer_path(go_root: Path, launcher_dir: Path) -> str:
+    """The PATH a writer child runs with; the inventory is resolved from this one.
+
+    Shared with :func:`environment` so the list of tools the boundary allowlists
+    and the list the writer actually resolves cannot drift apart.
+    """
+    return ':'.join([str(launcher_dir), str(go_root / 'bin'), *BASE_WRITER_PATH])
+
+
+def resolved_writer_tools(path: str) -> list[str]:
+    """Every writer tool as exactly one absolute path, resolved once.
+
+    Resolution is against ``path`` -- the writer child's own PATH -- and happens
+    here, in the supervisor, before any boundary exists. Neither half may be asked
+    twice: the writer must never be handed an inventory resolved from a PATH it
+    does not run with (GNU coreutils ahead of the BSD tools in *this* process's
+    PATH would allowlist homebrew's ``dirname`` while the writer starts
+    ``/usr/bin/dirname`` and is refused), and ``os.access(..., X_OK)`` inside the
+    boundary is answered by the exec allowlist being proved rather than by the
+    file, so a re-resolution there describes the boundary, not the host. Every
+    later reader takes this list from :data:`WRITER_TOOLS_FILE`.
+    """
+    tools = set()
+    for name in WRITER_TOOLS:
+        found = shutil.which(name, path=path)
+        if found is not None:
+            tools.add(os.path.realpath(found))
+    return sorted(tools)
+
+
+def writer_inventory(go_root: Path, launcher_dir: Path,
+                     writer_tools: list[str]) -> list[str]:
     """The explicit executable inventory for the writer-inclusive boundary.
 
     Shells are named both as the literal this suite starts and as the file it
@@ -292,10 +334,7 @@ def writer_inventory(go_root: Path, launcher_dir: Path) -> list[str]:
     ``#!/bin/sh`` script's shebang.
     """
     allowed = set(go_executables(go_root))
-    for name in WRITER_TOOLS:
-        found = shutil.which(name)
-        if found is not None:
-            allowed.add(os.path.realpath(found))
+    allowed.update(writer_tools)
     for path in SYSTEM_SHELLS:
         if os.access(path, os.X_OK):
             allowed.add(path)
@@ -321,6 +360,9 @@ FORGED_MARKER_FILES = ('forged-marker.txt', 'supervisor-controls.txt')
 TMPDIR_GUARD_FILE = 'tmpdir-guard.txt'
 SECOND_PASS_FILE = 'second-pass-controls.txt'
 SECOND_GO_FILE = 'second-go.txt'
+# The supervisor's resolved writer tool list, so the ``--inside`` pass reads the
+# same absolute paths instead of resolving them again under the boundary.
+WRITER_TOOLS_FILE = 'writer-tools.txt'
 
 
 @dataclass(frozen=True)
@@ -343,39 +385,63 @@ def exec_probe(path: str, arguments: Sequence[str]) -> str:
     return 'allowed'
 
 
-def confinement_proof(sandbox, inventory: list[str]) -> Proof:
+def unlisted_binary(writer_tools: list[str]) -> str | None:
+    """A runnable file the resolved writer list does not name, or ``None``.
+
+    Two facts, and neither may be asked of the boundary this proof is measuring:
+    whether the file can be run is its own mode bits (``os.access(..., X_OK)``
+    inside the boundary answers with the exec allowlist, so a correctly
+    unlisted binary reads as "not executable" and the leg is skipped), and
+    whether it is unlisted is a comparison against the one resolved list.
+    """
+    for candidate in UNLISTED_CANDIDATES:
+        if os.path.realpath(candidate) in writer_tools:
+            continue
+        try:
+            mode = os.stat(candidate).st_mode
+        except OSError:
+            continue
+        if stat.S_ISREG(mode) and mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+            return candidate
+    return None
+
+
+def confinement_proof(sandbox, writer_tools: list[str]) -> Proof:
     """Prove the boundary from inside it, instead of believing a marker.
 
     The executable-denial legs are the proof: a direct exec of an allowed binary
     copied into writable scratch (an executable-allowlist identity on macOS, a
     Landlock rule on Linux) and a direct exec of an *unlisted* binary copied into
-    writable scratch must both be refused. The off-host TEST-NET leg is attempted
-    but is supplementary, never the proof: a host with no route to TEST-NET fails
-    it identically to a denied connect, so it cannot distinguish sandbox denial
-    from host routing. A connection that *succeeds* is a definitive breach and
-    still fails the proof.
+    writable scratch must both be refused. Both legs name their binary from
+    ``writer_tools``, the list resolved once outside the boundary: which binary a
+    leg copies may not depend on the order of PATH, or the copy and the allowlist
+    describe different files. The off-host TEST-NET leg is attempted but is
+    supplementary, never the proof: a host with no route to TEST-NET fails it
+    identically to a denied connect, so it cannot distinguish sandbox denial from
+    host routing. A connection that *succeeds* is a definitive breach and still
+    fails the proof.
     """
     import socket
 
     try:
-        allowed_copy = sandbox.exec_of_copy_denied(inventory)
+        allowed_copy = sandbox.exec_of_copy_denied(writer_tools)
     except Exception as error:  # noqa: BLE001 - any failure is a missing proof
         return Proof(False, f'copy probe failed: {error}', 'error', 'error')
     if allowed_copy != 'denied':
         return Proof(False, f'a copied allowed binary executed ({allowed_copy})',
                      allowed_copy, 'not reached')
-    unlisted_copy = 'skipped'
-    for candidate in ('/usr/bin/true', '/bin/true'):
-        if os.access(candidate, os.X_OK):
-            directory = Path(tempfile.mkdtemp(prefix='unlisted-'))
-            try:
-                copy = directory / 'copied-unlisted-binary'
-                shutil.copyfile(candidate, copy)
-                os.chmod(copy, 0o755)
-                unlisted_copy = exec_probe(str(copy), ())
-            finally:
-                remove_tree(directory)
-            break
+    candidate = unlisted_binary(writer_tools)
+    if candidate is None:
+        return Proof(False, 'no unlisted binary was available to copy',
+                     allowed_copy, 'skipped')
+    directory = Path(tempfile.mkdtemp(prefix='unlisted-'))
+    try:
+        copy = directory / 'copied-unlisted-binary'
+        shutil.copyfile(candidate, copy)
+        os.chmod(copy, 0o755)
+        unlisted_copy = exec_probe(str(copy), ())
+    finally:
+        remove_tree(directory)
     if unlisted_copy != 'denied':
         return Proof(False, f'a copied unlisted binary executed ({unlisted_copy})',
                      allowed_copy, unlisted_copy)
@@ -415,6 +481,11 @@ def supervise(go_root: Path) -> int:
     (root / SECOND_GO_FILE).write_text(json.dumps(
         {'root': '' if alternate.root is None else str(alternate.root),
          'version': alternate.version, 'reason': alternate.reason}) + '\n')
+    # Resolved here, outside the boundary, from the writer's own PATH and handed to
+    # every reader: a PATH query made inside would be answered by the boundary being
+    # proved (see resolved_writer_tools).
+    (root / WRITER_TOOLS_FILE).write_text(
+        json.dumps(resolved_writer_tools(writer_path(go_root, launcher_dir))) + '\n')
 
     # Discriminating control, run where no boundary exists: a forged marker must
     # not buy confinement, so the --inside path (which is what the suite actually
@@ -838,8 +909,7 @@ def tmpdir_guard_check(root: Path) -> dict:
 
 def environment(fixture_root, tree_root: Path, launcher_dir: Path,
                 extra: dict | None = None) -> dict:
-    path = ':'.join([str(launcher_dir), str(fixture_root.go_root / 'bin'),
-                     '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'])
+    path = writer_path(fixture_root.go_root, launcher_dir)
     env = {'PATH': path,
            'HOME': os.environ.get('HOME', '/tmp'),
            'LANG': 'C',
@@ -941,13 +1011,14 @@ def main() -> int:
 
     alternate = json.loads((root / SECOND_GO_FILE).read_text())
     alternate_root = Path(alternate['root']) if alternate['root'] else None
-    inventory = full_inventory(go_root, launcher_dir, alternate_root)
+    writer_tools = json.loads((root / WRITER_TOOLS_FILE).read_text())
+    inventory = full_inventory(go_root, launcher_dir, writer_tools, alternate_root)
     # Every attempt is kept: the last one is the proof the checks below report, and
     # the earlier ones only decide whether another entry is needed.
     proofs: list[Proof] = []
 
     def prove() -> str:
-        proofs.append(confinement_proof(sandbox, inventory))
+        proofs.append(confinement_proof(sandbox, writer_tools))
         return '' if proofs[-1].proven else proofs[-1].detail
 
     try:
