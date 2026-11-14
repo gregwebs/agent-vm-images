@@ -122,6 +122,21 @@ class Case:
                         DSH_TEST_REPO=str(ROOT), DSH_TEST_GRAPH=str(self.graph), DSH_TEST_LOG=str(self.log),
                         DSH_TEST_TARGETS=json.dumps(list(map(str, self.targets))), AVM_FAKE_STATE=str(self.state))
 
+    def clean_checkout(self):
+        """Model a source checkout: no AGENT_VM_CONTRACT_DIR, only a composed build.
+
+        The fixture's `go` refuses to build, so the adapter's offline reuse form
+        (RECIPE_CONTRACT_CONTEXT in script/build/recipe-contract.sh) stands in for the
+        compile a host checkout would run. What the case proves is that upgrade-dsh.sh
+        reaches that adapter at all: while the fallback sat below the guard, the guard
+        refused this environment before the build written for exactly this case.
+        """
+        context = self.root / 'host-build'
+        context.mkdir()
+        self.native_contract = self.native_contract.rename(context / 'out')
+        self.env.pop('AGENT_VM_CONTRACT_DIR')
+        self.env['RECIPE_CONTRACT_CONTEXT'] = str(context)
+
     def run(self, args=(), mode='', gate='positive', publish='', rollback='', upstream='',
             cleanup_failure=False):
         self.log.write_text('')
@@ -354,6 +369,20 @@ def main():
                 assert str(case.root / source) not in [event['value'][-1] for event in events if event['kind'] == 'cp']
             print('dsh upgrade: ' + name + ' PASS')
         docker_client_config_cases(root)
+        # A source checkout carries no composed helper, so the native build has to
+        # happen before the first guard. The base-pin refusal stays ahead of that
+        # build, so an unreviewed --pnpm never spends a compile.
+        case = Case(root, 'host-checkout', fast_gate=True)
+        case.clean_checkout()
+        assert case.run(['--pnpm', '12.0.0']) == 1, case.output
+        assert '--pnpm must equal the reviewed base pin' in case.output, case.output
+        assert not any(event['kind'] == 'go' for event in case.events), case.events
+        assert case.run([]) == 0, case.output
+        assert 'no executable recipe-contract' not in case.output, case.output
+        assert json.loads(case.targets[0].read_text())['dependencies']['@deepseek-ai/dsh'] == '0.1.5-rc.2'
+        assert '${AGENT_VERSION_DSH:-0.1.5-rc.2}' in case.targets[-1].read_text(), case.output
+        case.clean()
+        print('dsh upgrade: a clean checkout builds the native contract before the guard PASS')
         for name, args, expected, mode in [
             ('pnpm12', ['--pnpm','12.0.0'], 1, ''), ('pnpm-tag', ['--pnpm','latest'], 1, ''),
             ('duplicate', ['--pnpm','11.11.0','--pnpm','11.11.0'], 2, ''),
