@@ -72,8 +72,11 @@ WRITER_TOOLS = ('bash', 'sh', 'cp', 'mv', 'rm', 'rmdir', 'mkdir', 'mktemp', 'cat
                 'sha256sum', 'grep', 'sed', 'head', 'tail', 'dirname', 'basename', 'env',
                 'sleep', 'true', 'uname', 'chmod', 'stat')
 # A runnable file the writer's own list must not name, so the copy probe asks about
-# an identity the boundary never allowlisted. ``false`` first: the writer never
-# starts it, so PATH order cannot put it in the inventory.
+# an identity the boundary never allowlisted. ``false`` first: no writer tool is or
+# starts it, so no PATH order can put it in the inventory -- unlike ``true``, which
+# is a writer tool and therefore can never be unlisted while the writer's PATH
+# resolves at all. ``/usr/bin`` before ``/bin`` so a merged-``/usr`` host names the
+# file once; the later entries are only for a host whose earlier ones are missing.
 UNLISTED_CANDIDATES = ('/usr/bin/false', '/bin/false', '/usr/bin/true', '/bin/true')
 SYSTEM_SHELLS = ('/bin/bash', '/usr/bin/bash', '/bin/sh', '/usr/bin/sh', '/usr/bin/env')
 
@@ -363,6 +366,9 @@ SECOND_GO_FILE = 'second-go.txt'
 # The supervisor's resolved writer tool list, so the ``--inside`` pass reads the
 # same absolute paths instead of resolving them again under the boundary.
 WRITER_TOOLS_FILE = 'writer-tools.txt'
+# The unlisted candidate, chosen outside the boundary for the same reason. Its
+# absence travels as ``null``: a leg that could not be made refuses, never skips.
+UNLISTED_BINARY_FILE = 'unlisted-binary.txt'
 
 
 @dataclass(frozen=True)
@@ -385,37 +391,50 @@ def exec_probe(path: str, arguments: Sequence[str]) -> str:
     return 'allowed'
 
 
-def unlisted_binary(writer_tools: list[str]) -> str | None:
+def resolve_unlisted_binary(writer_tools: list[str]) -> str | None:
     """A runnable file the resolved writer list does not name, or ``None``.
 
-    Two facts, and neither may be asked of the boundary this proof is measuring:
-    whether the file can be run is its own mode bits (``os.access(..., X_OK)``
-    inside the boundary answers with the exec allowlist, so a correctly
-    unlisted binary reads as "not executable" and the leg is skipped), and
-    whether it is unlisted is a comparison against the one resolved list.
+    Resolved in the supervisor, outside any boundary, exactly like
+    :func:`resolved_writer_tools` and for the same reason: neither fact this
+    needs may be asked of the boundary being proved. Whether the candidate is
+    unlisted is a comparison against the one resolved list; whether it can run is
+    its own mode bits. Inside the boundary both questions come back about the
+    boundary instead of the host -- ``os.access(..., X_OK)`` answers with the
+    exec allowlist (so a correctly unlisted binary reads as "not executable"),
+    and the Linux root binds executables one file at a time, so a binary outside
+    the inventory is not even present to ``os.stat``. Either way the leg would be
+    skipped rather than made, which is exactly how the Linux runner refused.
+
+    The candidates are a fallback chain: one that is absent or unstatable here
+    costs nothing, and only an exhausted list returns ``None`` (which the caller
+    reports as an unproven proof, never as a pass).
     """
     for candidate in UNLISTED_CANDIDATES:
-        if os.path.realpath(candidate) in writer_tools:
+        resolved = os.path.realpath(candidate)
+        if resolved in writer_tools:
             continue
         try:
-            mode = os.stat(candidate).st_mode
+            mode = os.stat(resolved).st_mode
         except OSError:
             continue
         if stat.S_ISREG(mode) and mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
-            return candidate
+            return resolved
     return None
 
 
-def confinement_proof(sandbox, writer_tools: list[str]) -> Proof:
+def confinement_proof(sandbox, writer_tools: list[str], unlisted: str | None) -> Proof:
     """Prove the boundary from inside it, instead of believing a marker.
 
     The executable-denial legs are the proof: a direct exec of an allowed binary
     copied into writable scratch (an executable-allowlist identity on macOS, a
     Landlock rule on Linux) and a direct exec of an *unlisted* binary copied into
-    writable scratch must both be refused. Both legs name their binary from
-    ``writer_tools``, the list resolved once outside the boundary: which binary a
-    leg copies may not depend on the order of PATH, or the copy and the allowlist
-    describe different files. The off-host TEST-NET leg is attempted but is
+    writable scratch must both be refused. Which binary each leg copies is decided
+    once, outside the boundary, and passed in: ``writer_tools`` is the resolved list
+    the allowlist is built from, and ``unlisted`` is the supervisor's candidate
+    (:func:`resolve_unlisted_binary`). Neither may be re-derived here -- inside the
+    boundary a PATH query, an ``os.access`` or even an ``os.stat`` describes the
+    boundary rather than the host, so the copy and the allowlist would describe
+    different files. The off-host TEST-NET leg is attempted but is
     supplementary, never the proof: a host with no route to TEST-NET fails it
     identically to a denied connect, so it cannot distinguish sandbox denial from
     host routing. A connection that *succeeds* is a definitive breach and still
@@ -430,14 +449,21 @@ def confinement_proof(sandbox, writer_tools: list[str]) -> Proof:
     if allowed_copy != 'denied':
         return Proof(False, f'a copied allowed binary executed ({allowed_copy})',
                      allowed_copy, 'not reached')
-    candidate = unlisted_binary(writer_tools)
-    if candidate is None:
+    if unlisted is None:
         return Proof(False, 'no unlisted binary was available to copy',
                      allowed_copy, 'skipped')
     directory = Path(tempfile.mkdtemp(prefix='unlisted-'))
     try:
         copy = directory / 'copied-unlisted-binary'
-        shutil.copyfile(candidate, copy)
+        try:
+            shutil.copyfile(unlisted, copy)
+        except OSError as error:
+            # Reading the source is the one thing this leg needs from the boundary
+            # that the proof is not about, so it is declared (see the ``readable``
+            # argument at the ``enter`` call). If it is still unreadable the leg
+            # was not made, which is an unproven proof rather than a pass.
+            return Proof(False, f'no unlisted binary to copy: {error}',
+                         allowed_copy, 'skipped')
         os.chmod(copy, 0o755)
         unlisted_copy = exec_probe(str(copy), ())
     finally:
@@ -484,8 +510,13 @@ def supervise(go_root: Path) -> int:
     # Resolved here, outside the boundary, from the writer's own PATH and handed to
     # every reader: a PATH query made inside would be answered by the boundary being
     # proved (see resolved_writer_tools).
-    (root / WRITER_TOOLS_FILE).write_text(
-        json.dumps(resolved_writer_tools(writer_path(go_root, launcher_dir))) + '\n')
+    tools = resolved_writer_tools(writer_path(go_root, launcher_dir))
+    (root / WRITER_TOOLS_FILE).write_text(json.dumps(tools) + '\n')
+    # The unlisted candidate is chosen here too, from the host's own file set: what
+    # binary the leg copies may not be a question the boundary answers (see
+    # resolve_unlisted_binary).
+    (root / UNLISTED_BINARY_FILE).write_text(
+        json.dumps({'path': resolve_unlisted_binary(tools)}) + '\n')
 
     # Discriminating control, run where no boundary exists: a forged marker must
     # not buy confinement, so the --inside path (which is what the suite actually
@@ -1012,20 +1043,33 @@ def main() -> int:
     alternate = json.loads((root / SECOND_GO_FILE).read_text())
     alternate_root = Path(alternate['root']) if alternate['root'] else None
     writer_tools = json.loads((root / WRITER_TOOLS_FILE).read_text())
+    # ``None`` when the supervisor found nothing to copy; the proof refuses rather
+    # than skipping, so the value is never treated as "no leg needed".
+    unlisted = json.loads((root / UNLISTED_BINARY_FILE).read_text())['path']
     inventory = full_inventory(go_root, launcher_dir, writer_tools, alternate_root)
     # Every attempt is kept: the last one is the proof the checks below report, and
     # the earlier ones only decide whether another entry is needed.
     proofs: list[Proof] = []
 
     def prove() -> str:
-        proofs.append(confinement_proof(sandbox, writer_tools))
+        proofs.append(confinement_proof(sandbox, writer_tools, unlisted))
         return '' if proofs[-1].proven else proofs[-1].detail
 
+    # The candidate was chosen outside, so the boundary has to expose it to be read:
+    # on Linux ``readable`` entries are ro-bound as files (sandbox._linux_prefix)
+    # while only ``executables`` become the Landlock rule set, so declaring the read
+    # leaves the file outside the exec allowlist -- which is the whole claim this leg
+    # makes. macOS needs nothing here: its profile already allows ``file-read*`` and
+    # its ``readable`` argument is unused, so the two platforms now agree on reads
+    # and differ only in the question under test.
+    readable = boundary_readable(go_root, alternate_root)
+    if unlisted is not None:
+        readable.append(unlisted)
     try:
         confinement.enter(
             sandbox, prove, executables=inventory,
             writable=[str(root), tempfile.gettempdir(), '/tmp', '/private/tmp'],
-            readable=boundary_readable(go_root, alternate_root), root=root)
+            readable=readable, root=root)
     except confinement.Refusal as error:
         print(f'ISOLATION-UNAVAILABLE: {error}', file=sys.stderr)
         return 3
