@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Static image contracts only; launcher agreement and native builds have other owners.
 set -euo pipefail
-CHECKER="$(cd "${BASH_SOURCE[0]%/*}" && pwd)/$(basename "${BASH_SOURCE[0]}")"
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+CHECKER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # Image-owned interface: agent-vm's CHROME_MCP_CAPABILITY_PATH and
 # CHROME_MCP_WRAPPER_PATH (crates/agent-vm/src/defaults.rs) must name these
 # paths; agent-vm checks that side (docs/image-source-ownership.md).

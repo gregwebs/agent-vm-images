@@ -24,7 +24,7 @@ CARGO_HOME=${CARGO_HOME:-/opt/cargo}
     echo "install-rust: CARGO_HOME must be the fixed /opt/cargo (got $CARGO_HOME)" >&2
     exit 1
 }
-HERE=$(cd "${BASH_SOURCE[0]%/*}" && pwd)
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export PYTHONDONTWRITEBYTECODE=1
 
 arch=$(dpkg --print-architecture)

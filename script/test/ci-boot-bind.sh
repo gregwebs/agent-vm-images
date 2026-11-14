@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exercise the actual workflow bind block, including output-injection rejection.
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 fail() { echo "bind regression: $*" >&2; exit 1; }

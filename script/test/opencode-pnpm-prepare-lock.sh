@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 SOURCE="$ROOT/images/tools/opencode/plugins"
 work=$(mktemp -d)
 work=$(cd "$work" && pwd -P)

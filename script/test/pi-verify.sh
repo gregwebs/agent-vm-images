@@ -12,7 +12,7 @@
 # is decided by the real script.
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 GATE="$REPO_ROOT/images/tools/pi/verify-pi.sh"
 PROJECT="$REPO_ROOT/images/tools/pnpm-project.py"
 CONTRACT_CONTEXT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)"

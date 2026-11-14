@@ -21,7 +21,7 @@
 # the suite proves the interface and the transaction on the published selections.
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PI_PREPARE="$REPO_ROOT/images/tools/pi/prepare-lock.sh"
 BRIDGE_PREPARE="$REPO_ROOT/images/tools/pi/bridge/prepare-lock.sh"
 TEST_ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/pi-prepare-lock-test.XXXXXX")" && pwd -P)"

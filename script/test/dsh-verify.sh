@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GATE="$REPO_ROOT/images/tools/dsh/verify-dsh.sh"
 SOURCE_DIR="$REPO_ROOT/images/tools/dsh"
 # The gate executes its contract helpers, so the native composed directory is

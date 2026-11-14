@@ -11,7 +11,7 @@
 #
 # usage: bash script/test/parent-identity.sh BASE --platform linux/ARCH
 set -euo pipefail
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 usage() {
     echo 'usage: bash script/test/parent-identity.sh BASE --platform linux/ARCH' >&2
     exit 2

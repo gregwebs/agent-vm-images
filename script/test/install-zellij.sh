@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INSTALLER="$REPO_ROOT/images/install-zellij.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/install-zellij-test.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT

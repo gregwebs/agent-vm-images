@@ -4,7 +4,7 @@
 # The committed pin is the review; there is no latest lookup (bump per
 # docs/standard-image-releases.md "Hosted amd64 boot verification").
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 [ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_OS:-}" = Linux ] || { echo 'disposable Linux Actions runner only' >&2; exit 1; }
 [ "$(uname -m)" = x86_64 ] || { echo 'the pinned msb runtime is provisioned for hosted amd64 only' >&2; exit 1; }
 pins="$ROOT/script/release/tool-pins.json"

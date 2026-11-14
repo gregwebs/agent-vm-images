@@ -34,7 +34,7 @@
 # genuine daemon, permission or in-use error still is.
 set -euo pipefail
 
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 EXAMPLE=examples/layers/rust-dev
 FIXTURES=script/test/fixtures/rust-toolchain
 DOCKER=${DOCKER:-docker}

@@ -9,7 +9,7 @@
 # host tree.
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INSTALL="$REPO_ROOT/images/tools/copilot/install-copilot.sh"
 
 TEST_ROOT="$(mktemp -d /tmp/copilot-installer.XXXXXX)"

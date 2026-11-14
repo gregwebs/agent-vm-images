@@ -10,7 +10,7 @@
 # because status handling and the access audit are part of what is under test.
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INSTALL="$REPO_ROOT/images/tools/agy/install-agy.sh"
 VERIFY="$REPO_ROOT/images/tools/agy/verify-agy.sh"
 COMMITTED="$REPO_ROOT/images/tools/agy"

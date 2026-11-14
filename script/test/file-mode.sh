@@ -32,6 +32,6 @@ file_mode() { # $1 = path
 # needs no path of its own.
 install_file_mode_stat_shim() { # $1 = directory that will hold the stub
     mkdir -p "$1"
-    cp "${BASH_SOURCE[0]%/*}/fixtures/file-mode-stat.sh" "$1/stat"
+    cp "$(dirname "${BASH_SOURCE[0]}")/fixtures/file-mode-stat.sh" "$1/stat"
     chmod 0755 "$1/stat"
 }

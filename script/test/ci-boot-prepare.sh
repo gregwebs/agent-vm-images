@@ -7,7 +7,7 @@
 # permitted path to prove the sentinel is live, making the guard the only
 # difference between refused and mutating.
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/bin"

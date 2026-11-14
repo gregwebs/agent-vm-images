@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Chrome example: identity, NSS, browser, pinned-MCP and policy checks (#41).
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 # Trusted publisher identity, used by phase A to re-verify the committed bundle.
 # shellcheck source=/dev/null

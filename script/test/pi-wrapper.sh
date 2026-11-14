@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WRAPPER="$REPO_ROOT/images/tools/pi/pi.sh"
 MANDATORY_EXTENSION=/opt/agent-vm/pi-extensions/guest-credential-warning.js
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/pi-wrapper-test.XXXXXX")"

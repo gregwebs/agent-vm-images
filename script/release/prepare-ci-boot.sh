@@ -2,7 +2,7 @@
 # Disposable hosted amd64 runner only: reclaim the four named unused SDK paths and
 # grant this job's user /dev/kvm for a real msb boot. Never run on an operator host.
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 [ "${GITHUB_ACTIONS:-}" = true ] && [ "${RUNNER_OS:-}" = Linux ] || { echo 'disposable Linux Actions runner only' >&2; exit 1; }
 # Measured: ubuntu-24.04-arm exposes no /dev/kvm, so arm64 boot evidence stays a native-host step.
 [ "$(uname -m)" = x86_64 ] || { echo 'hosted boot verification is amd64-only: ubuntu-24.04-arm has no /dev/kvm' >&2; exit 1; }

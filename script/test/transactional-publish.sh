@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Failed cp can truncate its destination. Verify bytes AND mode, not just status.
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/bin"

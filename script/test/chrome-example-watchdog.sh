@@ -2,7 +2,7 @@
 # Exercise the real harness's nested bounds and EXIT evidence with a native
 # daemon. Only build/slow cleanup clients are shimmed; no browser flags change.
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 BASE_IMAGE=${BASE_IMAGE:-agent-vm-standard:local}
 WATCHDOG_SECONDS=${WATCHDOG_SECONDS:-60}

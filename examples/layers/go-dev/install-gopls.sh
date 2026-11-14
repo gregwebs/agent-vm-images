@@ -41,7 +41,7 @@ GO_TOOLS_BIN="${GO_TOOLS_BIN:-/opt/go-tools/bin}"
     echo "install-gopls: GO_TOOLS_BIN must be the fixed /opt/go-tools/bin (got $GO_TOOLS_BIN)" >&2
     exit 1
 }
-HERE=$(cd "${BASH_SOURCE[0]%/*}" && pwd)
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export PYTHONDONTWRITEBYTECODE=1
 
 arch=$(dpkg --print-architecture)

@@ -17,7 +17,7 @@
 # restore fail).
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 SOURCE="$REPO_ROOT/images/tools/dsh"
 PREPARE="$SOURCE/prepare-lock.sh"
 INSTALL="$SOURCE/install-dsh.sh"

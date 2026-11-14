@@ -10,7 +10,7 @@
 # the caller's environment.
 set -euo pipefail
 
-root="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 module="$root/images/recipe-contract"
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/recipe-contract-vendor.XXXXXX")
 

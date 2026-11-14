@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Image-only fast gates. Explicit list prevents accidentally running installers.
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 guard_only=false
 case "${1:-}" in
@@ -306,6 +306,34 @@ while IFS= read -r -d '' script; do
     # literal interpolation, not a warning; don't rewrite reviewed payloads.
     shellcheck --severity=warning "$script"
 done < <(find images script examples -type f \( -name '*.sh' -o -name hello-image \) ! -name '*.upstream.sh' ! -path '*/target/*' -print0)
+# --- self-location -----------------------------------------------------------
+# Every maintained shell source resolves its own directory with `dirname`, which
+# answers `.` for a bare file name: `${BASH_SOURCE[0]%/*}` keeps the file name
+# instead, so `cd` fails when a script is invoked by name from its own directory.
+# A full-line comment may name the idiom (images/build.sh explains it); code may
+# not use it. Vendor snapshots are provenance bytes and are never re-spelled.
+if self_location_hits=$(grep -rn -e 'BASH_SOURCE\[0\]%/\*' \
+    --include='*.sh' --exclude='*.upstream.sh' --exclude-dir='target' \
+    images script examples); then
+    if self_location_code=$(printf '%s\n' "$self_location_hits" | grep -vE -e ':[0-9]+:[[:space:]]*#'); then
+        :
+    else
+        status=$?
+        [ "$status" -eq 1 ] || { echo "FAIL: self-location comment filter failed (grep status $status)" >&2; exit 1; }
+        self_location_code=
+    fi
+    if [ -n "$self_location_code" ]; then
+        printf '%s\n' "$self_location_code" >&2
+        printf '%s\n' 'FAIL: a slash-less invocation keeps the file name, so this expansion cannot name a directory: resolve with $(dirname "${BASH_SOURCE[0]}") instead' >&2
+        exit 1
+    fi
+else
+    status=$?
+    [ "$status" -eq 1 ] || { echo "FAIL: self-location search failed (grep status $status)" >&2; exit 1; }
+fi
+# The rule exercised rather than read: a script invoked by name from its own
+# directory reaches the usage path that its self-location gates.
+(cd script/build && bash agent-versions.sh --help >/dev/null)
 bash script/test/example-layers.sh
 # Runtime network-request labels (ADR 0014): the key scheme, the value grammar
 # and the one-owner rule are static facts about the recipes, so --guard-only

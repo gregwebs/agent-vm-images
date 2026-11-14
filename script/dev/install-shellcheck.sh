@@ -4,7 +4,7 @@
 # are the review; there is no latest lookup. Bump together with the version
 # assertion in contracts.sh: CI fails while they disagree.
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 usage="usage: ${0##*/} ABSOLUTE_DIR"
 [ "$#" -eq 1 ] || { echo "$usage" >&2; exit 2; }
 dest=$1

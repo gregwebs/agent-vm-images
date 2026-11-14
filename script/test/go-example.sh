@@ -37,7 +37,7 @@
 # retained and named rather than force-removed by id.
 set -euo pipefail
 
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 EXAMPLE=examples/layers/go-dev
 FIXTURES=script/test/fixtures/go-example
 DOCKER=${DOCKER:-docker}
