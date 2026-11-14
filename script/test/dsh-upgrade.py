@@ -65,7 +65,7 @@ class Case:
             harness.write_text('#!/usr/bin/env bash\n'
                                '# Publication-only fixture: see the fast_gate note in script/test/dsh-upgrade.py.\n'
                                'set -euo pipefail\n'
-                               'printf \'fast-gate-consumers: %s\\n\' "$*"\n')
+                               'printf \'fast-gate-consumers: %s docker-config=%s\\n\' "$*" "${DOCKER_CONFIG-<unset>}"\n')
         (self.root / 'images/standard').mkdir()
         shutil.copyfile(ROOT / 'images/standard/Dockerfile', self.root / 'images/standard/Dockerfile')
         (self.root / 'pnpm').mkdir()
@@ -277,6 +277,48 @@ class Case:
         assert not state['containers'] and not state['volume'], state
 
 
+def docker_client_config_cases(root):
+    """The caller's Docker client configuration is not manager state."""
+    # The redirect to a private HOME must not hide the operator's Docker client
+    # configuration: the gate's `context show`/`buildx inspect` resolve
+    # $DOCKER_CONFIG first and $HOME/.docker second (`docker --help`, `--config`),
+    # so the caller's directory is the only thing that keeps the buildx plugin
+    # directory and `currentContext` readable. The operator here relies on that
+    # default rather than on an exported variable.
+    operator_home = root / 'operator-home'
+    (operator_home / '.docker').mkdir(parents=True)
+    (operator_home / '.docker/config.json').write_text(json.dumps(
+        {'auths': {}, 'currentContext': 'colima',
+         'cliPluginsExtraDirs': ['/opt/homebrew/lib/docker/cli-plugins']}))
+    case = Case(root, 'docker-config')
+    case.env.update(HOME=str(operator_home))
+    case.env.pop('DOCKER_CONFIG', None)
+    assert case.run() == 0, case.output
+    configs = [event['value']['config'] for event in case.events if event['kind'] == 'docker']
+    assert configs, case.output  # the real focused gate really ran the client
+    # Exactly the operator's directory, so neither the redirect's own HOME nor an
+    # invented path was used.
+    assert set(configs) == {str(operator_home / '.docker')}, (configs, case.output)
+    print('dsh upgrade: caller Docker client configuration survives the HOME redirect PASS')
+    # A caller with neither DOCKER_CONFIG nor $HOME/.docker has nothing to
+    # preserve: no path is invented and no directory is created.
+    bare_home = root / 'bare-home'
+    bare_home.mkdir()
+    case = Case(root, 'docker-config-absent', fast_gate=True)
+    case.env.update(HOME=str(bare_home))
+    case.env.pop('DOCKER_CONFIG', None)
+    assert case.run() == 0, case.output
+    assert 'docker-config=<unset>' in case.output, case.output
+    assert not (bare_home / '.docker').exists()
+    print('dsh upgrade: absent Docker client configuration is not invented PASS')
+    # An explicit caller value is passed through verbatim, existing or not.
+    case = Case(root, 'docker-config-explicit', fast_gate=True)
+    case.env.update(HOME=str(operator_home), DOCKER_CONFIG='/nonexistent/client-config')
+    assert case.run() == 0, case.output
+    assert 'docker-config=/nonexistent/client-config' in case.output, case.output
+    print('dsh upgrade: caller DOCKER_CONFIG passes through the HOME redirect PASS')
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix='dsh-upgrade-test-') as directory:
         root = Path(directory).resolve()
@@ -309,6 +351,7 @@ def main():
             for source in ['images/tools/pi/package.json', 'images/tools/pi/bridge/package.json']:
                 assert str(case.root / source) not in [event['value'][-1] for event in events if event['kind'] == 'cp']
             print('dsh upgrade: ' + name + ' PASS')
+        docker_client_config_cases(root)
         for name, args, expected, mode in [
             ('pnpm12', ['--pnpm','12.0.0'], 1, ''), ('pnpm-tag', ['--pnpm','latest'], 1, ''),
             ('duplicate', ['--pnpm','11.11.0','--pnpm','11.11.0'], 2, ''),

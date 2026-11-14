@@ -212,7 +212,9 @@ def main():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     if name == 'docker':
-        log('docker', args)
+        # The client configuration directory is #139's subject: the gate must see the
+        # caller's, not one derived from the redirected HOME.
+        log('docker', {'args': args, 'config': os.environ.get('DOCKER_CONFIG')})
         return module.fake_docker(args)
     if name == 'python3':
         if args and args[0].endswith('/standard-node-layout.py'):
