@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Chrome example: identity, NSS, browser, pinned-MCP and policy checks (#41).
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 # Trusted publisher identity, used by phase A to re-verify the committed bundle.
 # shellcheck source=/dev/null
 . "$ROOT/script/build/chrome-mcp-provenance.sh"
 MCP_HELPER=examples/layers/chrome-devtools/chrome-devtools-mcp.sh
-MCP_INPUTS=examples/layers/chrome-devtools/chrome-devtools-mcp
-MCP_BUNDLE=examples/layers/chrome-devtools/chrome-devtools-mcp.sigstore.json
+MCP_INPUTS=examples/layers/chrome-devtools/data/chrome-devtools-mcp
+MCP_BUNDLE=examples/layers/chrome-devtools/data/chrome-devtools-mcp.sigstore.json
 MCP_PREFIX=/opt/agent-vm/chrome-devtools-mcp
 RUN_ID=$(printf '%s' "${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$$-$(date +%s)" | tr 'A-Z' 'a-z')
 PLATFORM=''
@@ -537,7 +537,7 @@ if [ "$SKIP_MUTATIONS" = true ]; then
 else
     for case in M1 M2 M3 M4; do
         ctx=$EVID/mutate/$case/context
-        mcp=$ctx/chrome-devtools-mcp
+        mcp=$ctx/data/chrome-devtools-mcp
         mkdir -p "$EVID/mutate/$case"
         cp -R examples/layers/chrome-devtools "$ctx"
         case "$case" in

@@ -2,7 +2,7 @@
 # Deterministic image-owned seeds, independent of optional marketplace success.
 set -euo pipefail
 [ "$#" -eq 1 ] || { echo "usage: $0 STANDARD_IMAGE" >&2; exit 2; }
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 name="agent-vm-seeds-$$"
 trap 'if docker container inspect "$name" >/dev/null 2>&1; then docker rm -f "$name" >/dev/null; fi' EXIT
 # shellcheck disable=SC2016 # variables belong to the disposable container

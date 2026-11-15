@@ -95,7 +95,7 @@ RUN --mount=type=bind,source=install-golangci-lint.sh,target=/tmp/install-golang
 # mounted read-only for this step and are not part of the image.
 RUN --mount=type=bind,source=install-gopls.sh,target=/tmp/install-gopls.sh,ro \
     --mount=type=bind,source=gopls_closure.py,target=/tmp/gopls_closure.py,ro \
-    --mount=type=bind,source=gopls-closure,target=/tmp/gopls-closure,ro \
+    --mount=type=bind,source=data/gopls-closure,target=/tmp/gopls-closure,ro \
     bash /tmp/install-gopls.sh
 
 # PATH stays additive: the base's entries are preserved via
@@ -121,5 +121,5 @@ ENV GOTOOLCHAIN=local
 RUN --network=none \
     --mount=type=bind,source=verify-toolchain.sh,target=/run/go-verify/verify-toolchain.sh,ro \
     --mount=type=bind,source=gopls_closure.py,target=/run/go-verify/gopls_closure.py,ro \
-    --mount=type=bind,source=gopls-closure,target=/run/go-verify/gopls-closure,ro \
+    --mount=type=bind,source=data/gopls-closure,target=/run/go-verify/gopls-closure,ro \
     PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/go-verify/verify-toolchain.sh

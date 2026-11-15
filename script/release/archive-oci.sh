@@ -2,7 +2,7 @@
 # Private graph framing only. Fixtures are never certified standard products.
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 layout='' arch='' out=''
 while [ "$#" -gt 0 ]; do
     [ "$#" -ge 2 ] || exit 2

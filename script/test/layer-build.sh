@@ -17,7 +17,7 @@
 #         128+N on an inherited signal.
 set -euo pipefail
 
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$ROOT"
 DOCKER=${DOCKER:-docker}
 WATCHDOG="$ROOT/script/test/host-watchdog.py"
@@ -797,7 +797,7 @@ SHIM
     kache_version=9.9.9
     kache_data=$root/kache-pin
     mkdir -p "$kache_data"
-    cp "$ROOT/examples/layers/rust-dev/kache/release-key.asc" "$kache_data/"
+    cp "$ROOT/examples/layers/rust-dev/data/kache/release-key.asc" "$kache_data/"
     kache_key_sha=$(sha256sum "$kache_data/release-key.asc" | cut -d' ' -f1)
     for kache_host in x86_64 aarch64; do
         printf '%s  kache-%s-unknown-linux-musl.tar.gz\n' "$zeros" "$kache_host" \

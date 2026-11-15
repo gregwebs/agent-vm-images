@@ -15,7 +15,7 @@ set -euo pipefail
 base=$1
 standard=$2
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PINNED="$(jq -r '.dependencies["@earendil-works/pi-coding-agent"]' \
     "$REPO_ROOT/images/tools/pi/package.json")"
 MANDATORY=/opt/agent-vm/pi-extensions/guest-credential-warning.js

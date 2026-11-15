@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Credential-free finished-image cases; native builds remain prerequisites.
 set -euo pipefail
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 [ "$#" -eq 2 ] || { echo 'usage: opencode-runtime.sh BASE_IMAGE STANDARD_IMAGE' >&2; exit 2; }
 container="agent-vm-opencode-$$-$(date +%s)"
 cleanup() { docker rm -f "$container" >/dev/null 2>&1 || true; }

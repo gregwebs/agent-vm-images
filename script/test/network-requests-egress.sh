@@ -21,7 +21,7 @@
 #         2 usage; 128+N on an inherited signal.
 set -euo pipefail
 
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$ROOT"
 DOCKER=${DOCKER:-docker}
 WATCHDOG="$ROOT/script/test/host-watchdog.py"

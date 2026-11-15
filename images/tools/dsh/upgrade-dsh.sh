@@ -39,7 +39,6 @@ REPO_ROOT="$(cd "$DIR/../../.." && pwd -P)"
 # shellcheck source=/dev/null
 . "$REPO_ROOT/script/build/transactional-publish.sh"
 require_tools jq npm node python3 timeout docker curl git
-python3 "$DIR/project.py" guard "$DIR"
 base=$(jq -er .version "$REPO_ROOT/images/pnpm/pin.json")
 [ "$base" = 11.11.0 ] || fail 'unsupported base manager'
 [ -z "$pnpm_version" ] || [ "$pnpm_version" = "$base" ] || fail '--pnpm must equal the reviewed base pin'
@@ -47,19 +46,32 @@ base=$(jq -er .version "$REPO_ROOT/images/pnpm/pin.json")
 # The contract directory executes policy, so project.py authorizes it before the
 # first graph check. A caller-selected directory is authorized by the same rules
 # as a build mount or a fixture copy; an unset one means a host checkout, whose
-# composed helper comes from the native adapter it also authorizes below.
+# composed helper comes from the native adapter below. The build therefore has to
+# precede the guard, which authorizes the directory before executing anything in it.
 if [ -z "${AGENT_VM_CONTRACT_DIR-}" ]; then
     context=$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native) ||
         fail 'cannot build the native recipe-contract helper'
     export AGENT_VM_CONTRACT_DIR="$context/out"
 fi
+python3 "$DIR/project.py" guard "$DIR"
 CONTRACT=$(python3 "$DIR/project.py" contract-dir "$DIR") || fail 'contract directory rejected'
 "$CONTRACT/recipe-contract" pnpm-lock check dsh "$DIR"
 current=$(jq -r '.dependencies["@deepseek-ai/dsh"]' "$DIR/package.json")
 work=$(mktemp -d "${TMPDIR:-/tmp}/dsh-upgrade.XXXXXX")
 work=$(cd "$work" && pwd -P)
 keep_recovery=false
-trap 'if [ "$keep_recovery" = false ]; then rm -rf "$work"; fi' EXIT
+# The trap reports the status this script decided: a removal that fails - a Go
+# cache written read-only under the redirected HOME is the observed case (#138) -
+# must not turn a completed adoption into a failure. The leftover is named so an
+# operator can remove it, and retained recovery material is never touched.
+cleanup() {
+    local status=$?
+    if [ "$keep_recovery" = false ] && ! rm -rf "$work"; then
+        echo "error: invocation scratch cleanup failed; $work left behind" >&2
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
 # The five publication destinations, in publication order. Every backup below is
 # taken before the first copy, so a signal mid-publication can restore them all.
 publish_backup=$work/publish-backup
@@ -135,8 +147,22 @@ else
     cp "$REPO_ROOT/images/pnpm/pin.json" "$work/pnpm/pin.json"
     export AGENT_VM_SCRATCH_ROOT=$work
 fi
+# The Docker client is the one tool whose configuration is not manager state: its
+# config file carries `currentContext` and `cliPluginsExtraDirs`, and both it and
+# the TLS defaults are discovered through `$DOCKER_CONFIG`, else `$HOME/.docker`
+# (`docker --help`, `--config`). The private HOME below is for the manager only, so
+# capture the client directory first and export it again after the redirect. A
+# caller with neither has nothing to preserve: no path is invented or created.
+if [ -n "${DOCKER_CONFIG-}" ]; then
+    docker_config=$DOCKER_CONFIG
+elif [ -n "${HOME-}" ] && [ -d "$HOME/.docker" ]; then
+    docker_config=$HOME/.docker
+else
+    docker_config=''
+fi
 export HOME=$work/home XDG_CONFIG_HOME=$work/config XDG_CACHE_HOME=$work/cache
 export XDG_DATA_HOME=$work/data XDG_STATE_HOME=$work/state TMPDIR=$work/tmp
+if [ -n "$docker_config" ]; then export DOCKER_CONFIG=$docker_config; fi
 mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" "$TMPDIR"
 export PNPM_CONFIG_MINIMUM_RELEASE_AGE=1440 PNPM_CONFIG_MINIMUM_RELEASE_AGE_STRICT=true
 export PNPM_CONFIG_MINIMUM_RELEASE_AGE_IGNORE_MISSING_TIME=false

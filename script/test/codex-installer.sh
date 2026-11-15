@@ -13,7 +13,7 @@
 # softening (and every way it must NOT soften), and the report/T5 gate.
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VENDOR_SRC="$REPO_ROOT/images/tools/codex/vendor"
 INSTALL="$REPO_ROOT/images/tools/codex/install-codex.sh"
 VERIFY="$REPO_ROOT/images/tools/codex/verify-codex.sh"

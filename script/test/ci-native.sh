@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Disposable hosted-runner evidence phases, not a user build interface.
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 phase=${1:?phase required}
 arch=${2:?native architecture required}

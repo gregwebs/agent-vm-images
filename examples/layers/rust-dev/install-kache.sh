@@ -25,7 +25,7 @@ set -euo pipefail
 : "${KACHE_ARM64_SHA256:?KACHE_ARM64_SHA256 must be set to the pinned tarball digest}"
 : "${KACHE_RELEASE_CERT_SHA256:?KACHE_RELEASE_CERT_SHA256 must be set to the committed release key digest}"
 KACHE_DIR=${KACHE_DIR:-/opt/kache}
-HERE=$(cd "${BASH_SOURCE[0]%/*}" && pwd)
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 KACHE_DATA=${KACHE_DATA:-$HERE/kache}
 
 printf '%s' "$KACHE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||

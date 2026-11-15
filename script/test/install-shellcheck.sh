@@ -4,7 +4,7 @@
 # guard, and the environment curl receives. Fake curl and fake uname keep it off
 # the network; the payloads are locally built tarballs.
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INSTALLER="$ROOT/script/dev/install-shellcheck.sh"
 work=$(mktemp -d "${TMPDIR:-/tmp}/install-shellcheck-test.XXXXXX")
 # Keep a failing case's status: a failed cleanup must not mask it.

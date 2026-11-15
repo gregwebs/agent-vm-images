@@ -14,7 +14,7 @@
 # publication (sources unchanged or fully restored), 2 usage, 3 undecided or
 # incomplete recovery (the work directory is retained and printed).
 set -euo pipefail
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=/dev/null
 . "$ROOT/script/build/transactional-publish.sh"
 

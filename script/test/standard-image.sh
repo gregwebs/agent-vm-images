@@ -7,7 +7,7 @@ set -euo pipefail
 # user (rc 126 / "not found on PATH").
 umask 022
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FIXTURE_DOCKERFILE="$REPO_ROOT/script/test/fixtures/t5-negative/Dockerfile"
 # The committed status-record validator (native build of the same helper the
 # image runs); the external oracle validates the exact status bytes with it rather

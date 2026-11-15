@@ -8,7 +8,7 @@
 # checks before the gate stubbed, so a failing formatter must stop the run before
 # any behaviour suite starts, in the default and the --guard-only mode alike.
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work="$(mktemp -d "${TMPDIR:-/tmp}/contracts-formatter.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 lint_version=$(<"$ROOT/images/recipe-contract/golangci-lint.version")

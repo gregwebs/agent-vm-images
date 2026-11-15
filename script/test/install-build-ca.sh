@@ -7,7 +7,7 @@
 # BUILD_CA_TRUST_DIR, AGENT_VM_BASE_STAMP_DIR and APT_LISTS_DIR keep every write
 # inside this invocation's scratch directory.
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 INSTALLER="$ROOT/images/install-build-ca.sh"
 CERT="$ROOT/script/test/fixtures/build-ca/host-ca.pem"
 work=$(mktemp -d "${TMPDIR:-/tmp}/install-build-ca.XXXXXX")

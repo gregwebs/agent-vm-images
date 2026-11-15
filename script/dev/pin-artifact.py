@@ -227,9 +227,21 @@ def resolve(name: str, version: str, key: Path | None,
     return platforms, evidence, signed, bundled
 
 
+def utc_today() -> datetime.date:
+    """The date `verified_on` is stamped with, in UTC.
+
+    A pin is written on one maintainer host and read by reviewers and builders in
+    every zone, so the stamp has to be one instant rather than the writer's local
+    calendar: a local stamp west of UTC records yesterday and misattributes the
+    review, and east of UTC it records a date UTC readers still see as tomorrow
+    (#136).
+    """
+    return datetime.datetime.now(datetime.timezone.utc).date()
+
+
 def render(name: str, version: str, platforms: dict, evidence: dict,
            signed: dict | None, bundled: dict | None = None) -> dict:
-    today = datetime.date.today().isoformat()
+    today = utc_today().isoformat()
     if name == 'node':
         assert signed is not None
         authentication = {

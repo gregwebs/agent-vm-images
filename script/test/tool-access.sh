@@ -11,7 +11,7 @@
 # (script/test/standard-image.sh).
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # One host build per suite: the audit predicates are the same binary the image
 # runs, and rebuilding per case would dominate the suite.
 CONTRACT_CONTEXT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)"

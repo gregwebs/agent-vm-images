@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONTRACT="$REPO_ROOT/images/recipe-contract"
 RUN_INSTALL="$CONTRACT/run-install.sh"
 CODEX_VENDOR="$REPO_ROOT/images/tools/codex/vendor"

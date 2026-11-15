@@ -10,7 +10,7 @@
 # restored); 2 usage; 3 undecided or incomplete recovery ($work retained and
 # printed); 128+N when a signal arrives before publication.
 set -euo pipefail
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=/dev/null
 . "$ROOT/script/build/npm-pin.sh"
 # shellcheck source=/dev/null
@@ -101,9 +101,9 @@ require_tools docker jq gh curl sha256sum sha512sum base64 od awk timeout cmp
 timeout --version | grep -q 'GNU coreutils' || die 'GNU timeout (coreutils) is required'
 
 EX=$ROOT/examples/layers/chrome-devtools
-DIR=$EX/chrome-devtools-mcp
+DIR=$EX/data/chrome-devtools-mcp
 HELPER=$EX/chrome-devtools-mcp.sh
-BUNDLE=$EX/chrome-devtools-mcp.sigstore.json
+BUNDLE=$EX/data/chrome-devtools-mcp.sigstore.json
 [ -f "$HELPER" ] || die "missing helper: $HELPER"
 parent=$(awk 'NR == 1 && sub(/^ARG BASE_IMAGE=/, "") { print; exit }' "$EX/Dockerfile")
 printf '%s' "$parent" | grep -Eqx 'ghcr\.io/gregwebs/agent-vm-standard@sha256:[0-9a-f]{64}' ||

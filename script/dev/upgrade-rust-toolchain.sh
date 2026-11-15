@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Maintainer-host writer for the rust-dev example's committed toolchain closure (#102).
 #
-# This is the only writer of examples/layers/rust-dev/rust-toolchain/ and of the
+# This is the only writer of examples/layers/rust-dev/data/rust-toolchain/ and of the
 # example's ARG RUST_TOOLCHAIN assertion. Ordinary builds verify those committed
 # bytes; they never resolve a channel, fetch a manifest or refresh a hash. Every
 # run stages and authenticates the whole two-architecture closure without
@@ -16,13 +16,13 @@ set -euo pipefail
 # Ordinary checks must not write generated state into the checkout: every
 # Python child (including the test launcher) inherits this.
 export PYTHONDONTWRITEBYTECODE=1
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=/dev/null
 . "$ROOT/script/build/transactional-publish.sh"
 
 UPDATER=script/dev/rust-toolchain-update.py
 EXAMPLE=examples/layers/rust-dev
-DATA=$EXAMPLE/rust-toolchain
+DATA=$EXAMPLE/data/rust-toolchain
 DOCKERFILE=$EXAMPLE/Dockerfile
 
 usage() {
@@ -70,7 +70,7 @@ restore_sources() { # signal path only; mirrors publish_transactional inclusivel
 # parent after a restored failure would make the next first adoption look like a
 # partial pinned state, so cleanup walks this list child first and only ever
 # removes directories rmdir reports as empty.
-owned_directories=("$DATA" "$DATA/evidence")
+owned_directories=("$EXAMPLE/data" "$DATA" "$DATA/evidence")
 
 remove_owned_directories() {
     local index=${#owned_directories[@]}
@@ -250,7 +250,7 @@ done
 
 # Every ancestor must already be a real directory inside the checkout; a
 # symlinked component would silently redirect publication outside it. Only the
-# two directories this operation owns may be missing.
+# directories this operation owns may be missing.
 check_ancestors() {
     local relative=$1 rest prefix='' component absolute
     rest=$relative
@@ -266,8 +266,8 @@ check_ancestors() {
         elif [ -e "$absolute" ]; then
             refuse "non-directory destination ancestor: $prefix"
         else
-            case "$prefix" in
-                "$DATA" | "$DATA/evidence") ;;
+            case " ${owned_directories[*]} " in
+                *" $prefix "*) ;;
                 *) refuse "missing destination ancestor: $prefix" ;;
             esac
         fi
@@ -442,7 +442,7 @@ cat <<'EOF'
 Next gates for this change:
   bash script/dev/upgrade-rust-toolchain.sh --check
   python3 examples/layers/rust-dev/rust_toolchain.py check \
-    examples/layers/rust-dev/rust-toolchain --expect-channel CHANNEL
+    examples/layers/rust-dev/data/rust-toolchain --expect-channel CHANNEL
   python3 script/test/rust-toolchain-pins.py
   python3 script/test/rust-toolchain-maintenance.py
   bash script/test/example-layers.sh --self-test

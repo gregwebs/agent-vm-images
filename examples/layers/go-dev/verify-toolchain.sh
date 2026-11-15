@@ -35,7 +35,7 @@ set -euo pipefail
 : "${GO_VERSION:?GO_VERSION must be set to the pinned toolchain}"
 : "${GOLANGCI_LINT_VERSION:?GOLANGCI_LINT_VERSION must be set to the pinned release}"
 : "${GOPLS_VERSION:?GOPLS_VERSION must be set to the pinned module version}"
-VERIFY_DIR=$(cd "${BASH_SOURCE[0]%/*}" && pwd)
+VERIFY_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 export PYTHONDONTWRITEBYTECODE=1
 
 # Validated by the helper: it refuses anything but the two Linux target names the

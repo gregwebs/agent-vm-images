@@ -37,7 +37,7 @@
 # retained and named rather than force-removed by id.
 set -euo pipefail
 
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 EXAMPLE=examples/layers/go-dev
 FIXTURES=script/test/fixtures/go-example
 DOCKER=${DOCKER:-docker}
@@ -785,7 +785,7 @@ input_digest_controls() { # LOG
         "$line" "$dockerfile"
     selftest_expect_contains "$listing" "  examples/layers/go-dev/install-gopls.sh" \
         'the gopls installer adapter is digested too'
-    selftest_expect_contains "$listing" "  examples/layers/go-dev/gopls-closure/pin.json" \
+    selftest_expect_contains "$listing" "  examples/layers/go-dev/data/gopls-closure/pin.json" \
         'the review record is digested too'
 }
 
@@ -832,7 +832,7 @@ mutate_closure_controls() { # SCRATCH LOG
     local scratch=$1 out=$2 copy status
     copy=$scratch/mutant-closure
     mkdir -p "$copy"
-    cp -R "$ROOT/$EXAMPLE/gopls-closure/." "$copy/"
+    cp -R "$ROOT/$EXAMPLE/data/gopls-closure/." "$copy/"
     python3 "$ROOT/$FIXTURES/mutate-closure.py" --data "$copy" \
         --wrong-zip-h1 'github.com/fatih/camelcase@v1.0.0' >>"$out" 2>&1
     status=0
@@ -845,7 +845,7 @@ mutate_closure_controls() { # SCRATCH LOG
     # refused by the checker, which is what proves the negative reaches Go.
     copy=$scratch/incoherent-closure
     mkdir -p "$copy"
-    cp -R "$ROOT/$EXAMPLE/gopls-closure/." "$copy/"
+    cp -R "$ROOT/$EXAMPLE/data/gopls-closure/." "$copy/"
     awk '$0 ~ /^github\.com\/fatih\/camelcase v1\.0\.0 h1:/ { print "github.com/fatih/camelcase v1.0.0 h1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="; next } { print }' \
         "$copy/go.sum" > "$scratch/go.sum.mutant"
     cat "$scratch/go.sum.mutant" > "$copy/go.sum"
@@ -1413,7 +1413,7 @@ GOLANGCI_LINT_VERSION=$(deploy_version GOLANGCI_LINT_VERSION)
 GOPLS_VERSION=$(deploy_version GOPLS_VERSION)
 GO_PIN_SHA=$(deploy_version "GO_$(echo "$ARCH" | tr '[:lower:]' '[:upper:]')_SHA256")
 LINT_PIN_SHA=$(deploy_version "GOLANGCI_LINT_$(echo "$ARCH" | tr '[:lower:]' '[:upper:]')_SHA256")
-DATA="$ROOT/$EXAMPLE/gopls-closure"
+DATA="$ROOT/$EXAMPLE/data/gopls-closure"
 log "pins go=$GO_VERSION golangci-lint=$GOLANGCI_LINT_VERSION gopls=$GOPLS_VERSION"
 
 # --- phase 0: the committed pins verify offline -----------------------------
@@ -1758,11 +1758,11 @@ MUTANT_ROOT="$LOG_DIR/mutant"
 mkdir -p "$MUTANT_ROOT"
 cp -R "$ROOT/$EXAMPLE/." "$MUTANT_ROOT/"
 if run_bounded mutant-mutation "$RUN_SECONDS" "$LOG_DIR/mutant-mutation.log" \
-        python3 "$ROOT/$FIXTURES/mutate-closure.py" --data "$MUTANT_ROOT/gopls-closure" \
+        python3 "$ROOT/$FIXTURES/mutate-closure.py" --data "$MUTANT_ROOT/data/gopls-closure" \
         --wrong-zip-h1 'github.com/fatih/camelcase@v1.0.0'; then
     if run_bounded mutant-offline "$RUN_SECONDS" "$LOG_DIR/mutant-offline.log" \
             env PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/$EXAMPLE/gopls_closure.py" \
-            check "$MUTANT_ROOT/gopls-closure" --expect-gopls "$GOPLS_VERSION" \
+            check "$MUTANT_ROOT/data/gopls-closure" --expect-gopls "$GOPLS_VERSION" \
             --expect-go "$GO_VERSION"; then
         pass 'the mutated closure is still coherent offline, so the negative reaches Go'
     else

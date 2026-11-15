@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime
 import errno
 import gzip
 import hashlib
@@ -2989,6 +2990,295 @@ def case_real_signatures(work: Path, archive_dir: Path, cosign: Path) -> None:
           'verified with the reviewed verifier; every negative control was refused')
 
 
+# --- clock ---------------------------------------------------------------------
+
+# The two extreme zones differ from UTC in opposite directions. Kiritimati is UTC+14,
+# so its local date runs ahead of the UTC date from 10:00 UTC; Etc/GMT+12 is UTC-12,
+# so its local date lags from 00:00 UTC. Every hour of the UTC day is therefore
+# covered by at least one of the two, which is what makes the pair time-of-day
+# independent instead of a coin flip.
+CLOCK_ZONES = ('Pacific/Kiritimati', 'Etc/GMT+12')
+
+
+def utc_date() -> datetime.date:
+    return datetime.datetime.now(datetime.timezone.utc).date()
+
+
+def behind_utc() -> datetime.datetime:
+    """A simulated host wall clock one day behind the UTC date, naive.
+
+    The shift is measured from UTC, not from whatever local date the host running
+    this suite happens to have, so the simulated local date is always exactly the
+    UTC date minus one.
+    """
+    return (datetime.datetime.now(datetime.timezone.utc)
+            - datetime.timedelta(days=1)).replace(tzinfo=None)
+
+
+class WestModule:
+    """A module's `datetime` as seen by a host whose local date lags UTC by a day.
+
+    `verified_on` used to be stamped and compared with the host's *local* date, so
+    the local accessors are what an unfixed writer or checker reaches for -- and
+    every one of them moves here: `date.today()`, `datetime.now()` with no zone and
+    `datetime.today()`. Overriding only some of them leaves the rest inherited and
+    real, and code written against one of the unshifted spellings then escapes the
+    simulation while the case still claims to guard it. The UTC accessors,
+    `now(tz)` and `utcnow()`, stay real: UTC is the same instant everywhere, and
+    shifting those would move the UTC clock instead of simulating a zone.
+    """
+
+    timezone = datetime.timezone
+
+    class date(datetime.date):  # noqa: N801 - stands in for datetime.date
+        @classmethod
+        def today(cls) -> datetime.date:
+            return behind_utc().date()
+
+    class datetime(datetime.datetime):  # noqa: N801
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return behind_utc()
+            return datetime.datetime.now(tz)
+
+        @classmethod
+        def today(cls):
+            return behind_utc()
+
+        @classmethod
+        def utcnow(cls):
+            return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
+def with_zone(zone: str):
+    """Run one case with the process timezone set to `zone`, then restore it."""
+
+    class _Zone:
+        def __enter__(self):
+            self.saved = os.environ.get('TZ')
+            os.environ['TZ'] = zone
+            time.tzset()
+            return self
+
+        def __exit__(self, *_exception):
+            if self.saved is None:
+                os.environ.pop('TZ', None)
+            else:
+                os.environ['TZ'] = self.saved
+            time.tzset()
+            return False
+
+    return _Zone()
+
+
+def restamped(fixture: Fixture, directory: Path, day: datetime.date) -> Path:
+    """A copy of the fixture closure whose `verified_on` is `day`."""
+    shutil.copytree(fixture.directory, directory, dirs_exist_ok=True)
+    document = json.loads((directory / 'pin.json').read_text())
+    document['authentication']['verified_on'] = day.isoformat()
+    (directory / 'pin.json').write_text(json.dumps(document, indent=2) + '\n')
+    return directory
+
+
+def at_a_stable_utc_date(call) -> None:
+    """Run `call(today)` unless the UTC date rolls over mid-case, then retry once.
+
+    Every case here derives a pin date from "the UTC date right now". A case that
+    straddles UTC midnight would compare against a date the process no longer
+    agrees with, so a genuine rollover is retried rather than reported -- but only
+    when the date really moved, never to excuse a mutant.
+    """
+    for _ in range(2):
+        today = utc_date()
+        try:
+            call(today)
+        except AssertionError:
+            if utc_date() == today:
+                raise
+            continue
+        if utc_date() == today:
+            return
+    raise AssertionError('the UTC date rolled over twice while this case ran')
+
+
+def clock_case(label: str, call) -> None:
+    try:
+        call()
+    except AssertionError as error:
+        fail(label, error)
+    except REFUSALS as error:
+        fail(label, f'an unexpected refusal: {error}')
+    else:
+        report(label)
+
+
+def case_clock(work: Path) -> None:
+    fixture = Fixture(work / 'fixture-clock')
+
+    def reference_date() -> None:
+        """The reference date is the UTC date, not the host's local date.
+
+        One of the two zones always has a local date other than the UTC date, so
+        the vector is not time-of-day dependent.
+        """
+        for zone in CLOCK_ZONES:
+            with with_zone(zone):
+                local = datetime.date.today()
+                utc = utc_date()
+                if local == utc:
+                    continue
+                found = codex_pin.utc_today()
+                assert found == utc, (
+                    f'under TZ={zone} the reference date is {found}, not the UTC '
+                    f'date {utc} (the local date is {local})')
+                return
+        raise AssertionError('no candidate zone differs from the UTC date')
+
+    def west_checker() -> None:
+        """A pin stamped with the UTC date verifies where the local date lags.
+
+        The writer east of UTC stamped its own local date and the checker compared
+        against its own local date, so a bump merged early in the maintainer's day
+        refused every builder until the two dates lined up. Here the lagging local
+        date is simulated rather than waited for, so the case runs at every hour,
+        and the simulation is asserted to move every local accessor the checker
+        could reach for. A genuinely future date is still refused.
+        """
+
+        def case(today: datetime.date) -> None:
+            behind = today - datetime.timedelta(days=1)
+            for spelling, found in (
+                    ('date.today()', WestModule.date.today()),
+                    ('datetime.now()', WestModule.datetime.now().date()),
+                    ('datetime.today()', WestModule.datetime.today().date())):
+                assert found == behind, (
+                    f'the simulated host reports {spelling} as {found}, not the '
+                    f'lagging local date {behind}')
+            for spelling, found in (
+                    ('datetime.now(timezone.utc)',
+                     WestModule.datetime.now(datetime.timezone.utc).date()),
+                    ('datetime.utcnow()', WestModule.datetime.utcnow().date())):
+                assert found == today, (
+                    f'the simulated host reports {spelling} as {found}, not the '
+                    f'UTC date {today}, so the case no longer simulates a zone -- '
+                    'it moves the UTC clock instead')
+
+            directory = restamped(fixture, work / 'clock-west-checker', today)
+            original = codex_pin.datetime
+            codex_pin.datetime = WestModule
+            try:
+                codex_pin.load_pin(directory)
+                document = json.loads((directory / 'pin.json').read_text())
+                document['authentication']['verified_on'] = (
+                    today + datetime.timedelta(days=1)).isoformat()
+                (directory / 'pin.json').write_text(
+                    json.dumps(document, indent=2) + '\n')
+                try:
+                    codex_pin.load_pin(directory)
+                except codex_pin.Refusal as error:
+                    assert 'is in the future' in str(error), error
+                else:
+                    raise AssertionError(
+                        'a genuinely future verified_on was accepted')
+            finally:
+                codex_pin.datetime = original
+
+        at_a_stable_utc_date(case)
+
+    def writer_stamps() -> None:
+        """The real staging path stamps the UTC date in either extreme zone.
+
+        Both the stamp and the checker that reads it back are real modules here;
+        only the upstream bytes are fixtures. A writer that fell back to the host's
+        local date is caught in whichever zone's date differs from UTC.
+        """
+
+        def case(today: datetime.date) -> None:
+            for zone in CLOCK_ZONES:
+                name = f'clock-writer-{zone.replace("/", "-")}'
+                repo = FixtureRepo(work / name)
+                with with_zone(zone):
+                    staged, _calls = _stage(repo, work / f'stage-{name}', fixture,
+                                            Verifier())
+                    stamped = json.loads(
+                        staged.files['images/tools/codex/pin.json']
+                    )['authentication']['verified_on']
+                    assert stamped == today.isoformat(), (
+                        f'under TZ={zone} the writer stamped {stamped}, not the UTC '
+                        f'date {today}')
+                    # What this writer published must verify on a host whose local
+                    # date still lags, and the future refusal must survive there.
+                    original = codex_pin.datetime
+                    codex_pin.datetime = WestModule
+                    try:
+                        codex_pin.parse_pin(
+                            staged.files['images/tools/codex/pin.json'],
+                            fixture.directory)
+                    finally:
+                        codex_pin.datetime = original
+
+        at_a_stable_utc_date(case)
+
+    def west_writer() -> None:
+        """The writer never reads its own local date, whatever the host says.
+
+        The TZ cases only prove a departure in a zone whose date differs *now*.
+        This one moves the writer's own `datetime` a day behind UTC, so a stamp
+        that consults any local accessor is wrong at every hour.
+        """
+
+        def case(today: datetime.date) -> None:
+            repo = FixtureRepo(work / 'repo-clock-west-writer')
+            original = pin_codex.datetime
+            pin_codex.datetime = WestModule
+            try:
+                staged, _calls = _stage(repo, work / 'stage-clock-west-writer',
+                                        fixture, Verifier())
+            finally:
+                pin_codex.datetime = original
+            stamped = json.loads(
+                staged.files['images/tools/codex/pin.json']
+            )['authentication']['verified_on']
+            assert stamped == today.isoformat(), (
+                f'the writer on a host one day behind UTC stamped {stamped}, not '
+                f'the UTC date {today}')
+
+        at_a_stable_utc_date(case)
+
+    def repeat_keeps_date() -> None:
+        """A byte-identical re-pin keeps the committed `verified_on`."""
+        repo = FixtureRepo(work / 'repo-clock-repeat')
+        repo.install(fixture)
+        committed = json.loads(
+            (repo.root / 'images/tools/codex/pin.json').read_text()
+        )['authentication']['verified_on']
+        original = pin_codex.datetime
+        pin_codex.datetime = WestModule
+        try:
+            staged, _calls = _stage(repo, work / 'stage-clock-repeat', fixture,
+                                    Verifier())
+        finally:
+            pin_codex.datetime = original
+        stamped = json.loads(
+            staged.files['images/tools/codex/pin.json']
+        )['authentication']['verified_on']
+        assert stamped == committed, (
+            f'a byte-identical re-pin restamped verified_on {stamped}, not the '
+            f'committed {committed}')
+        assert pin_codex.unchanged(repo.root, staged), (
+            'a byte-identical re-pin is not byte-identical')
+
+    for label, function in (
+            ('clock_reference_date_is_utc', reference_date),
+            ('clock_far_east_pin_verifies_on_a_far_west_host', west_checker),
+            ('clock_writer_stamps_the_utc_date_in_either_extreme_zone',
+             writer_stamps),
+            ('clock_writer_ignores_a_lagging_local_date', west_writer),
+            ('clock_repeat_keeps_the_committed_verified_on', repeat_keeps_date)):
+        clock_case(label, function)
+
+
 # --- driver ------------------------------------------------------------------
 
 def main(argv: list[str]) -> int:
@@ -3040,7 +3330,7 @@ def main(argv: list[str]) -> int:
         for case in (case_loader, case_schema, case_urls, case_evidence,
                      case_corroboration, case_preflight, case_staging,
                      case_verifier, case_transport, case_transport_sockets,
-                     case_writer_process, case_checksum_parser):
+                     case_writer_process, case_checksum_parser, case_clock):
             name = work / case.__name__
             name.mkdir(parents=True, exist_ok=True)
             case(name)

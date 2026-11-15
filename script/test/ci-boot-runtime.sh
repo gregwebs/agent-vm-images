@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Offline pin/linkage controls; fixture hashes change, production has no bypass.
 set -euo pipefail
-ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 . "$ROOT/script/test/file-mode.sh"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT

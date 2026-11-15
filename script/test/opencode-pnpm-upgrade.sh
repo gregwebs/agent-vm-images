@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Exercise the owning four-file transaction without registry access.
 set -euo pipefail
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 work=$(mktemp -d)
 work=$(cd "$work" && pwd -P)
 trap 'rm -rf "$work"' EXIT

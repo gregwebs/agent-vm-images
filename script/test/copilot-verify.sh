@@ -10,7 +10,7 @@
 # of what is under test.
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GATE="$REPO_ROOT/images/tools/copilot/verify-copilot.sh"
 # The converted verifiers execute `recipe-contract` from the contract directory,
 # so build the native composed directory once before any restricted env -i or

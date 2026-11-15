@@ -13,7 +13,7 @@
 # inputs are the committed bridge project.
 set -euo pipefail
 
-REPO_ROOT="$(cd "${BASH_SOURCE[0]%/*}/../.." && pwd -P)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 INSTALLER="$REPO_ROOT/images/tools/pi/install-pi-packages.sh"
 TEST_ROOT="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/pi-bridge-install-test.XXXXXX")" && pwd -P)"
 CASE=""

@@ -65,7 +65,7 @@ class Case:
             harness.write_text('#!/usr/bin/env bash\n'
                                '# Publication-only fixture: see the fast_gate note in script/test/dsh-upgrade.py.\n'
                                'set -euo pipefail\n'
-                               'printf \'fast-gate-consumers: %s\\n\' "$*"\n')
+                               'printf \'fast-gate-consumers: %s docker-config=%s\\n\' "$*" "${DOCKER_CONFIG-<unset>}"\n')
         (self.root / 'images/standard').mkdir()
         shutil.copyfile(ROOT / 'images/standard/Dockerfile', self.root / 'images/standard/Dockerfile')
         (self.root / 'pnpm').mkdir()
@@ -91,7 +91,7 @@ class Case:
         native = self.tools / 'tools.py'
         native.write_text('#!' + sys.executable + '\n' + script.split('\n', 1)[1])
         native.chmod(0o755)
-        for tool in ['npm', 'pnpm-fixture', 'cp', 'docker', 'python3', 'git', 'go']:
+        for tool in ['npm', 'pnpm-fixture', 'cp', 'docker', 'python3', 'git', 'go', 'rm']:
             (self.tools / tool).symlink_to('tools.py')
         # The authorized manager seam intentionally refuses symlink executables.
         (self.tools / 'pnpm-fixture').unlink()
@@ -122,11 +122,28 @@ class Case:
                         DSH_TEST_REPO=str(ROOT), DSH_TEST_GRAPH=str(self.graph), DSH_TEST_LOG=str(self.log),
                         DSH_TEST_TARGETS=json.dumps(list(map(str, self.targets))), AVM_FAKE_STATE=str(self.state))
 
-    def run(self, args=(), mode='', gate='positive', publish='', rollback='', upstream=''):
+    def clean_checkout(self):
+        """Model a source checkout: no AGENT_VM_CONTRACT_DIR, only a composed build.
+
+        The fixture's `go` refuses to build, so the adapter's offline reuse form
+        (RECIPE_CONTRACT_CONTEXT in script/build/recipe-contract.sh) stands in for the
+        compile a host checkout would run. What the case proves is that upgrade-dsh.sh
+        reaches that adapter at all: while the fallback sat below the guard, the guard
+        refused this environment before the build written for exactly this case.
+        """
+        context = self.root / 'host-build'
+        context.mkdir()
+        self.native_contract = self.native_contract.rename(context / 'out')
+        self.env.pop('AGENT_VM_CONTRACT_DIR')
+        self.env['RECIPE_CONTRACT_CONTEXT'] = str(context)
+
+    def run(self, args=(), mode='', gate='positive', publish='', rollback='', upstream='',
+            cleanup_failure=False):
         self.log.write_text('')
         self.state.write_text(json.dumps({'commands': [], 'containers': [], 'volume': None, 'network': None}))
         env = dict(self.env, DSH_TEST_MODE=mode, AVM_FAKE_CASE=gate, DSH_TEST_PUBLISH=str(publish),
-                   DSH_TEST_ROLLBACK=str(rollback), DSH_TEST_UPSTREAM=upstream)
+                   DSH_TEST_ROLLBACK=str(rollback), DSH_TEST_UPSTREAM=upstream,
+                   DSH_TEST_RM_FAILS_CASE=str(self.root) if cleanup_failure else '')
         with tempfile.TemporaryFile() as output:
             result = subprocess.run(['/bin/bash', str(self.prefix / 'upgrade-dsh.sh'), *args], env=env, stdout=output, stderr=output, timeout=70)
             output.seek(0)
@@ -277,6 +294,48 @@ class Case:
         assert not state['containers'] and not state['volume'], state
 
 
+def docker_client_config_cases(root):
+    """The caller's Docker client configuration is not manager state."""
+    # The redirect to a private HOME must not hide the operator's Docker client
+    # configuration: the gate's `context show`/`buildx inspect` resolve
+    # $DOCKER_CONFIG first and $HOME/.docker second (`docker --help`, `--config`),
+    # so the caller's directory is the only thing that keeps the buildx plugin
+    # directory and `currentContext` readable. The operator here relies on that
+    # default rather than on an exported variable.
+    operator_home = root / 'operator-home'
+    (operator_home / '.docker').mkdir(parents=True)
+    (operator_home / '.docker/config.json').write_text(json.dumps(
+        {'auths': {}, 'currentContext': 'colima',
+         'cliPluginsExtraDirs': ['/opt/homebrew/lib/docker/cli-plugins']}))
+    case = Case(root, 'docker-config')
+    case.env.update(HOME=str(operator_home))
+    case.env.pop('DOCKER_CONFIG', None)
+    assert case.run() == 0, case.output
+    configs = [event['value']['config'] for event in case.events if event['kind'] == 'docker']
+    assert configs, case.output  # the real focused gate really ran the client
+    # Exactly the operator's directory, so neither the redirect's own HOME nor an
+    # invented path was used.
+    assert set(configs) == {str(operator_home / '.docker')}, (configs, case.output)
+    print('dsh upgrade: caller Docker client configuration survives the HOME redirect PASS')
+    # A caller with neither DOCKER_CONFIG nor $HOME/.docker has nothing to
+    # preserve: no path is invented and no directory is created.
+    bare_home = root / 'bare-home'
+    bare_home.mkdir()
+    case = Case(root, 'docker-config-absent', fast_gate=True)
+    case.env.update(HOME=str(bare_home))
+    case.env.pop('DOCKER_CONFIG', None)
+    assert case.run() == 0, case.output
+    assert 'docker-config=<unset>' in case.output, case.output
+    assert not (bare_home / '.docker').exists()
+    print('dsh upgrade: absent Docker client configuration is not invented PASS')
+    # An explicit caller value is passed through verbatim, existing or not.
+    case = Case(root, 'docker-config-explicit', fast_gate=True)
+    case.env.update(HOME=str(operator_home), DOCKER_CONFIG='/nonexistent/client-config')
+    assert case.run() == 0, case.output
+    assert 'docker-config=/nonexistent/client-config' in case.output, case.output
+    print('dsh upgrade: caller DOCKER_CONFIG passes through the HOME redirect PASS')
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix='dsh-upgrade-test-') as directory:
         root = Path(directory).resolve()
@@ -309,6 +368,21 @@ def main():
             for source in ['images/tools/pi/package.json', 'images/tools/pi/bridge/package.json']:
                 assert str(case.root / source) not in [event['value'][-1] for event in events if event['kind'] == 'cp']
             print('dsh upgrade: ' + name + ' PASS')
+        docker_client_config_cases(root)
+        # A source checkout carries no composed helper, so the native build has to
+        # happen before the first guard. The base-pin refusal stays ahead of that
+        # build, so an unreviewed --pnpm never spends a compile.
+        case = Case(root, 'host-checkout', fast_gate=True)
+        case.clean_checkout()
+        assert case.run(['--pnpm', '12.0.0']) == 1, case.output
+        assert '--pnpm must equal the reviewed base pin' in case.output, case.output
+        assert not any(event['kind'] == 'go' for event in case.events), case.events
+        assert case.run([]) == 0, case.output
+        assert 'no executable recipe-contract' not in case.output, case.output
+        assert json.loads(case.targets[0].read_text())['dependencies']['@deepseek-ai/dsh'] == '0.1.5-rc.2'
+        assert '${AGENT_VERSION_DSH:-0.1.5-rc.2}' in case.targets[-1].read_text(), case.output
+        case.clean()
+        print('dsh upgrade: a clean checkout builds the native contract before the guard PASS')
         for name, args, expected, mode in [
             ('pnpm12', ['--pnpm','12.0.0'], 1, ''), ('pnpm-tag', ['--pnpm','latest'], 1, ''),
             ('duplicate', ['--pnpm','11.11.0','--pnpm','11.11.0'], 2, ''),
@@ -469,6 +543,33 @@ def main():
         assert json.loads(case.targets[0].read_text())['dependencies']['@deepseek-ai/dsh'] == '0.1.5-rc.1'
         case.clean()
         print('dsh upgrade: signal after the recovery decision exits 3 and keeps recovery PASS')
+        # #138: the EXIT trap must report the status the script decided, not the
+        # removal's. The fixture `rm` fails for this case's own scratch alone -
+        # the one `dsh-upgrade.*` directory directly under the case root, never a
+        # path inside it - exactly as a real `rm -rf` does when the redirected HOME
+        # holds a read-only Go cache entry. The publication already completed, so
+        # the run still reports success and names the leftover once; nothing is
+        # retained as recovery material, because nothing is left to recover.
+        case = Case(root, 'cleanup-failure', fast_gate=True)
+        assert case.run(cleanup_failure=True) == 0, (case.status, case.output)
+        assert 'Permission denied' in case.output, case.output
+        failures = [line for line in case.output.splitlines()
+                    if line.startswith('error: invocation scratch cleanup failed; ')]
+        assert len(failures) == 1, case.output
+        leftover = Path(failures[0].split('; ', 1)[1].rsplit(' left behind', 1)[0])
+        assert leftover.is_absolute() and leftover.parent == case.root.resolve(), failures[0]
+        assert leftover.name.startswith('dsh-upgrade.'), failures[0]
+        assert (leftover / 'final/pnpm-workspace.yaml').is_file(), failures[0]
+        assert '==> pinned @deepseek-ai/dsh@0.1.5-rc.2' in case.output, case.output
+        assert 'error: recovery material retained' not in case.output, case.output
+        assert json.loads(case.targets[0].read_text())['dependencies']['@deepseek-ai/dsh'] == '0.1.5-rc.2', case.output
+        assert case.targets[-1].read_bytes() == case.dockerfile_with_label('0.1.5-rc.2'), case.output
+        # Remove what the injected failure left behind: the scratch is real, so the
+        # suite stays re-runnable.
+        shutil.rmtree(leftover)
+        assert not leftover.exists()
+        case.clean()
+        print('dsh upgrade: a failed scratch cleanup keeps the decided success PASS')
         case = Case(root, 'final-drift', fast_gate=True)
         proposal = case.root / 'reviewed.json'
         proposal.write_text(json.dumps(expected))
