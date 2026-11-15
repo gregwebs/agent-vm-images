@@ -1,29 +1,33 @@
 # One maintained all-agent recipe. Build context: images/.
 # Version declarations remain local to each block for Docker cache locality.
 ARG BASE_IMAGE=agent-vm-base:local
-# Build-only helper compiler. Docker stages do not cross Dockerfiles, so both
-# products declare this stage; the substantive recipe is recipe-contract/build.sh
-# and the version/digest pair is guarded by script/test/image-sources. The binary
-# reaches consumers only through a read-only composed-directory mount, so no
-# compiler or helper persists in a final layer.
-FROM --platform=$BUILDPLATFORM golang:1.27.3-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4 AS recipe-contract-bin
-ARG TARGETARCH
-WORKDIR /src/recipe-contract
-COPY recipe-contract/ ./
-# The pinned image compiler must equal go.mod's toolchain before any cross-target
-# variable is set, so auto-download inside the build cannot mask a stale image.
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    GOTOOLCHAIN=local GOWORK=off GOFLAGS= GOENV=off \
-    go test -tags recipe_contract_image_compiler -run '^TestImageCompiler$' ./internal/buildcheck
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    GOOS=linux GOARCH=$TARGETARCH CGO_ENABLED=0 bash ./build.sh /out
+# The recipe-contract helper is compiled on the host and supplied as a named build
+# context (`--build-context recipe-contract-bin=<composed directory>`), so this
+# build never runs a Go compiler (ADR 0017). The placeholder stage exists so an
+# unsupplied context fails inside this Dockerfile instead of resolving the registry
+# image docker.io/library/recipe-contract-bin; the presence check below turns that
+# failure into a message naming the build entry point.
+FROM scratch AS recipe-contract-bin
 
 FROM ${BASE_IMAGE}
+# Before anything else: every later step mounts the helper from the context the
+# build adapter supplies, so a missing one is reported here rather than as a bare
+# "not found" from an installer. The mount has no `source` because a placeholder
+# context is empty; the real context carries `out/recipe-contract`.
+RUN --mount=from=recipe-contract-bin,target=/tmp/recipe-contract-context,ro \
+    [ -x /tmp/recipe-contract-context/out/recipe-contract ] || { \
+        echo 'the recipe-contract helper is missing from this build' >&2; \
+        echo 'Build with: bash images/build.sh <recipe>' >&2; \
+        echo 'or pass --build-context recipe-contract-bin=<composed directory>' >&2; \
+        exit 1; \
+    }
+
+
 LABEL org.opencontainers.image.title="agent-vm standard coding-agent image"
 LABEL org.opencontainers.image.description="dsh, Pi, Codex, OpenCode, Claude, Copilot and agy with reviewed exact selections."
 
 # The inherited stamp proves which sources the base was built from; comparing it
-# with this checkout's manifest is the first product RUN so a base from other
+# with this checkout's manifest is the first content step so a base from other
 # sources fails before any agent installation, and the mount list matches the
 # base's exactly so one manifest never describes two different input sets.
 RUN --mount=type=bind,source=base-inputs.sha256,target=/tmp/base-source/base-inputs.sha256,ro \

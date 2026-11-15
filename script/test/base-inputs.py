@@ -92,7 +92,7 @@ FIXTURE_FILES = {
     'images/install-zellij.sh': '#!/bin/sh\nset -eu\n',
     'images/pnpm/pin.json': '{"version": "11.11.0"}\n',
     'images/pnpm/verify-pnpm.sh': '#!/bin/sh\nset -eu\n',
-    'images/recipe-contract/go.mod': 'module example.invalid/contract\n\ngo 1.27.3\n',
+    'images/recipe-contract/run-pnpm.sh': '#!/bin/sh\nset -eu\n',
 }
 EXTENSION_FIXTURE = ('ARG BASE_IMAGE=agent-vm-base:local\n'
                      'ARG ' + IDENTITY_ARG + '=' + PLACEHOLDER + '\n'

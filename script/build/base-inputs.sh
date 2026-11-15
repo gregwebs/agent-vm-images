@@ -24,6 +24,12 @@ IDENTITY_ARG=AGENT_VM_BASE_IDENTITY
 # Every images/ entry the base image consumes, and nothing else. Each listed
 # root must contribute at least one tracked file; the manifest, the mount list in
 # both recipes and this array change together.
+#
+# `recipe-contract` covers what a build consumes from there: the wrappers the
+# composed directory mounts (`download.sh`, `run-*.sh`) and the recipe that
+# compiles the executable. The helper's implementation moved to `./internal` with
+# the root module (ADR 0017), so those sources are outside this manifest -- a
+# residual gap, tracked separately, not an untested assumption.
 BASE_INPUT_ROOTS=(.dockerignore Dockerfile apt-policy artifacts install-artifact.sh
                   install-build-ca.sh install-pnpm.sh install-zellij.sh pnpm recipe-contract
                   verify-base-inputs.sh)

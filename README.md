@@ -71,9 +71,12 @@ bash images/build.sh standard
 bash images/build.sh standard -- --build-arg AGENT_VERSION_CLAUDE=2.1.319 --progress=plain
 ```
 
-The default needs Docker only. For optional host Go compilation, use
-`--host-helpers`; see [contributor commands](CONTRIBUTING.md#go-build-helpers)
-and [ADR 0004](docs/adr/0004-go-build-helpers.md).
+`images/build.sh` needs Docker and Go: it compiles the `recipe-contract` helper
+on the host and passes it to the build as a named context, so the images carry no
+Go compiler (see [contributor commands](CONTRIBUTING.md#go-programs) and
+[ADR 0017](docs/adr/0017-go-programs.md)). The recipes themselves still build with
+ordinary `docker build` if you supply `--build-context recipe-contract-bin=<composed
+directory>`; without it they stop at the first step and say so.
 
 The helper builds only the selected recipe, never auto-builds a missing base,
 resolves latest, prunes, pushes or reads launcher configuration. Ordinary Docker

@@ -562,6 +562,9 @@ class Invocation(base.Invocation):
                  *(ROOT / 'images/tools/pi/extensions').glob('*'),
                  *(ROOT / 'images/tools/pi/dispatch').glob('*'),
                  ROOT / 'images/tools/pnpm-project.py', ROOT / 'images/tools/pnpm-host-manager.py',
+                 # The helper is host-compiled (ADR 0017). These are the wrappers
+                 # beside it; the binary's own digest is helper.json, written by
+                 # select_contract once the platform is known.
                  *(ROOT / 'images/recipe-contract').rglob('*'),
                  *(ROOT / 'script/test').glob('standard-node-*.py'),
                  ROOT / 'script/test/fixtures/standard-node-pi.py']

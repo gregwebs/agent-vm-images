@@ -39,7 +39,6 @@ done < <(bash "$ROOT/script/build/base-inputs.sh" inputs)
 usage() {
     cat >&2 <<'USAGE'
 usage: refresh-parent-pins.sh debian
-       refresh-parent-pins.sh golang-builder [golang:VERSION-trixie]
        refresh-parent-pins.sh standard-release X.Y.Z
        refresh-parent-pins.sh --bootstrap
 
@@ -149,7 +148,6 @@ selection=( "$@" )
 case "${1:-}" in
     --bootstrap) [ "$#" -eq 1 ] || usage ;;
     debian) [ "$#" -eq 1 ] || usage ;;
-    golang-builder) [ "$#" -le 2 ] || usage ;;
     standard-release) [ "$#" -eq 2 ] || usage ;;
     *) usage ;;
 esac
@@ -163,12 +161,6 @@ for argument in "${selection[@]}"; do
     esac
 done
 case "${selection[0]}" in
-    golang-builder)
-        if [ "$#" -eq 2 ]; then
-            printf '%s' "$2" | grep -Eqx 'golang:[0-9]+\.[0-9]+\.[0-9]+-trixie' ||
-                { echo 'parent-pins: refusing a Go selection other than golang:VERSION-trixie' >&2; exit 2; }
-        fi
-        ;;
     standard-release)
         printf '%s' "$2" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' ||
             { echo 'parent-pins: refusing a release selection other than X.Y.Z' >&2; exit 2; }

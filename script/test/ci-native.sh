@@ -10,6 +10,10 @@ platform="linux/$arch"
 BUILDER=$(docker context show)
 bash "$ROOT/script/test/require-daemon-builder.sh" || { echo 'daemon-backed builder required' >&2; exit 1; }
 mkdir -p target/ci-logs
+# Every product build in every phase takes the host-compiled helper as one named
+# context (ADR 0017), and each phase is its own process: build it here, once.
+helper_context=$(bash "$ROOT/script/build/recipe-contract.sh" --fresh --platform "$platform") ||
+    { echo 'cannot compile the recipe-contract helper' >&2; exit 1; }
 measure_capacity() {
     local root available
     root=$(docker info --format '{{.DockerRootDir}}')
@@ -71,9 +75,12 @@ case "$phase" in
         measure_capacity
         ;;
     build)
-        timed base docker build --builder "$BUILDER" --platform "$platform" -t agent-vm-base:local -f images/Dockerfile images
+        timed base docker build --builder "$BUILDER" --platform "$platform" -t agent-vm-base:local \
+            --build-context "recipe-contract-bin=$helper_context" -f images/Dockerfile images
         measure_capacity
-        timed standard docker build --builder "$BUILDER" --platform "$platform" -t agent-vm-standard:local --build-arg BASE_IMAGE=agent-vm-base:local -f images/standard/Dockerfile images
+        timed standard docker build --builder "$BUILDER" --platform "$platform" -t agent-vm-standard:local \
+            --build-arg BASE_IMAGE=agent-vm-base:local \
+            --build-context "recipe-contract-bin=$helper_context" -f images/standard/Dockerfile images
         timed example docker build --builder "$BUILDER" --platform "$platform" -t my-agent-vm:local examples/base-extension
         timed helper-base bash images/build.sh base
         timed helper-standard bash images/build.sh standard
@@ -165,7 +172,9 @@ case "$phase" in
         # the artifact that existed before the failing build, not its result.
         printf 'stale-tag control: prior agent-vm-standard id %s = prior artifact, not a result of the failing build\n' \
             "$prior" | tee -a target/ci-logs/durations.txt
-        if timed bad-version docker build --builder "$BUILDER" --platform "$platform" -t agent-vm-standard:local --build-arg AGENT_VERSION_DSH=latest -f images/standard/Dockerfile images; then
+        if timed bad-version docker build --builder "$BUILDER" --platform "$platform" -t agent-vm-standard:local \
+            --build-arg AGENT_VERSION_DSH=latest --build-context "recipe-contract-bin=$helper_context" \
+            -f images/standard/Dockerfile images; then
             echo 'invalid exact selection succeeded' >&2; exit 1
         fi
         [ "$(docker image inspect agent-vm-standard:local --format '{{.Id}}')" = "$prior" ]
@@ -178,7 +187,8 @@ case "$phase" in
         check_audit_budget "$audit_durations_start"
         ;;
     network-build)
-        timed network-base docker build --builder "$BUILDER" --platform "$platform" -t agent-vm-base:local -f images/Dockerfile images
+        timed network-base docker build --builder "$BUILDER" --platform "$platform" -t agent-vm-base:local \
+            --build-context "recipe-contract-bin=$helper_context" -f images/Dockerfile images
         ;;
     network-audit)
         args=()

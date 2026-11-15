@@ -19,7 +19,7 @@ try {
   const archive = execFileSync('git', ['archive', '3b21103', 'images/recipe-contract/vendor/yaml'], {cwd:root, maxBuffer:16 << 20});
   execFileSync('tar', ['-xf', '-', '-C', scratch], {input:archive});
   const {default:YAML} = await import(pathToFileURL(path.join(scratch, 'images/recipe-contract/vendor/yaml/dist/index.js')));
-  const rows = JSON.parse(fs.readFileSync(path.join(root, 'images/recipe-contract/internal/document/testdata/parse-vectors.json'), 'utf8'));
+  const rows = JSON.parse(fs.readFileSync(path.join(root, 'internal/document/testdata/parse-vectors.json'), 'utf8'));
   function parse(row) {
     const source = new TextDecoder('utf-8', {fatal:true}).decode(Buffer.from(row.source));
     if (row.format === 'json') JSON.parse(source);

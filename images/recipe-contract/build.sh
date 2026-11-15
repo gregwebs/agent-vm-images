@@ -1,11 +1,11 @@
 #!/bin/bash
 # Canonical recipe-contract build recipe.
 #
-# Both delivery adapters call this: the Docker builder stage (composed directory at
-# /out) and script/build/recipe-contract.sh (composed directory at
-# target/recipe-contract/OS-ARCH/out). It is invocation-only, it owns the compiler
-# flags so the adapters cannot diverge, and it publishes the composed directory the
-# image used to bind-mount: the helper sources plus the executable.
+# script/build/recipe-contract.sh is its only caller: the helper is compiled with
+# the host Go toolchain and reaches an image build as a named build context
+# (ADR 0017). The recipe owns the compiler flags so no caller can diverge, and it
+# publishes the composed directory the image mounts: the executable and the shell
+# wrappers that exec it.
 set -euo pipefail
 
 usage() {
@@ -19,9 +19,10 @@ case "$output" in
     /*) ;;
     *) usage ;;
 esac
-module="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-case "$output" in
-    "$module"/*) echo "composed directory must be outside the Go module: $output" >&2; exit 2 ;;
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+main=./images/recipe-contract/cmd/recipe-contract
+case "$root" in
+    "$output" | "$output"/*) echo "composed directory must not contain the repository: $output" >&2; exit 2 ;;
 esac
 
 # The publish step replaces only a directory this recipe wrote, so the marker is
@@ -39,31 +40,20 @@ mkdir -p "$(dirname "$output")"
 rm -rf "$stage"
 mkdir -m 0755 "$stage"
 
-# -p keeps the reviewed helper modes (0644 sources, 0755 programs). The Go sources
-# travel with the directory so the mounted tree stays canonical source with no
-# maintained copy.
-(cd "$module" && cp -R -p . "$stage/")
-
 # -mod=vendor makes a missing vendor tree a build failure instead of a proxy
-# download: the image build never fetches modules (ADR 0001 § Amended by #75).
-(cd "$stage" && GOWORK=off GOFLAGS='' CGO_ENABLED=0 \
-    go build -mod=vendor -trimpath -buildvcs=false -o "$stage/recipe-contract" ./cmd/recipe-contract)
+# download: a build never fetches modules (ADR 0001 § Amended by #75). -trimpath
+# and -buildvcs=false keep the checkout's location and history out of the binary.
+(cd "$root" && GOWORK=off GOFLAGS='' CGO_ENABLED=0 \
+    go build -mod=vendor -trimpath -buildvcs=false -o "$stage/recipe-contract" "$main")
 
 chmod 0755 "$stage/recipe-contract"
-find "$stage" -type d -exec chmod 0755 {} +
-# The composed directory is mounted into every audit container. Go sources and
-# testdata are inert read-only data there, but Python is not: it would be
-# executable helper code the Go-only rule forbids, and `cp -R` also carries any
-# untracked file. Refuse to publish it rather than relying on the repository-side
-# guard having run first (ADR 0004, "What the mount carries").
-if python_leftovers=$(find "$stage" \( -name '*.py' -o -name '*.pyc' -o -name __pycache__ \) -print); then :; else
-    status=$?; echo "cannot inspect the composed directory for Python (status $status)" >&2; exit "$status"
-fi
-[ -z "$python_leftovers" ] || {
-    printf '%s\n' "$python_leftovers" >&2
-    echo "refusing to publish Python in the composed directory: the helpers are Go and shell only" >&2
-    exit 2
-}
+# The mount carries a closed set: the executable and the wrappers that exec it
+# inside the container. Copying a list rather than the directory is what keeps a
+# source, a testdata file or a stray untracked file out of the mount, and -p keeps
+# the reviewed wrapper modes (0644 run-report.sh, 0755 the other three).
+for wrapper in download.sh run-install.sh run-pnpm.sh run-report.sh; do
+    cp -p "$root/images/recipe-contract/$wrapper" "$stage/$wrapper"
+done
 printf 'recipe-contract composed directory\n' >"$stage/$marker"
 # Record what the binary is so a caller-supplied context cannot be reused for a
 # different target: the adapters compare this before honouring
@@ -72,8 +62,8 @@ printf 'recipe-contract composed directory\n' >"$stage/$marker"
 # than claiming a target the recipe was never told.
 printf '%s-%s\n' "${GOOS:-unknown}" "${GOARCH:-unknown}" >"$stage/.recipe-contract-platform"
 
-# Publication is serialized. Two builds of one output (a suite run beside
-# `images/build.sh --host-helpers`, say) must not interleave the two renames, so
+# Publication is serialized. Two builds of one output (a suite run beside an
+# `images/build.sh` run, say) must not interleave the two renames, so
 # one cannot move the directory out from under the other. Each rename is atomic,
 # but the swap is still two of them: a reader that resolves the path in that
 # microsecond window sees it absent. The window is exclusive to publishers and an
