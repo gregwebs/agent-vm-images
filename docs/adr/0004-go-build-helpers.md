@@ -325,3 +325,10 @@ this amendment:
   `script/build/recipe-contract.sh --native` build published
   (`target/recipe-contract/OS-ARCH/out`), which `project.py` authorizes as the
   checkout's host shape.
+
+## Amended by 0017 (2026-11-14)
+
+[ADR 0017](0017-go-programs.md) supersedes three parts of this record. The Go
+module moves to the repository root. The host cross-compile becomes the only
+delivery path for product images, so the `golang:` builder stage and its guards
+are removed. New ports keep exit status and meaning rather than byte parity.

@@ -44,6 +44,10 @@ _Avoid_: Helpers, contract scripts
 A program the image build runs during a build step that leaves no trace in the finished image.
 _Avoid_: Image tool, installed helper
 
+**Pin writer**:
+A maintainer program that selects a pinned image input and records its content identity in reviewed repository data. A build helper verifies what a pin writer recorded; it never selects.
+_Avoid_: Updater, refresher (the `upgrade-*` scripts orchestrate pin writers)
+
 **Runtime payload**:
 Files this repository deliberately places in the finished image for the guest to use.
 _Avoid_: Build helper, image tool
