@@ -1,7 +1,7 @@
 # 0017: Programs are Go; shell is for entry points and automation
 
 Status: accepted. Amends [ADR 0004](0004-go-build-helpers.md) (layout, delivery,
-parity bar). Not yet implemented.
+parity bar). Not yet implemented; step 0 is #178.
 
 ## Context
 
@@ -54,8 +54,9 @@ with a message naming `images/build.sh`.
 flag. So each example's helper is its own Go module in its directory, built by
 the example's own pinned `golang:` stage. A guard ties that image to the root
 `go.mod` toolchain. Logic shared with `./internal` (OpenPGP, archive hashes)
-is duplicated deliberately. When agent-vm accepts named build contexts,
-examples can move to the host cross-compile.
+is duplicated deliberately. When agent-vm accepts named build contexts
+([agent-vm#627](https://github.com/gregwebs/agent-vm/issues/627)), examples can
+move to the host cross-compile.
 
 **Parity bar.** A port keeps exit status and meaning. The existing harness runs
 against the Go program and is the oracle. Output text is frozen only where a
