@@ -9634,7 +9634,9 @@ fn check_go_mod(text: &str) -> Result<(), String> {
     .map(|pin| pin.to_string())
     .collect();
     if pins != expected {
-        return Err(format!("go.mod requires exactly the reviewed modules: {pins:?}"));
+        return Err(format!(
+            "go.mod requires exactly the reviewed modules: {pins:?}"
+        ));
     }
     Ok(())
 }

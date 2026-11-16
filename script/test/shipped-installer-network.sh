@@ -998,6 +998,9 @@ run_one_combined() { # $1 = tool, $2 = version
         extra_env+=(-v "$REPO_ROOT/images/install-artifact.sh:/artifact-source/install-artifact.sh:ro")
         extra_env+=(-e "AGENT_VM_AGY_SOURCE_DIR=/agy")
         extra_env+=(-e "ARTIFACT_SOURCE_DIR=/artifact-source")
+        # The wrapper runs the installer as a recipe-contract subcommand, so the
+        # helper the run already mounts is what it has to reach.
+        extra_env+=(-e "RECIPE_CONTRACT_HELPER=/contract/recipe-contract")
         case "$arch" in
             aarch64) extra_env+=(-e "AGENT_VM_AGY_ARCH=arm64") ;;
             x86_64) extra_env+=(-e "AGENT_VM_AGY_ARCH=amd64") ;;

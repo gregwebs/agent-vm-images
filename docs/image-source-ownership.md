@@ -73,7 +73,8 @@ does not consume and is deliberately not listed. Decision and limits:
 CLI: the exact upstream archive per architecture with its SHA-256, the member
 prefix, the declared payload and the authentication evidence (a committed Node
 release key, or a Sigstore bundle per architecture). `images/install-artifact.sh`
-(with `images/artifacts/install_artifact.py` and `artifact_pin.py`) is the only
+runs the `install-artifact` subcommand of the host-compiled `recipe-contract`
+helper (`internal/artifactinstall` over `internal/artifactpin`), which is the only
 installer and the only reader of a pin in an image;
 `script/dev/pin-artifact.py` is the only writer, and it also owns the
 `org.agent-vm.version.<name>` labels in `images/Dockerfile`. `artifacts/` and

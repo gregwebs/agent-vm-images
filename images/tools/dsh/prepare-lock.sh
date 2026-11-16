@@ -86,7 +86,8 @@ base_pin=$(printf '%s\n' "$facts" | jq -er '.basePin') || fail 'authorization re
 python3 "$PROJECT" guard "$PREFIX" || exit 1
 
 PNPM_SOURCE=${PNPM_SOURCE_DIR:-$self_dir/../../pnpm}
-base_pnpm=$("$CONTRACT/recipe-contract" artifact-pin version "$base_pin") || fail 'cannot read the base pin'
+[ -f "$PNPM_SOURCE/read-pin-version.py" ] || fail "cannot locate the reviewed pnpm sources at $PNPM_SOURCE"
+base_pnpm=$(python3 "$PNPM_SOURCE/read-pin-version.py" "$base_pin") || fail 'cannot read the base pin'
 [ "$base_pnpm" = '11.11.0' ] || fail "unsupported base manager selection: $base_pnpm"
 [ -z "$PNPM_VERSION" ] || [ "$PNPM_VERSION" = "$base_pnpm" ] ||
     fail 'pnpm compatibility selection disagrees with base pin'
