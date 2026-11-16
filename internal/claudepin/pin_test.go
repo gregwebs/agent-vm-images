@@ -130,6 +130,15 @@ func TestLoadRefusesWhatTheReviewDidNotAccept(t *testing.T) {
 				return strings.Replace(pin, ReviewedSignerFingerprint,
 					"422E8241E320573700499D74E010800BADA0909D", 1)
 			}},
+		{label: "year zero", needle: "not a calendar date",
+			edit: func(pin string) string {
+				return strings.Replace(pin, `"verified_on": "2026-11-13"`,
+					`"verified_on": "0000-01-01"`, 1)
+			}},
+		{label: "leading-zero schema", needle: "is not a JSON number",
+			edit: func(pin string) string {
+				return strings.Replace(pin, `"schema": 1,`, `"schema": 01,`, 1)
+			}},
 		{label: "future verified_on", needle: "is in the future",
 			edit: func(pin string) string {
 				return strings.Replace(pin, `"verified_on": "2026-11-13"`,
@@ -357,4 +366,77 @@ func TestGPGHomeRefusesAnUnusableRoot(t *testing.T) {
 			t.Errorf("an unusable root %s gave %v", root, err)
 		}
 	}
+}
+
+// TestInstalledPayloadModeIsExact: a setuid or setgid payload runs with privileges
+// the review never granted, so the whole mode word is compared, not the nine rwx bits.
+func TestInstalledPayloadModeIsExact(t *testing.T) {
+	pin, err := Load(writeClosure(t))
+	if err != nil {
+		t.Fatalf("load: %s", err)
+	}
+	verified, err := pin.Verify(pin.Version)
+	if err != nil {
+		t.Fatalf("verify: %s", err)
+	}
+	payload, err := os.ReadFile(filepath.Join("..", "..", "images", "tools", "claude", "pin.json"))
+	if err != nil {
+		t.Fatalf("read: %s", err)
+	}
+	if len(payload) == 0 {
+		t.Fatal("the committed pin is empty")
+	}
+	for _, test := range []struct {
+		label  string
+		mode   os.FileMode
+		needle string
+	}{
+		{label: "0755", mode: 0o755},
+		// A setuid bit is the case `Perm()` would hide. (A setgid bit is not: BSD
+		// clears it on a regular file owned by the caller's group, so a case for it
+		// would pass for the wrong reason on macOS.)
+		{label: "04755", mode: 0o4755 | os.ModeSetuid, needle: "not 0755"},
+		{label: "0644", mode: 0o644, needle: "not 0755"},
+		{label: "0775", mode: 0o775, needle: "not 0755"},
+	} {
+		prefix := t.TempDir()
+		versions := filepath.Join(prefix, ".local", "share", "claude", "versions")
+		installed := filepath.Join(versions, pin.Version)
+		for _, directory := range []string{filepath.Join(prefix, ".local", "bin"), versions} {
+			if err := os.MkdirAll(directory, 0o755); err != nil {
+				t.Fatalf("%s: %s", test.label, err)
+			}
+		}
+		// The payload's digest never matches the committed pin here; the mode is what
+		// this case is about, so only the mode refusal is asserted.
+		if err := os.WriteFile(installed, []byte("payload"), 0o600); err != nil {
+			t.Fatalf("%s: %s", test.label, err)
+		}
+		if err := os.Chmod(installed, test.mode); err != nil {
+			t.Fatalf("%s: %s", test.label, err)
+		}
+		if err := os.Symlink(installed, filepath.Join(prefix, ".local", "bin", "claude")); err != nil {
+			t.Fatalf("%s: %s", test.label, err)
+		}
+		owner, _ := ownerOf(mustStat(t, installed))
+		err := verified.CheckInstalled("linux-x64", prefix, owner[0], owner[1])
+		if test.needle == "" {
+			if err != nil && strings.Contains(err.Error(), "not 0755") {
+				t.Errorf("%s: the exact mode was refused: %s", test.label, err)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), test.needle) {
+			t.Errorf("%s: got %v, want a refusal naming %q", test.label, err, test.needle)
+		}
+	}
+}
+
+func mustStat(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("%s: %s", path, err)
+	}
+	return info
 }

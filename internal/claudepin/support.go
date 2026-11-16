@@ -1,11 +1,25 @@
 package claudepin
 
 import (
+	"os"
 	"strconv"
 	"syscall"
 
 	"github.com/gregwebs/agent-vm-images/internal/strictjson"
 )
+
+// permissionBits is the file's whole mode word, special bits included: `Perm()`
+// alone would hide a setuid bit, which a reviewed payload never carries.
+//
+// The mask is the numeric 07777 of the underlying stat mode: Go's `ModeSetuid` and
+// friends are its own high bits, not the S_ISUID/S_ISGID a kernel reports, so masking
+// a syscall mode with them would compare two different numberings.
+func permissionBits(info os.FileInfo) os.FileMode {
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		return os.FileMode(stat.Mode & 0o7777)
+	}
+	return info.Mode().Perm()
+}
 
 // ownerOf is the file's owning uid and gid, where the platform reports them.
 func ownerOf(info interface{ Sys() any }) ([2]int, bool) {

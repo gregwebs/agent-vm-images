@@ -61,8 +61,17 @@ func CheckRedirect(request *http.Request, via []*http.Request) error {
 	if len(via) >= 10 {
 		return refuse("refusing more than 10 redirects fetching %s", via[0].URL)
 	}
-	if !RedirectHosts[request.URL.Hostname()] {
-		return refuse("refusing a redirect from %s to %s", via[0].URL, request.URL)
+	target := request.URL
+	if !RedirectHosts[target.Hostname()] {
+		return refuse("refusing a redirect from %s to %s", via[0].URL, target)
+	}
+	// A host name is not an origin: an https-to-http downgrade, credentials in the
+	// URL or an unusual port would all send the request somewhere the approved host
+	// never serves from.
+	if target.Scheme != "https" || target.User != nil ||
+		(target.Port() != "" && target.Port() != "443") {
+		return refuse("refusing a redirect from %s to %s: not a plain https asset origin",
+			via[0].URL, target)
 	}
 	return nil
 }

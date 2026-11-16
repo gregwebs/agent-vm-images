@@ -147,6 +147,16 @@ func (c *cursor) number(what string) (Value, error) {
 	if c.offset < len(c.source) && c.source[c.offset] == '-' {
 		c.offset++
 	}
+	// JSON has one spelling for a whole number: a single zero, or digits that do not
+	// begin with zero. `01` is a literal Python's decoder refuses, and a reader that
+	// accepted it would accept a document the review never produced.
+	if c.offset < len(c.source) && c.source[c.offset] == '0' {
+		c.offset++
+		if c.offset < len(c.source) && c.source[c.offset] >= '0' && c.source[c.offset] <= '9' {
+			return nil, Refuse("%s is not a JSON number this build acts on",
+				c.constant(what))
+		}
+	}
 	for c.offset < len(c.source) {
 		b := c.source[c.offset]
 		switch {

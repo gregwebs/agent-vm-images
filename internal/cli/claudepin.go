@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -26,6 +27,24 @@ func (claudePinUsage) Description() string {
 	return "Read the committed Claude native payload closure offline."
 }
 
+// claudePinVerbs is each verb's argument set. The reader decides what a verb may be
+// given before it reads anything: a flag that does not belong to the verb is a
+// malformed invocation, not something to ignore.
+type claudePinVerb struct {
+	required []string
+	allowed  []string
+}
+
+var claudePinVerbs = map[string]claudePinVerb{
+	"version":      {required: []string{"pin-dir"}, allowed: []string{"pin-dir"}},
+	"digest":       {required: []string{"pin-dir", "platform"}, allowed: []string{"pin-dir", "platform"}},
+	"check":        {required: []string{"pin-dir", "version"}, allowed: []string{"pin-dir", "version"}},
+	"select":       {required: []string{"pin-dir", "version", "platform"}, allowed: []string{"pin-dir", "version", "platform"}},
+	"preflight":    {required: []string{"pin-dir", "version", "platform", "file"}, allowed: []string{"pin-dir", "version", "platform", "file"}},
+	"installed":    {required: []string{"pin-dir", "version", "platform", "prefix", "owner"}, allowed: []string{"pin-dir", "version", "platform", "prefix", "owner"}},
+	"native-state": {required: []string{"prefix"}, allowed: []string{"prefix"}},
+}
+
 // runClaudePin is the only reader of images/tools/claude/pin.json. Every verb is
 // offline: nothing here resolves a release, downloads a byte or writes a pin.
 func (p *process) runClaudePin(args []string) int {
@@ -37,51 +56,58 @@ func (p *process) runClaudePin(args []string) int {
 	if err := parser.Parse(args); err != nil {
 		return p.argFailure(parser, err)
 	}
-	if usage.Verb == "native-state" {
-		if usage.Prefix == "" {
-			return p.claudeUsage("native-state needs --prefix")
+	spec, known := claudePinVerbs[usage.Verb]
+	if !known {
+		return p.claudeUsage("unknown verb " + usage.Verb)
+	}
+	given := map[string]string{
+		"pin-dir":  usage.PinDir,
+		"version":  usage.Version,
+		"platform": usage.Platform,
+		"prefix":   usage.Prefix,
+		"owner":    usage.Owner,
+		"file":     usage.File,
+	}
+	for _, flag := range claudePinFlags {
+		if given[flag] == "" || contains(spec.allowed, flag) {
+			continue
 		}
+		return p.claudeUsage(usage.Verb + " does not take --" + flag)
+	}
+	for _, flag := range spec.required {
+		if given[flag] == "" {
+			return p.claudeUsage(usage.Verb + " needs --" + flag)
+		}
+	}
+	if usage.Verb == "native-state" {
 		if err := claudepin.CheckNativeState(usage.Prefix); err != nil {
 			return p.claudeFailure(err)
 		}
 		return p.stdoutStatus("claude: native state at " + usage.Prefix +
 			" matches the offline install\n")
 	}
-	if usage.PinDir == "" {
-		return p.claudeUsage(usage.Verb + " needs --pin-dir")
-	}
 	pin, err := claudepin.Load(usage.PinDir)
 	if err != nil {
 		return p.claudeFailure(err)
 	}
-	switch usage.Verb {
-	case "version":
+	if usage.Verb == "version" {
 		return p.stdoutStatus(pin.Version + "\n")
-	case "digest":
-		if usage.Platform == "" {
-			return p.claudeUsage("digest needs --platform")
-		}
+	}
+	if usage.Verb == "digest" {
 		pinned, err := pin.Executable(usage.Platform)
 		if err != nil {
 			return p.claudeFailure(err)
 		}
 		return p.stdoutStatus(pinned.SHA256 + "\n")
-	case "check", "select", "preflight", "installed":
-	default:
-		return p.claudeUsage("unknown verb " + usage.Verb)
 	}
-	if usage.Version == "" {
-		return p.claudeUsage(usage.Verb + " needs --version")
-	}
-	verified, err := pin.Verify(usage.Version)
+	verified, err := pin.VerifyWith(usage.Version, func(format string, args ...any) {
+		_ = p.err.writeString("claude_pin: " + fmt.Sprintf(format, args...) + "\n")
+	})
 	if err != nil {
 		return p.claudeFailure(err)
 	}
 	if usage.Verb == "check" {
 		return p.stdoutStatus(claudepin.CheckReport(verified))
-	}
-	if usage.Platform == "" {
-		return p.claudeUsage(usage.Verb + " needs --platform")
 	}
 	pinned, err := pin.Executable(usage.Platform)
 	if err != nil {
@@ -92,9 +118,6 @@ func (p *process) runClaudePin(args []string) int {
 		return p.stdoutStatus(pinned.URL + " " + pinned.SHA256 + " " +
 			strconv.FormatInt(pinned.Size, 10) + "\n")
 	case "preflight":
-		if usage.File == "" {
-			return p.claudeUsage("preflight needs the downloaded file")
-		}
 		if err := verified.Preflight(usage.Platform, usage.File); err != nil {
 			return p.claudeFailure(err)
 		}
@@ -102,9 +125,6 @@ func (p *process) runClaudePin(args []string) int {
 			": downloaded executable matches the committed pin and is an executable " +
 			"for this machine\n")
 	default: // installed
-		if usage.Prefix == "" || usage.Owner == "" {
-			return p.claudeUsage("installed needs --prefix and --owner")
-		}
 		uid, gid, err := parseOwner(usage.Owner)
 		if err != nil {
 			return p.claudeFailure(err)
@@ -115,6 +135,18 @@ func (p *process) runClaudePin(args []string) int {
 		return p.stdoutStatus("claude " + pin.Version + " " + pinned.Platform +
 			": installed payload, launcher and layout match the committed pin\n")
 	}
+}
+
+// claudePinFlags is every flag name one verb may carry.
+var claudePinFlags = []string{"pin-dir", "version", "platform", "prefix", "owner", "file"}
+
+func contains(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
 }
 
 // parseOwner reads the UID:GID the installed layout must carry.

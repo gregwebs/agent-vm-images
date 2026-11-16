@@ -11,7 +11,11 @@ import (
 // Verify proves everything the committed directory proves about the requested
 // version: the evidence digests, the key's single primary, the detached signature,
 // and the signed manifest's own selection for both maintained platforms.
-func (p Pin) Verify(version string) (VerifiedPin, error) {
+func (p Pin) Verify(version string) (VerifiedPin, error) { return p.VerifyWith(version, nil) }
+
+// VerifyWith is Verify with a warning sink: a keyring this run could not clean up
+// is a diagnostic, not a refusal, but it must still be visible.
+func (p Pin) VerifyWith(version string, warn func(format string, args ...any)) (VerifiedPin, error) {
 	requested, err := RequireVersion(version, "requested version")
 	if err != nil {
 		return VerifiedPin{}, err
@@ -32,7 +36,7 @@ func (p Pin) Verify(version string) (VerifiedPin, error) {
 	if err != nil {
 		return VerifiedPin{}, err
 	}
-	signature, err := VerifySignature(keyRaw, p.Key.Fingerprint, manifestRaw, signatureRaw, nil)
+	signature, err := VerifySignature(keyRaw, p.Key.Fingerprint, manifestRaw, signatureRaw, warn)
 	if err != nil {
 		return VerifiedPin{}, err
 	}
@@ -235,7 +239,9 @@ func (v VerifiedPin) CheckInstalled(token, prefix string, uid, gid int) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return Refuse("the installed payload %s is not a regular file", installed)
 	}
-	if mode := info.Mode().Perm(); mode != 0o755 {
+	// The whole permission word, not just the nine rwx bits: a setuid or setgid
+	// payload runs with privileges the review never granted.
+	if mode := permissionBits(info); mode != 0o755 {
 		return Refuse("the installed payload %s has mode %04o, not 0755", installed, mode)
 	}
 	if owner, ok := ownerOf(info); ok && owner != [2]int{uid, gid} {
@@ -328,7 +334,7 @@ func notWritableByOthers(path, what string) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return Refuse("%s at %s is not a real directory", what, path)
 	}
-	if mode := info.Mode().Perm(); mode&0o022 != 0 {
+	if mode := permissionBits(info); mode&0o022 != 0 {
 		return Refuse("%s %s is group- or world-writable (mode %04o)", what, path, mode)
 	}
 	return nil

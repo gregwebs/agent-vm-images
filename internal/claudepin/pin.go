@@ -455,6 +455,9 @@ func authentication(value any) (time.Time, string, error) {
 	if err != nil {
 		return time.Time{}, "", Refuse("%s verified_on is not a calendar date: %q", what, day)
 	}
+	if parsed.Year() < 1 {
+		return time.Time{}, "", Refuse("%s verified_on is not a calendar date: %q", what, day)
+	}
 	if parsed.After(UTCToday()) {
 		return time.Time{}, "", Refuse("%s verified_on %s is in the future", what, day)
 	}
