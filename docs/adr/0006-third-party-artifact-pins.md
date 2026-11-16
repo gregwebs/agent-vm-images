@@ -46,7 +46,7 @@ One shape, two artifacts, three pieces of code:
 images/artifacts/<name>.json      reviewed selection: version, per-arch URL + SHA-256,
                                   member prefix, payload, authentication evidence
 images/install-artifact.sh        the only installer; runs the pin, never a resolver
-script/dev/pin-artifact.py        the only writer of a pin (maintenance host, one transaction)
+script/dev/pin-artifact.sh        the only writer of a pin (maintenance host, one transaction)
 ```
 
 - **Exact upstream archives.** `node-v22.23.4-linux-{x64,arm64}.tar.xz` from
@@ -118,7 +118,7 @@ script/dev/pin-artifact.py        the only writer of a pin (maintenance host, on
   `nodejs`/`npm`/`gh` through apt in any ordinary spelling, a hand-unpacked
   downloaded archive, and any `--from` that is neither a declared stage nor a
   digest from the parent inventory.
-- **Refresh is transactional and never automatic.** `script/dev/pin-artifact.py`
+- **Refresh is transactional and never automatic.** `script/dev/pin-artifact.sh`
   resolves one exact `X.Y.Z`, verifies every architecture and every piece of
   evidence, and only then publishes the pin, its evidence files and the
   `org.agent-vm.version.<name>` label as one transaction with backups, reverse
@@ -179,14 +179,19 @@ script/dev/pin-artifact.py        the only writer of a pin (maintenance host, on
   `npx --version`, `/usr/bin/node` and `gh --version` equal the pins, `npm` and
   `npx` resolve into `/usr/local/lib/node_modules/npm`, and `pnpm` still resolves
   through `/usr/bin/node`.
-- `script/test/pin-artifact-maintenance.py` (hermetic): the maintenance writer's
-  transactional guarantees under a real fault - a failed second architecture, a
-  publication that fails on its last file (inclusive rollback), a SIGINT during
-  publication, an incomplete recovery (exit 3 with retained material), a
-  symlinked destination and symlinked parent, a failed backup (nothing restored,
-  nothing reported as published), a restore without a complete backup, an ambient
-  `GNUPGHOME` that must stay untouched, `GITHUB_ACTIONS=true`, a non-`X.Y.Z`
-  version, and `--check` against a mutated pin.
+- `script/test/pin-artifact-maintenance.py` (hermetic): the maintenance writer
+  driven as a program - a failed second architecture, an archive the signed
+  manifest does not name, a manifest signed by a foreign key, a publication that
+  cannot be restored (exit 3 with retained material), a symlinked destination and
+  symlinked parent, an ambient `GNUPGHOME` that must stay untouched,
+  `GITHUB_ACTIONS=true`, a non-`X.Y.Z` version, `verified_on` under two extreme
+  zones, and `--check` against a mutated pin.
+- `internal/artifactwriter/publish_test.go` (Go): the transaction's own fault
+  paths, which need an injected failure - a partial write (inclusive rollback), a
+  SIGINT during publication (exit 130 with the sources restored), an incomplete
+  recovery (exit 3, `recovery.json`, retained backups), a recovery record that
+  cannot be written, a restore without a complete backup, a failed backup, and a
+  rollback that removes a destination publication created.
 - `script/test/image-sources` (Rust): pin schema/version/platform/origin/digest
   and authentication rules plus per-field mutations, the base recipe's installer
   mount and `$TARGETARCH` invocation, the version labels, the closed

@@ -76,7 +76,8 @@ release key, or a Sigstore bundle per architecture). `images/install-artifact.sh
 runs the `install-artifact` subcommand of the host-compiled `recipe-contract`
 helper (`internal/artifactinstall` over `internal/artifactpin`), which is the only
 installer and the only reader of a pin in an image;
-`script/dev/pin-artifact.py` is the only writer, and it also owns the
+`script/dev/pin-artifact.sh` (the `avm-pin artifact` subcommand) is the only
+writer, and it also owns the
 `org.agent-vm.version.<name>` labels in `images/Dockerfile`. `artifacts/` and
 `install-artifact.sh` are base inputs, so a pin refresh is followed by
 `bash script/build/base-inputs.sh --write`. Decision, limits and evidence:

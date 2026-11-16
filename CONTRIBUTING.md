@@ -48,7 +48,7 @@ version bump, Rust application build, submodule or launcher packaging is needed.
   [pinned release artifacts](docs/image-input-policy.md#pinned-third-party-release-artifacts):
   exact upstream archives whose per-architecture SHA-256, evidence files and
   version labels are committed, installed by `images/install-artifact.sh` and
-  refreshed only by `script/dev/pin-artifact.py` (see
+  refreshed only by `script/dev/pin-artifact.sh` (see
   [ADR 0006](docs/adr/0006-third-party-artifact-pins.md)). This is a
   pinned-parent boundary, not byte-reproducible distro construction. The base
   build verifies the Debian baseline with `images/apt-policy/check-sources.sh`
@@ -79,13 +79,14 @@ version bump, Rust application build, submodule or launcher packaging is needed.
 ## Release-artifact maintenance
 
 Node and the GitHub CLI come from committed release archives. Only
-`script/dev/pin-artifact.py` writes their pins, evidence and labels, on a
-maintainer host (it refuses `GITHUB_ACTIONS=true`):
+`script/dev/pin-artifact.sh` (`avm-pin artifact`, compiled on first use) writes
+their pins, evidence and labels, on a maintainer host (it refuses
+`GITHUB_ACTIONS=true`):
 
 ```bash
-python3 script/dev/pin-artifact.py --artifact node --version 22.23.5
-python3 script/dev/pin-artifact.py --artifact gh --version 2.104.0
-python3 script/dev/pin-artifact.py --check
+script/dev/pin-artifact.sh --artifact node --version 22.23.5
+script/dev/pin-artifact.sh --artifact gh --version 2.104.0
+script/dev/pin-artifact.sh --check
 ```
 
 It resolves both architectures, verifies every piece of evidence (the Node

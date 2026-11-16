@@ -22,6 +22,9 @@ const (
 // Names are the reviewed artifacts.
 var Names = []Name{Node, GH, Agy}
 
+// ParseName validates an artifact name a command line names.
+func ParseName(value string) (Name, error) { return parseName(value) }
+
 func parseName(value string) (Name, error) {
 	name := Name(value)
 	for _, candidate := range Names {
