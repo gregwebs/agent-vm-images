@@ -463,7 +463,7 @@ cmp -s "$CASE/expected/bridge/Dockerfile" "$CASE/images/standard/Dockerfile" ||
 # lands and the reverse-inclusive restore has real work to do.
 assert_recovery_retained() { # $1 scratch name prefix
     local dir index
-    dir=$(find "$CASE" -maxdepth 1 -name "$1-upgrade.*" -type d | head -1)
+    dir=$(find "$CASE" -maxdepth 1 -name "$1-upgrade.*" -type d -print -quit)
     [ -n "$dir" ] || fail "no retained recovery material for $1"
     [ -f "$dir/publish-backup/.complete" ] || fail "$1: retained backups are not complete"
     for index in 0 1 2 3 4; do

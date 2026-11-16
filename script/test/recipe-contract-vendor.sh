@@ -129,7 +129,10 @@ if ! vendor_go mod tidy -diff; then
 fi
 
 cp -R "$root/vendor" "$scratch/mutant"
-mutant_file="$(find "$scratch/mutant" -type f -name '*.go' | head -n 1)"
+# `-print -quit` rather than `| head -1`: under `pipefail` the pipeline reports
+# find's SIGPIPE when head exits first, which made this line fail on a bigger
+# vendor tree.
+mutant_file="$(find "$scratch/mutant" -type f -name '*.go' -print -quit)"
 [ -n "$mutant_file" ] || { echo 'recipe-contract-vendor: no vendored Go file to mutate' >&2; exit 1; }
 printf '// drift\n' >>"$mutant_file"
 if diff_vendor "$scratch/mutant" >"$scratch/mutant.log" 2>&1; then
