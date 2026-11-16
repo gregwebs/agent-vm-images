@@ -557,6 +557,10 @@ esac
 # holds sources, not a binary. Compose it once for the platform under test.
 CONTRACT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --platform "$platform")/out"
 [ -x "$CONTRACT/recipe-contract" ] || { echo "no recipe-contract in $CONTRACT" >&2; exit 1; }
+# The same reader, built for the host: the committed pins are read here, not inside
+# the image, and this script runs on the maintainer's machine.
+HOST_CONTRACT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)/out"
+[ -x "$HOST_CONTRACT/recipe-contract" ] || { echo "no host recipe-contract in $HOST_CONTRACT" >&2; exit 1; }
 
 if [ "${#tools[@]}" -eq 0 ]; then
     tools=(codex opencode claude agy opencode-plugins)
@@ -677,7 +681,7 @@ assert_selection_defaults_match_dockerfiles() {
     [ "$agy_pin" = "$(selection_for agy 2)" ] ||
         fail "the committed agy pin is '$agy_pin' but selections.tsv says '$(selection_for agy 2)'"
     local claude_pin
-    claude_pin="$(python3 "$REPO_ROOT/images/tools/claude/claude_pin.py" version \
+    claude_pin="$("$HOST_CONTRACT/recipe-contract" claude-pin version \
         --pin-dir "$REPO_ROOT/images/tools/claude")"
     [ "$claude_pin" = "$(selection_for claude 2)" ] ||
         fail "the committed claude pin is '$claude_pin' but selections.tsv says '$(selection_for claude 2)'"

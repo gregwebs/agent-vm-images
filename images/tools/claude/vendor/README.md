@@ -13,7 +13,9 @@ the snapshot renamed `install.sh`.
 
 The selection authority is the committed closure in `images/tools/claude/`:
 `pin.json`, the signed `evidence/manifest.json`, its detached
-`evidence/manifest.json.sig`, the release signing key and `claude_pin.py`. The
+`evidence/manifest.json.sig` and the release signing key. The reader is the image's
+own `recipe-contract claude-pin` (ADR 0017): the pin directory carries reviewed
+bytes only, never a program. The
 signature is verified over the committed manifest with that key at pin time and on
 every build, under the reviewed primary fingerprint
 (`docs/adr/0013-claude-native-payload-pin.md`). The installer fetches exactly one
@@ -39,7 +41,7 @@ the installer implementation that performs the offline setup.
    (`images/recipe-contract/download.sh`), so a transport failure is a receipt + 75
    and every other failure is hard.
 4. **No live manifest, jq or zstd.** The checksum, size and URL come from
-   `claude_pin.py select`, which verifies the committed evidence, the signature and
+   `recipe-contract claude-pin select`, which verifies the committed evidence, the signature and
    the signed manifest; the selection is then re-checked here and the URL recomputed,
    so the pin can name bytes but never another location.
 5. **No channel fetch.** `version="$TARGET"`; there is no `/latest` request.

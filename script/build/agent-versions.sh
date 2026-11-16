@@ -141,7 +141,7 @@ codex_writer="$repo_root/script/dev/pin-codex.py"
 [ -f "$codex_writer" ] || fail "missing $codex_writer"
 agy_writer="$repo_root/script/dev/pin-agy.py"
 [ -f "$agy_writer" ] || fail "missing $agy_writer"
-claude_writer="$repo_root/script/dev/pin-claude.py"
+claude_writer="$repo_root/script/dev/pin-claude.sh"
 [ -f "$claude_writer" ] || fail "missing $claude_writer"
 
 if [ "$check" = true ]; then
@@ -149,7 +149,7 @@ if [ "$check" = true ]; then
     # agy, then claude, then the codex `exec` last: the codex check owns the final
     # status.
     python3 "$agy_writer" --check --repo-root "$repo_root" || exit $?
-    python3 "$claude_writer" --check --repo-root "$repo_root" || exit $?
+    bash "$claude_writer" --check --root "$repo_root" || exit $?
     exec python3 "$codex_writer" --check --repo-root "$repo_root"
 fi
 
@@ -392,7 +392,7 @@ fi
 # publication refuses a staged Claude ARG difference, so it has to stage from a
 # Dockerfile Claude has already published.
 claude_status=0
-python3 "$claude_writer" --version "$claude" --repo-root "$repo_root" || claude_status=$?
+bash "$claude_writer" --version "$claude" --root "$repo_root" || claude_status=$?
 if [ "$claude_status" -ne 0 ]; then
     if [ "$claude_status" -eq 3 ]; then
         echo "error: claude publication is undecided; recover the directories printed above" >&2

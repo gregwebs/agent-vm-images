@@ -47,7 +47,7 @@ HELPER_DIGEST = 'verify_archive_digest "$output" "$expected_digest"'
 
 # Injected immediately before the pin selection, so it is a real attempt through
 # the same classified downloader rather than a fake denial.
-CLAUDE_MANIFEST_ANCHOR = 'selection=$(python3 "$CLAUDE_PIN_DIR/claude_pin.py" select'
+CLAUDE_MANIFEST_ANCHOR = 'selection=$("$CLAUDE_PIN_CONTRACT" claude-pin select'
 CLAUDE_MANIFEST_INJECTION = ('download_file "$DOWNLOAD_BASE_URL/$version/manifest.json" '
                              '"$DOWNLOAD_DIR/manifest.json"\n')
 # Injected immediately before the native invocation in setup-claude.sh: the
@@ -69,12 +69,17 @@ def _delete_through(lines: list[str], start: int, end: int, what: str) -> list[s
     return lines[:start] + lines[end + 1:]
 
 
+# The reader the hooks and the vendored installer call: a contract helper, not a
+# script that travels with the pin (ADR 0017).
+CLAUDE_READER = '"$CONTRACT/recipe-contract" claude-pin'
+
+
 def _command_block(lines: list[str], anchor_index: int, what: str) -> tuple[int, int]:
-    """The `python3 ...` command after an anchor line, through its last line."""
+    """The reader command after an anchor line, through its last line."""
     index = anchor_index + 1
     while index < len(lines) and not lines[index].strip():
         index += 1
-    if index >= len(lines) or not lines[index].lstrip().startswith('python3'):
+    if index >= len(lines) or not lines[index].lstrip().startswith(CLAUDE_READER):
         raise SystemExit(f'{what}: no command follows the anchor')
     while lines[index].rstrip().endswith('\\'):
         index += 1
@@ -99,7 +104,7 @@ def _delete_claude_preflight(text: str) -> str:
     if end is None:
         raise SystemExit('claude-skip-preflight: the anchor block does not end')
     span = '\n'.join(lines[start:end + 1])
-    if 'claude_pin.py" preflight' not in span:
+    if 'claude-pin preflight' not in span:
         raise SystemExit('claude-skip-preflight: the deleted span is not the preflight')
     mutated = '\n'.join(_delete_through(lines, start, end, 'claude-skip-preflight'))
     if 'preflight' in mutated:
@@ -116,7 +121,7 @@ def _delete_claude_setup_check(text: str) -> tuple[str, list[str]]:
                          f'{len(anchor)}')
     start, end = _command_block(lines, anchor[0], 'claude-setup check')
     span = '\n'.join(lines[anchor[0]:end + 1])
-    if 'claude_pin.py" installed' not in span:
+    if 'claude-pin installed' not in span:
         raise SystemExit('claude-setup check: the deleted span is not the installed call')
     removed = lines[anchor[0]:end + 1]
     return '\n'.join(_delete_through(lines, anchor[0], end, 'claude-setup check')), removed
@@ -187,7 +192,7 @@ def mutate(source: Path, destination: Path, variant: str) -> None:
         return
     if variant == 'claude-setup-skip-initial-check':
         mutated, _removed = _delete_claude_setup_check(text)
-        if 'claude_pin.py" installed' not in mutated:
+        if 'claude-pin installed' not in mutated:
             raise SystemExit(f'{variant}: the closing installed call disappeared')
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(mutated)

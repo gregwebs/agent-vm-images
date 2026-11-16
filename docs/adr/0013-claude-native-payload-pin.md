@@ -52,7 +52,8 @@ Three upstream facts made a closure possible:
 ### One committed closure
 
 `images/tools/claude/` holds `pin.json`, `evidence/manifest.json`,
-`evidence/manifest.json.sig`, the hand-committed release key and `claude_pin.py`.
+`evidence/manifest.json.sig`, the hand-committed release key and the reader
+(`recipe-contract claude-pin`, ADR 0017).
 The pin records, for `linux/amd64` and `linux/arm64`, the manifest platform token,
 the exact canonical URL, SHA-256 and byte size of the plain `claude` executable,
 plus the URL, evidence path and SHA-256 of the manifest and the signature, and the
@@ -75,8 +76,8 @@ secret key would otherwise pass the single-primary count and let the import inst
 an unnamed second signer. No hash-only exception is used.
 
 The reviewed fingerprint `31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE` is a constant
-in `claude_pin.py`, but **the build does not read it**. What holds the pin to the
-reviewed signer is `script/dev/pin-claude.py` (write mode and `--check`) and the
+in the reader's source, but **the build does not read it**. What holds the pin to the
+reviewed signer is `script/dev/pin-claude.sh` (write mode and `--check`) and the
 Rust source gate. The build's job is narrower and structural: bind the pin's
 fingerprint to the key file and the signature at this commit.
 
@@ -91,7 +92,7 @@ key import is reported as an import failure and is never followed by `--verify`.
 
 The install RUN order is: the hook refuses an exact-but-unpinned version; the
 vendored installer refuses a non-fresh layout, takes `URL SHA256 SIZE` from
-`claude_pin.py select`, makes exactly one classified download, checks its SHA-256,
+`recipe-contract claude-pin select`, makes exactly one classified download, checks its SHA-256,
 size and ELF machine, and only then places the bytes at
 `$HOME/.local/share/claude/versions/<v>` with an absolute launcher symlink.
 Nothing executes in that RUN.
@@ -112,7 +113,7 @@ that any native request is a logged `DENY`, and a real-network control removes t
 launcher and requires that denial.
 
 **Egress asymmetry.** Maintenance is different on purpose: every *initial* request
-`script/dev/pin-claude.py` makes is on `downloads.claude.ai`, but the shared owner
+`script/dev/pin-claude.sh` makes is on `downloads.claude.ai`, but the shared owner
 transport may follow a redirect to `release-assets.githubusercontent.com` or
 `objects.githubusercontent.com`, because that transport is shared with the Codex
 and agy writers. A followed redirect cannot change what is adopted: the manifest
@@ -124,7 +125,7 @@ redirect is a route change to review, so its gate denies and learns nothing.
 
 ### Maintenance and ordering
 
-`script/dev/pin-claude.py` is the only writer of the pin, both evidence files and
+`script/dev/pin-claude.sh` is the only writer of the pin, both evidence files and
 the `ARG AGENT_VERSION_CLAUDE` default, and it publishes them as one transaction
 through the shared publisher after printing a field-by-field payload delta. It
 refuses GitHub Actions before any fetch, refuses a same-release rewrite, and
@@ -185,7 +186,7 @@ Rejected alternatives:
 
 - Pinning establishes which bytes were reviewed, not that a release is safe.
 - The build binds the pin's fingerprint to the committed key and the signature and
-  does **not** read `REVIEWED_SIGNER_FINGERPRINT`. `pin-claude.py --check` and the
+  does **not** read `REVIEWED_SIGNER_FINGERPRINT`. `pin-claude.sh --check` and the
   Rust gate hold the pin to that constant. Do not describe a build as enforcing
   it.
 - `manifest.json.raw-sig.json` is not verified and not used. There is no hash-only
@@ -234,3 +235,25 @@ The pull request that introduced this decision carries the run logs: the native
 arm64 build, the finished-image audit, the strict-egress Claude request log and
 its denial control, and the closure-mutation builds. `script/test/claude-pins.py`
 holds the hermetic case table for every refusal described here.
+
+## Amended by 0017 (2026-11-16)
+
+The decision here stands: the bytes are a committed closure, the manifest is the
+selection authority, and the native step runs offline. What changed is who reads the
+closure and who writes it, per [0017](0017-go-programs.md).
+
+- The reader is `recipe-contract claude-pin` (`internal/claudepin`), reached through
+  the image's own composed contract directory, with the verbs `select`, `preflight`,
+  `installed`, `native-state`, `check`, `digest` and `version`.
+  `images/tools/claude/claude_pin.py` is deleted, so the pin directory now carries
+  reviewed bytes and no program. The refusal text keeps its `claude_pin: ` prefix
+  because the hook and the suites read it.
+- The writer is `avm-pin claude`, reached through `script/dev/pin-claude.sh`
+  (`internal/claudewriter`). `script/dev/pin-claude.py` is deleted.
+- The publication transaction it shares with the artifact writer is now
+  `internal/publication`, one implementation for "staging, complete backup,
+  publication, rollback, 128+N".
+- The vendored installer calls `"$AGENT_VM_CONTRACT_DIR/recipe-contract" claude-pin`
+  at its three closure sites instead of `python3 "$CLAUDE_PIN_DIR/claude_pin.py"`,
+  and the committed `install.patch` was regenerated so it still reproduces
+  `vendor/install.sh` byte-for-byte.

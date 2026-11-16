@@ -2,15 +2,15 @@
 """Fixture closures for the Claude native payload pin (#98).
 
 One throwaway OpenPGP key, ELF-shaped executables and a consistent signed closure
-(pin, manifest, detached signature, key, and a copy of the real `claude_pin.py`),
-so the offline suites exercise the production loader over bytes they control. The
-fixture never touches the real committed evidence and never reaches the network.
+(pin, manifest, detached signature and key), so the offline suites exercise the
+production reader over bytes they control. The fixture never touches the real
+committed evidence and never reaches the network.
 
-The fixture's gpg homes are deliberately separate from `claude_pin.gpg_home`: a
-short transient 0700 home under `/tmp` for key generation, export, signing and
-two-key assembly, removed by the invocation that created it. A defect in the
-module under test must not be able to mask a fixture defect, and vice versa.
-Every gpg exit status is checked.
+The fixture's gpg homes are deliberately separate from the production reader's
+(`internal/claudepin`'s `GPGHome`): a short transient 0700 home under `/tmp` for key
+generation, export, signing and two-key assembly, removed by the invocation that
+created it. A defect in the program under test must not be able to mask a fixture
+defect, and vice versa. Every gpg exit status is checked.
 
 CLI:
 
@@ -23,9 +23,9 @@ CLI:
 `keygen` writes OUT/key.asc (armored public), OUT/secret.asc (armored secret) and
 OUT/fingerprint (primary); with `--subkey` the primary is cert-only and the
 signing subkey's fingerprint goes to OUT/signing-subkey. `closure` writes
-OUT/pin.json, OUT/evidence/manifest.json, OUT/evidence/manifest.json.sig, the key
-file and OUT/claude_pin.py. The same behaviour is importable:
-`make_signer`, `sign`, `make_closure`, `two_primaries`.
+OUT/pin.json, OUT/evidence/manifest.json, OUT/evidence/manifest.json.sig and the key
+file. The same behaviour is importable: `make_signer`, `sign`, `make_closure`,
+`two_primaries`.
 """
 from __future__ import annotations
 
@@ -43,12 +43,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-ROOT = Path(__file__).resolve().parents[4]
-REAL_PIN_MODULE = ROOT / 'images' / 'tools' / 'claude' / 'claude_pin.py'
 FIXTURE_UID = 'fixture claude signer <fixture@example.invalid>'
 FIXTURE_REASON = ('Fixture closure: the manifest is the selection authority and '
                   'the detached signature is verified with the committed key.')
-# Same rule as the module under test, deliberately a separate copy: gpg-agent's
+# Same rule as the reader, deliberately a separate copy: gpg-agent's
 # socket path limit makes a deep TMPDIR-derived home fail the key import.
 GPG_HOME_ROOT = Path('/tmp')
 GPG_HOME_PREFIX = 'claude-fixture-gpg.'
@@ -300,7 +298,6 @@ def make_closure(out: Path, *, signer: Signer, version: str, amd64: Path,
                            'reason': reason},
     }
     (out / 'pin.json').write_text(json.dumps(document, indent=2) + '\n')
-    shutil.copyfile(REAL_PIN_MODULE, out / 'claude_pin.py')
     return out
 
 

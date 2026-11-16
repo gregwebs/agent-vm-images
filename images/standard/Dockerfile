@@ -260,8 +260,9 @@ LABEL org.agent-vm.network-requests.agent.claude="api.anthropic.com,mcp-proxy.an
 
 ENV PATH=/opt/agent/.local/bin:/opt/agent/.claude/local/bin:${PATH}
 
-# The committed pin (pin.json, evidence, release key, claude_pin.py) travels in the
-# tools/claude mount; the hook and vendor keep their own mounts.
+# The committed pin (pin.json, evidence, release key) travels in the tools/claude
+# mount; the hook, the vendor tree and the reader (recipe-contract, ADR 0017) keep
+# their own mounts.
 RUN --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     --mount=type=bind,source=tools/claude,target=/tmp/claude-source,ro \
     --mount=type=bind,source=tools/claude/install-claude.sh,target=/tmp/install-claude.sh,ro \

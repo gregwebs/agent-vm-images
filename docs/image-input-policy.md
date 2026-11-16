@@ -360,7 +360,7 @@ section is the canonical policy.
 **Build ordering.** `install-claude.sh` requires the committed closure, refuses an
 exact-but-unpinned version before the vendored installer runs, and exports the pin
 directory. The vendored installer refuses a non-fresh layout, takes `URL SHA256
-SIZE` from `claude_pin.py select` (which re-hashes every evidence file, verifies
+SIZE` from `recipe-contract claude-pin select` (which re-hashes every evidence file, verifies
 the signature and requires the signed manifest's version, binary, checksum and
 size to equal the pin), makes exactly one classified download, checks its SHA-256
 and size and the ELF machine of the manifest token, and only then places the bytes
@@ -396,8 +396,8 @@ serving host cannot change what is adopted
 
 **Signature policy.** The build binds the pin's fingerprint to the committed key
 file's single primary and to the signature's `VALIDSIG` primary; it does not
-compare that fingerprint with a code constant. `script/dev/pin-claude.py` (write
-mode and `--check`) and the Rust source gate hold the pin to the reviewed
+compare that fingerprint with a code constant. `script/dev/pin-claude.sh`
+(write mode and `--check`) and the Rust source gate hold the pin to the reviewed
 fingerprint `31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE`. A signature made by a
 reviewed signing subkey is accepted; a pin or key file naming a subkey is refused,
 and so is a key file carrying secret key material (`sec`/`ssb`), which a
@@ -410,13 +410,14 @@ over the manifest bytes under any tried canonicalization.
 and the alternate column for `claude` in
 `script/test/fixtures/installer-egress/selections.tsv` is `-`.
 
-**Maintenance.** Only `script/dev/pin-claude.py` writes the pin, both evidence
-files and the Claude ARG, and only through the shared Python publication
-transaction, after printing a field-by-field payload delta. Typical commands:
+**Maintenance.** Only `script/dev/pin-claude.sh` writes the pin, both evidence
+files and the Claude ARG, and only through the shared publication transaction
+(`internal/publication`), after printing a field-by-field payload delta. Typical
+commands:
 
 ```bash
-python3 script/dev/pin-claude.py --check
-python3 script/dev/pin-claude.py --version 2.1.319
+script/dev/pin-claude.sh --check
+script/dev/pin-claude.sh --version 2.1.319
 bash script/build/agent-versions.sh --check
 bash script/build/agent-versions.sh --write --cosign /absolute/path/to/cosign
 bash script/test/shipped-installer-network.sh agent-vm-base:local --platform linux/arm64 --tool claude

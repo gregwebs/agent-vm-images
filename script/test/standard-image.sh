@@ -718,7 +718,7 @@ check_agy_shape() { # $1 output
 # The committed Claude payload identity for one manifest token. The expectation
 # comes from reviewed sources, never from a label or from the image.
 claude_expected_sha() { # $1 = manifest token
-    python3 "$REPO_ROOT/images/tools/claude/claude_pin.py" digest \
+    "$STATUS_VALIDATOR" claude-pin digest \
         --pin-dir "$REPO_ROOT/images/tools/claude" --platform "$1"
 }
 

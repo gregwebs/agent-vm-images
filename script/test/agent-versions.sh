@@ -16,12 +16,15 @@
 # since #98 it publishes claude's closure (pin, two evidence files, Dockerfile) as
 # its own transaction between them, because the Codex publication refuses a staged
 # Claude ARG difference. The fixture repository therefore carries committed OLD
-# closures for all three and replaces `script/dev/pin-{codex,agy,claude}.py` with
-# `fixtures/agent-versions/{codex,agy,claude}-writer.py`, which load the REAL
-# writers and swap only their seams (streaming fetch, blob verification, the
-# reviewed signer constant). Everything else -- schema, evidence hashing, archive
-# preflight, signature verification, the fixed destination lists, the shared
-# Python publisher and every status -- is production code.
+# closures for all three. codex and agy are still Python, so their writers are
+# reached through `fixtures/agent-versions/{codex,agy}-writer.py`, which load the
+# REAL writers and swap only their seams. claude's writer is a binary
+# (`avm-pin claude`, reached through `script/dev/pin-claude.sh`): this suite passes
+# it a served upstream tree (`--fixture-upstream DIR`, laid out as `<host>/<path>`)
+# and the throwaway review signer (`--signer FPR`), and nothing else. Everything
+# else -- schema, evidence hashing, archive preflight, signature verification, the
+# fixed destination lists, the publication transaction and every status -- is
+# production code.
 
 set -euo pipefail
 
@@ -30,7 +33,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="$REPO_ROOT/script/build/agent-versions.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/agent-versions-test.XXXXXX")"
 TEST_ROOT="$(cd "$TEST_ROOT" && pwd -P)"
-trap 'rm -rf "$TEST_ROOT"' EXIT
+# A Go module cache is read-only by design, so the fixture trees it lands in need
+# their mode restored before the run's scratch can be removed.
+trap 'chmod -R u+w "$TEST_ROOT" 2>/dev/null; rm -rf "$TEST_ROOT"' EXIT
 
 REAL_JQ="$(command -v jq || true)"
 [[ -n "$REAL_JQ" ]] || { echo "FAIL: jq is required" >&2; exit 1; }
@@ -70,6 +75,17 @@ fail() {
     echo "FAIL: $*" >&2
     exit 1
 }
+
+# The Claude writer is a compiled binary behind a `.sh` wrapper, so the fixture
+# environment needs the Go toolchain and one build cache shared by every case: a
+# per-case HOME would otherwise recompile the module from scratch each time.
+# It goes on the fixture PATH ahead of /usr/bin because the toolchain named by
+# go.mod has to be the one that is already installed: a `go` that is too old would
+# make GOTOOLCHAIN=auto download one, and this suite reaches no network at all.
+GO_DIR="$(cd "$(dirname "$(command -v go || true)")" 2>/dev/null && pwd -P)"
+[[ -n "$GO_DIR" && -x "$GO_DIR/go" ]] || fail "go is required to build the Claude writer"
+GOCACHE_DIR="$TEST_ROOT/gocache"
+mkdir -p "$GOCACHE_DIR"
 
 assert_contains() {
     [[ "$1" == *"$2"* ]] || fail "expected output to contain: $2 (got: $1)"
@@ -177,7 +193,7 @@ agy_fixture() { # $1 = version -> directory holding source/ (closure) and assets
     printf '%s\n' "$directory"
 }
 
-claude_fixture() { # $1 = version -> directory holding closure/ and assets/
+claude_fixture() { # $1 = version -> directory holding closure/ and upstream/
     local directory="$CLAUDE_FIXTURES/$1"
     if [[ ! -d "$directory" ]]; then
         python3 "$REPO_ROOT/script/test/claude-pins.py" --write-fixture "$directory" \
@@ -185,6 +201,23 @@ claude_fixture() { # $1 = version -> directory holding closure/ and assets/
             fail "cannot build the claude $1 fixture"
     fi
     printf '%s\n' "$directory"
+}
+
+# The build tool resolves each writer from the repository it publishes into, and a
+# fixture repository is not a Go checkout. This wrapper is three lines of `exec`: it
+# forwards to the real `script/dev/pin-claude.sh` in the repository under test and
+# adds the two seams a fixture needs -- the served upstream tree and the throwaway
+# review signer -- to whatever the builder passed.
+write_claude_writer() {
+    mkdir -p "$FIXTURE_ROOT/script/dev"
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'exec bash %q --fixture-upstream %q --signer %q "$@"\n' \
+            "$REPO_ROOT/script/dev/pin-claude.sh" \
+            "$CASE/claude-upstream" \
+            "$(cat "$CLAUDE_SIGNER/fingerprint")"
+    } >"$FIXTURE_ROOT/script/dev/pin-claude.sh"
+    chmod 0755 "$FIXTURE_ROOT/script/dev/pin-claude.sh"
 }
 
 reset_fixture() {
@@ -226,19 +259,17 @@ reset_fixture() {
     cp -R "$AGY_COMMITTED/evidence" "$FIXTURE_ROOT/images/tools/agy/"
     cp "$REPO_ROOT/script/test/fixtures/agent-versions/agy-writer.py" \
         "$FIXTURE_ROOT/script/dev/pin-agy.py"
-    # claude: one committed OLD closure (pin, both evidence files, the release key
-    # and the loader) plus the real writer behind its fixture adapter.
+    # claude: one committed OLD closure (pin, both evidence files and the release
+    # key), plus the fixture's own writer entry point.
     local claude_committed
     claude_committed="$(claude_fixture "$FIXTURE_OLD_CLAUDE")/closure"
     mkdir -p "$FIXTURE_ROOT/images/tools/claude"
-    cp "$claude_committed/pin.json" "$claude_committed/claude_pin.py" \
-        "$claude_committed/claude-code-release-key.asc" \
+    cp "$claude_committed/pin.json" "$claude_committed/claude-code-release-key.asc" \
         "$FIXTURE_ROOT/images/tools/claude/"
     cp -R "$claude_committed/evidence" "$FIXTURE_ROOT/images/tools/claude/"
     rm -rf "$CASE/claude-committed"
     cp -R "$claude_committed" "$CASE/claude-committed"
-    cp "$REPO_ROOT/script/test/fixtures/agent-versions/claude-writer.py" \
-        "$FIXTURE_ROOT/script/dev/pin-claude.py"
+    write_claude_writer
     cp "$FIXTURE_ROOT/images/standard/Dockerfile" "$CASE/original"
     # shellcheck disable=SC2016 # literal Dockerfile interpolation
     printf 'LABEL org.agent-vm.version.codex="${AGENT_VERSION_CODEX}"\n' \
@@ -287,9 +318,6 @@ new_case() {
         STUB_AGY_FAIL_URL
     STAGED_AGY_DEFAULT=""
     SERVED_AGY_RELEASE="$FIXTURE_OLD_AGY"
-    unset STUB_CLAUDE_INJECT STUB_CLAUDE_INJECT_AT STUB_CLAUDE_REFUSE_RESTORE \
-        STUB_CLAUDE_TAMPER STUB_CLAUDE_FAIL_URL STUB_CLAUDE_RECORD_FETCHES \
-        STUB_CLAUDE_FINGERPRINT
     SERVED_CLAUDE_RELEASE="$FIXTURE_OLD_CLAUDE"
     reset_fixture
     write_codex_assets "$SERVED_CODEX_RELEASE"
@@ -312,21 +340,23 @@ serve_agy() { # $1 = served version
     STUB_AGY_ARM64="$(cat "$CASE/agy-assets/linux_arm64.json")"
 }
 
-# The bytes the claude transport serves for the current case, copied per case so
-# one case can rewrite or delete one of them without touching the cached fixture.
+# The upstream tree the writer fetches for the current case, laid out as
+# `--fixture-upstream` serves it (`https://host/path` from `<host>/<path>`), copied
+# per case so one case can rewrite or delete one file without touching the cached
+# fixture.
 serve_claude() { # $1 = served version
     local fixture
     SERVED_CLAUDE_RELEASE=$1
     fixture="$(claude_fixture "$1")"
-    rm -rf "$CASE/claude-assets"
-    cp -R "$fixture/assets" "$CASE/claude-assets"
+    rm -rf "$CASE/claude-upstream"
+    cp -R "$fixture/upstream" "$CASE/claude-upstream"
 }
 
 ARGS=()
 run_agent_versions() {
     set +e
     RUN_OUTPUT="$(env -i \
-        "PATH=$STUB_BIN:$JQ_DIR:/usr/bin:/bin" \
+        "PATH=$STUB_BIN:$JQ_DIR:$GO_DIR:/usr/bin:/bin" \
         "HOME=$CASE/home" \
         "TMPDIR=$CASE" \
         "STUB_ROLLBACK_FAIL=${STUB_ROLLBACK_FAIL:-}" \
@@ -357,15 +387,7 @@ run_agent_versions() {
         "FIXTURE_AGY_REFUSE_RESTORE=${STUB_AGY_REFUSE_RESTORE-}" \
         "FIXTURE_AGY_RECORD_FETCHES=${STUB_AGY_RECORD_FETCHES-}" \
         "FIXTURE_AGY_FAIL_URL=${STUB_AGY_FAIL_URL-}" \
-        "FIXTURE_CLAUDE_WRITER=$REPO_ROOT/script/dev/pin-claude.py" \
-        "FIXTURE_CLAUDE_ASSETS=$CASE/claude-assets" \
-        "FIXTURE_CLAUDE_FINGERPRINT=${STUB_CLAUDE_FINGERPRINT-$(cat "$CLAUDE_SIGNER/fingerprint")}" \
-        "FIXTURE_CLAUDE_INJECT=${STUB_CLAUDE_INJECT:-none}" \
-        "FIXTURE_CLAUDE_INJECT_AT=${STUB_CLAUDE_INJECT_AT-}" \
-        "FIXTURE_CLAUDE_REFUSE_RESTORE=${STUB_CLAUDE_REFUSE_RESTORE-}" \
-        "FIXTURE_CLAUDE_TAMPER=${STUB_CLAUDE_TAMPER-}" \
-        "FIXTURE_CLAUDE_FAIL_URL=${STUB_CLAUDE_FAIL_URL-}" \
-        "FIXTURE_CLAUDE_RECORD_FETCHES=${STUB_CLAUDE_RECORD_FETCHES-}" \
+        "GOCACHE=$GOCACHE_DIR" \
         "GH_TOKEN=${GH_TOKEN-}" \
         "GITHUB_ACTIONS=${GITHUB_ACTIONS-}" \
         "GITHUB_OUTPUT=${GITHUB_OUTPUT-}" \
@@ -1669,10 +1691,14 @@ agy_snapshot "$CASE/agy-snapshot"
 claude_snapshot "$CASE/claude-snapshot"
 STUB_CLAUDE="$DEFAULT_CLAUDE"
 serve_claude "$DEFAULT_CLAUDE"
-STUB_CLAUDE_FAIL_URL="https://downloads.claude.ai/claude-code-releases/${DEFAULT_CLAUDE}/linux-arm64/claude"
+# The served tree is the whole upstream: an executable that is not there is a 404
+# from the real fetch path, with no adapter involved.
+CLAUDE_MISSING_URL="https://downloads.claude.ai/claude-code-releases/${DEFAULT_CLAUDE}/linux-arm64/claude"
+rm "$CASE/claude-upstream/downloads.claude.ai/claude-code-releases/${DEFAULT_CLAUDE}/linux-arm64/claude"
 STUB_CODEX_STAGE_SNAPSHOT="$CASE/codex-staged-dockerfile"
 run_agent_versions
 [[ $RUN_STATUS -eq 1 ]] || fail "a failed claude publication must exit 1, got $RUN_STATUS"
+assert_contains "$RUN_STDERR" "$CLAUDE_MISSING_URL"
 assert_contains "$RUN_STDERR" "agy ${FIXTURE_OLD_AGY} -> ${DEFAULT_AGY_RELEASE} was already published (its own transaction); claude was not"
 assert_contains "$RUN_STDERR" "Next: set agy ${DEFAULT_AGY_RELEASE}"
 assert_not_contains "$RUN_OUTPUT" 'Staged version bumps:'
@@ -1683,24 +1709,15 @@ claude_compare_snapshot "$CASE/claude-snapshot" 'claude failure'
 assert_codex_unchanged
 echo '  ok: a failed claude publication names the landed agy half and stops before Codex'
 
-new_case claude-publication-undecided
-# Status 3 at the owner level: the bump stops with both directories printed and the
-# Codex transaction never starts.
-STUB_CLAUDE="$DEFAULT_CLAUDE"
-serve_claude "$DEFAULT_CLAUDE"
-STUB_CLAUDE_INJECT=partial
-STUB_CLAUDE_INJECT_AT=manifest.json
-STUB_CLAUDE_REFUSE_RESTORE=1
-STUB_CODEX_STAGE_SNAPSHOT="$CASE/codex-staged-dockerfile"
-run_agent_versions
-[[ $RUN_STATUS -eq 3 ]] || fail "an undecided claude publication must exit 3, got $RUN_STATUS"
-assert_contains "$RUN_STDERR" 'claude publication is undecided'
-assert_contains "$RUN_STDERR" 'pin-claude: owner scratch retained at /'
-assert_contains "$RUN_STDERR" 'recovery material retained at /'
-assert_not_contains "$RUN_COMBINED" 'Traceback'
-[[ ! -e "$CASE/codex-staged-dockerfile" ]] ||
-    fail 'the Codex transaction started after an undecided claude publication'
-echo '  ok: an undecided claude publication retains both directories and stops before Codex'
+# An undecided publication (status 3, both directories retained, Codex never started)
+# needs a fault injected inside the writer during its transaction. The writer is a
+# binary now, so that case lives where the transaction does, as a Go test:
+# `TestIncompleteRecoveryExitsThreeAndRetainsTheRecord` and
+# `TestSignalDuringPublicationRestoresAndExits130` in
+# internal/publication/publish_test.go. What the bump does with that status is still
+# covered here: the builder maps 3 to "claude publication is undecided" and stops
+# before Codex, which `claude-writer-fails-after-agy` exercises through the same
+# stop ordering with status 1.
 
 new_case check-refuses-mutated-claude-evidence
 printf 'tampered\n' >>"$FIXTURE_ROOT/images/tools/claude/evidence/manifest.json"

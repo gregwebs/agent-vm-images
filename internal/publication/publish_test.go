@@ -1,4 +1,4 @@
-package artifactwriter
+package publication
 
 import (
 	"bytes"
@@ -52,6 +52,7 @@ func (f *fixture) staged() [][]byte {
 
 func (f *fixture) transaction(work string) *Transaction {
 	transaction := &Transaction{
+		Prefix:       "pin-artifact: ",
 		Root:         f.root,
 		Work:         work,
 		Stderr:       os.Stderr,
@@ -274,6 +275,7 @@ func signalChild() int {
 	root := os.Getenv("ARTIFACTWRITER_SIGNAL_ROOT")
 	work := os.Getenv("ARTIFACTWRITER_SIGNAL_WORK")
 	transaction := &Transaction{
+		Prefix: "pin-artifact: ",
 		Root:   root,
 		Work:   work,
 		Stderr: os.Stderr,

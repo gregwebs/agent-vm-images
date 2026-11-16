@@ -453,8 +453,8 @@ native installer runs offline. Read
 [policy](docs/image-input-policy.md#claude-native-payload) before changing it.
 
 ```bash
-python3 script/dev/pin-claude.py --check      # offline: evidence hashes, signature, signer policy, ARG/label
-python3 script/dev/pin-claude.py --version 2.1.286
+script/dev/pin-claude.sh --check      # offline: evidence hashes, signature, signer policy, ARG/label
+script/dev/pin-claude.sh --version 2.1.319
 bash script/build/agent-versions.sh --check   # agy, Claude, then Codex
 bash script/build/agent-versions.sh --write --cosign /abs/cosign
 bash script/test/shipped-installer-network.sh agent-vm-base:local --platform linux/<arch> --tool claude

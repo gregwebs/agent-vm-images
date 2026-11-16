@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,4 +71,56 @@ func TestStatusIsNotRetried(t *testing.T) {
 	if requests != 1 {
 		t.Fatalf("a 404 was requested %d times", requests)
 	}
+}
+
+// A redirect is the one place a successful status can send the download somewhere
+// the pin never named, so the policy is decided before the target is opened.
+func TestRedirectIsRefusedOutsideTheAssetHosts(t *testing.T) {
+	elsewhere := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("elsewhere"))
+		}))
+	defer elsewhere.Close()
+	origin := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, elsewhere.URL+"/payload", http.StatusFound)
+		}))
+	defer origin.Close()
+	_, err := New().Get(context.Background(), origin.URL+"/node.tar.xz", 1024)
+	if err == nil || !strings.Contains(err.Error(), "refusing a redirect") {
+		t.Fatalf("a redirect to a host the pin never named reported %v", err)
+	}
+}
+
+// CheckRedirect is the whole policy, so it is also checked directly: the asset hosts
+// are exactly the two a release download moves to.
+func TestCheckRedirectNamesTheAssetHosts(t *testing.T) {
+	via := []*http.Request{{URL: mustURL(t, "https://github.com/o/r/releases/download/v1/x.tgz")}}
+	allowed := []string{
+		"https://release-assets.githubusercontent.com/x",
+		"https://objects.githubusercontent.com/x",
+	}
+	for _, target := range allowed {
+		if err := CheckRedirect(&http.Request{URL: mustURL(t, target)}, via); err != nil {
+			t.Errorf("%s must be followed: %s", target, err)
+		}
+	}
+	for _, target := range []string{
+		"https://downloads.claude.ai.evil.example/x",
+		"https://evil.example/x",
+		"https://github.com/other/x",
+	} {
+		if err := CheckRedirect(&http.Request{URL: mustURL(t, target)}, via); err == nil {
+			t.Errorf("%s must be refused", target)
+		}
+	}
+}
+
+func mustURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("%s: %s", raw, err)
+	}
+	return parsed
 }

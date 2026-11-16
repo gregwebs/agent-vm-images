@@ -32,7 +32,7 @@ else
         *) pin_dir="." ;;
     esac
 fi
-[ -r "$pin_dir/pin.json" ] && [ -r "$pin_dir/claude_pin.py" ] || {
+[ -r "$pin_dir/pin.json" ] || {
     echo "  claude: no committed Claude pin at $pin_dir" >&2
     exit 1
 }
@@ -68,12 +68,13 @@ case "$(uname -m)" in
         exit 1
         ;;
 esac
-if ! python3 "$pin_dir/claude_pin.py" installed --pin-dir "$pin_dir" --version "$want" \
-    --platform "$platform" --prefix "$prefix" --owner "$expected_owner"; then
+if ! "$CONTRACT/recipe-contract" claude-pin installed --pin-dir "$pin_dir" \
+    --version "$want" --platform "$platform" --prefix "$prefix" \
+    --owner "$expected_owner"; then
     echo "  claude: the installed payload or layout does not match the committed pin" >&2
     exit 1
 fi
-if ! python3 "$pin_dir/claude_pin.py" native-state --prefix "$prefix"; then
+if ! "$CONTRACT/recipe-contract" claude-pin native-state --prefix "$prefix"; then
     echo "  claude: the native state does not match what the image requires" >&2
     exit 1
 fi
