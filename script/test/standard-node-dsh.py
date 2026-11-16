@@ -145,7 +145,9 @@ class Invocation(base.Invocation):
                  # evidence records the bytes that actually implement the boundary.
                  ROOT / 'images/tools/pnpm-project.py',
                  ROOT / 'images/tools/pnpm-host-manager.py',
-                 *(ROOT / 'images/recipe-contract').rglob('*'),
+                 # The helper is host-compiled (ADR 0017): the binary is the
+                 # implementation, and the wrappers beside it are the mount.
+                 *(ROOT / 'images/recipe-contract').rglob('*'), Path(self.native) / 'recipe-contract',
                  *(ROOT / 'script/test').glob('standard-node-*.py'), ROOT / 'script/test/fixtures/standard-node-dsh.py',
                  ROOT / 'script/test/fixtures/dsh/oracle.mjs']
         hashes = {str(file): hashlib.sha256(file.read_bytes()).hexdigest() for file in files

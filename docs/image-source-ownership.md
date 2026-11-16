@@ -156,7 +156,8 @@ READMEs may be adapted to their new owner):
   the reviewed bytes remain in git history and no current helper, test or image
   executes it
 - `images/recipe-contract/run-report.sh`
-- `images/recipe-contract/` — Go record/access predicates; see [ADR 0004](adr/0004-go-build-helpers.md)
+- `images/recipe-contract/` — the helper's `main` package and the shell wrappers;
+  the predicates themselves live in `./internal` (see [ADR 0017](adr/0017-go-programs.md))
 - `images/tools/dsh/install-dsh.sh`
 - `images/tools/dsh/verify-dsh.sh`
 - `images/tools/dsh/prepare-lock.sh`

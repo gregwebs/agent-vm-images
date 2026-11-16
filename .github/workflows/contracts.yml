@@ -26,7 +26,7 @@ jobs:
         with:
           # go.mod is the single source of truth for the language version; the
           # selected patch release comes from its toolchain line (see the next step).
-          go-version-file: images/recipe-contract/go.mod
+          go-version-file: go.mod
           # Dependencies are vendored and built with -mod=vendor, so no module
           # cache is needed; the vendor drift gate in contracts.sh downloads
           # through GOPROXY/GOSUMDB.

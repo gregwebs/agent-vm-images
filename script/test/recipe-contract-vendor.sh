@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Vendor drift gate for images/recipe-contract.
+# Vendor drift gate for the repository Go module.
 #
 # The committed vendor tree is the build's whole dependency closure, and neither
 # `go build` nor `go mod verify` authenticates its bytes (`go build` happily
@@ -11,7 +11,6 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-module="$root/images/recipe-contract"
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/recipe-contract-vendor.XXXXXX")
 
 cleanup() {
@@ -32,6 +31,16 @@ trap cleanup EXIT
 
 expected_sum='go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
 go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg='
+
+# The module root is the repository root, which also holds ignored build scratch
+# that may contain stand-alone Go files. A module-wide command (`go mod tidy`,
+# `go mod vendor`) walks all of it, so this gate runs over the tracked tree — the
+# files a checkout owns, with the working tree's content — instead of the
+# directory.
+module="$scratch/tree"
+mkdir -p "$module"
+(cd "$root" && git ls-files -z | tar --null -T - -cf -) | tar -xf - -C "$module" ||
+    { echo 'recipe-contract-vendor: cannot extract the tracked module tree' >&2; exit 1; }
 
 cd "$module"
 
@@ -66,7 +75,7 @@ vendor_go mod vendor -o "$scratch/vendor"
 # diff_vendor is the gate. The mutation control below calls it with a tree that
 # must be rejected, so a diff that cannot fail is a gate that proves nothing.
 diff_vendor() {
-    for tree in "$1" "$module/vendor"; do
+    for tree in "$1" "$root/vendor"; do
         unexpected=$(find "$tree" ! -type f ! -type d -print) || return 1
         executable=$(find "$tree" -type f \( -perm -100 -o -perm -010 -o -perm -001 \) -print) || return 1
         if [ -n "$unexpected$executable" ]; then
@@ -74,7 +83,7 @@ diff_vendor() {
             return 1
         fi
     done
-    diff -r "$1" "$module/vendor"
+    diff -r "$1" "$root/vendor"
 }
 if ! diff_vendor "$scratch/vendor"; then
     echo 'recipe-contract-vendor: the committed vendor tree differs from the regenerated one' >&2
@@ -88,7 +97,7 @@ if ! vendor_go mod tidy -diff; then
     exit 1
 fi
 
-cp -R "$module/vendor" "$scratch/mutant"
+cp -R "$root/vendor" "$scratch/mutant"
 mutant_file="$(find "$scratch/mutant" -type f -name '*.go' | head -n 1)"
 [ -n "$mutant_file" ] || { echo 'recipe-contract-vendor: no vendored Go file to mutate' >&2; exit 1; }
 printf '// drift\n' >>"$mutant_file"
@@ -97,14 +106,14 @@ if diff_vendor "$scratch/mutant" >"$scratch/mutant.log" 2>&1; then
     exit 1
 fi
 
-cp "$module/vendor/${mutant_file#"$scratch/mutant/"}" "$mutant_file"
+cp "$root/vendor/${mutant_file#"$scratch/mutant/"}" "$mutant_file"
 chmod u+x "$mutant_file"
 if diff_vendor "$scratch/mutant" >"$scratch/mode.log" 2>&1; then
     echo 'recipe-contract-vendor: drift gate accepted an executable file' >&2
     exit 1
 fi
 rm "$mutant_file"
-ln -s "$module/vendor/${mutant_file#"$scratch/mutant/"}" "$mutant_file"
+ln -s "$root/vendor/${mutant_file#"$scratch/mutant/"}" "$mutant_file"
 if diff_vendor "$scratch/mutant" >"$scratch/symlink.log" 2>&1; then
     echo 'recipe-contract-vendor: drift gate accepted a symlink' >&2
     exit 1

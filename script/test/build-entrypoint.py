@@ -4,8 +4,8 @@ import tempfile,os,subprocess,json,shutil
 r=Path(__file__).resolve().parents[2]; tmp=Path(tempfile.mkdtemp(prefix='helper space.')); bins=tmp/'bin'; bins.mkdir(); images=tmp/'repo space/images'; images.mkdir(parents=True)
 atexit.register(shutil.rmtree, tmp)
 shutil.copyfile(r/'images/build.sh',images/'build.sh')
-# A fake host adapter for --host-helpers: the real one compiles Go, so the copied
-# spaced checkout carries a script that records its argv and prints a context root.
+# A fake host adapter: the real one compiles Go, so the copied spaced checkout
+# carries a script that records its argv and prints a context root.
 (repo_script:=tmp/'repo space/script/build').mkdir(parents=True)
 shutil.copyfile(r/'script/test/fixtures/recipe-contract-adapter.sh', repo_script/'recipe-contract.sh')
 (repo_script/'recipe-contract.sh').chmod(0o755)
@@ -35,7 +35,7 @@ for args in [[],['wat'],['base','--bad'],['standard','--help'],['--help','x']]: 
 assert not run(['--help'],0)
 for arch,platform in [('arm64','linux/arm64'),('aarch64','linux/arm64'),('x86_64','linux/amd64'),('amd64','linux/amd64')]:
  calls=run(['standard','--','--build-arg','BASE_IMAGE=a b','--tag','quoted tag'],0,{'ARCH':arch})
- assert calls==[['context','show'],['buildx','inspect','context-name'],['build','--builder','context-name','--platform',platform,'-t','agent-vm-standard:local','-f',str(images/'standard/Dockerfile'),'--build-arg','BASE_IMAGE=a b','--tag','quoted tag',str(images)]]
+ assert calls==[['context','show'],['buildx','inspect','context-name'],['build','--builder','context-name','--platform',platform,'-t','agent-vm-standard:local','-f',str(images/'standard/Dockerfile'),'--build-context','recipe-contract-bin='+env['HOST_CONTEXT'],'--build-arg','BASE_IMAGE=a b','--tag','quoted tag',str(images)]]
 assert not run(['base'],1,{'ARCH':'unknown'})
 assert len(run(['base'],1,{'DRIVER':'docker-container'}))==2
 assert len(run(['base'],43,{'CONTEXT_STATUS':'43'}))==1
@@ -46,33 +46,28 @@ shutil.copyfile(bins/'uname',unavailable/'uname'); (unavailable/'uname').chmod(0
 for command in ['dirname', 'grep']:
  (unavailable/command).symlink_to(shutil.which(command))
 assert not run(['base'],127,{'PATH':str(unavailable)})
-# --host-helpers: the fake adapter receives the validated platform and one named
-# context reaches the Docker argv, before the caller's own options.
+# Every build compiles the helper first: the fake adapter receives the validated
+# platform and one named context reaches the Docker argv, before the caller's own
+# options.
 for recipe,tag in [('base','agent-vm-base:local'),('standard','agent-vm-standard:local')]:
- calls=run([recipe,'--host-helpers','--','--build-arg','X=1'],0,{'ARCH':'arm64'})
+ calls=run([recipe,'--','--build-arg','X=1'],0,{'ARCH':'arm64'})
  host_calls=(tmp/'host-log').read_text().splitlines()
- assert host_calls==['--os linux --arch arm64'],host_calls
+ # Every build passes --fresh: a RECIPE_CONTRACT_CONTEXT inherited from a suite
+ # run must not stand in for the compile a product build owns.
+ assert host_calls==['--fresh --os linux --arch arm64'],host_calls
  argv=calls[-1]
  assert argv[:7]==['build','--builder','context-name','--platform','linux/arm64','-t',tag],argv
  assert argv.count('--build-context')==1,argv
  index=argv.index('--build-context')
  assert argv[index+1]=='recipe-contract-bin='+env['HOST_CONTEXT'],argv
  assert argv[index+2:]==['--build-arg','X=1',str(images)],argv
-assert not run(['base','--host-helpers','--','--build-context','recipe-contract-bin=/elsewhere'],2)
-assert not run(['base','--host-helpers','--','--build-context=recipe-contract-bin=/elsewhere'],2)
-# Without --host-helpers the script injects nothing, so a caller who names the
-# seam is using it rather than colliding with it: the raw path has to reach
-# Docker unchanged (the only way to replace the stage without host Go).
-for recipe, argv, tail in [
-        ('base', ['--build-context','recipe-contract-bin=/elsewhere'], ['--build-context','recipe-contract-bin=/elsewhere']),
-        ('standard', ['--build-context=recipe-contract-bin=/elsewhere'], ['--build-context=recipe-contract-bin=/elsewhere'])]:
-    calls = run([recipe,'--']+argv, 0)
-    assert calls[-1][-1-len(tail):-1] == tail, calls[-1]
-    assert calls[-1].count('--build-context') + calls[-1].count('--build-context=recipe-contract-bin=/elsewhere') == 1, calls[-1]
+# The script owns the context name and appends it last, so a caller-supplied
+# replacement would be silently overridden: both spellings are refused.
+assert not run(['base','--','--build-context','recipe-contract-bin=/elsewhere'],2)
+assert not run(['base','--','--build-context=recipe-contract-bin=/elsewhere'],2)
 assert not run(['base','--bogus-helpers'],2)
-assert not run(['base','--host-helpers','--host-helpers'],2)
-assert len(run(['base','--host-helpers'],45,{'HOST_STATUS':'45'}))==2
-assert len(run(['base','--host-helpers'],1,{'ARCH':'unknown'}))==0
+assert len(run(['base'],45,{'HOST_STATUS':'45'}))==2
+assert len(run(['base'],1,{'ARCH':'unknown'}))==0
 
 # --- invocations that name the script instead of its path (regression guard) ---
 # ${BASH_SOURCE[0]%/*} yields the bare file name here, so `cd` failed with
@@ -85,7 +80,11 @@ relative_calls = [json.loads(line) for line in (tmp / 'log').read_text().splitli
 assert relative_calls[-1][:7] == ['build', '--builder', 'context-name', '--platform', 'linux/arm64', '-t', 'agent-vm-base:local'], relative_calls
 # A relative invocation resolves the same directory through the shell's
 # logical cwd, which macOS reports as /private/tmp; compare the real paths.
-assert relative_calls[-1][-2:] == [os.path.realpath(images / 'Dockerfile'), os.path.realpath(images)], relative_calls
+# Argument order is: -f DOCKERFILE ... --build-context CTX IMAGES.
+assert relative_calls[-1][-4] == os.path.realpath(images / 'Dockerfile'), relative_calls
+assert relative_calls[-1][-3] == '--build-context', relative_calls
+assert relative_calls[-1][-2] == 'recipe-contract-bin=' + env['HOST_CONTEXT'], relative_calls
+assert relative_calls[-1][-1] == os.path.realpath(images), relative_calls
 print('relative invocation controls passed')
 
 # --- the real host adapter's argv handling ---
@@ -149,9 +148,10 @@ refused = subprocess.run(['/bin/bash', str(recipe), str(unwritten)], env=recipe_
 assert refused.returncode == 2, (refused.returncode, refused.stderr)
 assert 'refusing to replace' in refused.stderr, refused.stderr
 assert (unwritten / 'caller-file').read_text() == 'keep me', 'an unowned directory was modified'
-inside = subprocess.run(['/bin/bash', str(recipe), str(r / 'images/recipe-contract/out')], env=recipe_env,
+inside = subprocess.run(['/bin/bash', str(recipe), str(r)], env=recipe_env,
                         text=True, capture_output=True)
-assert inside.returncode == 2 and 'outside the Go module' in inside.stderr, (inside.returncode, inside.stderr)
+assert inside.returncode == 2 and 'must not contain the repository' in inside.stderr, \
+    (inside.returncode, inside.stderr)
 owned = tmp / 'owned'
 published = subprocess.run(['/bin/bash', str(recipe), str(owned)], env=recipe_env, text=True, capture_output=True)
 assert published.returncode == 0, (published.returncode, published.stdout, published.stderr)
@@ -169,7 +169,7 @@ assert again.returncode == 0, (again.returncode, again.stderr)
 assert not [entry.name for entry in tmp.iterdir() if '.stage.' in entry.name or '.previous.' in entry.name]
 print('build recipe publish controls passed')
 
-# --- the host adapter compiles the way the builder stage does -------------------
+# --- the host adapter compiles the module the repository owns -----------------
 # A scratch checkout keeps these controls off the shared target/ directory: the
 # adapter derives its context root from its own location.
 def scratch_repo(name):
@@ -179,12 +179,12 @@ def scratch_repo(name):
     module = root / 'images/recipe-contract'
     (module / 'cmd/recipe-contract').mkdir(parents=True)
     shutil.copyfile(recipe, module / 'build.sh')
-    (module / 'go.mod').write_text('module example.test/recipe-contract\n\ngo 1.27.0\n')
+    (root / 'go.mod').write_text('module example.test/recipe-contract\n\ngo 1.27.0\n')
     (module / 'cmd/recipe-contract/main.go').write_text('package main\n\nfunc main() {}\n')
-    (module / 'run-report.sh').write_text('#!/bin/sh\n')
-    (module / 'run-report.sh').chmod(0o644)
-    (module / 'run-install.sh').write_text('#!/bin/sh\n')
-    (module / 'run-install.sh').chmod(0o755)
+    for wrapper, mode in (('download.sh', 0o644), ('run-report.sh', 0o644),
+                          ('run-install.sh', 0o644), ('run-pnpm.sh', 0o644)):
+        (module / wrapper).write_text('#!/bin/sh\n')
+        (module / wrapper).chmod(mode)
     return root, module
 
 repo, module = scratch_repo('scratch repo')
@@ -222,10 +222,11 @@ calls = go_calls()
 assert len(calls) == 1, calls
 call = calls[0]
 target = call['args'][call['args'].index('-o') + 1]
-assert call['args'] == ['build', '-mod=vendor', '-trimpath', '-buildvcs=false', '-o', target, './cmd/recipe-contract'], call['args']
+assert call['args'] == ['build', '-mod=vendor', '-trimpath', '-buildvcs=false', '-o', target,
+                        './images/recipe-contract/cmd/recipe-contract'], call['args']
 assert '.stage.' in target and target.endswith('/recipe-contract'), target
-# The build runs inside the staged canonical copy, not the checked-out module.
-assert os.path.realpath(call['cwd']) == os.path.realpath(os.path.dirname(target)), call['cwd']
+# The build runs at the module root, which is the checkout the caller invoked.
+assert os.path.realpath(call['cwd']) == os.path.realpath(repo), call['cwd']
 assert call['env'] == {'GOOS': 'linux', 'GOARCH': 'amd64', 'GOAMD64': 'v1', 'GOARM64': 'v8.0',
                        'CGO_ENABLED': '0', 'GOWORK': 'off', 'GOFLAGS': '', 'GOEXPERIMENT': None}, call['env']
 print('host adapter compile environment controls passed')
@@ -256,9 +257,8 @@ def mode_of(path):
 
 assert mode_of(published_out) == 0o755, oct(mode_of(published_out))
 assert mode_of(published_out / 'recipe-contract') == 0o755, oct(mode_of(published_out / 'recipe-contract'))
-assert mode_of(published_out / 'cmd') == 0o755, oct(mode_of(published_out / 'cmd'))
-for name, want in [('run-report.sh', 0o644), ('run-install.sh', 0o755), ('go.mod', 0o644)]:
-    assert mode_of(published_out / name) == want, (name, oct(mode_of(published_out / name)))
+for name in ('download.sh', 'run-report.sh', 'run-install.sh', 'run-pnpm.sh'):
+    assert mode_of(published_out / name) == 0o644, (name, oct(mode_of(published_out / name)))
 print('host adapter umask and mode controls passed')
 
 # No stale artifacts: a rebuild replaces the whole directory, so a file an older
@@ -271,22 +271,26 @@ assert not [path for path in published_out.parent.iterdir()
             if '.stage.' in path.name or '.previous.' in path.name or path.name.endswith('.publish-lock')]
 print('host adapter stale-artifact controls passed')
 
-# The composed directory is mounted into every audit container, so Python in it
-# is refused rather than published (the repository-side guard may not have run).
-(module / 'py').mkdir()
-(module / 'py/helper.py').write_text('print("old helper")\n')
-python_in_module = adapter_build(['--os', 'linux', '--arch', 'arm64'])
-assert python_in_module.returncode == 2, (python_in_module.returncode, python_in_module.stderr)
-assert 'refusing to publish Python' in python_in_module.stderr, python_in_module.stderr
-assert 'py/helper.py' in python_in_module.stderr, python_in_module.stderr
-assert mode_of(published_out / 'recipe-contract') == 0o755, 'a refused build damaged the published tree'
-assert not (published_out / 'py').exists(), 'a refused build published the Python file'
-(module / 'py/helper.py').unlink()
-(module / 'py').rmdir()
-print('host adapter Python-refusal controls passed')
+# The composed directory is mounted into every audit container, so it carries a
+# closed set: the executable and the four wrappers. Anything else in the module
+# directory -- a source tree, a testdata file, an untracked leftover -- cannot
+# ride along.
+assert sorted(path.name for path in published_out.iterdir()) == [
+    '.recipe-contract-composed', '.recipe-contract-platform', 'download.sh',
+    'recipe-contract', 'run-install.sh', 'run-pnpm.sh', 'run-report.sh'], \
+    sorted(path.name for path in published_out.iterdir())
+(module / 'leftover.py').write_text('print("stray")\n')
+(module / 'notes.txt').write_text('untracked\n')
+rerun = adapter_build(['--os', 'linux', '--arch', 'arm64'])
+assert rerun.returncode == 0, (rerun.returncode, rerun.stderr)
+assert not (published_out / 'leftover.py').exists(), 'an untracked module file was published'
+assert not (published_out / 'notes.txt').exists(), 'an untracked module file was published'
+(module / 'leftover.py').unlink()
+(module / 'notes.txt').unlink()
+print('host adapter closed-set controls passed')
 
-# Two builds of one output run concurrently: a suite and a --host-helpers image
-# build (or two suites) must both succeed and leave one complete directory. The
+# Two builds of one output run concurrently: a suite and an `images/build.sh`
+# run (or two suites) must both succeed and leave one complete directory. The
 # swap is serialized, so neither can move the output out from under the other.
 def concurrent(index):
     return subprocess.Popen(['/bin/bash', str(adapter), '--os', 'linux', '--arch', 'arm64'],
@@ -343,6 +347,15 @@ undeclared = tmp / 'fixture-context'
 fixture_reuse = adapter_build(['--platform', 'linux/arm64'], {'RECIPE_CONTRACT_CONTEXT': str(undeclared)})
 assert fixture_reuse.returncode == 0 and fixture_reuse.stdout.strip() == str(undeclared), fixture_reuse.stderr
 assert not go_calls(), 'a supplied fixture context was rebuilt'
+# A product build owns what reaches the image, so it refuses that reuse: --fresh
+# compiles even when the environment names a context, and a repeated flag is a
+# usage error rather than a silent no-op.
+fresh = adapter_build(['--fresh', '--platform', 'linux/arm64'],
+                      {'RECIPE_CONTRACT_CONTEXT': str(undeclared)})
+assert fresh.returncode == 0, (fresh.returncode, fresh.stderr)
+assert fresh.stdout.strip() == str(repo / 'target/recipe-contract/linux-arm64'), fresh.stdout
+assert go_calls(), '--fresh reused the supplied context instead of compiling'
+assert adapter_build(['--fresh', '--fresh', '--platform', 'linux/arm64']).returncode == 2
 print('host adapter native/platform/reuse controls passed')
 
 # Exercise standard-image's real argv/context setup without entering image

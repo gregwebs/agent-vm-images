@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/gregwebs/agent-vm-images/images/recipe-contract/internal/cli"
+	"github.com/gregwebs/agent-vm-images/internal/cli"
 )
 
 func main() {

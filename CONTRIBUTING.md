@@ -211,7 +211,6 @@ Only `script/dev/refresh-parent-pins.sh` writes parent pins, on a maintainer hos
 
 ```bash
 bash script/dev/refresh-parent-pins.sh debian
-bash script/dev/refresh-parent-pins.sh golang-builder [golang:VERSION-trixie]
 bash script/dev/refresh-parent-pins.sh standard-release X.Y.Z
 ```
 
@@ -672,7 +671,10 @@ bash script/test/standard-node-policy.sh agent-vm-base:local --consumer dsh --pl
 
 ## Contributor prerequisites and fast gates
 
-Build users need Docker only. Contributors running contracts need Bash, git >= 2.30, jq,
+Build users need Docker and Go: `images/build.sh` compiles the `recipe-contract`
+helper on the host (GOTOOLCHAIN=auto may download the version go.mod selects) and
+passes it to the build as a named context. Contributors running contracts need
+Bash, git >= 2.30, jq,
 Node/npm, Python 3, GNU coreutils (`timeout`, and `sha256sum` for the committed
 base-input manifest), `xz` on Linux (GNU `tar -cJf` in the
 shellcheck suite's fixture), **ShellCheck 0.11.0**, **actionlint v1.7.7**, and
@@ -909,27 +911,40 @@ builds, the real launcher policy controls and all runtime/egress audits remain
 merge prerequisites. Do not substitute hermetic fake-manager controls for them.
 
 
-## Go build helpers
+## Go programs
 
-Read [ADR 0004](docs/adr/0004-go-build-helpers.md) for version ownership,
-build-only delivery, supported environments, parity exceptions and evidence.
+Read [ADR 0017](docs/adr/0017-go-programs.md) for the rule (programs are Go,
+shell is for entry points and automation) and [ADR 0004](docs/adr/0004-go-build-helpers.md)
+for what the build helpers are and why they exist.
 Install the module-owned lint pin through Go's checksum database:
 
 ```sh
 bash script/dev/install-golangci-lint.sh
-(cd images/recipe-contract && GOTOOLCHAIN=auto go test ./... && GOTOOLCHAIN=auto go vet ./... && golangci-lint run)
+GOTOOLCHAIN=auto go test ./internal/... ./images/...
+GOTOOLCHAIN=auto go vet ./internal/... ./images/...
+golangci-lint run ./internal/... ./images/...
 bash script/test/contracts.sh
 bash script/test/contracts.sh --guard-only
 ```
 
-Dependencies are vendored (`images/recipe-contract/vendor/`, `-mod=vendor` in
-every build). To update one, follow ADR 0001 § Amended by #75:
+The module is rooted at the repository, which also holds ignored build scratch
+(`target/`) and, from #187, self-contained example modules. `./...` would walk
+those, so name the package roots: `./internal/... ./images/...`.
+
+Dependencies are vendored (`vendor/`, `-mod=vendor` in every build). To update
+one, follow ADR 0001 § Amended by #75. `go mod tidy` and `go mod vendor` are
+module-wide: they read every package under the module root, including whatever
+stand-alone Go files ignored scratch (`target/`) happens to hold, so run the
+update in a checkout without it and bring the result back:
 
 ```sh
-cd images/recipe-contract
+git worktree add --detach ../avm-go-deps HEAD
+cd ../avm-go-deps
 GOTOOLCHAIN=auto GOFLAGS=-mod=mod go get go.yaml.in/yaml/v3@vX
 GOTOOLCHAIN=auto GOFLAGS=-mod=mod go mod tidy
 GOTOOLCHAIN=auto GOFLAGS=-mod=mod go mod vendor
+cd - && rm -rf vendor && cp -R ../avm-go-deps/vendor . && cp ../avm-go-deps/go.{mod,sum} .
+git worktree remove ../avm-go-deps
 ```
 
 then review the vendor diff, license/NOTICE and advisories (`govulncheck`), update
@@ -944,8 +959,8 @@ Build and audit commands (mount `<context>/out`, never a Darwin binary in Linux)
 ```sh
 bash script/build/recipe-contract.sh --native
 bash script/build/recipe-contract.sh --platform linux/arm64
-bash images/build.sh base --host-helpers
-bash images/build.sh standard --host-helpers
+bash images/build.sh base
+bash images/build.sh standard
 bash script/test/tool-access.sh
 ```
 
@@ -963,7 +978,7 @@ running it in a shallow clone (`git fetch --unshallow`); CI jobs running
 `script/test/contracts.sh` must use `fetch-depth: 0`.
 
 The graph, environment and dsh staging helpers are `recipe-contract`
-subcommands ([Go build helpers](#go-build-helpers)); dsh is built on them
+subcommands ([Go programs](#go-programs)); dsh is built on them
 ([dsh maintenance](#dsh-maintenance-and-graph-freeze)). Read
 [ownership](docs/image-source-ownership.md#bounded-pnpm-primitives-42-pr-1) and the
 [parser ADR](docs/adr/0001-build-only-pnpm-graph-parser.md). Go builds the helper;

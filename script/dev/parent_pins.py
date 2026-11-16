@@ -60,16 +60,14 @@ KEYRINGS = 'images/apt-policy/keyrings.sha256'
 POLICY_FILES = (DEBIAN_SOURCES, KEYRINGS)
 
 DEBIAN_PIN = 'debian'
-GO_PIN = 'golang-builder'
 RELEASE_PIN = 'standard-release'
-PINS = (DEBIAN_PIN, GO_PIN, RELEASE_PIN)
+PINS = (DEBIAN_PIN, RELEASE_PIN)
 
-# The maintained candidates. Selecting a different Debian release or Go
-# toolchain is a reviewed source change of this file and the coordinated
-# recipes, never a silent effect of running the refresher.
+# The maintained candidates. Selecting a different Debian release is a reviewed
+# source change of this file and the coordinated recipes, never a silent effect of
+# running the refresher.
 DEBIAN_TAG = 'debian:13-slim'
 DEBIAN_SOURCE = 'https://github.com/debuerreotype/docker-debian-artifacts.git'
-GO_SOURCE = 'https://github.com/docker-library/golang.git'
 STANDARD_REPOSITORY = 'ghcr.io/gregwebs/agent-vm-standard'
 STANDARD_VERSION = '0.1.3'
 # The released index the four example layers address today. Bootstrap must
@@ -85,7 +83,7 @@ LAYERS_README = 'examples/layers/README.md'
 BASE_INPUTS = 'script/build/base-inputs.sh'
 BASE_MANIFEST = 'images/base-inputs.sha256'
 EXTENSION = 'examples/base-extension/Dockerfile'
-LOCAL_PINS = (DEBIAN_PIN, GO_PIN)
+LOCAL_PINS = (DEBIAN_PIN,)
 
 # Reviewed Debian repository policy for the pinned parent. A future parent
 # carrying a different URI, suite or key path is a policy change, not a refresh.
@@ -119,19 +117,12 @@ HASH_ONLY_REASONS = {
                  'signing scheme is published for this image. The reviewed choice is the registry '
                  'digest plus the recorded source revision and creation time, re-checked on every '
                  'refresh.'),
-    GO_PIN: ('Docker Official Image for Go, used only as the build-only helper compiler. Same '
-             'retired Docker Content Trust channel as the Debian parent and no published '
-             'replacement signing scheme for this image; the reviewed choice is the registry '
-             'digest plus the recorded source revision, which the build additionally cross-checks '
-             'against go.mod.'),
 }
 
 SHA256 = re.compile(r'sha256:([0-9a-f]{64})')
 REVISION = re.compile(r'[0-9a-f]{40}')
 STAMP = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}')
 IMAGE_NAME = re.compile(r'(?P<repository>[a-z0-9][a-z0-9._/-]*):(?P<tag>[A-Za-z0-9][A-Za-z0-9._-]*)')
-GO_TAG = re.compile(r'golang:(?P<version>[0-9]+\.[0-9]+\.[0-9]+)-trixie')
-GO_FRAGMENT = re.compile(r'(?P<revision>[0-9a-f]{40}):(?P<major_minor>[0-9]+\.[0-9]+)/trixie')
 CREATED = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
 WORD = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]*')
 FROM_LINE = re.compile(r'^FROM(?:\s+(?P<flags>(?:--[a-z-]+=\S+\s+)*))?(?P<image>\S+)'
@@ -384,7 +375,6 @@ class OfficialPolicy:
     name: str
     tag: str
     expected_source: str
-    revision_fragment: bool
 
     def verification(self, reviewed_on: Date) -> HashOnly:
         return HashOnly(reviewed_on, HASH_ONLY_REASONS[self.name], HASH_ONLY_EVIDENCE,
@@ -395,7 +385,6 @@ class OfficialPolicy:
 class Request:
     pins: tuple[str, ...]
     bootstrap: bool
-    go_tag: str | None
     version: str | None
 
     def label(self) -> str:
@@ -502,6 +491,14 @@ def parse_froms(text: str) -> list[FromInstruction]:
         result.append(FromInstruction(raw, resolve_image(raw, defaults), match.group('stage'),
                                       platform))
     return result
+
+
+# `scratch` is not a parent image: a stage built on it is a placeholder for a
+# build context the host supplies (ADR 0017), so it has nothing to pin and the
+# inventory does not record it.
+def parent_froms(text: str) -> list['FromInstruction']:
+    return [instruction for instruction in parse_froms(text)
+            if instruction.resolved_image != 'scratch']
 
 
 def resolve_image(raw: str, defaults: dict[str, str]) -> str:
@@ -681,7 +678,7 @@ def walk_recipes(root: Path) -> dict[str, str]:
     return recipes
 
 
-REPOSITORY_PINS = ((DEBIAN_PIN, 'debian'), (GO_PIN, 'golang'), (RELEASE_PIN, STANDARD_REPOSITORY))
+REPOSITORY_PINS = ((DEBIAN_PIN, 'debian'), (RELEASE_PIN, STANDARD_REPOSITORY))
 
 
 def image_repository(image: str) -> str:
@@ -709,7 +706,7 @@ def derive_recipes(root: Path) -> dict[str, tuple[ParentSpec, ...]]:
     recipes = {}
     for path, text in walk_recipes(root).items():
         specs = []
-        for instruction in parse_froms(text):
+        for instruction in parent_froms(text):
             name = pin_for_image(instruction.resolved_image)
             if name is not None:
                 specs.append(ParentSpec(instruction.stage, 'pin', name))
@@ -734,7 +731,7 @@ def check_recipe_parents(inventory: ParentInventory, recipes: dict[str, str]) ->
         raise Refusal(f'recipe inventory mismatch: missing {sorted(set(inventory.recipes) - set(recipes))}, '
                       f'unlisted {sorted(set(recipes) - set(inventory.recipes))}')
     for path in sorted(recipes):
-        froms = parse_froms(recipes[path])
+        froms = parent_froms(recipes[path])
         specs = inventory.recipes[path]
         if len(froms) != len(specs):
             raise Refusal(f'{path}: {len(froms)} FROM instructions but {len(specs)} inventory entries')
@@ -866,11 +863,9 @@ def annotation(descriptor: dict, child: dict, key: str, context: str) -> str:
 def check_source(raw: str, policy: OfficialPolicy, revision: str) -> None:
     """Repository equality against the reviewed source, not a URL prefix.
 
-    Only two shapes pass: the reviewed repository URL (whose `.git` suffix may be
-    omitted) and, for docker-library images, that URL plus the
-    `#<revision>:<major.minor>/<suite>` build fragment. Everything else — a
-    lookalike host or path, `.git.evil`, a query, userinfo, a port, encoded
-    separators or an extra fragment — is refused.
+    Only one shape passes: the reviewed repository URL, whose `.git` suffix may be
+    omitted. Everything else — a lookalike host or path, `.git.evil`, a query,
+    userinfo, a port, encoded separators or a fragment — is refused.
     """
     if not isinstance(raw, str) or '%' in raw or '\\' in raw:
         raise Refusal(f'{policy.name}: encoded or escaped source URL: {raw!r}')
@@ -884,44 +879,16 @@ def check_source(raw: str, policy: OfficialPolicy, revision: str) -> None:
              expected.path[:-4] if expected.path.endswith('.git') else expected.path}
     if parsed.path not in names:
         raise Refusal(f'{policy.name}: source is not the reviewed repository: {raw}')
-    if not parsed.fragment:
-        return
-    if not policy.revision_fragment:
+    if parsed.fragment:
         raise Refusal(f'{policy.name}: unexpected source fragment: {raw}')
-    match = GO_FRAGMENT.fullmatch(parsed.fragment)
-    if match is None:
-        raise Refusal(f'{policy.name}: unexpected source fragment: {raw}')
-    if match.group('revision') != revision:
-        raise Refusal(f'{policy.name}: source fragment revision differs from the image revision')
-    tag = GO_TAG.fullmatch(policy.tag)
-    if tag is None:
-        raise Refusal(f'{policy.name}: a Go tag must be golang:<version>-trixie')
-    major, minor = tag.group('version').split('.')[:2]
-    if match.group('major_minor') != f'{major}.{minor}':
-        raise Refusal(f'{policy.name}: source fragment directory differs from the selected tag')
 
 
-def resolve_official(policy: OfficialPolicy, resolved_on: Date, *,
-                     required_digest: Digest | None = None) -> tuple[OfficialPin, str]:
+def resolve_official(policy: OfficialPolicy, resolved_on: Date) -> tuple[OfficialPin, str]:
     """Resolve one official image, verifying digest bytes and provenance."""
     repository, _, tag = policy.tag.partition(':')
     raw, parsed = docker_json(policy.tag)
     index_digest = Digest.of(raw)
     note = 'resolved by tag'
-    if required_digest is not None and required_digest != index_digest:
-        if policy.name != GO_PIN:
-            raise Refusal(f'{policy.name}: tag {policy.tag} resolves to {index_digest.value}, not the '
-                          f'committed digest {required_digest.value}')
-        # The committed pin is the reviewed selection: resolve it by digest and
-        # report the tag drift instead of bumping the toolchain silently.
-        raw, parsed = docker_json(f'{repository}@{required_digest.value}')
-        index_digest = Digest.of(raw)
-        if index_digest != required_digest:
-            raise Refusal(f'{policy.name}: committed digest {required_digest.value} no longer resolves')
-        note = (f'tag {policy.tag} now resolves to a different index; the pin retains the committed '
-                f'digest {required_digest.value} (a Go toolchain update belongs to its coordinated change)')
-    elif required_digest is not None:
-        note = 'tag and committed digest agree'
     children = index_children(raw, parsed, f'{policy.name} index', official_platform_key)
     require_platforms(children, OFFICIAL_PLATFORMS, f'{policy.name} index')
     platforms = {}
@@ -1219,51 +1186,21 @@ def parse_release_version(text: str, context: str) -> str:
     return text
 
 
-def go_mod_toolchain(root: Path) -> str:
-    """The selected Go patch release, without the `go` prefix go.mod writes."""
-    for line in (root / 'images/recipe-contract/go.mod').read_text().splitlines():
-        if line.startswith('toolchain go'):
-            return line.split()[1].strip().removeprefix('go')
-    raise Refusal('go.mod declares no toolchain directive')
-
-
-def go_committed_reference(root: Path) -> str:
-    for instruction in parse_froms((root / 'images/Dockerfile').read_text()):
-        if instruction.resolved_image.startswith('golang:'):
-            return instruction.resolved_image
-    raise Refusal('the base Dockerfile has no golang builder stage')
-
-
-def go_tag_default(root: Path) -> str:
-    return go_committed_reference(root).split('@', 1)[0]
-
-
-def parse_selection(pin: str | None, selection: str | None, bootstrap: bool,
-                    root: Path) -> Request:
+def parse_selection(pin: str | None, selection: str | None, bootstrap: bool) -> Request:
     if bootstrap:
         if pin is not None or selection is not None:
             raise Refusal('--bootstrap resolves every pin and takes no selection')
-        return Request(PINS, True, go_tag_default(root), STANDARD_VERSION)
+        return Request(PINS, True, STANDARD_VERSION)
     if pin not in PINS:
         raise Refusal(f'unknown pin {pin!r}; expected one of {", ".join(PINS)}')
     if pin == DEBIAN_PIN:
         if selection is not None:
             raise Refusal('debian takes no selection; the reviewed candidate is ' + DEBIAN_TAG)
-        return Request((DEBIAN_PIN,), False, None, None)
-    if pin == GO_PIN:
-        tag = selection or go_tag_default(root)
-        match = GO_TAG.fullmatch(tag)
-        if match is None:
-            raise Refusal('golang-builder takes golang:<version>-trixie')
-        toolchain = go_mod_toolchain(root)
-        if match.group('version') != toolchain:
-            raise Refusal(f'Go selection {tag} differs from the go.mod toolchain {toolchain}; '
-                          'a toolchain change is coordinated with it')
-        return Request((GO_PIN,), False, tag, None)
+        return Request((DEBIAN_PIN,), False, None)
     if selection is None:
         raise Refusal('standard-release requires an explicit X.Y.Z version')
     parse_release_version(selection, 'standard-release')
-    return Request((RELEASE_PIN,), False, None, selection)
+    return Request((RELEASE_PIN,), False, selection)
 
 
 # --- admission, destinations and staging -----------------------------------
@@ -1440,7 +1377,7 @@ def merge_pins(existing: dict | None, resolved: dict) -> dict:
 
 def rewrite_from_reference(text: str, old: str, new: str, path: str) -> str:
     """Replace the image token (or its global ARG default) of the FROM addressing `old`."""
-    for instruction in parse_froms(text):
+    for instruction in parent_froms(text):
         if instruction.resolved_image != old:
             continue
         if '$' in instruction.raw_image:
@@ -1471,7 +1408,7 @@ def replace_token(text: str, token: str, replacement: str, path: str) -> str:
 
 
 def current_reference(text: str, name: str) -> str:
-    for instruction in parse_froms(text):
+    for instruction in parent_froms(text):
         if pin_for_image(instruction.resolved_image) == name:
             return instruction.resolved_image
     raise Refusal(f'no FROM instruction addresses the {name} parent')
@@ -1512,18 +1449,9 @@ def stage(request: Request, root: Path, out: Path) -> list[Destination]:
     resolved: dict = {}
     notes: list[str] = []
     if DEBIAN_PIN in request.pins:
-        pin, note = resolve_official(OfficialPolicy(DEBIAN_PIN, DEBIAN_TAG, DEBIAN_SOURCE, False),
-                                     today)
+        pin, note = resolve_official(OfficialPolicy(DEBIAN_PIN, DEBIAN_TAG, DEBIAN_SOURCE), today)
         resolved[DEBIAN_PIN] = pin
         notes.append(f'{DEBIAN_PIN}: {note}')
-    if GO_PIN in request.pins:
-        required = None
-        if request.bootstrap:
-            required = Digest.parse(go_committed_reference(root).split('@', 1)[1])
-        pin, note = resolve_official(OfficialPolicy(GO_PIN, request.go_tag, GO_SOURCE, True), today,
-                                     required_digest=required)
-        resolved[GO_PIN] = pin
-        notes.append(f'{GO_PIN}: {note}')
     if RELEASE_PIN in request.pins:
         expected = None
         if request.bootstrap:
@@ -1669,7 +1597,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = args.root.resolve()
     try:
-        request = parse_selection(args.pin, args.selection, args.bootstrap, root)
+        request = parse_selection(args.pin, args.selection, args.bootstrap)
         if args.command == 'destinations':
             for path in destination_paths(request, root, require_state(request, root)):
                 print(path)

@@ -41,10 +41,14 @@ SH
 chmod +x "$work/bin/"*
 REAL_CP=$(command -v cp)
 export REAL_CP
-# The fixture repo builds its own composed helper inside this invocation's root:
-# a reused real context would sit outside the fixture root and could not be
-# authorized for the staged prefixes.
-unset RECIPE_CONTRACT_CONTEXT
+# The fixture repo is a checkout without a Go module, so it cannot compile the
+# helper itself. Give it a composed directory inside its own root -- the
+# authorization boundary for the staged prefixes -- and point the adapter at it,
+# so this suite exercises the upgrade transaction rather than a Go build.
+native_context=$(bash "$ROOT/script/build/recipe-contract.sh" --native)
+mkdir -p "$work/repo/target/recipe-contract/native"
+cp -R "$native_context/out" "$work/repo/target/recipe-contract/native/"
+export RECIPE_CONTRACT_CONTEXT="$work/repo/target/recipe-contract/native"
 export PATH="$work/bin:$PATH" SEED="$ROOT/images/tools/opencode/plugins/pnpm-lock.yaml"
 export FAIL_DEST=none FAILED="$work/failed" TMPDIR="$work/scratch"
 owner="$work/repo/images/tools/opencode/plugins"

@@ -584,6 +584,16 @@ def hand_rolled_repository_sites() -> dict[str, list[int]]:
     return sites
 
 
+HELPER_CONTEXT = 'fixture-helper-context'
+
+
+def fixture_helper_context(argv):
+    """The host helper build's reply, or None when `argv` is a different command."""
+    if any(str(argument).endswith('script/build/recipe-contract.sh') for argument in argv):
+        return (HELPER_CONTEXT + '\n').encode()
+    return None
+
+
 def build_repo(base: Path) -> tuple[Path, str]:
     """A disposable checkout the real build CLI can run against."""
     repo = base / 'repo'
@@ -1080,6 +1090,8 @@ class ReviewRegressionTests(unittest.TestCase):
                     calls.append(argv)
                     if argv[0] == 'git':
                         return original(argv, **kwargs)
+                    if (helper := fixture_helper_context(argv)) is not None:
+                        return helper
                     if 'Dockerfile' in ' '.join(argv) and 'capability' not in ' '.join(argv):
                         stage = 'standard' if '/standard/Dockerfile' in ' '.join(argv) else 'base'
                     elif 'archive-oci.sh' in ' '.join(argv): stage = 'archive'
@@ -1133,6 +1145,18 @@ class ReviewRegressionTests(unittest.TestCase):
                     self.assertEqual(sum('/standard/Dockerfile' in ' '.join(argv) for argv in recipe_builds), 1)
                     self.assertTrue(all(argv[-1] == str(repo / 'images') for argv in recipe_builds))
                     self.assertTrue(all('linux/' + arch in argv for argv in recipe_builds))
+                    # Both recipes get the host-compiled helper as one named
+                    # context, built once for this run (ADR 0017).
+                    self.assertEqual(
+                        [[argv[i + 1] for i, token in enumerate(argv) if token == '--build-context']
+                         for argv in recipe_builds],
+                        [['recipe-contract-bin=' + HELPER_CONTEXT]] * 2)
+                    helper_calls = [argv for argv in calls
+                                    if fixture_helper_context(argv) is not None]
+                    self.assertEqual(len(helper_calls), 1)
+                    # A release owns the helper bytes it ships, so the compile
+                    # cannot be replaced by an inherited RECIPE_CONTRACT_CONTEXT.
+                    self.assertIn('--fresh', helper_calls[0], helper_calls[0])
                     self.assertIn('BASE_IMAGE=', ' '.join(recipe_builds[1]))
                     self.assertTrue((out / 'platform.json').exists())
                     self.assertEqual(content.PlatformInventory.parse(content.read_json(out / 'platform.json')).selections,
@@ -1168,6 +1192,8 @@ class ReviewRegressionTests(unittest.TestCase):
                     calls.append(argv)
                     if argv[0] == 'git':
                         return original(argv, **kwargs)
+                    if (helper := fixture_helper_context(argv)) is not None:
+                        return helper
                     if argv[:3] == ['docker', 'context', 'show']: return b'fixture-builder\n'
                     if argv[:3] == ['docker', 'buildx', 'inspect']: return b'Driver: docker\n'
                     return b''
@@ -1288,6 +1314,8 @@ class ReviewRegressionTests(unittest.TestCase):
                     calls.append(argv)
                     if argv[0] == 'git':
                         return original(argv, **kwargs)
+                    if (helper := fixture_helper_context(argv)) is not None:
+                        return helper
                     if argv[:3] == ['docker', 'context', 'show']: return b'fixture-builder\n'
                     if argv[:3] == ['docker', 'buildx', 'inspect']: return b'Driver: docker\n'
                     if argv[:3] == ['docker', 'image', 'inspect'] and argv[-2] == '--format':

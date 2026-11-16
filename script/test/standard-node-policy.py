@@ -322,7 +322,7 @@ class Invocation:
         inputs = [ROOT / 'images/pnpm/launcher.sh', ROOT / 'images/pnpm/pin.json',
                   ROOT / 'images/recipe-contract/run-pnpm.sh',
                   ROOT / 'images/recipe-contract/run-install.sh',
-                  ROOT / 'images/recipe-contract/pnpmenv/environment.go',
+                  ROOT / 'internal/pnpmenv/environment.go',
                   ROOT / 'script/test/fixtures/standard-node-policy.py',
                   ROOT / 'script/test/fixtures/pnpm/registry.py',
                   ROOT / 'script/test/fixtures/pnpm/packages.json',

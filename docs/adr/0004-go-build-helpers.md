@@ -325,3 +325,20 @@ this amendment:
   `script/build/recipe-contract.sh --native` build published
   (`target/recipe-contract/OS-ARCH/out`), which `project.py` authorizes as the
   checkout's host shape.
+
+## Amended by 0017 (2026-11-14)
+
+[ADR 0017](0017-go-programs.md) supersedes three parts of this record, and #178
+carried them out. Read the sections above as the record of what was decided then:
+
+- The module moved to the repository root: `go.mod`, `go.sum`, `vendor/`,
+  `.golangci.yml` and `golangci-lint.version` are top-level files, the domain
+  packages live under `./internal`, and `images/recipe-contract` holds only the
+  `main` package and the shell wrappers. Every `images/recipe-contract/…` path in
+  the sections above therefore reads as `./internal/…` or a top-level file.
+- The host cross-compile is the only delivery path for product images, so the
+  `golang:` builder stage, its digest pin in `images/parent-pins.json` and the
+  builder-stage guard are gone. `images/build.sh` no longer takes
+  `--host-helpers`: it always compiles. Row 12 and 13 of the evidence table
+  describe commands that no longer exist.
+- New ports keep exit status and meaning rather than byte parity.
