@@ -54,10 +54,12 @@ type Transaction struct {
 	// while a failing write is being rolled back must not produce a second, other
 	// status: whichever path acts first owns the outcome, and the other one waits
 	// for the process to end.
-	mu        sync.Mutex
-	restored  bool
-	cancelled atomic.Bool
-	exited    chan struct{}
+	mu         sync.Mutex
+	restored   bool
+	incomplete bool
+	settled    bool
+	cancelled  atomic.Bool
+	exited     chan struct{}
 }
 
 func (t *Transaction) backupDir() string { return filepath.Join(t.Work, "backup") }
@@ -248,21 +250,35 @@ func (t *Transaction) Run(owner string) int {
 	}
 	stop := t.watchSignals()
 	defer stop()
-	if err := t.stage(); err != nil {
+	// The phases hold `mu` so a signal cannot restore a destination while a copy
+	// into it is still running: the handler waits, then restores what publication
+	// actually wrote.
+	t.mu.Lock()
+	err := t.stage()
+	if err == nil {
+		err = t.backUp()
+	}
+	if err == nil {
+		err = t.publishFile()
+	}
+	t.mu.Unlock()
+	if err != nil && t.phase != "publication" {
 		_ = os.RemoveAll(t.Work)
-		t.diagnose("%s failed (%s); no destination was touched, sources unchanged", t.phase, err)
+		t.diagnose("%s failed (%s); no destination was touched, sources unchanged",
+			t.phase, err)
 		return 1
 	}
-	if err := t.backUp(); err != nil {
-		_ = os.RemoveAll(t.Work)
-		t.diagnose("%s failed (%s); no destination was touched, sources unchanged", t.phase, err)
-		return 1
-	}
-	if err := t.publishFile(); err != nil {
+	if err != nil {
 		return t.recover(err)
 	}
-	t.awaitSignal()
+	// Settle and remove the work directory *under* the lock: a signal that arrives
+	// from here on is too late to restore anything, and it must not find a settled
+	// transaction whose backups are already gone.
+	t.mu.Lock()
+	t.settled = true
 	_ = os.RemoveAll(t.Work)
+	t.mu.Unlock()
+	t.awaitSignal()
 	return 0
 }
 
@@ -270,10 +286,7 @@ func (t *Transaction) Run(owner string) int {
 // path removes the work directory or returns: the handler restores from that
 // directory, so it has to be the one that decides the outcome after a signal.
 func (t *Transaction) awaitSignal() {
-	t.mu.Lock()
-	restored := t.restored
-	t.mu.Unlock()
-	if restored || !t.cancelled.Load() {
+	if !t.cancelled.Load() {
 		return
 	}
 	t.signalExit()
@@ -307,14 +320,16 @@ func (t *Transaction) recover(cause error) int {
 		}
 		t.diagnose("STOP: recover %s%s before further edits/builds/commits", t.Work,
 			ownerSuffix(t.owner))
-		t.restored = true
+		t.incomplete = true
+		t.settled = true
 		t.mu.Unlock()
 		t.awaitSignal()
 		return 3
 	}
 	t.restored = true
-	t.mu.Unlock()
+	t.settled = true
 	_ = os.RemoveAll(t.Work)
+	t.mu.Unlock()
 	t.awaitSignal()
 	return 1
 }
@@ -355,7 +370,14 @@ func (t *Transaction) interrupted(received os.Signal) {
 	}
 	t.cancelled.Store(true)
 	t.mu.Lock()
-	if t.restored {
+	// A publication that already settled owns its outcome: an incomplete recovery
+	// must stay status 3, and a completed one has nothing left to restore.
+	if t.incomplete {
+		t.mu.Unlock()
+		t.leave(3)
+		return
+	}
+	if t.restored || t.settled {
 		t.mu.Unlock()
 		t.leave(128 + int(number))
 		return
@@ -375,17 +397,21 @@ func (t *Transaction) interrupted(received os.Signal) {
 			t.diagnose("STOP: recover both directories above before further " +
 				"edits/builds/commits")
 			t.restored = true
+			t.incomplete = true
+			t.settled = true
 			t.mu.Unlock()
 			t.leave(3)
 			return
 		}
 		t.diagnose("interrupted; sources restored")
 		t.restored = true
+		t.settled = true
 		_ = os.RemoveAll(t.Work)
 		t.mu.Unlock()
 		t.leave(128 + int(number))
 		return
 	}
+	t.settled = true
 	t.mu.Unlock()
 	_ = os.RemoveAll(t.Work)
 	t.diagnose("interrupted before publication; sources unchanged")

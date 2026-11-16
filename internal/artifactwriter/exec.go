@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -78,15 +79,25 @@ func (r CommandResult) failure(argv []string) error {
 //
 // It exists so the writer's cases are hermetic without weakening the record: the
 // URL a pin names stays the one a build would fetch, and only the bytes' origin
-// changes. A maintainer never sets it, and the program ignores it unless it has a
-// value.
+// changes. It is reachable only through an explicit command-line flag, because a
+// pin written from fixture bytes still records the canonical upstream URL — an
+// environment variable would let an inherited value redirect a real refresh.
 type fixtureFetcher struct{ root string }
 
-// FixtureVariable names the directory the harness serves upstream bytes from.
-const FixtureVariable = "FIXTURE_PIN_UPSTREAM"
-
 // NewFixtureFetcher serves `https://host/path` from `<root>/host/path`.
-func NewFixtureFetcher(root string) Fetcher { return &fixtureFetcher{root: root} }
+func NewFixtureFetcher(root string) (Fetcher, error) {
+	if root == "" {
+		return nil, refuse("the fixture upstream needs a directory")
+	}
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return nil, refuse("%s", err)
+	}
+	if info, err := os.Stat(absolute); err != nil || !info.IsDir() {
+		return nil, refuse("the fixture upstream %s is not a directory", root)
+	}
+	return &fixtureFetcher{root: absolute}, nil
+}
 
 func (f *fixtureFetcher) Get(_ context.Context, rawURL string, limit int64) ([]byte, error) {
 	rest := rawURL
@@ -96,10 +107,10 @@ func (f *fixtureFetcher) Get(_ context.Context, rawURL string, limit int64) ([]b
 			break
 		}
 	}
-	if strings.HasPrefix(rest, "..") || strings.Contains(rest, "/../") {
+	if rest == "" || strings.Contains(rest, "..") {
 		return nil, refuse("cannot fetch %s: a fixture path may not traverse", rawURL)
 	}
-	raw, err := os.ReadFile(f.root + "/" + rest)
+	raw, err := os.ReadFile(filepath.Join(f.root, filepath.FromSlash(rest)))
 	if err != nil {
 		return nil, refuse("cannot fetch %s: %s", rawURL, err)
 	}
@@ -107,14 +118,4 @@ func (f *fixtureFetcher) Get(_ context.Context, rawURL string, limit int64) ([]b
 		return nil, refuse("%s is larger than the %d byte ceiling", rawURL, limit)
 	}
 	return raw, nil
-}
-
-// FixtureFetcher is the harness's byte source when it configured one, and nil
-// otherwise. The command asks for it explicitly, so the production path cannot pick
-// a fixture directory up by accident.
-func FixtureFetcher(variables map[string]string) Fetcher {
-	if root := variables[FixtureVariable]; root != "" {
-		return NewFixtureFetcher(root)
-	}
-	return nil
 }

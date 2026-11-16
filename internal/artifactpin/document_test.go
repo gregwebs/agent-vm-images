@@ -34,6 +34,39 @@ func TestDocumentRoundTripsTheCommittedPins(t *testing.T) {
 	}
 }
 
+// Render builds a pin from what a refresh resolved, so it is the path a refresh
+// actually publishes. Feeding it the committed pin's own reviewed data has to
+// reproduce the committed bytes: that is what keeps the shape constants (payload,
+// links, destination, the two reasons) honest, which the round trip above cannot
+// see because it starts from a parsed pin.
+func TestRenderReproducesTheCommittedPins(t *testing.T) {
+	for _, relative := range []string{
+		"images/artifacts/node.json",
+		"images/artifacts/gh.json",
+	} {
+		pin := committedPin(t, relative)
+		review := Review{
+			VerifiedOn: pin.Authentication.VerifiedOn(),
+			Archives:   pin.Archives,
+			OpenPGP:    pin.Authentication.OpenPGP,
+			Sigstore:   pin.Authentication.Sigstore,
+			Bundled:    pin.Bundled,
+		}
+		rendered, err := Render(pin.Name, pin.Version, review)
+		if err != nil {
+			t.Fatalf("%s: %v", relative, err)
+		}
+		committed, err := os.ReadFile(filepath.Join(repositoryRoot(t), relative))
+		if err != nil {
+			t.Fatalf("%s: %v", relative, err)
+		}
+		if !bytes.Equal(rendered, committed) {
+			t.Errorf("%s: a rendered refresh differs from the committed record\n--- committed\n%s\n--- rendered\n%s",
+				relative, committed, rendered)
+		}
+	}
+}
+
 func TestRenderLabel(t *testing.T) {
 	dockerfile := "FROM base\nLABEL org.agent-vm.version.node=\"22.23.4\"\nLABEL other=keep\n"
 	version, err := ParseVersion("22.23.5", "--version")

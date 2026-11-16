@@ -9,7 +9,7 @@ verification uses its own keyring, and `verified_on` is the UTC date rather than
 the maintainer host's.
 
 Every case drives the real program through the wrapper. The upstream bytes come
-from a fixture directory (`FIXTURE_PIN_UPSTREAM`) and the Node release key is a
+from a fixture directory passed as `--fixture-upstream` and the Node release key is a
 fixture key this file generates, so the detached signature, the archive decode and
 the whole publication are real work — nothing is monkeypatched, because nothing can
 be: the writer is a binary. The archive and manifest are built here, which is why a
@@ -165,14 +165,14 @@ class Fixture:
             zone: str | None = None) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env.pop('GITHUB_ACTIONS', None)
-        for name in ('FIXTURE_PIN_UPSTREAM', 'GNUPGHOME', 'TZ'):
+        for name in ('GNUPGHOME', 'TZ'):
             env.pop(name, None)
-        env['FIXTURE_PIN_UPSTREAM'] = str(self.upstream)
         env.update(environment or {})
         if zone is not None:
             env['TZ'] = zone
         return subprocess.run(
-            ['bash', str(TOOL), '--root', str(self.root), *arguments],
+            ['bash', str(TOOL), '--root', str(self.root),
+             '--fixture-upstream', str(self.upstream), *arguments],
             cwd=ROOT, capture_output=True, text=True, check=False, env=env)
 
     def refresh(self, version: str = VERSION,
