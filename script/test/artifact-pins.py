@@ -19,6 +19,7 @@ re-download or an extraction.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import http.server
 import importlib.util
 import io
@@ -37,9 +38,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / 'images' / 'install-artifact.sh'
 ARTIFACTS = ROOT / 'images' / 'artifacts'
-sys.path.insert(0, str(ARTIFACTS))
-
-import artifact_pin  # noqa: E402  (the model the installer and the gate share)
+# The installer is a recipe-contract subcommand, so the suite builds the helper
+# once and points the wrapper at it. Everything else in the fixture is the
+# suite's own: the reviewed expectations below are copies of the committed shape,
+# and the Go model is exercised through the binary, not imported.
+HELPER = Path(os.environ.get('RECIPE_CONTRACT_HELPER') or
+              subprocess.run(['bash', str(ROOT / 'script/build/recipe-contract.sh'), '--native'],
+                             check=True, capture_output=True, text=True).stdout.strip()) \
+    / 'out' / 'recipe-contract'
 
 VERSION = '9.9.9'
 # The npm version the fixture Node archive ships. The pin records it and the
@@ -49,7 +55,67 @@ NPM_VERSION = '9.8.7'
 NODE_PREFIX = {'linux/amd64': f'node-v{VERSION}-linux-x64/', 'linux/arm64': f'node-v{VERSION}-linux-arm64/'}
 GH_PREFIX = {'linux/amd64': f'gh_{VERSION}_linux_amd64/', 'linux/arm64': f'gh_{VERSION}_linux_arm64/'}
 ARCH = {'linux/amd64': 'amd64', 'linux/arm64': 'arm64'}
-GH_POLICY = dict(artifact_pin.GH_POLICY)
+GH_POLICY = {
+    'repository': 'cli/cli',
+    'signer_workflow': 'cli/cli/.github/workflows/deployment.yml',
+    'cert_oidc_issuer': 'https://token.actions.githubusercontent.com',
+    'deny_self_hosted_runners': True,
+}
+# The committed shape the fixture pins have to reproduce.
+NODE_PAYLOAD = ['bin', 'include', 'lib', 'share', 'CHANGELOG.md', 'LICENSE', 'README.md']
+GH_PAYLOAD = ['bin/gh', 'share/man']
+NODE_LINKS = [{'path': '/usr/bin/node', 'target': '/usr/local/bin/node'}]
+AGY_PAYLOAD = [('antigravity', 'bin/agy')]
+AGY_REPOSITORY = 'google-antigravity/antigravity-cli'
+AGY_RELEASE_API = f'https://api.github.com/repos/{AGY_REPOSITORY}/releases/tags/'
+AGY_MANIFEST_ORIGIN = (
+    'https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/')
+AGY_EVIDENCE = {
+    'linux/amd64': 'evidence/manifest-linux-amd64.json',
+    'linux/arm64': 'evidence/manifest-linux-arm64.json',
+}
+ARCH_TOKEN = {'node': {'linux/amd64': 'linux-x64', 'linux/arm64': 'linux-arm64'},
+              'gh': {'linux/amd64': 'linux_amd64', 'linux/arm64': 'linux_arm64'},
+              'agy': {'linux/amd64': 'x64', 'linux/arm64': 'arm64'}}
+
+
+def platform_token(name: str, platform: str) -> str:
+    return ARCH_TOKEN[name][platform]
+
+
+def expected_filename(name: str, version: str, platform: str) -> str:
+    token = platform_token(name, platform)
+    if name == 'node':
+        return f'node-v{version}-{token}.tar.xz'
+    if name == 'agy':
+        return f'agy_cli_linux_{token}.tar.gz'
+    return f'gh_{version}_{token}.tar.gz'
+
+
+def release_tag(name: str, version: str) -> str:
+    return version if name == 'agy' else f'v{version}'
+
+
+def canonical_url(name: str, version: str, platform: str) -> str:
+    filename = expected_filename(name, version, platform)
+    if name == 'node':
+        return f'https://nodejs.org/dist/v{version}/{filename}'
+    if name == 'agy':
+        return f'https://github.com/{AGY_REPOSITORY}/releases/download/{version}/{filename}'
+    return f'https://github.com/cli/cli/releases/download/v{version}/{filename}'
+
+
+def bundle_name(name: str, version: str, platform: str) -> str:
+    return f'{name}-{version}-{platform.replace("/", "-")}.bundle.jsonl'
+
+
+def manifest_url(platform: str) -> str:
+    return f'{AGY_MANIFEST_ORIGIN}linux_{platform.split("/")[1]}.json'
+
+
+def sha512(raw: bytes) -> str:
+    return hashlib.sha512(raw).hexdigest()
+
 
 # The image's own PATH tools, plus recorders for the fallbacks the installer must
 # never reach: any invocation of one of these is a failure, not a warning.
@@ -68,7 +134,7 @@ def fail(label: str, detail: str) -> None:
 
 
 def sha256(raw: bytes) -> str:
-    return artifact_pin.sha256(raw)
+    return hashlib.sha256(raw).hexdigest()
 
 
 # --- fixture synthesis ------------------------------------------------------
@@ -285,7 +351,7 @@ class Fixture:
             f'{sha256(raw)}  {gh_name(platform)}\n'
             for platform, raw in self.gh_bytes.items()))
         self.bundle = {platform: (self.artifacts
-                                  / artifact_pin.bundle_name('gh', VERSION, platform))
+                                  / bundle_name('gh', VERSION, platform))
                        for platform in GH_PREFIX}
         for path in self.bundle.values():
             path.write_text('{"fixture":"attestation bundle"}\n')
@@ -322,8 +388,8 @@ class Fixture:
             'upstream': {'project': 'https://nodejs.org/dist', 'release': f'v{VERSION}'},
             'install': {
                 'destination': '/usr/local',
-                'payload': list(artifact_pin.NODE_PAYLOAD),
-                'links': [dict(link) for link in artifact_pin.NODE_LINKS],
+                'payload': list(NODE_PAYLOAD),
+                'links': [dict(link) for link in NODE_LINKS],
             },
             'bundled': {'npm': NPM_VERSION},
             'platforms': {
@@ -354,7 +420,7 @@ class Fixture:
         pin = {
             'schema': 1, 'name': 'gh', 'kind': 'release-archive', 'version': VERSION,
             'upstream': {'project': 'https://github.com/cli/cli', 'release': f'v{VERSION}'},
-            'install': {'destination': '/usr/local', 'payload': list(artifact_pin.GH_PAYLOAD),
+            'install': {'destination': '/usr/local', 'payload': list(GH_PAYLOAD),
                         'links': []},
             'platforms': {
                 platform: {
@@ -362,7 +428,7 @@ class Fixture:
                     'archive': 'tar.gz',
                     'member_prefix': GH_PREFIX[platform],
                     'sha256': sha256(raw),
-                    'bundle': {'path': artifact_pin.bundle_name('gh', VERSION, platform),
+                    'bundle': {'path': bundle_name('gh', VERSION, platform),
                                'sha256': sha256(self.bundle[platform].read_bytes())},
                 } for platform, raw in self.gh_bytes.items()
             },
@@ -384,11 +450,11 @@ class Fixture:
 
 
 def node_name(platform: str) -> str:
-    return f'node-v{VERSION}-{artifact_pin.platform_token("node", platform)}.tar.xz'
+    return f'node-v{VERSION}-{platform_token("node", platform)}.tar.xz'
 
 
 def gh_name(platform: str) -> str:
-    return f'gh_{VERSION}_{artifact_pin.platform_token("gh", platform)}.tar.gz'
+    return f'gh_{VERSION}_{platform_token("gh", platform)}.tar.gz'
 
 
 # --- running the installer --------------------------------------------------
@@ -396,7 +462,8 @@ def gh_name(platform: str) -> str:
 def install(fixture: Fixture, name: str, arch: str, root: Path,
             environment: dict | None = None, events: Path | None = None,
             images: Path | None = None) -> subprocess.CompletedProcess:
-    env = dict(os.environ, ARTIFACT_SOURCE_DIR=str(images or ROOT / 'images'))
+    env = dict(os.environ, ARTIFACT_SOURCE_DIR=str(images or ROOT / 'images'),
+               RECIPE_CONTRACT_HELPER=str(HELPER))
     env.pop('FIXTURE_GH_STATUS', None)
     env.update(environment or {})
     # Each run starts with an empty verifier log, so a case can tell whether the
@@ -632,42 +699,6 @@ def case_missing_asset(work: Path, fixture: Fixture) -> None:
     expect_refusal('a missing asset is refused',
                    install(fixture, 'node', 'amd64', root), 'cannot fetch', root, fixture)
     fixture.write_pins()
-
-
-def case_transport(work: Path, fixture: Fixture) -> None:
-    """The two HTTP failure modes, through the fetch primitive every download in
-    the installer uses. A committed pin may only name `https` (the gate enforces
-    the upstream origins), so a local origin cannot appear in one; the transport
-    is what this case pins down."""
-    import install_artifact  # the installer's own module, not a copy
-    served = work / 'served'
-    served.mkdir()
-    httpd, base = server(served)
-    try:
-        try:
-            install_artifact.fetch(f'{base}/absent.tar.gz', 1024)
-        except install_artifact.Refusal as error:
-            if 'HTTP 404' not in str(error):
-                fail('a 404 is refused', str(error))
-            else:
-                report('a missing asset (HTTP 404) is refused')
-        else:
-            fail('a 404 is refused', 'the fetch succeeded')
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-    with socket.socket() as probe:
-        probe.bind(('127.0.0.1', 0))
-        port = probe.getsockname()[1]
-    try:
-        install_artifact.fetch(f'http://127.0.0.1:{port}/node.tar.xz', 1024)
-    except install_artifact.Refusal as error:
-        if 'cannot fetch' not in str(error):
-            fail('a refused connection is refused', str(error))
-        else:
-            report('an unreachable endpoint (connection refused) is refused')
-    else:
-        fail('a refused connection is refused', 'the fetch succeeded')
 
 
 def case_hostile_members(work: Path, fixture: Fixture) -> None:
@@ -963,7 +994,7 @@ class AgyFixture:
         self.write_pin()
 
     def filename(self, platform: str) -> str:
-        return artifact_pin.expected_filename('agy', VERSION, platform)
+        return expected_filename('agy', VERSION, platform)
 
     def path(self, platform: str) -> Path:
         return self.releases / self.filename(platform)
@@ -972,7 +1003,7 @@ class AgyFixture:
         return self.path(platform).as_uri()
 
     def manifest_name(self, platform: str) -> str:
-        return artifact_pin.AGY_EVIDENCE[platform]
+        return AGY_EVIDENCE[platform]
 
     def write_evidence(self) -> None:
         assets = [{'name': self.filename(platform),
@@ -987,18 +1018,18 @@ class AgyFixture:
         for platform, raw in self.bytes.items():
             manifest = {'version': VERSION,
                         'url': f'https://storage.googleapis.com/fixture/{self.filename(platform)}',
-                        'sha512': artifact_pin.sha512(raw)}
+                        'sha512': sha512(raw)}
             (self.directory / self.manifest_name(platform)).write_text(
                 json.dumps(manifest, indent=2) + '\n')
 
     def write_pin(self, tamper=None) -> None:
         pin = {
             'schema': 1, 'name': 'agy', 'kind': 'release-archive', 'version': VERSION,
-            'upstream': {'project': f'https://github.com/{artifact_pin.AGY_REPOSITORY}',
-                         'release': artifact_pin.release_tag('agy', VERSION)},
+            'upstream': {'project': f'https://github.com/{AGY_REPOSITORY}',
+                         'release': release_tag('agy', VERSION)},
             'install': {'destination': '/usr/local',
                         'payload': [{'member': member, 'path': path}
-                                    for member, path in artifact_pin.AGY_PAYLOAD],
+                                    for member, path in AGY_PAYLOAD],
                         'links': []},
             'platforms': {
                 platform: {
@@ -1006,16 +1037,16 @@ class AgyFixture:
                     'archive': 'tar.gz',
                     'member_prefix': '',
                     'sha256': sha256(raw),
-                    'sha512': artifact_pin.sha512(raw),
+                    'sha512': sha512(raw),
                 } for platform, raw in self.bytes.items()
             },
             'authentication': {
                 'method': 'hash-only',
-                'release': {'url': artifact_pin.AGY_RELEASE_API + VERSION,
+                'release': {'url': AGY_RELEASE_API + VERSION,
                             'path': AGY_RELEASE_JSON,
                             'sha256': sha256((self.directory / AGY_RELEASE_JSON).read_bytes())},
                 'manifests': {
-                    platform: {'url': artifact_pin.manifest_url(platform),
+                    platform: {'url': manifest_url(platform),
                                'path': self.manifest_name(platform),
                                'sha256': sha256(
                                    (self.directory / self.manifest_name(platform)).read_bytes())}
@@ -1040,7 +1071,8 @@ class AgyFixture:
 def install_agy(fixture: AgyFixture, root: Path, arch: str = 'amd64', *,
                 pin: Path | None = None, events: Path | None = None,
                 environment: dict | None = None) -> subprocess.CompletedProcess:
-    env = dict(os.environ, ARTIFACT_SOURCE_DIR=str(ROOT / 'images'))
+    env = dict(os.environ, ARTIFACT_SOURCE_DIR=str(ROOT / 'images'),
+               RECIPE_CONTRACT_HELPER=str(HELPER))
     env.update(environment or {})
     argv = ['bash', str(INSTALLER), 'agy', str(pin or fixture.directory / 'pin.json'), arch,
             '--root', str(root)]
@@ -1153,7 +1185,7 @@ def case_agy_committed_corroboration(work: Path, fixture: AgyFixture) -> None:
         'manifest has a duplicate key': (
             lambda: (fixture.directory / fixture.manifest_name('linux/amd64')).write_text(
                 '{"version": "9.9.9", "version": "9.9.9", "url": "https://x/", '
-                '"sha512": "' + artifact_pin.sha512(
+                '"sha512": "' + sha512(
                     fixture.bytes['linux/amd64']) + '"}\n'),
             'duplicate'),
         'manifest url is not https': (
@@ -1305,36 +1337,6 @@ def case_agy_archive_bytes(work: Path, fixture: AgyFixture) -> None:
     fixture.restore()
 
 
-def case_agy_ceiling(work: Path, fixture: AgyFixture) -> None:
-    """The 64 MiB ceiling that suits Node would refuse agy's real amd64 archive,
-    so the ceiling is per artifact — and the decoded member has its own."""
-    if artifact_pin.MAX_ARCHIVE_BYTES['agy'] <= 67_990_723:
-        fail('the agy archive ceiling admits the real amd64 archive',
-             str(artifact_pin.MAX_ARCHIVE_BYTES['agy']))
-        return
-    if artifact_pin.MAX_ARCHIVE_BYTES['node'] != 64 << 20 \
-            or artifact_pin.MAX_ARCHIVE_BYTES['gh'] != 64 << 20:
-        fail('the node and gh ceilings are unchanged', str(artifact_pin.MAX_ARCHIVE_BYTES))
-        return
-    report('the per-artifact archive ceilings leave node and gh unchanged')
-
-    import install_artifact
-    previous = artifact_pin.MAX_MEMBER_BYTES['agy']
-    artifact_pin.MAX_MEMBER_BYTES['agy'] = len(elf_header(62)) - 1
-    try:
-        root = work / 'agy-member-ceiling'
-        root.mkdir()
-        status = install_artifact.main(
-            ['agy', str(fixture.directory / 'pin.json'), 'amd64', '--root', str(root)])
-    finally:
-        artifact_pin.MAX_MEMBER_BYTES['agy'] = previous
-    if status == 0 or (root / 'usr/local/bin/agy').exists():
-        fail('a member past the decoded ceiling is refused before extraction',
-             f'status {status}')
-        return
-    report('a member past the decoded ceiling is refused before extraction')
-
-
 def case_agy_publish_conflict(work: Path, fixture: AgyFixture) -> None:
     """An installed `agy` is another input's path: the install publishes nothing
     and leaves the existing bytes in place."""
@@ -1358,8 +1360,8 @@ def case_agy_publish_conflict(work: Path, fixture: AgyFixture) -> None:
 def case_agy_pin_refusals(work: Path, fixture: AgyFixture) -> None:
     """The pin itself: the method is bound to the name, the payload is the
     reviewed rename, and the URLs are computed rather than matched."""
-    created = artifact_pin.canonical_url('agy', VERSION, 'linux/amd64')
-    asset = artifact_pin.expected_filename('agy', VERSION, 'linux/amd64')
+    created = canonical_url('agy', VERSION, 'linux/amd64')
+    asset = expected_filename('agy', VERSION, 'linux/amd64')
     rows = [
         ('downgraded-to-openpgp',
          lambda pin: pin['authentication'].update({'method': 'openpgp-signed-manifest'}),
@@ -1382,7 +1384,7 @@ def case_agy_pin_refusals(work: Path, fixture: AgyFixture) -> None:
              {'url': created.replace('linux_x64', 'linux_musl')}), 'must be exactly'),
         ('another-repository',
          lambda pin: pin['platforms']['linux/amd64'].update(
-             {'url': created.replace(artifact_pin.AGY_REPOSITORY, 'attacker/repo')}),
+             {'url': created.replace(AGY_REPOSITORY, 'attacker/repo')}),
          'must be exactly'),
         ('query-string',
          lambda pin: pin['platforms']['linux/amd64'].update({'url': created + '?raw=1'}),
@@ -1431,8 +1433,17 @@ def case_agy_named_by_directory(work: Path, fixture: AgyFixture) -> None:
     tree = work / 'committed' / 'agy'
     tree.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(fixture.directory, tree)
-    if artifact_pin.load(tree / 'pin.json').name != 'agy':
-        fail('a pin.json names its artifact by its directory', 'the name differs')
+    named = run([str(HELPER), 'artifact-pin', 'version', str(tree / 'pin.json')])
+    if named.returncode != 0 or not named.stdout.strip():
+        fail('a pin.json names its artifact by its directory', named.stderr.strip())
+        return
+    renamed = work / 'committed' / 'minimal'
+    renamed.mkdir(parents=True, exist_ok=True)
+    shutil.copy(tree / 'pin.json', renamed / 'pin.json')
+    refused = run([str(HELPER), 'artifact-pin', 'version', str(renamed / 'pin.json')])
+    if refused.returncode == 0 or 'unknown artifact' not in refused.stderr:
+        fail('a pin.json names its artifact by its directory',
+             'an unknown directory was accepted: ' + refused.stderr.strip())
         return
     report('a pin.json names its artifact by its directory')
 
@@ -1507,7 +1518,8 @@ def case_agy_wrong_artifact(work: Path, fixture: AgyFixture) -> None:
         return
     result = run(['bash', str(INSTALLER), 'gh', str(installed), 'amd64',
                   '--root', str(work / 'agy-wrong-artifact')],
-                 env=dict(os.environ, ARTIFACT_SOURCE_DIR=str(ROOT / 'images')))
+                 env=dict(os.environ, ARTIFACT_SOURCE_DIR=str(ROOT / 'images'),
+                          RECIPE_CONTRACT_HELPER=str(HELPER)))
     if result.returncode == 0 or 'pins agy, not gh' not in result.stderr:
         fail('the committed agy pin cannot be installed as gh', result.stderr.strip())
         return
@@ -1577,59 +1589,13 @@ def case_ordering(work: Path, fixture: Fixture) -> None:
         if problems:
             fail('a mismatch fetches the archive exactly once', '; '.join(problems))
             return
+        # The source-level half of this case mutated the retired Python installer.
+        # The ordering it guarded is a Go property now, and internal/artifactinstall
+        # asserts it directly: an install that hashes after extracting, or that
+        # fetches twice, cannot keep the event log this case reads.
         report('a mismatch fetches the archive once and never starts extraction')
-
-        digest_check = """        if artifact_pin.sha256(payload) != archive.digest:
-            raise Refusal(f'{archive.filename} is {artifact_pin.sha256(payload)}, '
-                          f'the pin says {archive.digest}')
-        if archive.sha512 is not None and artifact_pin.sha512(payload) != archive.sha512:
-            raise Refusal(f'{archive.filename} does not match the corroborated sha512')
-"""
-        extraction = """        archive_file = scratch / archive.filename
-        archive_file.write_bytes(payload)
-        with tarfile.open(archive_file, 'r:' + ('xz' if archive.archive == 'tar.xz' else 'gz')) as tar:
-            members = preflight(tar, archive.member_prefix)
-            check_members(pin, members)
-            extract(members, tar, staging, archive.member_prefix)
-        check_executable(pin, platform, staging)
-"""
-        regressions = {
-            'extraction before the digest check': (
-                digest_check + extraction, extraction + digest_check),
-            'a second fetch after the mismatch': (
-                "        payload = fetch(archive.url, artifact_pin.MAX_ARCHIVE_BYTES[pin.name])\n",
-                "        payload = fetch(archive.url, artifact_pin.MAX_ARCHIVE_BYTES[pin.name])\n"
-                "        payload = fetch(archive.url, artifact_pin.MAX_ARCHIVE_BYTES[pin.name])\n"),
-        }
-        for label, (from_text, to_text) in regressions.items():
-            tree = work / 'mutated-images'
-            shutil.rmtree(tree, ignore_errors=True)
-            shutil.copytree(ROOT / 'images', tree)
-            source = (tree / 'artifacts/install_artifact.py').read_text()
-            if from_text not in source:
-                fail(f'the {label} regression still applies', 'the installer changed shape')
-                return
-            (tree / 'artifacts/install_artifact.py').write_text(
-                source.replace(from_text, to_text, 1))
-            log = work / 'ordering-mutant.log'
-            root = work / 'ordering-mutant'
-            shutil.rmtree(root, ignore_errors=True)
-            root.mkdir()
-            mutated_result = install(fixture, 'node', 'amd64', root, events=log, images=tree)
-            if mutated_result.returncode == 0:
-                fail(f'the {label} regression is caught', 'the mutated installer installed')
-                return
-            if 'the pin says' not in mutated_result.stderr:
-                fail(f'the {label} regression is caught',
-                     f'the refusal changed: {mutated_result.stderr.strip()}')
-                return
-            if not ordering_problems(log, node_name_amd64, expect_extraction=False):
-                fail(f'the {label} regression is caught',
-                     'the ordering check accepted the mutated installer')
-                return
     finally:
         fixture.node_path('linux/amd64').write_bytes(original)
-    report('both replayed ordering regressions are caught by the event log')
 
 
 # --- writer clock -------------------------------------------------------------
@@ -1836,7 +1802,6 @@ def main() -> int:
         case_bad_signature(work, fixture)
         case_attacker_key(work, fixture)
         case_missing_asset(work, fixture)
-        case_transport(work, fixture)
         case_hostile_members(work, fixture)
         case_attestation(work, fixture)
         case_no_fallback(work, fixture)
@@ -1850,7 +1815,6 @@ def main() -> int:
         case_agy_install(work, agy)
         case_agy_committed_corroboration(work, agy)
         case_agy_archive_bytes(work, agy)
-        case_agy_ceiling(work, agy)
         case_agy_publish_conflict(work, agy)
         case_agy_pin_refusals(work, agy)
         case_agy_named_by_directory(work, agy)

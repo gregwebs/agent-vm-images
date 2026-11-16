@@ -34,13 +34,15 @@ image_platform=$(docker image inspect "$IMAGE" --format '{{.Os}}/{{.Architecture
 # The pins are the expectation; the image is the claim being tested. `npm` is
 # compared against the version recorded for the reviewed Node archive, not against
 # whatever npm the image reports: an equal-but-wrong npm/npx pair passed before.
+contract="$(bash "$ROOT/script/build/recipe-contract.sh" --native)/out/recipe-contract"
+[ -x "$contract" ] || fail 'cannot build the recipe-contract helper'
 pin_version() {
-    python3 "$ROOT/images/artifacts/read-pin-version.py" "$ROOT/images/artifacts/$1.json"
+    "$contract" artifact-pin version "$ROOT/images/artifacts/$1.json"
 }
 node_version=$(pin_version node) || fail 'cannot read the node pin'
 gh_version=$(pin_version gh) || fail 'cannot read the gh pin'
-bundled_npm=$(python3 "$ROOT/images/artifacts/read-pin-version.py" \
-    "$ROOT/images/artifacts/node.json" --npm) || fail 'cannot read the bundled npm pin'
+bundled_npm=$("$contract" artifact-pin version "$ROOT/images/artifacts/node.json" --npm) ||
+    fail 'cannot read the bundled npm pin'
 pnpm_version=$(python3 "$ROOT/images/pnpm/read-pin-version.py" "$ROOT/images/pnpm/pin.json")
 
 # One container, one command, every claim: a second run could see a different

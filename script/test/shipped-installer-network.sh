@@ -672,7 +672,7 @@ assert_selection_defaults_match_dockerfiles() {
     [ "$pin_release" = "$(selection_for codex 2)" ] ||
         fail "the committed codex pin is '$pin_release' but selections.tsv says '$(selection_for codex 2)'"
     local agy_pin
-    agy_pin="$(python3 "$REPO_ROOT/images/artifacts/read-pin-version.py" \
+    agy_pin="$("$CONTRACT/recipe-contract" artifact-pin version \
         "$REPO_ROOT/images/tools/agy/pin.json")"
     [ "$agy_pin" = "$(selection_for agy 2)" ] ||
         fail "the committed agy pin is '$agy_pin' but selections.tsv says '$(selection_for agy 2)'"
@@ -998,6 +998,9 @@ run_one_combined() { # $1 = tool, $2 = version
         extra_env+=(-v "$REPO_ROOT/images/install-artifact.sh:/artifact-source/install-artifact.sh:ro")
         extra_env+=(-e "AGENT_VM_AGY_SOURCE_DIR=/agy")
         extra_env+=(-e "ARTIFACT_SOURCE_DIR=/artifact-source")
+        # The wrapper runs the installer as a recipe-contract subcommand, so the
+        # helper the run already mounts is what it has to reach.
+        extra_env+=(-e "RECIPE_CONTRACT_HELPER=/contract/recipe-contract")
         case "$arch" in
             aarch64) extra_env+=(-e "AGENT_VM_AGY_ARCH=arm64") ;;
             x86_64) extra_env+=(-e "AGENT_VM_AGY_ARCH=amd64") ;;

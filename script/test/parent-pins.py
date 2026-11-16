@@ -58,7 +58,7 @@ STAGED = {
                'install-build-ca.sh', 'install-pnpm.sh', 'install-zellij.sh',
                'verify-base-inputs.sh', 'base-inputs.sha256',
                'artifacts/artifact_pin.py', 'artifacts/install_artifact.py',
-               'artifacts/read-pin-version.py', 'artifacts/node.json', 'artifacts/gh.json',
+               'artifacts/node.json', 'artifacts/gh.json',
                'artifacts/node-release-key.asc',
                'artifacts/gh-2.103.2-linux-amd64.bundle.jsonl',
                'artifacts/gh-2.103.2-linux-arm64.bundle.jsonl',
