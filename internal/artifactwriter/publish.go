@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 )
 
@@ -48,6 +49,15 @@ type Transaction struct {
 	copyFile func(source, destination string, mode os.FileMode) error
 	owner    string
 	exit     func(status int)
+
+	// guard serializes the two ways out of a publication. A signal that arrives
+	// while a failing write is being rolled back must not produce a second, other
+	// status: whichever path acts first owns the outcome, and the other one waits
+	// for the process to end.
+	mu        sync.Mutex
+	restored  bool
+	cancelled atomic.Bool
+	exited    chan struct{}
 }
 
 func (t *Transaction) backupDir() string { return filepath.Join(t.Work, "backup") }
@@ -68,6 +78,9 @@ func (t *Transaction) prepare(owner string) error {
 	}
 	if t.exit == nil {
 		t.exit = os.Exit
+	}
+	if t.exited == nil {
+		t.exited = make(chan struct{})
 	}
 	return nil
 }
@@ -248,12 +261,39 @@ func (t *Transaction) Run(owner string) int {
 	if err := t.publishFile(); err != nil {
 		return t.recover(err)
 	}
+	t.awaitSignal()
 	_ = os.RemoveAll(t.Work)
 	return 0
 }
 
+// awaitSignal waits for an interrupt to finish its own unwind before the ordinary
+// path removes the work directory or returns: the handler restores from that
+// directory, so it has to be the one that decides the outcome after a signal.
+func (t *Transaction) awaitSignal() {
+	t.mu.Lock()
+	restored := t.restored
+	t.mu.Unlock()
+	if restored || !t.cancelled.Load() {
+		return
+	}
+	t.signalExit()
+}
+
+// signalExit waits for the interrupt handler to end the process and never returns.
+func (t *Transaction) signalExit() {
+	<-t.exited
+	// The handler is between closing the channel and calling exit; returning here
+	// would let the ordinary path's status win the race.
+	select {}
+}
+
 // recover restores what publication touched and reports the outcome.
 func (t *Transaction) recover(cause error) int {
+	t.mu.Lock()
+	if t.cancelled.Load() {
+		t.mu.Unlock()
+		t.signalExit()
+	}
 	t.diagnose("publication failed (%s); restoring", cause)
 	if err := t.restore(); err != nil {
 		recordError, recordFailed := t.recordRecoveryBestEffort(err.Error())
@@ -267,9 +307,15 @@ func (t *Transaction) recover(cause error) int {
 		}
 		t.diagnose("STOP: recover %s%s before further edits/builds/commits", t.Work,
 			ownerSuffix(t.owner))
+		t.restored = true
+		t.mu.Unlock()
+		t.awaitSignal()
 		return 3
 	}
+	t.restored = true
+	t.mu.Unlock()
 	_ = os.RemoveAll(t.Work)
+	t.awaitSignal()
 	return 1
 }
 
@@ -307,6 +353,13 @@ func (t *Transaction) interrupted(received os.Signal) {
 	if !ok {
 		number = syscall.SIGINT
 	}
+	t.cancelled.Store(true)
+	t.mu.Lock()
+	if t.restored {
+		t.mu.Unlock()
+		t.leave(128 + int(number))
+		return
+	}
 	if t.phase == "publication" && t.touched > 0 {
 		if err := t.restore(); err != nil {
 			recordError, recordFailed := t.recordRecoveryBestEffort(err.Error())
@@ -321,16 +374,28 @@ func (t *Transaction) interrupted(received os.Signal) {
 			t.diagnose("recovery material retained at %s", t.Work)
 			t.diagnose("STOP: recover both directories above before further " +
 				"edits/builds/commits")
-			t.exit(3)
+			t.restored = true
+			t.mu.Unlock()
+			t.leave(3)
 			return
 		}
 		t.diagnose("interrupted; sources restored")
-		t.exit(128 + int(number))
+		t.restored = true
+		_ = os.RemoveAll(t.Work)
+		t.mu.Unlock()
+		t.leave(128 + int(number))
 		return
 	}
+	t.mu.Unlock()
 	_ = os.RemoveAll(t.Work)
 	t.diagnose("interrupted before publication; sources unchanged")
-	t.exit(128 + int(number))
+	t.leave(128 + int(number))
+}
+
+// leave releases the ordinary path, which is waiting for this outcome, and exits.
+func (t *Transaction) leave(status int) {
+	close(t.exited)
+	t.exit(status)
 }
 
 // copyFile copies bytes and applies the source's permission bits, so a published

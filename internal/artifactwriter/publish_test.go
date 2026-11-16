@@ -7,9 +7,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // fixture is a throwaway repository root with three destinations, two of which
@@ -97,9 +97,14 @@ func failOn(transaction *Transaction, name string, signal os.Signal, once *bool)
 				return err
 			}
 			if signal != nil {
+				// An interrupt does not come with a write error: the handler is what
+				// ends this run, so the injected copy waits for it instead of racing
+				// it back to the caller.
 				if err := syscall.Kill(os.Getpid(), signal.(syscall.Signal)); err != nil {
 					return err
 				}
+				time.Sleep(30 * time.Second)
+				return nil
 			}
 			return os.ErrInvalid
 		}
@@ -317,17 +322,7 @@ func TestSignalDuringPublicationRestoresAndExits130(t *testing.T) {
 	if changed := created.changed(); len(changed) > 0 {
 		t.Errorf("a signal during publication restores the sources, changed: %v", changed)
 	}
-	waitForGone(t, work)
-}
-
-// waitForGone tolerates the one thing that is genuinely racy: the handler exits
-// from its own goroutine, so the directory removal may still be in flight when the
-// parent observes the status.
-func waitForGone(t *testing.T, directory string) {
-	t.Helper()
-	var once sync.Once
-	once.Do(func() {})
-	if _, err := os.Stat(directory); err == nil {
-		t.Logf("the work directory is retained after a restore; the handler exited first")
+	if _, err := os.Stat(work); !os.IsNotExist(err) {
+		t.Errorf("a restore that succeeded removes the work directory")
 	}
 }
