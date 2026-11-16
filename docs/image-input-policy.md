@@ -258,7 +258,8 @@ input. No hash-only exception is used.
 
 **Maintenance.** Only `script/dev/pin-codex.py` writes the pin, its four evidence
 files and the Codex ARG, and only through the shared Python publication
-transaction (which it reuses from `script/dev/pin-artifact.py`). Typical commands:
+transaction (which it still reuses from `script/dev/pin-artifact.py`, until the
+Codex writer is ported too). Typical commands:
 
 ```bash
 python3 script/dev/pin-codex.py --check
@@ -731,15 +732,16 @@ fallback for it.
 
 ## Maintenance: refreshing a pinned release artifact
 
-Only `script/dev/pin-artifact.py` writes `images/artifacts/*.json`, their evidence
-files and the `org.agent-vm.version.<name>` labels, on a maintainer host. Codex is
-*not* one of those artifacts: its closure has its own writer and policy
+Only `script/dev/pin-artifact.sh` writes `images/artifacts/*.json`, their evidence
+files and the `org.agent-vm.version.<name>` labels, on a maintainer host. It is the
+`artifact` subcommand of the Go `avm-pin` binary, compiled on first use (ADR 0017).
+Codex is *not* one of those artifacts: its closure has its own writer and policy
 ([Codex standalone payloads](#codex-standalone-payloads)).
 
 ```bash
-python3 script/dev/pin-artifact.py --artifact node --version 22.23.5
-python3 script/dev/pin-artifact.py --artifact gh --version 2.104.0
-python3 script/dev/pin-artifact.py --check      # re-verify what is committed
+script/dev/pin-artifact.sh --artifact node --version 22.23.5
+script/dev/pin-artifact.sh --artifact gh --version 2.104.0
+script/dev/pin-artifact.sh --check      # re-verify what is committed
 ```
 
 It resolves that exact `X.Y.Z` for `linux/amd64` and `linux/arm64`, verifies every

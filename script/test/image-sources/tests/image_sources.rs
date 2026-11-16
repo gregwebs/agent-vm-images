@@ -9416,7 +9416,7 @@ fn check_opencode_parser_boundary(source: &str) -> Result<(), String> {
 /// The exact vendor closure: `modules.txt` plus every file of the three reviewed
 /// modules. The module list, the checksum pin and the files are the provenance
 /// evidence: a vendored file nobody reviewed is a build input nobody reviewed.
-const VENDOR_MODULE_FILES: [&str; 80] = [
+const VENDOR_MODULE_FILES: [&str; 128] = [
     "github.com/alexflint/go-arg/.gitignore",
     "github.com/alexflint/go-arg/LICENSE",
     "github.com/alexflint/go-arg/README.md",
@@ -9481,6 +9481,54 @@ const VENDOR_MODULE_FILES: [&str; 80] = [
     "github.com/failsafe-go/failsafe-go/retrypolicy/doc.go",
     "github.com/failsafe-go/failsafe-go/retrypolicy/retry.go",
     "github.com/failsafe-go/failsafe-go/retrypolicy/retryexecutor.go",
+    "github.com/ulikunitz/xz/.gitignore",
+    "github.com/ulikunitz/xz/LICENSE",
+    "github.com/ulikunitz/xz/README.md",
+    "github.com/ulikunitz/xz/SECURITY.md",
+    "github.com/ulikunitz/xz/TODO.md",
+    "github.com/ulikunitz/xz/bits.go",
+    "github.com/ulikunitz/xz/crc.go",
+    "github.com/ulikunitz/xz/format.go",
+    "github.com/ulikunitz/xz/fox-check-none.xz",
+    "github.com/ulikunitz/xz/fox.xz",
+    "github.com/ulikunitz/xz/internal/hash/cyclic_poly.go",
+    "github.com/ulikunitz/xz/internal/hash/doc.go",
+    "github.com/ulikunitz/xz/internal/hash/rabin_karp.go",
+    "github.com/ulikunitz/xz/internal/hash/roller.go",
+    "github.com/ulikunitz/xz/internal/xlog/xlog.go",
+    "github.com/ulikunitz/xz/lzma/bintree.go",
+    "github.com/ulikunitz/xz/lzma/bitops.go",
+    "github.com/ulikunitz/xz/lzma/breader.go",
+    "github.com/ulikunitz/xz/lzma/buffer.go",
+    "github.com/ulikunitz/xz/lzma/bytewriter.go",
+    "github.com/ulikunitz/xz/lzma/decoder.go",
+    "github.com/ulikunitz/xz/lzma/decoderdict.go",
+    "github.com/ulikunitz/xz/lzma/directcodec.go",
+    "github.com/ulikunitz/xz/lzma/distcodec.go",
+    "github.com/ulikunitz/xz/lzma/encoder.go",
+    "github.com/ulikunitz/xz/lzma/encoderdict.go",
+    "github.com/ulikunitz/xz/lzma/fox.lzma",
+    "github.com/ulikunitz/xz/lzma/hashtable.go",
+    "github.com/ulikunitz/xz/lzma/header.go",
+    "github.com/ulikunitz/xz/lzma/header2.go",
+    "github.com/ulikunitz/xz/lzma/lengthcodec.go",
+    "github.com/ulikunitz/xz/lzma/literalcodec.go",
+    "github.com/ulikunitz/xz/lzma/matchalgorithm.go",
+    "github.com/ulikunitz/xz/lzma/operation.go",
+    "github.com/ulikunitz/xz/lzma/prob.go",
+    "github.com/ulikunitz/xz/lzma/properties.go",
+    "github.com/ulikunitz/xz/lzma/rangecodec.go",
+    "github.com/ulikunitz/xz/lzma/reader.go",
+    "github.com/ulikunitz/xz/lzma/reader2.go",
+    "github.com/ulikunitz/xz/lzma/state.go",
+    "github.com/ulikunitz/xz/lzma/treecodecs.go",
+    "github.com/ulikunitz/xz/lzma/writer.go",
+    "github.com/ulikunitz/xz/lzma/writer2.go",
+    "github.com/ulikunitz/xz/lzmafilter.go",
+    "github.com/ulikunitz/xz/make-docs",
+    "github.com/ulikunitz/xz/none-check.go",
+    "github.com/ulikunitz/xz/reader.go",
+    "github.com/ulikunitz/xz/writer.go",
     "go.yaml.in/yaml/v3/LICENSE",
     "go.yaml.in/yaml/v3/NOTICE",
     "go.yaml.in/yaml/v3/README.md",
@@ -9519,6 +9567,12 @@ github.com/failsafe-go/failsafe-go/internal/util
 github.com/failsafe-go/failsafe-go/policy
 github.com/failsafe-go/failsafe-go/priority
 github.com/failsafe-go/failsafe-go/retrypolicy
+# github.com/ulikunitz/xz v0.5.17
+## explicit; go 1.20
+github.com/ulikunitz/xz
+github.com/ulikunitz/xz/internal/hash
+github.com/ulikunitz/xz/internal/xlog
+github.com/ulikunitz/xz/lzma
 # go.yaml.in/yaml/v3 v3.0.5
 ## explicit; go 1.16
 go.yaml.in/yaml/v3
@@ -9542,6 +9596,8 @@ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZN
 github.com/stretchr/testify v1.2.2/go.mod h1:a8OnRcib4nhh0OaRAV+Yts87kKdq0PP7pXfy6kDkUVs=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
+github.com/ulikunitz/xz v0.5.17 h1:flR0y/x1hgM8EGV1AW3Xll6T413G0glV8UfBwR617V4=
+github.com/ulikunitz/xz v0.5.17/go.mod h1:H9Rt/W6/Qj27PGauhQc6nfCDy7vHpzsOThBSaYDoEhw=
 go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
 go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
 golang.org/x/net v0.28.0 h1:a9JDOJc5GMUJ0+UDqmLT86WiEy7iWyIhz8gz8E4e5hE=
@@ -9628,6 +9684,7 @@ fn check_go_mod(text: &str) -> Result<(), String> {
         "github.com/alexflint/go-scalar v1.2.0",
         "github.com/bits-and-blooms/bitset v1.24.4",
         "github.com/failsafe-go/failsafe-go v0.9.8",
+        "github.com/ulikunitz/xz v0.5.17",
         "go.yaml.in/yaml/v3 v3.0.5",
     ]
     .iter()
