@@ -69,7 +69,7 @@ CONTRACT=$(python3 "$PROJECT" contract-dir "$PREFIX") || die 'dsh: contract dire
 facts=$(python3 "$PROJECT" authorize "$PREFIX" --command "$COMMAND" --status-dir "$status_dir") ||
     die 'dsh: prefix, command or status destination is not authorized'
 base_pin=$(printf '%s\n' "$facts" | jq -er '.basePin') || die 'dsh: authorization returned no base pin'
-base_pnpm=$(python3 "$PNPM_SOURCE/read-pin-version.py" "$base_pin") || die 'dsh: cannot read the base pin'
+base_pnpm=$("$CONTRACT/recipe-contract" artifact-pin version "$base_pin") || die 'dsh: cannot read the base pin'
 want_dsh=$(jq -er '.dependencies["@deepseek-ai/dsh"]' "$PREFIX/package.json") ||
     die 'dsh: the committed manifest selects no dsh version'
 package_manager=$(jq -er '.packageManager' "$PREFIX/package.json") ||

@@ -6650,7 +6650,7 @@ fn agy_recipe_installs_through_the_shared_installer() {
 fn agy_hook_checks_the_pin_before_installing() {
     let hook = read_text("images/tools/agy/install-agy.sh");
     let pinned = hook
-        .find("read-pin-version.py")
+        .find("artifact-pin version")
         .expect("the hook reads the committed pin's version");
     let install = hook
         .find("install-artifact.sh")
@@ -9413,30 +9413,127 @@ fn check_opencode_parser_boundary(source: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The exact vendor closure: `modules.txt` plus the pinned module's files.
-const VENDOR_MODULE_FILES: [&str; 16] = [
-    "apic.go",
-    "decode.go",
-    "emitterc.go",
-    "encode.go",
-    "LICENSE",
-    "NOTICE",
-    "parserc.go",
-    "readerc.go",
-    "README.md",
-    "resolve.go",
-    "scannerc.go",
-    "sorter.go",
-    "writerc.go",
-    "yaml.go",
-    "yamlh.go",
-    "yamlprivateh.go",
+/// The exact vendor closure: `modules.txt` plus every file of the three reviewed
+/// modules. The module list, the checksum pin and the files are the provenance
+/// evidence: a vendored file nobody reviewed is a build input nobody reviewed.
+const VENDOR_MODULE_FILES: [&str; 66] = [
+    "github.com/bits-and-blooms/bitset/.gitignore",
+    "github.com/bits-and-blooms/bitset/.travis.yml",
+    "github.com/bits-and-blooms/bitset/LICENSE",
+    "github.com/bits-and-blooms/bitset/README.md",
+    "github.com/bits-and-blooms/bitset/SECURITY.md",
+    "github.com/bits-and-blooms/bitset/azure-pipelines.yml",
+    "github.com/bits-and-blooms/bitset/bitset.go",
+    "github.com/bits-and-blooms/bitset/bitset_iter.go",
+    "github.com/bits-and-blooms/bitset/pext.gen.go",
+    "github.com/bits-and-blooms/bitset/popcnt.go",
+    "github.com/bits-and-blooms/bitset/select.go",
+    "github.com/failsafe-go/failsafe-go/CHANGELOG.md",
+    "github.com/failsafe-go/failsafe-go/CONTRIBUTING.md",
+    "github.com/failsafe-go/failsafe-go/LICENSE",
+    "github.com/failsafe-go/failsafe-go/Makefile",
+    "github.com/failsafe-go/failsafe-go/README.md",
+    "github.com/failsafe-go/failsafe-go/VERSIONING.md",
+    "github.com/failsafe-go/failsafe-go/budget/budget.go",
+    "github.com/failsafe-go/failsafe-go/budget/doc.go",
+    "github.com/failsafe-go/failsafe-go/codecov.yml",
+    "github.com/failsafe-go/failsafe-go/common/doc.go",
+    "github.com/failsafe-go/failsafe-go/common/result.go",
+    "github.com/failsafe-go/failsafe-go/doc.go",
+    "github.com/failsafe-go/failsafe-go/events.go",
+    "github.com/failsafe-go/failsafe-go/execution.go",
+    "github.com/failsafe-go/failsafe-go/executor.go",
+    "github.com/failsafe-go/failsafe-go/internal/budget.go",
+    "github.com/failsafe-go/failsafe-go/internal/execution.go",
+    "github.com/failsafe-go/failsafe-go/internal/prioritizer.go",
+    "github.com/failsafe-go/failsafe-go/internal/util/assert.go",
+    "github.com/failsafe-go/failsafe-go/internal/util/average.go",
+    "github.com/failsafe-go/failsafe-go/internal/util/median.go",
+    "github.com/failsafe-go/failsafe-go/internal/util/quantile.go",
+    "github.com/failsafe-go/failsafe-go/internal/util/semaphore.go",
+    "github.com/failsafe-go/failsafe-go/internal/util/stats.go",
+    "github.com/failsafe-go/failsafe-go/internal/util/util.go",
+    "github.com/failsafe-go/failsafe-go/internal/util/windows.go",
+    "github.com/failsafe-go/failsafe-go/policy.go",
+    "github.com/failsafe-go/failsafe-go/policy/doc.go",
+    "github.com/failsafe-go/failsafe-go/policy/execution.go",
+    "github.com/failsafe-go/failsafe-go/policy/policy.go",
+    "github.com/failsafe-go/failsafe-go/policy/policyexecutor.go",
+    "github.com/failsafe-go/failsafe-go/priority/doc.go",
+    "github.com/failsafe-go/failsafe-go/priority/prioritizer.go",
+    "github.com/failsafe-go/failsafe-go/priority/priority.go",
+    "github.com/failsafe-go/failsafe-go/priority/usage.go",
+    "github.com/failsafe-go/failsafe-go/result.go",
+    "github.com/failsafe-go/failsafe-go/retrypolicy/doc.go",
+    "github.com/failsafe-go/failsafe-go/retrypolicy/retry.go",
+    "github.com/failsafe-go/failsafe-go/retrypolicy/retryexecutor.go",
+    "go.yaml.in/yaml/v3/LICENSE",
+    "go.yaml.in/yaml/v3/NOTICE",
+    "go.yaml.in/yaml/v3/README.md",
+    "go.yaml.in/yaml/v3/apic.go",
+    "go.yaml.in/yaml/v3/decode.go",
+    "go.yaml.in/yaml/v3/emitterc.go",
+    "go.yaml.in/yaml/v3/encode.go",
+    "go.yaml.in/yaml/v3/parserc.go",
+    "go.yaml.in/yaml/v3/readerc.go",
+    "go.yaml.in/yaml/v3/resolve.go",
+    "go.yaml.in/yaml/v3/scannerc.go",
+    "go.yaml.in/yaml/v3/sorter.go",
+    "go.yaml.in/yaml/v3/writerc.go",
+    "go.yaml.in/yaml/v3/yaml.go",
+    "go.yaml.in/yaml/v3/yamlh.go",
+    "go.yaml.in/yaml/v3/yamlprivateh.go",
 ];
 
-const VENDOR_MODULES_TXT: &str =
-    "# go.yaml.in/yaml/v3 v3.0.5\n## explicit; go 1.16\ngo.yaml.in/yaml/v3\n";
+const VENDOR_MODULES_TXT: &str = "\
+# github.com/bits-and-blooms/bitset v1.24.4
+## explicit; go 1.16
+github.com/bits-and-blooms/bitset
+# github.com/failsafe-go/failsafe-go v0.9.8
+## explicit; go 1.22
+github.com/failsafe-go/failsafe-go
+github.com/failsafe-go/failsafe-go/budget
+github.com/failsafe-go/failsafe-go/common
+github.com/failsafe-go/failsafe-go/internal
+github.com/failsafe-go/failsafe-go/internal/util
+github.com/failsafe-go/failsafe-go/policy
+github.com/failsafe-go/failsafe-go/priority
+github.com/failsafe-go/failsafe-go/retrypolicy
+# go.yaml.in/yaml/v3 v3.0.5
+## explicit; go 1.16
+go.yaml.in/yaml/v3
+";
 
-const VENDOR_GO_SUM: &str = "go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=\ngo.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=\n";
+const VENDOR_GO_SUM: &str = "\
+github.com/bits-and-blooms/bitset v1.24.4 h1:95H15Og1clikBrKr/DuzMXkQzECs1M6hhoGXLwLQOZE=
+github.com/bits-and-blooms/bitset v1.24.4/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
+github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
+github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+github.com/failsafe-go/failsafe-go v0.9.8 h1:NzahTEc+vg6FqCJV0Sy9mgwcaCemB81c8iSHWTF/urU=
+github.com/failsafe-go/failsafe-go v0.9.8/go.mod h1:wMKUFRbxxjWwvwhJttSiim9BaQssrlZV4lk0IwPkwUc=
+github.com/influxdata/tdigest v0.0.1 h1:XpFptwYmnEKUqmkcDjrzffswZ3nvNeevbUSLPP/ZzIY=
+github.com/influxdata/tdigest v0.0.1/go.mod h1:Z0kXnxzbTC2qrx4NaIzYkE1k66+6oEDQTvL95hQFh5Y=
+github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
+github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
+github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
+go.yaml.in/yaml/v3 v3.0.5 h1:N6y/pJk8buWs9NY5ERU2HSMfm+IuD/OtfdAnq6kESPw=
+go.yaml.in/yaml/v3 v3.0.5/go.mod h1:HVTZu1O7/Vkt2N+BFy8Zza+lnLsABggaTM2ZpNIGuKg=
+golang.org/x/net v0.28.0 h1:a9JDOJc5GMUJ0+UDqmLT86WiEy7iWyIhz8gz8E4e5hE=
+golang.org/x/net v0.28.0/go.mod h1:yqtgsTWOOnlGLG9GFRrK3++bGOUEkNBoHZc8MEDWPNg=
+golang.org/x/sys v0.24.0 h1:Twjiwq9dn6R1fQcyiK+wQyHWfaz/BJB+YIpzU/Cv3Xg=
+golang.org/x/sys v0.24.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
+golang.org/x/text v0.17.0 h1:XtiM5bkSOt+ewxlOE/aE/AKEHibwj/6gvWMl9Rsh0Qc=
+golang.org/x/text v0.17.0/go.mod h1:BuEKDfySbSR4drPmRPG/7iBdf8hvFMuRexcpahXilzY=
+google.golang.org/genproto/googleapis/rpc v0.0.0-20240814211410-ddb44dafa142 h1:e7S5W7MGGLaSu8j3YjdezkZ+m1/Nm0uRVRMEMGk26Xs=
+google.golang.org/genproto/googleapis/rpc v0.0.0-20240814211410-ddb44dafa142/go.mod h1:UqMtugtsSgubUsoxbuAoiCXvqvErP7Gf0so0mK9tHxU=
+google.golang.org/grpc v1.67.1 h1:zWnc1Vrcno+lHZCOofnIMvycFcc0QRGIzm9dhnDX68E=
+google.golang.org/grpc v1.67.1/go.mod h1:1gLDyUQU7CTLJI90u3nXZ9ekeghjeM7pTDZlqFNg2AA=
+google.golang.org/protobuf v1.36.4 h1:6A3ZDJHn/eNqc1i+IdefRzy/9PokBTPvcqMySR7NNIM=
+google.golang.org/protobuf v1.36.4/go.mod h1:9fA7Ob0pmnwhb644+1+CVWFRbNajQ6iRojtC/QF5bRE=
+gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+";
 
 /// The vendor tree is the whole dependency closure, so its file set, its module
 /// list, its checksum pin and its single importing package are the provenance
@@ -9446,7 +9543,7 @@ fn check_vendor_file_set(paths: &std::collections::BTreeSet<String>) -> Result<(
     let mut expected = std::collections::BTreeSet::new();
     expected.insert("modules.txt".to_string());
     for file in VENDOR_MODULE_FILES {
-        expected.insert(format!("go.yaml.in/yaml/v3/{file}"));
+        expected.insert(file.to_string());
     }
     if paths != &expected {
         return Err(format!(
@@ -9465,15 +9562,52 @@ fn check_go_sum(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The module pins in a go.mod, from the single-line form and from require
+/// blocks alike, sorted so the comparison does not depend on layout.
+fn module_pins(text: &str) -> Vec<String> {
+    let mut pins = Vec::new();
+    let mut in_block = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed == "require (" {
+            in_block = true;
+            continue;
+        }
+        if in_block {
+            if trimmed == ")" {
+                in_block = false;
+                continue;
+            }
+            if !trimmed.is_empty() {
+                pins.push(trimmed.to_string());
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("require ") {
+            pins.push(rest.to_string());
+        }
+    }
+    for pin in &mut pins {
+        if let Some((head, _)) = pin.split_once(" //") {
+            *pin = head.trim().to_string();
+        }
+    }
+    pins.sort();
+    pins
+}
+
 fn check_go_mod(text: &str) -> Result<(), String> {
-    let requires: Vec<&str> = text
-        .lines()
-        .filter(|line| line.trim_start().starts_with("require "))
-        .collect();
-    if requires != vec!["require go.yaml.in/yaml/v3 v3.0.5"] {
-        return Err(format!(
-            "go.mod requires exactly one pinned module: {requires:?}"
-        ));
+    let pins = module_pins(text);
+    let expected: Vec<String> = [
+        "github.com/bits-and-blooms/bitset v1.24.4",
+        "github.com/failsafe-go/failsafe-go v0.9.8",
+        "go.yaml.in/yaml/v3 v3.0.5",
+    ]
+    .iter()
+    .map(|pin| pin.to_string())
+    .collect();
+    if pins != expected {
+        return Err(format!("go.mod requires exactly the reviewed modules: {pins:?}"));
     }
     Ok(())
 }

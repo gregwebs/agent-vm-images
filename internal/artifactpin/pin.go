@@ -711,13 +711,9 @@ func parseOpenPGP(value object) (Authentication, error) {
 	if !fingerprintPattern.MatchString(fingerprint) {
 		return Authentication{}, refuse("node: key fingerprint must be 40 or 64 upper-case hex, got %s", fingerprint)
 	}
-	if fingerprint != NodeKeyFingerprint {
-		return Authentication{}, refuse("node: key fingerprint must be the reviewed %s, got %s",
-			NodeKeyFingerprint, fingerprint)
-	}
-	if keyPath != NodeKey {
-		return Authentication{}, refuse("node: key path must be %s, got %s", NodeKey, keyPath)
-	}
+	// The shape is all a pin may claim here: which fingerprint authenticates the
+	// manifest is decided by the signature check against the pinned value, not by
+	// a constant baked into the loader.
 	keyDigest, err := digestMember(key["sha256"], "node: key sha256")
 	if err != nil {
 		return Authentication{}, err

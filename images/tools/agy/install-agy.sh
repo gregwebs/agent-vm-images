@@ -13,6 +13,7 @@ set -eu
 version="${AGENT_VM_VERSION_AGY:?install-agy.sh needs AGENT_VM_VERSION_AGY}"
 source_dir="${AGENT_VM_AGY_SOURCE_DIR:?install-agy.sh needs AGENT_VM_AGY_SOURCE_DIR}"
 artifact_source="${ARTIFACT_SOURCE_DIR:-/tmp/artifact-source}"
+contract="${AGENT_VM_CONTRACT_DIR:-/tmp/recipe-contract}"
 arch="${AGENT_VM_AGY_ARCH:?install-agy.sh needs AGENT_VM_AGY_ARCH}"
 
 # Reject an embedded newline first: `grep` is line-oriented, so a multi-line value
@@ -41,8 +42,7 @@ esac
 
 # The pin is read through the shared validator, so a pin file the installer would
 # reject cannot select a version this hook then claims is pinned.
-pinned=$(PYTHONDONTWRITEBYTECODE=1 python3 "$artifact_source/artifacts/read-pin-version.py" \
-    "$source_dir/pin.json") || {
+pinned=$("$contract/recipe-contract" artifact-pin version "$source_dir/pin.json") || {
     echo "install-agy.sh: the committed agy pin is not readable" >&2
     exit 1
 }

@@ -239,24 +239,23 @@ func maxArchiveBytes(name Name) int64 {
 // MaxArchiveBytes is the ceiling for one archive of name.
 func MaxArchiveBytes(name Name) int64 { return maxArchiveBytes(name) }
 
-// MaxMemberBytes is the ceiling for one extracted member.
-func MaxMemberBytes(name Name) int64 {
-	if name == Agy {
-		return 512 << 20
+// ExactShape is the reviewed archive shape of a hash-only artifact: an archive
+// that carries a second member, or an ELF for another machine under a consistent
+// hash, is not the reviewed binary. Only agy has one; Node's and the GitHub CLI's
+// payloads are whole trees whose shape comes from the signed manifest instead.
+//
+// The digest covers the member mode too, so the reviewed mode is not a hole in
+// the hash: both channels can agree on an archive whose member is mode 0777, which
+// would publish a world-writable /usr/local/bin/agy that every guest UID runs.
+func ExactShape(name Name) (members []string, mode, ceiling int64, reviewed bool) {
+	switch name {
+	case Agy:
+		return []string{"antigravity"}, 0o755, 512 << 20, true
+	case Node, GH:
+		return nil, 0, 0, false
 	}
-	return 0
+	return nil, 0, 0, false
 }
-
-// ExactMembers is a hash-only artifact's reviewed archive shape: an archive that
-// carries a second member, or an ELF for another machine under a consistent
-// hash, is not the reviewed binary.
-var ExactMembers = map[Name][]string{Node: nil, GH: nil, Agy: {"antigravity"}}
-
-// ExactMemberModes is the reviewed mode for an EXACT_MEMBERS artifact. The digest
-// covers the archive's member mode too, so this is not a hole in the hash: both
-// channels can agree on an archive whose member is mode 0777, which would publish
-// a world-writable /usr/local/bin/agy that every guest UID runs.
-var ExactMemberModes = map[Name]int64{Node: 0, GH: 0, Agy: 0o755}
 
 // ELFMachines is the e_machine each platform's agy binary must declare.
 var ELFMachines = map[Name]map[Platform]uint16{

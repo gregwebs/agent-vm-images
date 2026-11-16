@@ -97,7 +97,9 @@ RUN apt-get update \
 ARG TARGETARCH
 RUN --mount=type=bind,source=install-artifact.sh,target=/tmp/artifact-source/install-artifact.sh,ro \
     --mount=type=bind,source=artifacts,target=/tmp/artifact-source/artifacts,ro \
+    --mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro \
     ARTIFACT_SOURCE_DIR=/tmp/artifact-source \
+    RECIPE_CONTRACT_HELPER=/tmp/recipe-contract/recipe-contract \
     bash /tmp/artifact-source/install-artifact.sh node \
         /tmp/artifact-source/artifacts/node.json "$TARGETARCH" \
  && bash /tmp/artifact-source/install-artifact.sh gh \

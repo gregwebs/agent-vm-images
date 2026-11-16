@@ -4,10 +4,10 @@
 #
 # No Docker and no network: `install-artifact.sh` is a recorder in a fixture
 # ARTIFACT_SOURCE_DIR and every agy binary is a fake on PATH. The real
-# `read-pin-version.py` and `artifact_pin.py` run against the committed agy pin,
-# so an exact-but-unpinned version is proved to be refused before anything is
-# fetched, and the real run-report.sh / `recipe-contract tool-access` are used
-# because status handling and the access audit are part of what is under test.
+# `recipe-contract` pin reader runs against the committed agy pin, so an
+# exact-but-unpinned version is proved to be refused before anything is fetched,
+# and the real run-report.sh / `recipe-contract tool-access` are used because
+# status handling and the access audit are part of what is under test.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -40,7 +40,6 @@ make_artifact_source() {
     local directory=$1
     mkdir -p "$directory/artifacts"
     chmod 0755 "$directory" "$directory/artifacts"
-    cp "$REPO_ROOT"/images/artifacts/*.py "$directory/artifacts/"
     cat >"$directory/install-artifact.sh" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >>"$FAKE_OPLOG"
@@ -59,7 +58,6 @@ new_hook_case() {
     chmod 0755 "$CASE" "$CASE/agy" "$CASE/artifacts" "$CASE/artifacts/artifacts"
     cp "$COMMITTED/pin.json" "$CASE/agy/pin.json"
     cp -R "$COMMITTED/evidence" "$CASE/agy/evidence"
-    cp "$SHARED_ARTIFACTS"/artifacts/*.py "$CASE/artifacts/artifacts/"
     cp "$SHARED_ARTIFACTS/install-artifact.sh" "$CASE/artifacts/"
     OPLOG="$CASE/invocations.log"
 }
@@ -74,6 +72,7 @@ run_hook() {
             "AGENT_VM_VERSION_AGY=${WANT-1.4.11}" \
             "AGENT_VM_AGY_SOURCE_DIR=$CASE/agy" \
             "ARTIFACT_SOURCE_DIR=$CASE/artifacts" \
+            "AGENT_VM_CONTRACT_DIR=$CONTRACT" \
             "AGENT_VM_AGY_ARCH=${ARCH-amd64}" \
             "FAKE_OPLOG=$OPLOG" \
             "$@" \
