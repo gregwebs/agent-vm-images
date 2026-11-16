@@ -11,7 +11,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 work="$(mktemp -d "${TMPDIR:-/tmp}/contracts-formatter.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
-lint_version=$(<"$ROOT/images/recipe-contract/golangci-lint.version")
+lint_version=$(<"$ROOT/golangci-lint.version")
 shim="$work/bin"
 mkdir "$shim"
 # Only the tools contracts.sh inspects before the gate are stubbed; the rest of
@@ -32,6 +32,12 @@ if [ "${1:-}" = env ] && [ "${2:-}" = GOROOT ]; then
     printf '%s\n' "$FAKE_GOROOT"
     exit 0
 fi
+# The gate resolves its package set with `go list`, so answer that the way the
+# real module root would.
+if [ "${1:-}" = list ]; then
+    printf '%s\n' "$FAKE_PACKAGE_DIR"
+    exit 0
+fi
 # The gate is the last thing before these; failing here bounds a passing run.
 case "${1:-}" in
     test) [ "$*" = 'test ./internal/buildcheck' ] && exit 0 ;;
@@ -40,6 +46,11 @@ esac
 exit 99
 SHIM
 chmod 0755 "$shim"/*
+# One package directory holding a Go file, so the formatter has something to be
+# asked about; the gate refuses an empty file list.
+package_dir="$work/package"
+mkdir -p "$package_dir"
+printf 'package fixture\n' >"$package_dir/fixture.go"
 goroot="$work/goroot"
 mkdir -p "$goroot/bin"
 # A clean formatter for the selected GOROOT; cases replace it.
@@ -56,10 +67,12 @@ contract_run() {
     contract_status=0
     : >"$work/go-log"
     if [ "$mode" = default ]; then
-        env PATH="$shim:$PATH" GO_LOG="$work/go-log" FAKE_GOROOT="$goroot" "$@" \
+        env PATH="$shim:$PATH" GO_LOG="$work/go-log" FAKE_GOROOT="$goroot" \
+            FAKE_PACKAGE_DIR="$package_dir" "$@" \
             bash "$ROOT/script/test/contracts.sh" >"$work/stdout" 2>"$work/stderr" || contract_status=$?
     else
-        env PATH="$shim:$PATH" GO_LOG="$work/go-log" FAKE_GOROOT="$goroot" "$@" \
+        env PATH="$shim:$PATH" GO_LOG="$work/go-log" FAKE_GOROOT="$goroot" \
+            FAKE_PACKAGE_DIR="$package_dir" "$@" \
             bash "$ROOT/script/test/contracts.sh" --guard-only >"$work/stdout" 2>"$work/stderr" || contract_status=$?
     fi
     contract_go_calls=$(cat "$work/go-log")
@@ -108,7 +121,8 @@ for mode in default guard-only; do
     case "$(cat "$work/stderr")" in
         *SHOULD-NOT-RUN*|*'formatter failed'*|*'missing formatter'*) fail "$mode/wrong-path: used the PATH gofmt" ;;
     esac
-    grep -qx 'vet ./...' "$work/go-log" || fail "$mode/wrong-path: go log: $(cat "$work/go-log")"
+    grep -qx 'vet ./internal/... ./images/...' "$work/go-log" ||
+        fail "$mode/wrong-path: go log: $(cat "$work/go-log")"
     echo "formatter gate control $mode passed"
 done
 echo 'contracts formatter gate controls passed'

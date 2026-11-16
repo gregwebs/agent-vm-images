@@ -3,15 +3,18 @@
 #
 # Compiles the helper with the host's Go toolchain and prints one absolute
 # composed-directory path. Pass it as a Docker named build context
-# (`--build-context recipe-contract-bin=PATH`) to replace the builder stage.
+# (`--build-context recipe-contract-bin=PATH`); it is the only way the helper
+# reaches an image build (ADR 0017).
 set -euo pipefail
 
 usage() {
     cat <<'HELP'
-usage: script/build/recipe-contract.sh [--native | --platform linux/ARCH[/v8] | --os linux|darwin --arch amd64|arm64]
+usage: script/build/recipe-contract.sh [--fresh] [--native | --platform linux/ARCH[/v8] | --os linux|darwin --arch amd64|arm64]
 
-Builds images/recipe-contract with the host Go toolchain and prints the absolute
-context root containing out/recipe-contract. Defaults: --os linux, host arch.
+Builds the recipe-contract helper with the host Go toolchain and prints the
+absolute context root containing out/recipe-contract. Defaults: --os linux, host
+arch. --fresh compiles even when RECIPE_CONTRACT_CONTEXT names a reusable
+context; a product or release build passes it, a fixture does not.
 Requires Go (GOTOOLCHAIN=auto may download the version go.mod selects).
 HELP
 }
@@ -23,8 +26,14 @@ os=linux
 arch=
 selection=explicit
 platform=
+fresh=false
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --fresh)
+            [ "$fresh" = false ] || invalid
+            fresh=true
+            shift
+            ;;
         --help)
             [ "$#" -eq 1 ] || invalid
             usage
@@ -96,6 +105,12 @@ esac
 # script is invoked as `bash recipe-contract.sh` from its own directory.
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 context="$root/target/recipe-contract/$os-$arch"
+
+# A product or release build owns what reaches the image, so it refuses the reuse
+# escape hatch below: an inherited context could be a stale or foreign helper.
+if [ "$fresh" = true ]; then
+    unset RECIPE_CONTRACT_CONTEXT
+fi
 
 # A caller may supply the composed directory it already holds: the owning run
 # built this platform before entering a restricted fixture environment, and a

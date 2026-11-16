@@ -2721,59 +2721,52 @@ fn phase_invocations(tool: &str) -> [(&'static str, String); 2] {
 const RECIPE_CONTRACT_MOUNT: &str =
     "--mount=from=recipe-contract-bin,source=/out,target=/tmp/recipe-contract,ro";
 
-/// The builder stage's pinned image and its two RUNs. Docker stages do not cross
-/// Dockerfiles, so base and standard each declare it; the declarations must stay
-/// byte-identical and the image version must be the one go.mod selects.
-fn check_recipe_contract_builder(text: &str) -> Result<(), String> {
-    let (stage, _) = recipe_contract_stages(text)?;
-    let image = stage
+/// The placeholder stage both product Dockerfiles declare. The helper is compiled
+/// on the host and supplied as a named build context (ADR 0017), so the products
+/// contain no Go compiler; the placeholder keeps an unsupplied context from
+/// resolving the registry image `docker.io/library/recipe-contract-bin`.
+fn check_recipe_contract_placeholder(text: &str) -> Result<(), String> {
+    let (stage, product) = recipe_contract_stages(text)?;
+    let declaration = stage
         .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(2))
-        .ok_or("the builder stage has no image")?;
-    if !image.contains("@sha256:") {
-        return Err("the Go builder image must be digest-pinned".into());
-    }
-    let (tag, digest) = image.split_once("@sha256:").ok_or("bad builder image")?;
-    if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("the Go builder digest must be 64 hex characters".into());
-    }
-    let declared = tag
-        .split(':')
-        .nth(1)
-        .ok_or("the Go builder image must declare a version tag")?;
-    let go_mod = read_text("images/recipe-contract/go.mod");
-    let toolchain = go_mod
-        .lines()
-        .find_map(|line| line.strip_prefix("toolchain go"))
-        .ok_or("go.mod must declare a toolchain directive")?
-        .trim();
-    // The tag carries the toolchain version plus a reviewed distro suffix.
-    if !declared.starts_with(&format!("{toolchain}-")) {
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect::<Vec<_>>();
+    if declaration != ["FROM scratch AS recipe-contract-bin"] {
         return Err(format!(
-            "builder image is {declared}, go.mod toolchain is {toolchain}"
+            "the placeholder stage must be `FROM scratch AS recipe-contract-bin`, got {declaration:?}"
         ));
     }
-    // go/version owns language/toolchain ordering in buildcheck. Both contracts
-    // modes run that test; this guard owns only the image declaration.
+    // A compiler in the recipe would put a Go toolchain back into the image path
+    // the host build is meant to own.
+    for block in [stage, product] {
+        for line in block.lines() {
+            if line.trim_start().to_ascii_lowercase().starts_with("from ")
+                && line.contains("golang")
+            {
+                return Err(format!("the recipe must not build Go in the image: {line}"));
+            }
+        }
+    }
     for required in [
         "AS recipe-contract-bin",
-        "ARG TARGETARCH",
-        "COPY recipe-contract/ ./",
-        "GOTOOLCHAIN=local GOWORK=off GOFLAGS= GOENV=off",
-        "go test -tags recipe_contract_image_compiler -run '^TestImageCompiler$' ./internal/buildcheck",
-        "GOOS=linux GOARCH=$TARGETARCH CGO_ENABLED=0 bash ./build.sh /out",
+        "the recipe-contract helper is missing from this build",
+        "bash images/build.sh",
     ] {
-        if !stage.contains(required) {
-            return Err(format!("builder stage misses {required}"));
+        if !text.contains(required) {
+            return Err(format!("the recipe misses {required}"));
         }
+    }
+    if !product.contains(RECIPE_CONTRACT_MOUNT) {
+        return Err("the product stage does not mount the supplied helper".into());
     }
     Ok(())
 }
 
-fn builder_stage(text: &str) -> &str {
-    let (block, _) = recipe_contract_stages(text).expect("builder/product stages");
-    // Trailing blank/comment lines belong to whatever follows the stage.
+/// The placeholder stage without the trailing blank and comment lines that belong
+/// to whatever follows it.
+fn placeholder_stage(text: &str) -> &str {
+    let (block, _) = recipe_contract_stages(text).expect("placeholder/product stages");
     let mut cut = block.len();
     for line in block.lines().rev() {
         let trimmed = line.trim();
@@ -2788,12 +2781,12 @@ fn builder_stage(text: &str) -> &str {
 
 fn recipe_contract_stages(text: &str) -> Result<(&str, &str), String> {
     let start = text
-        .find("FROM --platform=$BUILDPLATFORM golang:")
-        .ok_or("missing the recipe-contract builder stage")?;
+        .find("FROM scratch AS recipe-contract-bin")
+        .ok_or("missing the recipe-contract placeholder stage")?;
     let rest = &text[start..];
     let end = rest
         .find("\nFROM ")
-        .ok_or("the builder stage must precede a FROM")?;
+        .ok_or("the placeholder stage must precede a FROM")?;
     Ok((&rest[..end], &rest[end + 1..]))
 }
 
@@ -2804,43 +2797,43 @@ fn product_stage(text: &str) -> &str {
 }
 
 #[test]
-fn the_two_builder_declarations_agree_with_go_mod() {
+fn both_recipes_use_a_host_supplied_helper() {
     let base = read_text("images/Dockerfile");
     let standard = standard_dockerfile();
-    check_recipe_contract_builder(&base).unwrap();
-    check_recipe_contract_builder(&standard).unwrap();
+    check_recipe_contract_placeholder(&base).unwrap();
+    check_recipe_contract_placeholder(&standard).unwrap();
     assert_eq!(
-        builder_stage(&base),
-        builder_stage(&standard),
-        "the builder stage declarations must stay byte-identical"
+        placeholder_stage(&base),
+        placeholder_stage(&standard),
+        "the placeholder declarations must stay byte-identical"
     );
-    let go_mod = read_text("images/recipe-contract/go.mod");
-    let toolchain = go_mod
-        .lines()
-        .find_map(|line| line.strip_prefix("toolchain go"))
-        .expect("toolchain")
-        .trim();
-    let image_tag = format!("golang:{toolchain}-");
     for mutation in [
-        base.replacen(&image_tag, "golang:0.0.0-", 1),
-        base.replacen("@sha256:", "@sha256:00", 1),
-        base.replacen("GOARCH=$TARGETARCH", "GOARCH=amd64", 1),
-        base.replacen("GOTOOLCHAIN=local", "GOTOOLCHAIN=auto", 1),
-        base.replacen("COPY recipe-contract/", "COPY missing/", 1),
         base.replacen(
-            "go test -tags recipe_contract_image_compiler -run '^TestImageCompiler$' ./internal/buildcheck",
-            "true",
+            "FROM scratch AS recipe-contract-bin",
+            "FROM busybox:1 AS recipe-contract-bin",
             1,
         ),
+        base.replacen(
+            "the recipe-contract helper is missing from this build",
+            "not found",
+            1,
+        ),
+        base.replacen("bash images/build.sh", "docker build", 1),
+        base.replacen("AS recipe-contract-bin", "AS helper", 1),
     ] {
+        assert_ne!(mutation, base, "the mutation must change the recipe");
         assert!(
-            check_recipe_contract_builder(&mutation).is_err(),
-            "accepted builder mutation"
+            check_recipe_contract_placeholder(&mutation).is_err(),
+            "accepted a placeholder mutation"
         );
     }
-    let mismatched = base.replace(&image_tag, "golang:999.0.0-");
-    assert_ne!(mismatched, base);
-    assert!(check_recipe_contract_builder(&mismatched).is_err());
+    // A compiled-in builder is the shape this decision removed.
+    let reinstated = base.replacen(
+        "FROM scratch AS recipe-contract-bin",
+        "FROM golang:1.27.3-trixie AS recipe-contract-bin",
+        1,
+    );
+    assert!(check_recipe_contract_placeholder(&reinstated).is_err());
 }
 
 /// The converted helpers must not come back as Python, and no caller may invoke
@@ -2875,7 +2868,6 @@ const RETIRED_HELPERS: [&str; 2] = ["install-status.py", "check-tool-access.py"]
 
 const PARENT_INVENTORY: &str = "images/parent-pins.json";
 const DEBIAN_PIN: &str = "debian";
-const GO_PIN: &str = "golang-builder";
 const RELEASE_PIN: &str = "standard-release";
 const LOCAL_BASE: &str = "agent-vm-base:local";
 /// The trusted release identity, tied to `script/release/attestations.py`
@@ -3552,12 +3544,12 @@ fn parse_parent_inventory(text_source: &str) -> Result<ParentInventory, String> 
     let pin_values = object(&members["pins"], "pins")?;
     if let Some(unknown) = pin_values
         .keys()
-        .find(|name| !matches!(name.as_str(), DEBIAN_PIN | GO_PIN | RELEASE_PIN))
+        .find(|name| !matches!(name.as_str(), DEBIAN_PIN | RELEASE_PIN))
     {
         return Err(format!("unknown pin: {unknown}"));
     }
     let mut pins = BTreeMap::new();
-    for name in [DEBIAN_PIN, GO_PIN, RELEASE_PIN] {
+    for name in [DEBIAN_PIN, RELEASE_PIN] {
         let value = pin_values
             .get(name)
             .ok_or_else(|| format!("pin inventory is incomplete: {name}"))?;
@@ -3704,6 +3696,15 @@ fn local_base_for(path: &str) -> &'static str {
     }
 }
 
+/// A stage built on `scratch` is a placeholder for a host-supplied build context,
+/// not a parent: it has nothing to pin, so the inventory does not record it.
+fn parent_froms(instructions: Vec<FromInstruction>) -> Vec<FromInstruction> {
+    instructions
+        .into_iter()
+        .filter(|instruction| instruction.resolved_image != "scratch")
+        .collect()
+}
+
 /// The pin a resolved FROM image addresses, compared by repository identity.
 fn pin_for_image(image: &str) -> Option<&'static str> {
     let name = image.split('@').next().unwrap_or(image);
@@ -3713,7 +3714,6 @@ fn pin_for_image(image: &str) -> Option<&'static str> {
     };
     match repository {
         "debian" => Some(DEBIAN_PIN),
-        "golang" => Some(GO_PIN),
         "ghcr.io/gregwebs/agent-vm-standard" => Some(RELEASE_PIN),
         _ => None,
     }
@@ -3736,7 +3736,7 @@ fn check_recipe_parents(
         ));
     }
     for (path, source) in recipes {
-        let froms = parse_froms(source)?;
+        let froms = parent_froms(parse_froms(source)?);
         let specs = &inventory.recipes[path];
         if froms.len() != specs.len() {
             return Err(format!(
@@ -5214,45 +5214,6 @@ fn the_parent_inventory_pins_every_maintained_recipe() {
         }
         other => panic!("the Debian exception must be hash-only, got {other:?}"),
     }
-    let go = match &inventory.pins[GO_PIN] {
-        Pin::Official(pin) => pin,
-        Pin::Release(_) => panic!("the Go builder is an official image"),
-    };
-    assert_eq!(go.reference.repository.value(), "golang");
-    let toolchain = read_text("images/recipe-contract/go.mod")
-        .lines()
-        .find_map(|line| line.strip_prefix("toolchain go"))
-        .expect("go.mod declares a toolchain")
-        .trim()
-        .to_owned();
-    let wanted_tag = format!("{toolchain}-trixie");
-    assert_eq!(go.reference.tag.as_deref(), Some(wanted_tag.as_str()));
-    assert_eq!(
-        go.expected_source,
-        "https://github.com/docker-library/golang.git"
-    );
-    let major_minor = toolchain
-        .rsplit_once('.')
-        .map(|(major_minor, _)| major_minor)
-        .expect("the go.mod toolchain is an X.Y.Z release");
-    for platform in PLATFORMS {
-        let record = &go.platforms[platform];
-        let fragment = record
-            .source
-            .strip_prefix("https://github.com/docker-library/golang.git#")
-            .unwrap_or_else(|| panic!("{platform}: unexpected Go source {}", record.source));
-        let (fragment_revision, directory) = fragment.split_once(':').expect("revision:directory");
-        assert_eq!(
-            fragment_revision, record.revision.0,
-            "the fragment revision equals the annotation"
-        );
-        assert_eq!(
-            directory,
-            format!("{major_minor}/trixie"),
-            "the fragment directory tracks the tag"
-        );
-        assert!(is_rfc3339(&record.created));
-    }
     let release = match &inventory.pins[RELEASE_PIN] {
         Pin::Release(pin) => pin,
         Pin::Official(_) => panic!("the released standard image is a repository release"),
@@ -5385,7 +5346,6 @@ fn parent_inventory_blocks_reject_edits() {
     let inventory = parse_parent_inventory(&read_text(PARENT_INVENTORY)).unwrap();
     let recipes = maintained_recipes();
     let debian = inventory.pins[DEBIAN_PIN].reference().text();
-    let go = inventory.pins[GO_PIN].reference().text();
     let release = inventory.pins[RELEASE_PIN].reference().text();
     let mut mutations: Vec<(&str, BTreeMap<String, String>)> = Vec::new();
     for (label, path, from, to) in [
@@ -5409,12 +5369,6 @@ fn parent_inventory_blocks_reject_edits() {
                 "debianx:13-slim@{}",
                 debian.rsplit('@').next().unwrap_or_default()
             ),
-        ),
-        (
-            "inconsistent Go declaration",
-            "images/standard/Dockerfile",
-            go,
-            format!("golang:0.0.0-trixie@sha256:{}", "1".repeat(64)),
         ),
         (
             "local base replaced",
@@ -5598,8 +5552,8 @@ fn parent_inventory_blocks_reject_edits() {
         ),
         (
             "recipe entry",
-            "\"stage\": \"recipe-contract-bin\",".to_owned(),
-            "\"stage\": \"recipe-contract-bin\", \"stage\": \"recipe-contract-bin\",".to_owned(),
+            "\"local_base\": \"standard\"".to_owned(),
+            "\"stage\": null, \"local_base\": \"standard\"".to_owned(),
         ),
         (
             "apt gap record",
@@ -7008,16 +6962,12 @@ fn from_parsing_keeps_raw_and_resolved_forms() {
     let base = parse_froms(&read_text("images/Dockerfile")).unwrap();
     assert_eq!(base.len(), 2);
     assert_eq!(base[0].stage.as_deref(), Some("recipe-contract-bin"));
-    assert_eq!(base[0].platform.as_deref(), Some("$BUILDPLATFORM"));
-    // A documented `refresh-parent-pins.sh golang-builder golang:VERSION-trixie`
-    // moves the pin and the FROM together, so bind the parsed raw form to the
-    // inventory instead of to the toolchain that happens to be reviewed now.
-    assert_eq!(
-        base[0].raw_image,
-        inventory.pins[GO_PIN].reference().text(),
-        "the builder FROM must be the pinned Go parent"
-    );
+    // The placeholder is not a parent image, so it carries no platform flag and
+    // the inventory does not record it.
+    assert_eq!(base[0].platform, None);
+    assert_eq!(base[0].resolved_image, "scratch");
     assert_eq!(base[0].raw_image, base[0].resolved_image);
+    assert_eq!(parent_froms(base.clone()).len(), 1);
     assert_eq!(
         base[1].raw_image,
         inventory.pins[DEBIAN_PIN].reference().text(),
@@ -7154,6 +7104,9 @@ const BASE_INPUT_ROOTS: [&str; 11] = [
     "install-pnpm.sh",
     "install-zellij.sh",
     "pnpm",
+    // The wrappers a build mounts plus the recipe that compiles the helper. The
+    // implementation itself moved to ./internal with the root module (ADR 0017)
+    // and is outside this manifest.
     "recipe-contract",
     "verify-base-inputs.sh",
 ];
@@ -7498,6 +7451,10 @@ fn check_base_stamp_is_last_run(base: &str) -> Result<(), String> {
 
 /// The consumer check is the first thing the product stage does, so a base from
 /// other sources fails before any agent installation can succeed.
+/// The product stage does two things before any agent work: refuse a build without
+/// the host-supplied helper (the placeholder context is empty), then verify the
+/// inherited parent stamp. Anything else first would install against a base from
+/// other sources, or fail late with a bare "not found" from an installer.
 fn check_standard_verify_is_first_product_run(standard: &str) -> Result<(), String> {
     let instructions = dockerfile_instructions(standard);
     let Some(start) = instructions.iter().rposition(|instruction| {
@@ -7506,19 +7463,26 @@ fn check_standard_verify_is_first_product_run(standard: &str) -> Result<(), Stri
     }) else {
         return Err("the standard recipe no longer declares the product stage".into());
     };
-    let product = &instructions[start + 1..];
-    let Some(first) = product.iter().position(|instruction| {
-        matches!(
-            instruction.split_whitespace().next(),
-            Some("RUN" | "COPY" | "ADD")
-        )
-    }) else {
+    let product: Vec<&String> = instructions[start + 1..]
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                instruction.split_whitespace().next(),
+                Some("RUN" | "COPY" | "ADD")
+            )
+        })
+        .collect();
+    let [helper, stamp, ..] = product.as_slice() else {
         return Err("the product stage does no work".into());
     };
-    if !product[first].starts_with("RUN ") || !product[first].contains(BASE_VERIFIER) {
+    if !helper.starts_with("RUN ") || !helper.contains("recipe-contract-context") {
         return Err(format!(
-            "the parent stamp must be verified before any product work, found {}",
-            product[first]
+            "the product stage must first refuse a missing helper, found {helper}"
+        ));
+    }
+    if !stamp.starts_with("RUN ") || !stamp.contains(BASE_VERIFIER) {
+        return Err(format!(
+            "the parent stamp must be verified before any product work, found {stamp}"
         ));
     }
     Ok(())
@@ -8562,17 +8526,15 @@ impl HelperTree {
                 .expect("fixture directory");
             std::fs::copy(repo_path(file), &destination).expect("copy live file");
         }
-        let module = directory.join("images/recipe-contract");
-        std::fs::create_dir_all(&module).expect("fixture module");
-        for file in ["go.mod", "build.sh", "internal/cli/legacy_text.go"] {
-            let destination = module.join(file);
+        for file in [
+            "go.mod",
+            "images/recipe-contract/build.sh",
+            "internal/cli/legacy_text.go",
+        ] {
+            let destination = directory.join(file);
             std::fs::create_dir_all(destination.parent().expect("module parent"))
                 .expect("module directory");
-            std::fs::copy(
-                repo_path(&format!("images/recipe-contract/{file}")),
-                destination,
-            )
-            .expect("copy module file");
+            std::fs::copy(repo_path(file), destination).expect("copy module file");
         }
         Self { directory }
     }
@@ -8924,16 +8886,16 @@ fn check_standard_blocks(text: &str) -> Result<(), String> {
         .collect::<Vec<_>>()
         .join("\n")
         .replace("\\\n", " ");
-    // Two stages: the build-only helper compiler and the one product stage.
+    // Two stages: the host-supplied helper placeholder and the one product stage.
     if active
         .lines()
         .filter(|l| l.trim_start().starts_with("FROM "))
         .count()
         != 2
     {
-        return Err("standard must have the builder stage and one product stage".into());
+        return Err("standard must have the placeholder stage and one product stage".into());
     }
-    check_recipe_contract_builder(text)?;
+    check_recipe_contract_placeholder(text)?;
     for tool in RECIPES {
         for (phase, script) in phase_invocations(tool) {
             if !active.contains(&script) {
@@ -9518,7 +9480,7 @@ fn check_go_mod(text: &str) -> Result<(), String> {
 
 fn check_go_vendor_inventory() {
     use std::collections::BTreeSet;
-    let vendor = repo_path("images/recipe-contract/vendor");
+    let vendor = repo_path("vendor");
     fn inventory(root: &Path, directory: &Path, paths: &mut BTreeSet<String>) {
         for entry in std::fs::read_dir(directory).unwrap() {
             let entry = entry.unwrap();
@@ -9543,18 +9505,9 @@ fn check_go_vendor_inventory() {
     let mut actual = BTreeSet::new();
     inventory(&vendor, &vendor, &mut actual);
     assert_eq!(check_vendor_file_set(&actual), Ok(()));
-    assert_eq!(
-        read_text("images/recipe-contract/vendor/modules.txt"),
-        VENDOR_MODULES_TXT
-    );
-    assert_eq!(
-        check_go_sum(&read_text("images/recipe-contract/go.sum")),
-        Ok(())
-    );
-    assert_eq!(
-        check_go_mod(&read_text("images/recipe-contract/go.mod")),
-        Ok(())
-    );
+    assert_eq!(read_text("vendor/modules.txt"), VENDOR_MODULES_TXT);
+    assert_eq!(check_go_sum(&read_text("go.sum")), Ok(()));
+    assert_eq!(check_go_mod(&read_text("go.mod")), Ok(()));
     // Parse import metadata with Go: aliases, escaped and raw strings are all legal.
     let imports = std::process::Command::new("go")
         .args([
@@ -9565,7 +9518,7 @@ fn check_go_vendor_inventory() {
             "TestYAMLImport",
             "./internal/buildcheck",
         ])
-        .current_dir(repo_path("images/recipe-contract"))
+        .current_dir(repo_path(""))
         .output()
         .expect("run Go import boundary guard");
     assert!(
@@ -9592,8 +9545,8 @@ fn check_go_vendor_inventory() {
     assert!(check_go_mod("module x\n").is_err());
 
     for file in [
-        "images/recipe-contract/pnpmlock/compare.go",
-        "images/recipe-contract/internal/document/yaml.go",
+        "internal/pnpmlock/compare.go",
+        "internal/document/yaml.go",
         "script/test/pnpm-lock-inputs.mjs",
         "script/test/recipe-contract-vendor.sh",
     ] {
@@ -9616,8 +9569,8 @@ fn check_go_vendor_inventory() {
     }
     for recipe in ["images/Dockerfile", "images/standard/Dockerfile"] {
         let text = read_text(recipe);
-        // The single deliberate builder-stage COPY compiles the helper; it never
-        // appears in the product stage.
+        // The helper arrives as a build context, never as a COPY into the product
+        // stage.
         let product = product_stage(&text);
         assert_eq!(
             product.matches("COPY recipe-contract/").count(),
@@ -9671,7 +9624,7 @@ fn helper_scan_comments_preserve_shell_expansions() {
 
 #[test]
 fn go_dev_mirrors_the_module_lint_pin() {
-    let pin = read_text("images/recipe-contract/golangci-lint.version");
+    let pin = read_text("golangci-lint.version");
     let declaration = format!("ARG GOLANGCI_LINT_VERSION={}", pin.trim());
     let dockerfile = read_text("examples/layers/go-dev/Dockerfile");
     assert_eq!(

@@ -67,10 +67,14 @@ what you build:
   supplied through `docker build -f OTHER` are outside this guarantee. The normal
   `-f images/Dockerfile` path is covered, because the Dockerfile the identity
   mounts is the one the build used.
-- The inherited base stamp is trusted, and so is an externally supplied
-  host-helper context (`images/build.sh --host-helpers`). A forged or stale stamp
-  cannot attest descendant modifications; the stamp is a receipt the base wrote
-  about its own sources, never authentication of the image.
+- The inherited base stamp is trusted, and so is the host-built `recipe-contract`
+  helper the build receives as the `recipe-contract-bin` context. The helper is
+  compiled outside the build, so the base manifest lists what `images/` contributes
+  to it — the mounted wrappers and the recipe that runs the compiler — and not the
+  implementation, which lives in `./internal` under the root module (ADR 0017). A
+  change to that implementation moves neither the manifest nor the stamp. A forged
+  or stale stamp cannot attest descendant modifications either; the stamp is a
+  receipt the base wrote about its own sources, never authentication of the image.
 
 Say "pinned parent" or "this base's sources", never "all inputs" or "same image".
 

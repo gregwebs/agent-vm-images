@@ -25,13 +25,13 @@ timeout --version | grep -q 'GNU coreutils' || { echo 'GNU timeout required (mac
 command -v go >/dev/null || { echo 'missing prerequisite: go (install Go; go.mod selects the toolchain via GOTOOLCHAIN=auto)' >&2; exit 1; }
 # The module owns the linter pin, so this gate and the review notes cannot drift
 # from one another; installing the same version is CONTRIBUTING's job.
-lint_want=$(<"$ROOT/images/recipe-contract/golangci-lint.version")
+lint_want=$(<"$ROOT/golangci-lint.version")
 lint_version=$(golangci-lint --version 2>/dev/null | sed -n 's/.*has version \([^ ]*\) .*/\1/p') || lint_version=unknown
 [ "${lint_version:-}" = "$lint_want" ] || {
     echo "golangci-lint $lint_want required, got ${lint_version:-nothing} (bash script/dev/install-golangci-lint.sh)" >&2
     exit 1
 }
-contract_module="$ROOT/images/recipe-contract"
+contract_module="$ROOT"
 # The formatter must come from the toolchain the module selects, not from PATH:
 # an older gofmt there would silently reformat to a different style. Every step is
 # status-checked separately so a missing or failing formatter cannot pass on empty
@@ -45,9 +45,21 @@ formatter="$selected_goroot/bin/gofmt"
 # module copy whose only authenticator is the drift gate, so a formatter rewrite
 # would look like a local (reviewed) change. The file list is passed explicitly
 # because `-l .` walks vendor/.
+# The module is the repository root, which also holds ignored scratch (target/)
+# and the self-contained example modules, so the package set is named explicitly
+# instead of `./...`. go list resolves it, which keeps new directories included
+# as long as they belong to one of these roots.
+go_packages=(./internal/... ./images/...)
+if package_dirs=$(cd "$contract_module" && GOTOOLCHAIN=auto go list -f '{{.Dir}}' "${go_packages[@]}"); then :; else
+    status=$?; echo 'cannot list the module packages' >&2; exit "$status"
+fi
 format_files=()
-while IFS= read -r -d '' format_file; do format_files+=("$format_file"); done \
-    < <(cd "$contract_module" && find . -path ./vendor -prune -o -name '*.go' -print0)
+while IFS= read -r format_dir; do
+    [ -n "$format_dir" ] || continue
+    while IFS= read -r -d '' format_file; do format_files+=("$format_file"); done \
+        < <(find "$format_dir" -maxdepth 1 -name '*.go' -print0)
+done <<<"$package_dirs"
+[ "${#format_files[@]}" -gt 0 ] || { echo 'cannot list Go files to format' >&2; exit 1; }
 if format_output=$(cd "$contract_module" && "$formatter" -l ${format_files+"${format_files[@]}"}); then :; else
     status=$?; echo "formatter failed: $formatter (status $status)" >&2; exit "$status"
 fi
@@ -55,8 +67,8 @@ fi
 (cd "$contract_module" && GOTOOLCHAIN=auto go test ./internal/buildcheck)
 # Vendor mode: dependencies are committed, so the gates never reach a module
 # proxy. A missing vendor tree fails here instead of downloading.
-(cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go vet ./...)
-(cd "$contract_module" && golangci-lint run)
+(cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go vet "${go_packages[@]}")
+(cd "$contract_module" && golangci-lint run "${go_packages[@]}")
 # The composed helper is shared by every suite below and by the Rust graph guard,
 # so it is built once here: after the lint gates, because the formatter suite
 # replaces `go` and must stop at vet.
@@ -74,7 +86,7 @@ elif [ "${GITHUB_ACTIONS:-}" = true ]; then echo 'dash required on CI for #!/bin
 else posix_sh='sh'; echo 'note: dash not on PATH; #!/bin/sh syntax checked with sh -n' >&2
 fi
 if [ "$guard_only" = false ]; then
-    (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test ./...)
+    (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test "${go_packages[@]}")
     # Regeneration-plus-diff is the vendor drift gate: `go mod vendor` does not
     # authenticate edits to the committed tree and `go mod verify` never reads it.
     # It downloads through GOPROXY/GOSUMDB, so it is default-mode only.

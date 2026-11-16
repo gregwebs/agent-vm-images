@@ -76,9 +76,19 @@ def main() -> int:
         for key in ('GITHUB_TOKEN', 'GH_TOKEN', 'PUBLISH_TOKEN', 'GHCR_PACKAGE_INVENTORY_TOKEN'):
             env.pop(key, None)
         watchdog = ['python3', str(op.ROOT / 'script/test/host-watchdog.py')]
+        # The helper is compiled on this host and reaches both recipes as a named
+        # build context; the product Dockerfiles carry no Go compiler (ADR 0017).
+        # --fresh: a release build owns the helper bytes it ships, so an inherited
+        # RECIPE_CONTRACT_CONTEXT must not stand in for the compile.
+        helper = op.run(['bash', str(op.ROOT / 'script/build/recipe-contract.sh'), '--fresh',
+                         '--os', 'linux', '--arch', arch], env=env, timeout=1800).decode().strip()
+        if not helper:
+            raise ValueError('the recipe-contract adapter printed no build context')
+        helper_context = ['--build-context', 'recipe-contract-bin=' + helper]
         op.public_build(
             watchdog + ['10800', 'docker', 'build', '--builder', builder, '--platform', 'linux/' + arch,
-                        '-t', base, '-f', str(op.ROOT / 'images/Dockerfile'), str(op.ROOT / 'images')],
+                        '-t', base, *helper_context,
+                        '-f', str(op.ROOT / 'images/Dockerfile'), str(op.ROOT / 'images')],
             output=scratch / 'base-build.log', env=env, timeout=10860)
         # The base records any persisted build CA in a label; a public release
         # must not carry that trust material. Inspection failure fails closed.
@@ -92,6 +102,7 @@ def main() -> int:
                         '--label', 'org.opencontainers.image.version=' + args.version,
                         '--label', 'org.opencontainers.image.revision=' + sha,
                         '--label', 'org.opencontainers.image.source=' + c.SOURCE,
+                        *helper_context,
                         '--output', f'type=oci,dest={layout},tar=false,compression=gzip',
                         '-f', str(op.ROOT / 'images/standard/Dockerfile'), str(op.ROOT / 'images')],
             output=scratch / 'standard-build.log', env=env, timeout=10860)

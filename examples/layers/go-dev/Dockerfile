@@ -52,7 +52,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential python3 \
  && rm -rf /var/lib/apt/lists/*
 
-# Pins. The lint version mirrors images/recipe-contract/golangci-lint.version
+# Pins. The lint version mirrors the repository root golangci-lint.version
 # (guarded by image-sources); the standalone example context cannot read that
 # repository file during a build. The pin and its verification stay together:
 # install-go.sh and install-golangci-lint.sh each check their prebuilt tarball
