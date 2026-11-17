@@ -2464,7 +2464,6 @@ fn exact_image_install_hooks_exist() {
         "claude/install-claude.sh",
         "claude/verify-claude.sh",
         "claude/setup-claude.sh",
-        "claude/claude_pin.py",
         "claude/vendor/install.sh",
         "copilot/install-copilot.sh",
         "copilot/verify-copilot.sh",
@@ -10687,15 +10686,15 @@ fn codex_recipe_mutations_are_refused() {
 // `images/tools/claude/pin.json` is the reviewed selection of one exact Claude
 // Code release: the signed manifest and its detached signature as committed
 // evidence, the release signing key, and per Linux architecture the executable
-// URL, SHA-256 and byte size. The loader (`images/tools/claude/claude_pin.py`)
+// URL, SHA-256 and byte size. The loader (`recipe-contract claude-pin`, ADR 0017)
 // verifies the signature; this gate re-derives the identity independently from
 // the pin (canonical URLs, the reviewed signer, the exact key sets) and requires
 // the recipe to install from a read-only committed source, place the verified
 // bytes, and run the native step in a separate `RUN --network=none`.
 //
 // What it cannot re-derive is a hash or a signature: no SHA-256 or OpenPGP
-// implementation lives in this crate, so evidence bytes are bound by the Python
-// loader and by `script/test/claude-pins.py`.
+// implementation lives in this crate, so evidence bytes are bound by the Go loader
+// and by `script/test/claude-pins.py`.
 
 const CLAUDE_PIN: &str = "images/tools/claude/pin.json";
 const CLAUDE_BASE: &str = "https://downloads.claude.ai/claude-code-releases/";
@@ -11107,7 +11106,6 @@ fn claude_pin_names_the_reviewed_signer_and_both_platforms() {
     }
     for relative in [
         CLAUDE_PIN,
-        "images/tools/claude/claude_pin.py",
         "images/tools/claude/setup-claude.sh",
         "images/tools/claude/claude-code-release-key.asc",
         "images/tools/claude/evidence/manifest.json",

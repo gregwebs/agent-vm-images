@@ -17,9 +17,12 @@ fi
 # The classified download helper lives in the bind-mounted recipe contract.
 : "${AGENT_VM_CONTRACT_DIR:?the claude installer needs AGENT_VM_CONTRACT_DIR}"
 
-# The committed pin is the selection authority (images/tools/claude/claude_pin.py,
+# The committed pin is the selection authority (recipe-contract claude-pin,
 # ADR 0013). No default: a direct run without it fails before any download.
 : "${CLAUDE_PIN_DIR:?the claude installer needs CLAUDE_PIN_DIR (the committed pin directory)}"
+# The reader is the image's own recipe-contract (ADR 0017): the pin directory holds
+# reviewed bytes only, never a program.
+CLAUDE_PIN_CONTRACT="$AGENT_VM_CONTRACT_DIR/recipe-contract"
 
 # Refuse to run under sudo from a regular user's shell. This installer puts
 # everything under $HOME, which under sudo typically resolves to root's home:
@@ -112,7 +115,7 @@ if [ -e "$launcher" ] || [ -L "$launcher" ] || { [ -d "$versions_dir" ] && [ -n 
 fi
 
 version="$TARGET"
-selection=$(python3 "$CLAUDE_PIN_DIR/claude_pin.py" select --pin-dir "$CLAUDE_PIN_DIR" \
+selection=$("$CLAUDE_PIN_CONTRACT" claude-pin select --pin-dir "$CLAUDE_PIN_DIR" \
     --version "$version" --platform "$platform")
 read -r url checksum size <<EOF
 $selection
@@ -147,7 +150,7 @@ if ! checksum_matches "$binary_path" "$checksum"; then
 fi
 # The digest proves which bytes these are, not that they are the expected
 # executable: the ELF preflight runs before anything is placed.
-if ! python3 "$CLAUDE_PIN_DIR/claude_pin.py" preflight --pin-dir "$CLAUDE_PIN_DIR" \
+if ! "$CLAUDE_PIN_CONTRACT" claude-pin preflight --pin-dir "$CLAUDE_PIN_DIR" \
     --version "$version" --platform "$platform" "$binary_path"; then
     rm -f "$binary_path"
     exit 1
@@ -160,7 +163,8 @@ mkdir -p "$versions_dir" "${launcher%/*}"
 chmod 0755 "$binary_path"
 mv "$binary_path" "$installed"
 ln -s "$installed" "$launcher"
-python3 "$CLAUDE_PIN_DIR/claude_pin.py" installed --pin-dir "$CLAUDE_PIN_DIR" --version "$version" \
-    --platform "$platform" --prefix "$HOME" --owner "$(id -u):$(id -g)"
+"$CLAUDE_PIN_CONTRACT" claude-pin installed --pin-dir "$CLAUDE_PIN_DIR" \
+    --version "$version" --platform "$platform" --prefix "$HOME" \
+    --owner "$(id -u):$(id -g)"
 echo ""
 echo "✅ Claude Code $version placed; native setup runs offline next."

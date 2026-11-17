@@ -1,4 +1,4 @@
-package artifactwriter
+package publication
 
 import (
 	"encoding/json"
@@ -27,6 +27,10 @@ import (
 // order, and a retained work directory plus `recovery.json` when a restore fails so
 // nothing is guessed afterwards.
 type Transaction struct {
+	// Prefix is the program's contract prefix on every diagnostic line. It is
+	// frozen per writer: the suites read those lines to find retained recovery
+	// material.
+	Prefix string
 	// Root is the repository the destinations are relative to.
 	Root string
 	// Work is this invocation's scratch directory, absolute before anything is
@@ -442,7 +446,7 @@ func (t *Transaction) diagnose(format string, args ...any) {
 	if t.Stderr == nil {
 		return
 	}
-	_, _ = fmt.Fprintf(t.Stderr, Prefix+format+"\n", args...)
+	_, _ = fmt.Fprintf(t.Stderr, t.Prefix+format+"\n", args...)
 }
 
 func relativeTo(root, path string) (string, error) {
@@ -504,42 +508,18 @@ func symlinked(root, destination string) string {
 	return ""
 }
 
+// SortedStrings orders values for a diagnostic, so a refusal names the same paths
+// in the same order on every host.
+func SortedStrings(values []string) []string {
+	sorted := append([]string(nil), values...)
+	sortStrings(sorted)
+	return sorted
+}
+
 func sortStrings(values []string) {
 	for index := 1; index < len(values); index++ {
 		for place := index; place > 0 && values[place] < values[place-1]; place-- {
 			values[place], values[place-1] = values[place-1], values[place]
 		}
 	}
-}
-
-// publish stages the requested files as one transaction.
-func (c *Client) publish(staged []stagedFile, owner string) int {
-	work, err := os.MkdirTemp(c.Env.TempRoot, "pin-artifact.")
-	if err != nil {
-		c.diagnose("cannot create a work directory (%s); sources unchanged", err)
-		return 1
-	}
-	if absolute, err := filepath.Abs(work); err == nil {
-		work = absolute
-	}
-	transaction := &Transaction{Root: c.Env.Root, Work: work, Stderr: stderrFile(c.Err)}
-	for _, entry := range staged {
-		transaction.Destinations = append(transaction.Destinations,
-			filepath.Join(c.Env.Root, entry.Path))
-	}
-	for _, entry := range staged {
-		transaction.Staged = append(transaction.Staged, entry.Raw)
-	}
-	return transaction.Run(owner)
-}
-
-// stderrFile is the *os.File the signal handler can still write to. A caller that
-// gave us a buffer (the tests) gets no signal output, which is why the handler
-// writes through the same field.
-func stderrFile(errOut any) *os.File {
-	file, ok := errOut.(*os.File)
-	if !ok {
-		return nil
-	}
-	return file
 }

@@ -28,6 +28,7 @@ import (
 
 	"github.com/gregwebs/agent-vm-images/internal/artifactpin"
 	"github.com/gregwebs/agent-vm-images/internal/fetch"
+	"github.com/gregwebs/agent-vm-images/internal/publication"
 )
 
 // Prefix is frozen: three suites read these lines to find the retained recovery
@@ -230,7 +231,14 @@ func (c *Client) Refresh(ctx context.Context, options Options) int {
 			c.diagnose("would publish %s", entry.Path)
 		}
 	}
-	status := c.publish(staged, "")
+	status := publication.Publish(publication.Request{
+		Prefix:     Prefix,
+		Root:       c.Env.Root,
+		TempRoot:   c.Env.TempRoot,
+		TempPrefix: "pin-artifact.",
+		Stderr:     publication.StderrOf(c.Err),
+		Files:      staged,
+	})
 	if status != 0 {
 		return status
 	}
@@ -239,13 +247,7 @@ func (c *Client) Refresh(ctx context.Context, options Options) int {
 	return 0
 }
 
-// stagedFile is one destination of the transaction, in publication order.
-type stagedFile struct {
-	Path string
-	Raw  []byte
-}
-
-func stringsJoined(staged []stagedFile) string {
+func stringsJoined(staged []publication.Staged) string {
 	paths := make([]string, 0, len(staged))
 	for _, entry := range staged {
 		paths = append(paths, entry.Path)

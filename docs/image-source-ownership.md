@@ -93,11 +93,12 @@ Three agent selections are content pins rather than version ARGs alone.
   [ADR 0009](adr/0009-codex-payload-pins.md).
 - **Claude** (`images/tools/claude/`): the pin, its two evidence files (the signed
   manifest and its detached signature), the **hand-committed** release key,
-  `claude_pin.py`, the three hooks (`install-claude.sh`, `setup-claude.sh`,
-  `verify-claude.sh`) and the vendored installer. `script/dev/pin-claude.py` is the
-  only writer of the generated files — the pin, both evidence files and the
-  Dockerfile ARG. Nothing writes the key, the hooks or `claude_pin.py`: a key
-  change is a reviewed diff, never a tool output. `images/tools/claude/` is **not**
+  the three hooks (`install-claude.sh`, `setup-claude.sh`, `verify-claude.sh`) and
+  the vendored installer. The reader is the image's own `recipe-contract
+  claude-pin` (ADR 0017), so the pin directory carries reviewed bytes only.
+  `script/dev/pin-claude.sh` is the only writer of the generated files — the pin,
+  both evidence files and the Dockerfile ARG. Nothing writes the key, the hooks or
+  the reader: a key change is a reviewed diff, never a tool output. `images/tools/claude/` is **not**
   a base input. See [ADR 0013](adr/0013-claude-native-payload-pin.md).
 - **`agy`** (`images/tools/agy/`): the `hash-only` pin, its three evidence files,
   the hand-written hook and verifier, and `ARG AGENT_VERSION_AGY`.
@@ -220,7 +221,6 @@ READMEs may be adapted to their new owner):
 - `images/tools/claude/verify-claude.sh`
 - `images/tools/claude/seed-claude-plugins.sh`
 - `images/tools/claude/pin.json`
-- `images/tools/claude/claude_pin.py`
 - `images/tools/claude/claude-code-release-key.asc`
 - `images/tools/claude/evidence/manifest.json`
 - `images/tools/claude/evidence/manifest.json.sig`

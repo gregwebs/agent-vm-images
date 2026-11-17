@@ -123,6 +123,7 @@ run_install() {
         env -i \
             "PATH=$GPGBIN:$PYTHON_DIR:/usr/bin:/bin" \
             "AGENT_VM_VENDOR_DIR=$CASE/vendor" \
+            "AGENT_VM_CONTRACT_DIR=$CONTRACT" \
             "AGENT_VM_CLAUDE_PREFIX=$CASE/prefix" \
             "AGENT_VM_FIXTURE_ROOT=$CASE" \
             "AGENT_VM_CLAUDE_SOURCE_DIR=$source_dir" \

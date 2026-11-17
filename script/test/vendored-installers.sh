@@ -400,7 +400,7 @@ run_claude() { # $1 slot, $2 vendor dir
         "PATH=$CASE/bin:$CASE/pybin:$CLAUDE_GPGBIN:/usr/bin:/bin"
         "HOME=$CASE"
         "TMPDIR=$CASE/tmp"
-        "AGENT_VM_CONTRACT_DIR=$CONTRACT"
+        "AGENT_VM_CONTRACT_DIR=$CLAUDE_CONTRACT"
         "AGENT_VM_VENDOR_DIR=$2"
         "AGENT_VM_CLAUDE_SOURCE_DIR=$CASE/source"
         "AGENT_VM_CLAUDE_PREFIX=$CASE/prefix"

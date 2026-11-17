@@ -11,15 +11,16 @@ import (
 	"strings"
 
 	"github.com/gregwebs/agent-vm-images/internal/artifactpin"
+	"github.com/gregwebs/agent-vm-images/internal/publication"
 	"github.com/ulikunitz/xz"
 )
 
 // resolve fetches, verifies and renders one release. Nothing is written outside
 // the work directory: the returned files are what the transaction may publish.
-func (c *Client) resolve(ctx context.Context, options Options, key, work string) ([]stagedFile, error) {
+func (c *Client) resolve(ctx context.Context, options Options, key, work string) ([]publication.Staged, error) {
 	review := artifactpin.Review{VerifiedOn: c.Now().UTC().Format("2006-01-02")}
 	review.Archives = map[artifactpin.Platform]artifactpin.Archive{}
-	evidence := []stagedFile{}
+	evidence := []publication.Staged{}
 	switch options.Name {
 	case artifactpin.Node:
 		openpgp, manifest, bundled, err := c.resolveNode(ctx, options.Version, key, work, review.Archives)
@@ -28,7 +29,7 @@ func (c *Client) resolve(ctx context.Context, options Options, key, work string)
 		}
 		review.OpenPGP = openpgp
 		review.Bundled = map[string]artifactpin.Version{"npm": bundled}
-		evidence = []stagedFile{{Path: filepath.Join("images", "artifacts", string(artifactpin.NodeKey)), Raw: manifest}}
+		evidence = []publication.Staged{{Path: filepath.Join("images", "artifacts", string(artifactpin.NodeKey)), Raw: manifest}}
 	case artifactpin.GH:
 		sigstore, bundles, err := c.resolveGH(ctx, options.Version, work, review.Archives)
 		if err != nil {
@@ -57,7 +58,7 @@ func (c *Client) resolve(ctx context.Context, options Options, key, work string)
 	if err != nil {
 		return nil, err
 	}
-	staged := []stagedFile{{
+	staged := []publication.Staged{{
 		Path: filepath.Join("images", "artifacts", options.Name.String()+".json"),
 		Raw:  raw,
 	}, {Path: filepath.Join("images", "Dockerfile"), Raw: []byte(labelled)}}
@@ -274,10 +275,10 @@ func bundledNPM(archive []byte, filename string) (artifactpin.Version, error) {
 // resolveGH cross-checks the release checksums and verifies the Sigstore bundle
 // with the policy the pin records.
 func (c *Client) resolveGH(ctx context.Context, version artifactpin.Version, work string,
-	archives map[artifactpin.Platform]artifactpin.Archive) (*artifactpin.Sigstore, []stagedFile, error) {
+	archives map[artifactpin.Platform]artifactpin.Archive) (*artifactpin.Sigstore, []publication.Staged, error) {
 	checksumsURL := artifactpin.ChecksumsURL(artifactpin.GH, version)
 	var checksums []byte
-	bundles := []stagedFile{}
+	bundles := []publication.Staged{}
 	for _, platform := range artifactpin.Platforms {
 		rawURL := artifactpin.CanonicalURL(artifactpin.GH, version, platform)
 		archive, err := c.Fetch.Get(ctx, rawURL, artifactpin.MaxArchiveBytes(artifactpin.GH))
@@ -308,7 +309,7 @@ func (c *Client) resolveGH(ctx context.Context, version artifactpin.Version, wor
 			return nil, nil, err
 		}
 		bundleName := artifactpin.BundleName(artifactpin.GH, version, platform)
-		bundles = append(bundles, stagedFile{
+		bundles = append(bundles, publication.Staged{
 			Path: filepath.Join("images", "artifacts", bundleName),
 			Raw:  bundle,
 		})

@@ -1,4 +1,4 @@
-package artifactwriter
+package publication
 
 import (
 	"bytes"
@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // fixture is a throwaway repository root with three destinations, two of which
@@ -52,6 +53,7 @@ func (f *fixture) staged() [][]byte {
 
 func (f *fixture) transaction(work string) *Transaction {
 	transaction := &Transaction{
+		Prefix:       "pin-artifact: ",
 		Root:         f.root,
 		Work:         work,
 		Stderr:       os.Stderr,
@@ -99,6 +101,12 @@ func failOn(transaction *Transaction, name string, signal os.Signal, once *bool)
 				if err := syscall.Kill(os.Getpid(), signal.(syscall.Signal)); err != nil {
 					return err
 				}
+				// The interrupt and the failing write are two goroutines, and the
+				// handler must record the signal before this one reports its error or
+				// the run exits 1 as if nothing had interrupted it. A real Ctrl-C is
+				// microseconds ahead of the write it lands in; a loaded CI runner
+				// schedules the handler late, so the case waits for it explicitly.
+				time.Sleep(200 * time.Millisecond)
 			}
 			return os.ErrInvalid
 		}
@@ -274,6 +282,7 @@ func signalChild() int {
 	root := os.Getenv("ARTIFACTWRITER_SIGNAL_ROOT")
 	work := os.Getenv("ARTIFACTWRITER_SIGNAL_WORK")
 	transaction := &Transaction{
+		Prefix: "pin-artifact: ",
 		Root:   root,
 		Work:   work,
 		Stderr: os.Stderr,

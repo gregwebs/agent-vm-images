@@ -16,6 +16,7 @@
 set -eu
 
 VENDOR="${AGENT_VM_VENDOR_DIR:-/opt/agent-vm/recipe-vendor}"
+CONTRACT="${AGENT_VM_CONTRACT_DIR:-/tmp/recipe-contract}"
 # Production prefix is the native installer's $HOME. The seam lets the host
 # black-box test point at a temp root; production always uses the default.
 prefix="${AGENT_VM_CLAUDE_PREFIX:-/opt/agent}"
@@ -23,11 +24,12 @@ version="${AGENT_VM_VERSION_CLAUDE:?install-claude.sh needs AGENT_VM_VERSION_CLA
 receipt="${AGENT_VM_TRANSPORT_RECEIPT:-}"
 status_dir="${AGENT_VM_INSTALL_STATUS_DIR:-/opt/agent-vm/install-status}"
 
-# The committed closure (pin.json, its evidence, the release key and
-# claude_pin.py) lives in the claude source directory. Production mounts it beside
-# this hook; the explicit seam is what keeps a hook-only mount from silently
-# pinning nothing. There is no ambient override for the pin contents, the expected
-# digest, the URL or the signer policy: the directory is the whole input.
+# The committed closure (pin.json, its evidence and the release key) lives in the
+# claude source directory. Production mounts it beside this hook; the explicit seam
+# is what keeps a hook-only mount from silently pinning nothing. There is no ambient
+# override for the pin contents, the expected digest, the URL or the signer policy:
+# the directory is the whole input, and the reader is this image's own
+# recipe-contract (ADR 0017).
 if [ -n "${AGENT_VM_CLAUDE_SOURCE_DIR:-}" ]; then
     pin_dir="$AGENT_VM_CLAUDE_SOURCE_DIR"
 else
@@ -36,7 +38,7 @@ else
         *) pin_dir="." ;;
     esac
 fi
-[ -r "$pin_dir/pin.json" ] && [ -r "$pin_dir/claude_pin.py" ] || {
+[ -r "$pin_dir/pin.json" ] || {
     echo "install-claude.sh: no committed Claude pin at $pin_dir" >&2
     exit 1
 }
@@ -106,13 +108,18 @@ fi
 # An exact but unpinned version is refused here, before the vendored installer
 # runs and therefore before any download. `check` verifies the committed evidence,
 # the signature and the signed manifest for exactly this version.
-if ! python3 "$pin_dir/claude_pin.py" check --pin-dir "$pin_dir" --version "$version"; then
+if ! "$CONTRACT/recipe-contract" claude-pin check --pin-dir "$pin_dir" \
+    --version "$version"; then
     echo "install-claude.sh: the committed Claude pin does not cover '$version'" >&2
     exit 1
 fi
 
 HOME=$prefix
 export HOME
+# The vendored installer reads the closure through the image's own reader, so it
+# needs the composed contract directory in its environment.
+AGENT_VM_CONTRACT_DIR="$CONTRACT"
+export AGENT_VM_CONTRACT_DIR
 # The verified bytes are the selection; the vendored installer reads them through
 # this directory and nowhere else.
 CLAUDE_PIN_DIR="$pin_dir"

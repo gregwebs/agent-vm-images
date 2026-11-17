@@ -34,7 +34,7 @@ else
         *) pin_dir="." ;;
     esac
 fi
-[ -r "$pin_dir/pin.json" ] && [ -r "$pin_dir/claude_pin.py" ] || {
+[ -r "$pin_dir/pin.json" ] || {
     echo "setup-claude.sh: no committed Claude pin at $pin_dir" >&2
     exit 1
 }
@@ -71,8 +71,9 @@ case "$(uname -m)" in
 esac
 
 # Verify before execute: the bytes checked here are the bytes the native step runs.
-python3 "$pin_dir/claude_pin.py" installed --pin-dir "$pin_dir" --version "$version" \
-    --platform "$platform" --prefix "$prefix" --owner "$(id -u):$(id -g)"
+"$CONTRACT/recipe-contract" claude-pin installed --pin-dir "$pin_dir" \
+    --version "$version" --platform "$platform" --prefix "$prefix" \
+    --owner "$(id -u):$(id -g)"
 
 # The verified file is what runs (not the launcher): the bytes just checked are the
 # bytes executed. NPM_CONFIG_UPDATE_NOTIFIER: the native step runs
@@ -89,7 +90,8 @@ if [ "$rc" -ne 0 ]; then
 fi
 
 # The native step must have left the verified payload and layout as they were.
-python3 "$pin_dir/claude_pin.py" installed --pin-dir "$pin_dir" --version "$version" \
-    --platform "$platform" --prefix "$prefix" --owner "$(id -u):$(id -g)"
-python3 "$pin_dir/claude_pin.py" native-state --prefix "$prefix"
+"$CONTRACT/recipe-contract" claude-pin installed --pin-dir "$pin_dir" \
+    --version "$version" --platform "$platform" --prefix "$prefix" \
+    --owner "$(id -u):$(id -g)"
+"$CONTRACT/recipe-contract" claude-pin native-state --prefix "$prefix"
 echo "  claude: native setup ran offline for $version"

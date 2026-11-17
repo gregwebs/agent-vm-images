@@ -6,3 +6,9 @@
 *.backup
 
 **/target/
+
+# Binaries a bare `go build ./cmd/...` drops in the working directory: builds in this
+# repository always name their output (`-o`), and a committed binary is never a
+# source.
+/avm-pin
+/recipe-contract

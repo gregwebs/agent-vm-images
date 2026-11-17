@@ -127,7 +127,7 @@ and [ADR 0009](../../docs/adr/0009-codex-payload-pins.md). Claude's executable i
 bound by a committed closure too, and its manifest carries a detached OpenPGP
 signature the build verifies with the committed release key: the pin's fingerprint
 must be that key's single primary and the signature's primary, and
-`pin-claude.py --check` and the source gate hold that fingerprint to the reviewed
+`pin-claude.sh --check` and the source gate hold that fingerprint to the reviewed
 signer — see the
 [Claude payload policy](../../docs/image-input-policy.md#claude-native-payload)
 and [ADR 0013](../../docs/adr/0013-claude-native-payload-pin.md). agy publishes

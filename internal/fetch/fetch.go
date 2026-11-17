@@ -45,6 +45,37 @@ func refuseCause(cause error, format string, args ...any) error {
 // Timeout bounds one artifact-sized response.
 const Timeout = 300 * time.Second
 
+// RedirectHosts are the only hosts a response may be redirected to. A release
+// download legitimately moves from `github.com` to an asset host; anything else is a
+// redirection this repository will not follow, and the Python writers it replaces
+// refused every other target before opening it.
+var RedirectHosts = map[string]bool{
+	"release-assets.githubusercontent.com": true,
+	"objects.githubusercontent.com":        true,
+}
+
+// CheckRedirect refuses a redirect whose target is not an allowed asset host, and
+// bounds the chain. It is exported so a caller can prove the policy, and it runs
+// before the target is opened.
+func CheckRedirect(request *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return refuse("refusing more than 10 redirects fetching %s", via[0].URL)
+	}
+	target := request.URL
+	if !RedirectHosts[target.Hostname()] {
+		return refuse("refusing a redirect from %s to %s", via[0].URL, target)
+	}
+	// A host name is not an origin: an https-to-http downgrade, credentials in the
+	// URL or an unusual port would all send the request somewhere the approved host
+	// never serves from.
+	if target.Scheme != "https" || target.User != nil ||
+		(target.Port() != "" && target.Port() != "443") {
+		return refuse("refusing a redirect from %s to %s: not a plain https asset origin",
+			via[0].URL, target)
+	}
+	return nil
+}
+
 // Attempts is the total number of tries for a transport failure or a 5xx. An
 // HTTP status the pin itself cannot produce (404, 403) is not retried: it is a
 // refusal, not a blip.
@@ -74,7 +105,10 @@ func New() *Client {
 			return err != nil
 		}).
 		Build()
-	return &Client{HTTP: &http.Client{Timeout: Timeout}, Retry: failsafe.With(policy)}
+	return &Client{
+		HTTP:  &http.Client{Timeout: Timeout, CheckRedirect: CheckRedirect},
+		Retry: failsafe.With(policy),
+	}
 }
 
 // statusError carries one HTTP status the caller must not retry blindly.
