@@ -310,10 +310,16 @@ func paxRecords(payload []byte, what string) (map[string][]byte, error) {
 		if err != nil {
 			return nil, Refuse("%s: unreadable PAX record length", what)
 		}
-		if length < 5 || position+length > len(payload) {
+		if length < 5 || int64(position)+length > int64(len(payload)) {
 			return nil, Refuse("%s: PAX record length outside its header", what)
 		}
-		record := payload[space+1 : position+length]
+		end := position + int(length)
+		if space+1 >= end {
+			// The declared length ends inside the length field itself: Python's slice
+			// was empty and refused, and a Go slice of the same span would panic.
+			return nil, Refuse("%s: PAX record length outside its header", what)
+		}
+		record := payload[space+1 : end]
 		if len(record) == 0 || record[len(record)-1] != '\n' {
 			return nil, Refuse("%s: PAX record is not newline-terminated", what)
 		}
@@ -322,24 +328,24 @@ func paxRecords(payload []byte, what string) (map[string][]byte, error) {
 			return nil, Refuse("%s: unreadable PAX record", what)
 		}
 		records[key] = []byte(value)
-		position += length
+		position = end
 	}
 	return records, nil
 }
 
-func parseDecimal(raw []byte) (int, error) {
+func parseDecimal(raw []byte) (int64, error) {
 	if len(raw) == 0 {
 		return 0, errors.New("empty")
 	}
-	value := 0
+	var value int64
 	for _, digit := range raw {
 		if digit < '0' || digit > '9' {
 			return 0, errors.New("not a decimal number")
 		}
-		value = value*10 + int(digit-'0')
-		if value > 1<<30 {
+		if value > (1<<62)/10 {
 			return 0, errors.New("too large")
 		}
+		value = value*10 + int64(digit-'0')
 	}
 	return value, nil
 }
@@ -353,20 +359,25 @@ func rejectSparseMetadata(records map[string][]byte, what string) error {
 	return nil
 }
 
-// paxSize is the size a pending PAX record set overrides the header field with.
+// paxSize is the size the pending PAX record sets override the header field with.
+//
+// The parser this walk has to agree with is Go's archive/tar, which merges every
+// pending set in the order the headers appear, so a *later* set wins a key an earlier
+// one also names. (Python's tarfile applied the earliest, which is why the Python walk
+// iterated forwards; a bound that keeps that order would skip a region the Go parser
+// then reads as headers.) A value the parser cannot read is refused here rather than
+// guessed: the parser refuses it too.
 func paxSize(pending []map[string][]byte, what string) (int64, bool, error) {
-	for _, records := range pending {
-		raw, ok := records["size"]
+	for index := len(pending) - 1; index >= 0; index-- {
+		raw, ok := pending[index]["size"]
 		if !ok {
 			continue
 		}
 		value, err := parseDecimal(raw)
 		if err != nil {
-			// tar's own PAX number conversion falls back to zero, so the layout the
-			// parser will use is a zero-length member.
-			return 0, true, nil
+			return 0, false, Refuse("%s: unreadable PAX size record", what)
 		}
-		return int64(value), true, nil
+		return value, true, nil
 	}
 	return 0, false, nil
 }

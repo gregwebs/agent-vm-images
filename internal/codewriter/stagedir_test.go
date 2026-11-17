@@ -1,6 +1,7 @@
 package codewriter
 
 import (
+	"github.com/gregwebs/agent-vm-images/internal/codexpin"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,9 +135,11 @@ func TestStagingRefusesASharedOrLinkedDirectory(t *testing.T) {
 		t.Errorf("a refused staging directory was written to: %v %s", entries, err)
 	}
 
+	// A fresh, empty target: nothing may appear in it, because the link is refused
+	// before the first write rather than after the evidence directory exists.
 	target := filepath.Join(base, "target")
-	if err := writeStage(target, files); err != nil {
-		t.Fatalf("write: %s", err)
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatalf("%s: %s", target, err)
 	}
 	link := filepath.Join(base, "link")
 	if err := os.Symlink(target, link); err != nil {
@@ -145,6 +148,68 @@ func TestStagingRefusesASharedOrLinkedDirectory(t *testing.T) {
 	if err := writeStage(link, files); err == nil ||
 		!strings.Contains(err.Error(), "not a real directory") {
 		t.Errorf("a symlinked staging directory reported %v", err)
+	}
+	// The refusal must come before the first write: os.Root follows a link that stays
+	// inside its own root, so without the explicit check the evidence directory would
+	// appear in the link's target and only then be reported.
+	targetEntries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatalf("%s: %s", target, err)
+	}
+	for _, entry := range targetEntries {
+		if entry.Name() == "evidence" {
+			t.Errorf("writing through a symlinked staging directory created %q in its target",
+				entry.Name())
+		}
+	}
+}
+
+// TestStagingRefusesSymlinkedProposalInputs: a staged file or evidence directory that
+// is a link is not the bytes the transaction read, and the Python publisher opened
+// every one of them without following a link.
+func TestStagingRefusesSymlinkedProposalInputs(t *testing.T) {
+	root := fixtureRoot(t)
+	files := committedProposal(t, root)
+	base := t.TempDir()
+	elsewhere := filepath.Join(base, "elsewhere")
+	if err := os.Mkdir(elsewhere, 0o700); err != nil {
+		t.Fatalf("%s: %s", elsewhere, err)
+	}
+	writeFixture(t, filepath.Join(elsewhere, "release.json"), "not the evidence\n")
+
+	// A nested file replaced by a link is refused rather than read through.
+	stageDir := filepath.Join(base, "stage")
+	if err := writeStage(stageDir, files); err != nil {
+		t.Fatalf("write: %s", err)
+	}
+	metadataPath := filepath.Join(stageDir, filepath.FromSlash(codexpin.MetadataPath))
+	if err := os.Remove(metadataPath); err != nil {
+		t.Fatalf("%s: %s", metadataPath, err)
+	}
+	if err := os.Symlink(filepath.Join(elsewhere, "release.json"), metadataPath); err != nil {
+		t.Fatalf("%s: %s", metadataPath, err)
+	}
+	if _, err := readStage(stageDir, stageNames()); err == nil ||
+		!strings.Contains(err.Error(), "a symlink is refused") {
+		t.Errorf("a symlinked staged file reported %v", err)
+	}
+
+	// A pre-planted evidence directory that is a link is refused before any write.
+	linked := filepath.Join(base, "linked")
+	if err := os.Mkdir(linked, 0o700); err != nil {
+		t.Fatalf("%s: %s", linked, err)
+	}
+	if err := os.Symlink(elsewhere, filepath.Join(linked, "evidence")); err != nil {
+		t.Fatalf("%s: %s", linked, err)
+	}
+	// Either refusal is right — the directory is not empty, and what fills it is a
+	// link — as long as nothing is written through it.
+	if err := writeStage(linked, files); err == nil {
+		t.Errorf("a pre-planted evidence directory was accepted")
+	}
+	if entries, err := os.ReadDir(elsewhere); err != nil || len(entries) != 1 {
+		t.Errorf("writing through a symlinked evidence directory changed its target: %v %s",
+			entries, err)
 	}
 }
 

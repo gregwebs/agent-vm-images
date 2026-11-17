@@ -676,3 +676,47 @@ func TestPaxSizeOverrideMovesBothWalksTogether(t *testing.T) {
 		t.Fatalf("a legal PAX size override was refused: %s", err)
 	}
 }
+
+// TestPaxPrecedenceMatchesTheParser: consecutive PAX headers for one member are
+// merged by the parser, and a later set wins a key an earlier one also names. The raw
+// walk has to agree, or the region it skips is not the region the parser reads.
+func TestPaxPrecedenceMatchesTheParser(t *testing.T) {
+	// `size=1024` then `size=0` for the member that follows: the parser reads no
+	// member data, so the next block is a header -- here an oversized GNU long name
+	// that the extended-header ceiling must refuse.
+	var raw []byte
+	for index, size := range []string{"1024", "0"} {
+		record := paxRecord("size", size)
+		raw = append(raw, tarBlock(fmt.Sprintf("PaxHeaders/%d", index), int64(len(record)),
+			typePAX, 0o644)...)
+		raw = append(raw, padToBlock(record)...)
+	}
+	raw = append(raw, tarBlock("member", 0, typeRegular, 0o644)...)
+	raw = append(raw, tarBlock("././@LongLink", 1<<20, typeGNULongName, 0o644)...)
+	archive := gzipOf(t, raw)
+	pin, pinned := syntheticPin(t, archive, "linux/amd64")
+	path := writeArchive(t, archive, "archive.tar.gz")
+	err := Preflight(pin, pinned, path)
+	if err == nil || !strings.Contains(err.Error(), "extended header of") {
+		t.Fatalf("got %v, want the hidden extended header refused", err)
+	}
+}
+
+// TestPaxRecordLengthIsNeverASlicePanic: a record whose declared length ends inside
+// its own length field is a refusal, not a crash.
+func TestPaxRecordLengthIsNeverASlicePanic(t *testing.T) {
+	for _, payload := range [][]byte{
+		[]byte("0000000000005 a=b\n"),
+		[]byte("5 a=b\n"),
+		[]byte("0000000000010 a=b\n"),
+	} {
+		if _, err := paxRecords(payload, "archive"); err == nil {
+			t.Errorf("%q was accepted", payload)
+		}
+	}
+	// A well-formed record still decodes.
+	records, err := paxRecords(paxRecord("size", "1024"), "archive")
+	if err != nil || string(records["size"]) != "1024" {
+		t.Fatalf("a well-formed record reported %v (%v)", err, records)
+	}
+}

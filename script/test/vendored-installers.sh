@@ -199,26 +199,36 @@ run() {
         "$REAL_TIMEOUT" "$bound" "$@"
     fi
 }
+# A fixture payload is the reviewed ELF header -- the twenty bytes the production
+# preflight reads -- followed by the shell body a suite that runs the payload
+# executes. This fixture executor therefore runs the body as the script it is,
+# still inside the same bound and the same kill-after. Production never sees any
+# of this: the real payload is an ELF.
+#
+# The decision is made from the file's own bytes, not from a failed execve. Linux's
+# execvp retries an ENOEXEC child through `/bin/sh`, so the polyglot is silently
+# read as a shell script there and fails with a syntax error (status 2) rather than
+# the 126 macOS reports; a status-based fallback would work on one host and not the
+# other.
+is_polyglot() {
+    [ -f "$1" ] && [ -x "$1" ] || return 1
+    magic=$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')
+    [ "$magic" = "7f454c46" ]
+}
 status=0
-run "$@" || status=$?
-if [ "$status" -eq 126 ]; then
-    # A fixture payload is the reviewed ELF header -- the twenty bytes the
-    # production preflight reads -- followed by the shell body a suite that runs
-    # the payload executes. No host can execve that polyglot (the header is ELF,
-    # the body is a script), so this fixture executor drops the header line and
-    # runs the body as the script it is, still inside the same bound and the same
-    # kill-after. Production never sees any of this: the real payload is an ELF.
+if is_polyglot "${1:-}"; then
     body=$(mktemp)
     sed '1d' "$1" >"$body"
     chmod 0755 "$body"
     shift
-    status=0
     if [ -n "$kill_after" ]; then
         "$REAL_TIMEOUT" "$kill_after" "$bound" "$body" "$@" || status=$?
     else
         "$REAL_TIMEOUT" "$bound" "$body" "$@" || status=$?
     fi
     rm -f "$body"
+else
+    run "$@" || status=$?
 fi
 exit "$status"
 SH

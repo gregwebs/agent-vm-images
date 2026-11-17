@@ -55,11 +55,26 @@ func openStageDirectory(path string, create bool) (stageRoot, []string, error) {
 		return stageRoot{}, nil, refusal("cannot open %s: %s", filepath.Dir(directory), err)
 	}
 	defer func() { _ = parent.Close() }()
+	// os.Root follows a symlink that stays inside its root, so opening the staging
+	// directory is not by itself a symlink refusal: a caller's "directory" that is a
+	// link to a sibling would be opened, and the four evidence writes would land in
+	// the link's target before anything noticed. The link is refused here, and the
+	// inode is proven to be the one the pathname names *before* the first write, so
+	// a swap in the window between the two is still refused with nothing written.
+	if info, err := parent.Lstat(filepath.Base(directory)); err == nil &&
+		info.Mode()&os.ModeSymlink != 0 {
+		return stageRoot{}, nil, refusal("%s is not a real directory (a symlink is "+
+			"refused as a staging directory)", directory)
+	}
 	opened, err := parent.OpenRoot(filepath.Base(directory))
 	if err != nil {
 		return stageRoot{}, nil, openRefusal(directory, parent, err)
 	}
 	stage := stageRoot{path: directory, root: opened}
+	if err := requireSameDirectory(directory, stage.root); err != nil {
+		stage.close()
+		return stageRoot{}, nil, err
+	}
 	entries, err := checkStagingDirectory(stage)
 	if err != nil {
 		stage.close()
@@ -179,9 +194,10 @@ func writeStage(path string, files []proposalFile) error {
 		return refusal("cannot create %s as a new directory: %s",
 			filepath.Join(directory, evidenceName), err)
 	}
-	evidenceRoot, err := stage.root.OpenRoot(evidenceName)
+	evidenceRoot, err := openChild(stage.root, evidenceName,
+		filepath.Join(directory, evidenceName))
 	if err != nil {
-		return refusal("cannot open %s: %s", filepath.Join(directory, evidenceName), err)
+		return err
 	}
 	defer func() { _ = evidenceRoot.Close() }()
 	for _, file := range files {
@@ -232,9 +248,12 @@ func readStage(path string, names []string) ([]stagedFile, error) {
 	}
 	defer stage.close()
 	var evidenceRoot *os.Root
-	if opened, err := stage.root.OpenRoot(evidenceName); err == nil {
+	if opened, err := openChild(stage.root, evidenceName,
+		filepath.Join(directory, evidenceName)); err == nil {
 		evidenceRoot = opened
 		defer func() { _ = evidenceRoot.Close() }()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
 	}
 	read := make([]stagedFile, 0, len(names))
 	missing := make([]string, 0, 1)
@@ -278,7 +297,40 @@ func readStage(path string, names []string) ([]stagedFile, error) {
 	return read, nil
 }
 
+// openChild opens one directory child of an opened staging directory, refusing a
+// symlink: a pre-planted `evidence` link would otherwise redirect the four evidence
+// writes, and os.Root follows a link that stays inside itself.
+func openChild(root *os.Root, name, label string) (*os.Root, error) {
+	info, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil, refusal("%s is not a real directory (a symlink is refused)", label)
+	}
+	opened, err := root.OpenRoot(name)
+	if err != nil {
+		return nil, refusal("cannot open %s: %s", label, err)
+	}
+	inside, err := opened.Stat(".")
+	if err != nil {
+		_ = opened.Close()
+		return nil, refusal("cannot read %s: %s", label, err)
+	}
+	if !os.SameFile(info, inside) {
+		_ = opened.Close()
+		return nil, refusal("%s was replaced while it was in use", label)
+	}
+	return opened, nil
+}
+
 func readStageFile(root *os.Root, name, label string) ([]byte, error) {
+	// A staged file that is a symlink is not the file the transaction read: the
+	// Python publisher opened every proposal file with O_NOFOLLOW, so this refusal is
+	// part of the contract rather than a detail of the traversal.
+	if info, err := root.Lstat(name); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return nil, refusal("%s is not a regular file (a symlink is refused)", label)
+	}
 	handle, err := root.Open(name)
 	if err != nil {
 		return nil, err
