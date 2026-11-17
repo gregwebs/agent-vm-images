@@ -49,8 +49,15 @@ formatter="$selected_goroot/bin/gofmt"
 # and the self-contained example modules, so the package set is named explicitly
 # instead of `./...`. go list resolves it, which keeps new directories included
 # as long as they belong to one of these roots.
+# The pin suites are black-box: they build fixture closures, drive the shipped
+# entry points as child processes and need gpg. They are named here so the
+# formatter, the vet pass and the linter see them, but they are NOT part of the
+# fast `go test` aggregate below -- they run once, in the slow section, as the one
+# place their cases are listed. A single root keeps them out of that aggregate by
+# construction rather than by an exclusion list that can rot.
 go_packages=(./internal/... ./images/...)
-if package_dirs=$(cd "$contract_module" && GOTOOLCHAIN=auto go list -f '{{.Dir}}' "${go_packages[@]}"); then :; else
+harness_packages=(./script/test/pinsuite/...)
+if package_dirs=$(cd "$contract_module" && GOTOOLCHAIN=auto go list -f '{{.Dir}}' "${go_packages[@]}" "${harness_packages[@]}"); then :; else
     status=$?; echo 'cannot list the module packages' >&2; exit "$status"
 fi
 format_files=()
@@ -67,8 +74,8 @@ fi
 (cd "$contract_module" && GOTOOLCHAIN=auto go test ./internal/buildcheck)
 # Vendor mode: dependencies are committed, so the gates never reach a module
 # proxy. A missing vendor tree fails here instead of downloading.
-(cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go vet "${go_packages[@]}")
-(cd "$contract_module" && golangci-lint run "${go_packages[@]}")
+(cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go vet "${go_packages[@]}" "${harness_packages[@]}")
+(cd "$contract_module" && golangci-lint run "${go_packages[@]}" "${harness_packages[@]}")
 # The composed helper is shared by every suite below and by the Rust graph guard,
 # so it is built once here: after the lint gates, because the formatter suite
 # replaces `go` and must stop at vet.
@@ -98,7 +105,9 @@ if [ "$guard_only" = false ]; then
     # installer and the fault-injection table for the maintenance writer, named
     # here because this file is the list of what runs.
     bash script/test/artifact-pins.sh
-    python3 script/test/pin-artifact-maintenance.py
+    # The pin writers' own harnesses, in Go and in one place: the artifact
+    # maintenance table (#96, #179) drives script/dev/pin-artifact.sh end to end.
+    (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test "${harness_packages[@]}")
     # The committed Codex payload closure (#97): the offline pin/evidence schema,
     # the archive/preflight budgets and the owner writer's staging rules. Real
     # cosign and the two native architecture rows are the evidence phase's work,

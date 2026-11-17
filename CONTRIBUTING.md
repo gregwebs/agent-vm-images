@@ -103,7 +103,7 @@ never adopts a newer version by itself. Because `artifacts/` and
 ```bash
 bash script/build/base-inputs.sh --write
 bash script/test/artifact-pins.sh
-python3 script/test/pin-artifact-maintenance.py   # the writer's own fault cases
+go test ./script/test/pinsuite/...                # the writer's own fault cases
 bash images/build.sh base    # then: bash script/test/node-toolchain.sh agent-vm-base:local --platform linux/arm64
 ```
 
