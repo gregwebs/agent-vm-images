@@ -9863,7 +9863,7 @@ fn go_dev_mirrors_the_module_lint_pin() {
 // release: two Linux package payloads with exact URLs and SHA-256 digests, the
 // original release metadata, the original `codex-package_SHA256SUMS` and both
 // original legacy `.sigstore` bundles, plus the signer policy that was enforced
-// when the pin was made. The loader (`images/tools/codex/codex_pin.py`) is what
+// when the pin was made. The loader (`recipe-contract codex-pin`, ADR 0017) is what
 // ordinary builds run; this gate re-derives the identity independently from the
 // pin instead of trusting the loader, and checks that the recipe is wired to a
 // read-only committed source rather than to anything live.
@@ -9874,7 +9874,7 @@ fn go_dev_mirrors_the_module_lint_pin() {
 
 const CODEX_PIN: &str = "images/tools/codex/pin.json";
 const CODEX_HOOK: &str = "images/tools/codex/install-codex.sh";
-const CODEX_LOADER: &str = "images/tools/codex/codex_pin.py";
+const CODEX_READER: &str = "internal/codexpin";
 const CODEX_SOURCE_MOUNT: &str = "--mount=type=bind,source=tools/codex,target=/tmp/codex-source,ro";
 const CODEX_SOURCE_ENV: &str = "AGENT_VM_CODEX_SOURCE_DIR=/tmp/codex-source";
 const CODEX_VENDOR_MOUNT: &str =
@@ -10304,12 +10304,38 @@ fn codex_code_lines(text: &str) -> String {
         .join("\n")
 }
 
+/// codex_reader_source is every Go file of the reader, concatenated, so the gate
+/// reads the same package a reviewer does rather than one chosen file.
+fn codex_reader_source() -> String {
+    let directory = repo_path(CODEX_READER);
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(&directory)
+        .unwrap_or_else(|error| panic!("read {}: {error}", directory.display()))
+        .map(|entry| entry.expect("a readable directory entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "go"))
+        .filter(|path| {
+            !path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .ends_with("_test.go")
+        })
+        .collect();
+    entries.sort();
+    entries
+        .iter()
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+        })
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
 fn check_codex_helper_sources(hook: &str, loader: &str) -> Result<(), String> {
     let hook_code = codex_code_lines(hook);
     for required in [
         "AGENT_VM_CODEX_SOURCE_DIR",
-        "codex_pin.py",
-        "check --pin-dir",
+        "codex-pin check --pin-dir",
         "CODEX_PIN_DIR",
         "CODEX_INSTALL_DIR",
         "CODEX_INSTALL_DAEMON_ONLY=0",
@@ -10321,7 +10347,7 @@ fn check_codex_helper_sources(hook: &str, loader: &str) -> Result<(), String> {
         }
     }
     let check_at = hook
-        .find("codex_pin.py\" check --pin-dir")
+        .find("codex-pin check --pin-dir")
         .ok_or("install-codex.sh must run the pin check")?;
     let vendor_at = hook
         .find("sh \"$VENDOR/install.sh\"")
@@ -10336,22 +10362,25 @@ fn check_codex_helper_sources(hook: &str, loader: &str) -> Result<(), String> {
             ));
         }
     }
+    // The reader is Go now (ADR 0017). What this gate can still check about it is
+    // that it stays a reader: no HTTP client, no child process, and no signature
+    // verification, because that happened once on the maintainer host.
     for required in [
-        "def load_pin(",
-        "def select(",
-        "def require_elf(",
-        "def preflight_archive(",
-        "MAX_DECODED_BYTES",
-        "MAX_EXTENDED_HEADER_BYTES",
+        "func Load(",
+        "func (p Pin) Selection(",
+        "func requireELF(",
+        "func Preflight(",
+        "MaxDecodedBytes",
+        "MaxExtendedHeaderBytes",
     ] {
         if !loader.contains(required) {
-            return Err(format!("codex_pin.py must contain `{required}`"));
+            return Err(format!("the codex reader must declare `{required}`"));
         }
     }
-    for forbidden in ["urllib", "requests", "socket", "subprocess", "verify-blob"] {
+    for forbidden in ["net/http", "os/exec", "verify-blob", "internal/fetch"] {
         if loader.contains(forbidden) {
             return Err(format!(
-                "codex_pin.py must stay offline and non-cryptographic: found `{forbidden}`"
+                "the codex reader must stay offline and non-cryptographic: found `{forbidden}`"
             ));
         }
     }
@@ -10395,7 +10424,7 @@ fn codex_pin_selects_both_reviewed_payloads() {
     );
     // Direct presence assertions: the generic helper inventory is a known
     // separate defect (#116), so this does not lean on it.
-    for relative in [CODEX_PIN, CODEX_HOOK, CODEX_LOADER] {
+    for relative in [CODEX_PIN, CODEX_HOOK] {
         let path = repo_path(relative);
         assert!(path.is_file(), "{relative} must exist");
         assert!(
@@ -10417,8 +10446,8 @@ fn codex_pin_selects_both_reviewed_payloads() {
     }
     let recipe = standard_dockerfile();
     check_codex_recipe(&recipe, &pin).expect("the committed recipe is wired to the pin");
-    check_codex_helper_sources(&read_text(CODEX_HOOK), &read_text(CODEX_LOADER))
-        .expect("the hook and loader keep the pin authority");
+    check_codex_helper_sources(&read_text(CODEX_HOOK), &codex_reader_source())
+        .expect("the hook and reader keep the pin authority");
 }
 
 #[test]
@@ -10635,10 +10664,10 @@ fn codex_recipe_requires_readonly_pin_source() {
 #[test]
 fn codex_recipe_mutations_are_refused() {
     let hook = read_text(CODEX_HOOK);
-    let loader = read_text(CODEX_LOADER);
+    let loader = codex_reader_source();
     check_codex_helper_sources(&hook, &loader).unwrap();
     let hook_mutations = [
-        hook.replace("codex_pin.py\" check --pin-dir", "true #"),
+        hook.replace("codex-pin check --pin-dir", "true #"),
         hook.replace("AGENT_VM_CODEX_SOURCE_DIR", "CODEX_OTHER_DIR"),
         hook.replace("unset CODEX_INSTALL_DEFER_SELECTION", ":"),
         hook.replace("CODEX_INSTALL_DAEMON_ONLY=0", "CODEX_INSTALL_DAEMON_ONLY=1"),
@@ -10653,7 +10682,7 @@ fn codex_recipe_mutations_are_refused() {
         );
     }
     // The pin check must precede the vendor call: swapping them is the defect.
-    let check = "python3 \"$pin_dir/codex_pin.py\" check --pin-dir \"$pin_dir\" --release \"$version\" || {";
+    let check = "\"$CONTRACT/recipe-contract\" codex-pin check --pin-dir \"$pin_dir\" --release \"$version\" ||";
     let vendor = "sh \"$VENDOR/install.sh\" || rc=$?";
     assert!(hook.contains(check) && hook.contains(vendor));
     let reordered = hook
@@ -10666,11 +10695,11 @@ fn codex_recipe_mutations_are_refused() {
         "the gate accepted a vendor call before the pin check"
     );
     let loader_mutations = [
-        loader.replace("def load_pin(", "def load_pin_disabled("),
-        format!("{loader}\nimport urllib.request\n"),
-        format!("{loader}\nimport subprocess\n"),
-        format!("{loader}\n# verify-blob\n"),
-        loader.replace("MAX_DECODED_BYTES", "DECODED_LIMIT"),
+        loader.replace("func Load(", "func loadDisabled("),
+        format!("{loader}\n\n// \"net/http\"\n"),
+        format!("{loader}\n\n// \"os/exec\"\n"),
+        format!("{loader}\n\n// verify-blob\n"),
+        loader.replace("MaxDecodedBytes", "DecodedLimit"),
     ];
     for (index, mutated) in loader_mutations.into_iter().enumerate() {
         assert_ne!(mutated, loader, "loader mutation {index} changed nothing");

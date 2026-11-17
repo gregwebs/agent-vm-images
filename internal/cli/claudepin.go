@@ -140,15 +140,6 @@ func (p *process) runClaudePin(args []string) int {
 // claudePinFlags is every flag name one verb may carry.
 var claudePinFlags = []string{"pin-dir", "version", "platform", "prefix", "owner", "file"}
 
-func contains(values []string, value string) bool {
-	for _, candidate := range values {
-		if candidate == value {
-			return true
-		}
-	}
-	return false
-}
-
 // parseOwner reads the UID:GID the installed layout must carry.
 func parseOwner(text string) (int, int, error) {
 	parts := strings.Split(text, ":")

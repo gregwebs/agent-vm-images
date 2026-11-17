@@ -29,10 +29,13 @@ snapshot renamed `install.sh`.
 ## Trust boundary
 
 This script does not decide which bytes are Codex. The selection authority is the
-committed closure beside it — `../pin.json`, `../evidence/` and `../codex_pin.py`.
+committed closure beside it — `../pin.json` and `../evidence/` — and the reader is
+the image's own `recipe-contract codex-pin` (ADR 0017), so no program travels with
+the pin.
 The patch below removes every live release-metadata and checksum lookup, takes the
-exact URL and SHA-256 from `codex_pin.py select`, and runs `codex_pin.py
-preflight` (bounded member policy, package metadata, ELF machine) before `tar`.
+exact URL and SHA-256 from `recipe-contract codex-pin select`, and runs
+`recipe-contract codex-pin preflight` (bounded member policy, package metadata, ELF
+machine) before `tar`.
 A build therefore never asks upstream what the expected bytes are, and a jointly
 rewritten metadata/checksum/archive fails on the committed digest.
 
@@ -65,7 +68,7 @@ supply-chain guarantee.
    `resolve_release_from_github`, the metadata parser, the asset-digest resolver,
    `download_text`, the checksum download and the legacy npm dispatch are gone.
    `resolve_release` normalizes and validates the exact release, then parses the
-   four fields `codex_pin.py select` prints. The auto-updater guard that remains
+   four fields `recipe-contract codex-pin select` prints. The auto-updater guard that remains
    only compares the (already exact) `RELEASE` and has no lookup.
 6. **Native subprocesses never see the transport receipt.** The script keeps the
    receipt path privately (`AGENT_VM_RECEIPT_PATH`) and `unset`s
@@ -88,4 +91,6 @@ The owning recipe is `images/standard/Dockerfile`, with read-only canonical
 helper mounts including the whole `tools/codex` directory. Evidence:
 `script/test/codex-installer.sh` (hook and pin gate, patch reproduction),
 `script/test/vendored-installers.sh` (the real patched script, exact request
-streams) and `script/test/codex-pins.py` (loader, preflight budgets, writer).
+streams), `script/test/codex-pins.py` (the reader and writer programs, black box)
+and `internal/codexpin/pin_test.go` (the schema, the archive policy and the
+preflight bounds).

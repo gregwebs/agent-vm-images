@@ -34,20 +34,20 @@ Commit a dedicated closure and make the build read only that.
   exact-tag API metadata, the original `codex-package_SHA256SUMS`, and both
   original `.sigstore` bundles — plus the signer policy enforced when the pin was
   made.
-- `images/tools/codex/codex_pin.py` is a stdlib-only, offline loader and archive
-  preflight. It reconstructs every URL, asset name and evidence path from the
+- The loader and archive preflight (`recipe-contract codex-pin`, ADR 0017) is
+  offline. It reconstructs every URL, asset name and evidence path from the
   validated release and requires *equality*; it re-hashes all four evidence files
   and every downloaded payload; it validates the metadata's security projection
   and the SHA-256SUMS rows; and it preflights the archive (member policy, package
   metadata, ELF machine) before `tar` runs.
 - The vendored installer keeps its extraction, linking and bounded native report,
-  and takes its selection from `codex_pin.py select`, whose four fields it parses
-  positionally. There is no `eval`, no metadata fetch, no checksum download and no
+  and takes its selection from `recipe-contract codex-pin select`, whose four
+  fields it parses positionally. There is no `eval`, no metadata fetch, no checksum download and no
   legacy npm fallback left in it.
-- Publication is shared, not new: `script/dev/pin-codex.py` reuses the
-  `Publisher` transaction from `script/dev/pin-artifact.py`, so the pin, its four
-  evidence files and the `ARG AGENT_VERSION_CODEX` default land together or not at
-  all.
+- Publication is shared, not new: `script/dev/pin-codex.sh` publishes through the
+  one transaction both pin writers use (`internal/publication`, ADR 0017), so the
+  pin, its four evidence files and the `ARG AGENT_VERSION_CODEX` default land
+  together or not at all.
 
 ## Signature decision: cosign v2.4.1, pin time only
 
@@ -103,22 +103,22 @@ exception in this design; a bundle that cannot be verified blocks the proposal.
 ## Flow
 
 ```text
-PIN TIME (maintainer host, script/dev/pin-codex.py)
+PIN TIME (maintainer host, script/dev/pin-codex.sh)
   exact tag ──▶ metadata + SHA256SUMS + 2 payloads + 2 bundles (private scratch)
                  │                    │
                  │                    ├─▶ cosign verify-blob  (both architectures,
                  │                    │   exact identity/issuer, default chain/SCT/Rekor)
-                 │                    └─▶ codex_pin.preflight_archive (both archives)
+                 │                    └─▶ codex-pin preflight (both archives)
                  ▼
-          render pin/evidence ──▶ load_pin (re-hash everything) ──▶ ONE transaction
+          render pin/evidence ──▶ codexpin.Load (re-hash everything) ──▶ ONE transaction
           (6 files: pin, 4 evidence, Dockerfile ARG)
 
 BUILD (ordinary, offline for this input)
-  committed pin + evidence ──▶ codex_pin check (all 4 evidence hashes)
+  committed pin + evidence ──▶ codex-pin check (all 4 evidence hashes)
        │
   exact payload URL ──▶ one classified download ──▶ sha256 == committed digest
        │
-  codex_pin preflight ──▶ package metadata + ELF machine + bounded inventory
+  codex-pin preflight ──▶ package metadata + ELF machine + bounded inventory
        │
   vendored install ──▶ bounded native report ──▶ existing verify-codex.sh gate
 ```
@@ -155,5 +155,36 @@ egress evidence is the separate acceptance step tracked by #97's CI rows.
 
 - [image input policy](../image-input-policy.md#codex-standalone-payloads)
 - [CONTRIBUTING: selection ownership and maintenance](../../CONTRIBUTING.md#selection-ownership-and-maintenance)
-- `docs/adr/0006-third-party-artifact-pins.md` (the shared publication
-  transaction and the release-artifact model this deliberately does not reuse)
+- `docs/adr/0006-third-party-artifact-pins.md` (the release-artifact model this
+  deliberately does not reuse)
+- `docs/adr/0017-go-programs.md` (why the reader and the writer are Go)
+
+## Amended by 0017 (2026-11-17)
+
+`images/tools/codex/codex_pin.py` and `script/dev/pin-codex.py` are gone. The
+reader is `recipe-contract codex-pin check|select|preflight` (`internal/codexpin`)
+and the writer is `avm-pin codex`, reached as `script/dev/pin-codex.sh`
+(`internal/codewriter`).
+
+The decisions above are unchanged; what moved is where they are written down.
+
+- **The pin directory carries reviewed bytes only.** The reader is the image's own
+  composed helper, so `images/tools/codex/` holds `pin.json` and its evidence and
+  nothing executable. The vendored installer's three closure sites call
+  `"$AGENT_VM_CONTRACT_DIR/recipe-contract" codex-pin …`, and `install.patch` was
+  regenerated so it still reproduces `install.sh` byte for byte.
+- **The exact-slot grammar has one home.** `install-codex.sh` no longer repeats the
+  release regex in shell: `codex-pin check --release` refuses a bare version, a `v`
+  alias, a dist-tag, a range, a URL and a leading-zero component, before the vendor
+  runs. A hook that accepted what the reader rejects would be a boundary the review
+  cannot see.
+- **`avm-pin codex` keeps the writer's contract**: 0 published or unchanged, 1
+  failed with the sources unchanged or restored, 2 usage, 3 undecided or incomplete
+  recovery (the retained directories are printed), 128+N after a signal whose
+  rollback succeeded. The `pin-codex: ` lines and the fixed six-file stage layout
+  are unchanged, because `script/build/agent-versions.sh` and the suites read them.
+- **The bounds are unchanged** (decoded stream, extended headers, physical headers,
+  logical members, expanded regular files) even though the parser underneath is now
+  Go's `archive/tar`: the raw 512-byte walk that bounds GNU/PAX metadata runs before
+  the parser, exactly as it did, because a bound that walks the blocks differently
+  from the parser is not a bound.

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The two HTTP failure modes, through the primitive every download in the
@@ -123,4 +124,43 @@ func mustURL(t *testing.T, raw string) *url.URL {
 		t.Fatalf("%s: %s", raw, err)
 	}
 	return parsed
+}
+
+// TestAStalledBodyEndsInARefusal: the Python writers bounded a request that never
+// returns with their own alarm, because a peer can keep the pipe busy a byte at a
+// time below any inactivity timeout. Go's http.Client.Timeout is the equivalent --
+// it bounds connect, headers, redirects and body together -- so what this test owns
+// is that the refusal is reached and reported, not that the timer is ours.
+func TestAStalledBodyEndsInARefusal(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Length", "1048576")
+		writer.WriteHeader(http.StatusOK)
+		if flusher, ok := writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		for index := 0; index < 64; index++ {
+			if _, err := writer.Write([]byte("x")); err != nil {
+				return
+			}
+			if flusher, ok := writer.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		<-release
+	}))
+	defer func() { close(release); server.Close() }()
+	client := New()
+	// The reviewed budget is 300s; the property under test is that a body which
+	// never finishes is a refusal, so the budget is the test's own.
+	client.HTTP = &http.Client{Timeout: 150 * time.Millisecond}
+	started := time.Now()
+	_, err := client.Get(context.Background(), server.URL+"/slow.tar.gz", 1<<20)
+	if err == nil || !strings.Contains(err.Error(), "cannot fetch") {
+		t.Fatalf("a stalled body reported %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 20*time.Second {
+		t.Fatalf("the refusal took %s, so the request was not bounded", elapsed)
+	}
 }

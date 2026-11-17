@@ -26,6 +26,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONTRACT="$REPO_ROOT/images/recipe-contract"
 RUN_INSTALL="$CONTRACT/run-install.sh"
+# The codex installer and hook call `"$AGENT_VM_CONTRACT_DIR/recipe-contract"`
+# (ADR 0017), so those cases need the composed directory: the helper binary plus
+# the shell wrappers it ships with. Built once, before any restricted env -i.
+HOST_CONTRACT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)/out"
 CODEX_VENDOR="$REPO_ROOT/images/tools/codex/vendor"
 OPENCODE_VENDOR="$REPO_ROOT/images/tools/opencode/vendor"
 CLAUDE_VENDOR="$REPO_ROOT/images/tools/claude/vendor"
@@ -188,10 +192,45 @@ case "$bound" in
     '' | *[!0-9]*) ;;
     *) [ "$bound" -gt "$cap" ] && bound="$cap" ;;
 esac
-if [ -n "$kill_after" ]; then
-    exec "$REAL_TIMEOUT" "$kill_after" "$bound" "$@"
+run() {
+    if [ -n "$kill_after" ]; then
+        "$REAL_TIMEOUT" "$kill_after" "$bound" "$@"
+    else
+        "$REAL_TIMEOUT" "$bound" "$@"
+    fi
+}
+# A fixture payload is the reviewed ELF header -- the twenty bytes the production
+# preflight reads -- followed by the shell body a suite that runs the payload
+# executes. This fixture executor therefore runs the body as the script it is,
+# still inside the same bound and the same kill-after. Production never sees any
+# of this: the real payload is an ELF.
+#
+# The decision is made from the file's own bytes, not from a failed execve. Linux's
+# execvp retries an ENOEXEC child through `/bin/sh`, so the polyglot is silently
+# read as a shell script there and fails with a syntax error (status 2) rather than
+# the 126 macOS reports; a status-based fallback would work on one host and not the
+# other.
+is_polyglot() {
+    [ -f "$1" ] && [ -x "$1" ] || return 1
+    magic=$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')
+    [ "$magic" = "7f454c46" ]
+}
+status=0
+if is_polyglot "${1:-}"; then
+    body=$(mktemp)
+    sed '1d' "$1" >"$body"
+    chmod 0755 "$body"
+    shift
+    if [ -n "$kill_after" ]; then
+        "$REAL_TIMEOUT" "$kill_after" "$bound" "$body" "$@" || status=$?
+    else
+        "$REAL_TIMEOUT" "$bound" "$body" "$@" || status=$?
+    fi
+    rm -f "$body"
+else
+    run "$@" || status=$?
 fi
-exec "$REAL_TIMEOUT" "$bound" "$@"
+exit "$status"
 SH
 
 # Fake tar: records only extraction (the step a pin/hash/preflight refusal must
@@ -343,7 +382,7 @@ run_codex() { # $1 slot, $2 vendor dir
         "PATH=$CASE/bin:$CASE/pybin:/usr/bin:/bin"
         "HOME=$CASE"
         "TMPDIR=$CASE/tmp"
-        "AGENT_VM_CONTRACT_DIR=$CONTRACT"
+        "AGENT_VM_CONTRACT_DIR=$HOST_CONTRACT"
         "AGENT_VM_VENDOR_DIR=$2"
         "AGENT_VM_CODEX_SOURCE_DIR=$CASE/source"
         "AGENT_VM_CODEX_PREFIX=$CASE/prefix"
@@ -427,6 +466,20 @@ run_claude() { # $1 slot, $2 vendor dir
 
 status_of() { # $1 tool
     cat "$CASE/status/$1" 2>/dev/null || echo MISSING
+}
+
+# Run a fixture payload the way this environment runs one. A fixture package's
+# entrypoint is the reviewed ELF header followed by a shell body (see the fake
+# timeout), so nothing can execve it directly; the body is what answers.
+run_fixture_command() { # $1 = payload, rest: arguments
+    local payload=$1 body status
+    shift
+    body=$(mktemp)
+    sed '1d' "$payload" >"$body"
+    status=0
+    sh "$body" "$@" || status=$?
+    rm -f "$body"
+    return "$status"
 }
 
 expect_ok() { [ "$RUN_RC" -eq 0 ] || fail "$1: expected success, got rc=$RUN_RC: $RUN_OUT"; }
@@ -544,7 +597,8 @@ for arch in x86_64 aarch64; do
         fail "codex $arch: expected exactly one extraction: $(cat "$CASE/tar.log")"
     [ "$(grep -c '^NATIVE ' "$CASE/native.log" || true)" -ge 1 ] ||
         fail "codex $arch: the native entrypoint never ran"
-    "$CASE/prefix/.local/bin/codex" --version >"$CASE/out" 2>&1 ||
+    run_fixture_command "$CASE/prefix/.local/bin/codex" --version \
+        >"$CASE/out" 2>&1 ||
         fail "codex $arch: published command failed"
     [ "$(sed -n '1p' "$CASE/out")" = "codex-cli $V" ] ||
         fail "codex $arch: report '$(sed -n '1p' "$CASE/out")' != 'codex-cli $V'"
@@ -719,7 +773,7 @@ for arch in x86_64 aarch64; do
         "PATH=$CASE/bin:$CASE/pybin:/usr/bin:/bin"
         "HOME=$CASE"
         "TMPDIR=$CASE/tmp"
-        "AGENT_VM_CONTRACT_DIR=$CONTRACT"
+        "AGENT_VM_CONTRACT_DIR=$HOST_CONTRACT"
         "AGENT_VM_VENDOR_DIR=$CODEX_VENDOR"
         "AGENT_VM_CODEX_SOURCE_DIR=$CASE/source"
         "AGENT_VM_CODEX_PREFIX=$CASE/prefix"
@@ -850,6 +904,32 @@ expect_no_native "codex substitution mutant"
 [ ! -e "$CASE/prefix/.local/bin/codex" ] ||
     fail "codex substitution mutant: a command was published"
 note "codex: a post-download substitution is refused by the committed digest, before tar"
+
+# --- the preflight is what refuses a self-consistent but wrong package --------
+# `wrong-version` above is refused by `"$CODEX_PIN_CONTRACT" codex-pin preflight`,
+# and nothing else in the installer can see that the archive's own metadata lies.
+# Deleting that call must therefore be detected: the same archive then extracts
+# and runs, so the extraction is the mutation showing through.
+echo "  (codex skip-preflight mutant)"
+new_codex_case "codex-skip-preflight-mutant" x86_64 "rust-v$V" 0 0
+python3 "$REPO_ROOT/script/test/vendored-installers-mutate-vendor.py" \
+    "$CODEX_VENDOR/install.sh" "$CASE/mutant/install.sh" codex-skip-preflight
+! cmp -s "$CODEX_VENDOR/install.sh" "$CASE/mutant/install.sh" ||
+    fail "codex skip-preflight mutant: the mutation changed no bytes"
+codex_native_body "$CASE/native-body.sh" "$V" 0 0
+codex_fixture "$CASE/fx" "rust-v$V" "$CODEX_TARGET" "$CASE/native-body.sh" \
+    --package-version 0.159.4
+rm -rf "$CASE/source"
+cp -R "$CASE/fx/source" "$CASE/source"
+route "$PAYLOAD_URL" "$CASE/fx/archive.tgz"
+run_codex "rust-v$V" "$CASE/mutant"
+[ -s "$CASE/tar.log" ] ||
+    fail "codex skip-preflight mutant: the archive never reached tar: $RUN_OUT"
+[ -s "$CASE/native.log" ] ||
+    fail "codex skip-preflight mutant: the entrypoint never ran: $RUN_OUT"
+printf '%s' "$RUN_OUT" | grep -q 'version is not the pinned' &&
+    fail "codex skip-preflight mutant: the preflight still refused the package: $RUN_OUT"
+note "codex: deleting the codex-pin preflight call is detected by the extraction it allows"
 
 # =============================================================================
 # opencode

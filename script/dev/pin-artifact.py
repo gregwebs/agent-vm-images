@@ -8,10 +8,10 @@ left is the one transaction every pin writer publishes through: staging, a compl
 backup, publication, reverse-order restore, and a retained work directory plus
 `recovery.json` when a restore fails.
 
-`script/dev/pin-agy.py`, `pin-claude.py` and `pin-codex.py` call `publish` here, and
-three suites patch `Publisher`/`shutil.copyfile` to inject publication faults. The
-transaction exists twice until the last of those writers is ported (#180-#182), at
-which point this file is deleted and the Go implementation is the only one.
+`script/dev/pin-agy.py` calls `publish` here, and its suites patch
+`Publisher`/`shutil.copyfile` to inject publication faults. The transaction exists
+twice until that last writer is ported (#182), at which point this file is deleted
+and the Go implementation (`internal/publication`) is the only one.
 """
 from __future__ import annotations
 

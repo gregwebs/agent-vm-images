@@ -86,7 +86,7 @@ class Refusal(Exception):
 
 _models: dict[str, object] = {}
 # Set by `bind_models`; the module-level `https_fetch` is the seam the hermetic
-# suite replaces, exactly as `pin-codex.py` exposes its own transport.
+# suite replaces: the transport module is the only network primitive in this file.
 _transport: object | None = None
 
 
@@ -145,7 +145,7 @@ def bind_models(repo_root: Path) -> tuple[object, object, object, object]:
     model = _bind(artifacts / 'artifact_pin.py', 'artifact_pin')
     installer = _bind(artifacts / 'install_artifact.py', 'install_artifact')
     publisher = _load(repo_root / 'script' / 'dev' / 'pin-artifact.py', 'pin_artifact')
-    transport = _load(repo_root / 'script' / 'dev' / 'pin-codex.py', 'pin_codex')
+    transport = _load(repo_root / 'script' / 'dev' / 'pin_transport.py', 'pin_transport')
     # One model, one Refusal: a second copy would make the top-level handler miss
     # a refusal the installer raised.
     if installer.artifact_pin is not model or publisher.artifact_pin is not model:
@@ -166,7 +166,7 @@ def https_fetch(url: str, output: Path, limit: int) -> None:
     """The one network primitive: the owner transport with this owner's origins.
 
     A module-level function so the hermetic suite can replace exactly the network
-    and nothing else, the way `pin-codex.py` is tested.
+    and nothing else.
     """
     if _transport is None:
         raise Refusal('the transport is not bound; call bind_models first')

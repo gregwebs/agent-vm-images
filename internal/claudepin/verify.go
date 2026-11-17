@@ -2,6 +2,7 @@ package claudepin
 
 import (
 	"encoding/binary"
+	evidencepkg "github.com/gregwebs/agent-vm-images/internal/evidence"
 	"os"
 	"path/filepath"
 	"sort"
@@ -136,7 +137,7 @@ func CheckELF(path, token string) error {
 	if !ok {
 		return Refuse("%s is not a maintained Claude Code platform", token)
 	}
-	file, err := openNoFollow(path)
+	file, err := evidencepkg.OpenNoFollow(path)
 	if err != nil {
 		return Refuse("%s cannot be read: %s", path, err)
 	}
@@ -181,7 +182,7 @@ func (v VerifiedPin) Preflight(token, path string) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return Refuse("%s is not a regular file", path)
 	}
-	digest, size, err := FileDigest(path, MaxExecutableBytes, "the downloaded executable")
+	digest, size, err := evidencepkg.FileDigest(path, MaxExecutableBytes, "the downloaded executable")
 	if err != nil {
 		return err
 	}
@@ -248,7 +249,7 @@ func (v VerifiedPin) CheckInstalled(token, prefix string, uid, gid int) error {
 		return Refuse("the installed payload %s is owned %d:%d, not %d:%d", installed,
 			owner[0], owner[1], uid, gid)
 	}
-	digest, size, err := FileDigest(installed, MaxExecutableBytes, "the installed payload")
+	digest, size, err := evidencepkg.FileDigest(installed, MaxExecutableBytes, "the installed payload")
 	if err != nil {
 		return err
 	}
@@ -292,7 +293,7 @@ func CheckNativeState(prefix string) error {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return Refuse("%s is not a regular file", path)
 	}
-	raw, err := ReadBounded(path, MaxStateBytes, path)
+	raw, err := evidencepkg.ReadBounded(path, MaxStateBytes, path)
 	if err != nil {
 		return err
 	}

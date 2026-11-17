@@ -89,7 +89,9 @@ writer, and it also owns the
 Three agent selections are content pins rather than version ARGs alone.
 
 - **Codex** (`images/tools/codex/`): the pin, its four evidence files and the
-  vendored installer; `script/dev/pin-codex.py` is the only writer. See
+  vendored installer. The reader is the image's own `recipe-contract codex-pin`
+  (ADR 0017), so the pin directory carries reviewed bytes only;
+  `script/dev/pin-codex.sh` is the only writer. See
   [ADR 0009](adr/0009-codex-payload-pins.md).
 - **Claude** (`images/tools/claude/`): the pin, its two evidence files (the signed
   manifest and its detached signature), the **hand-committed** release key,
@@ -209,7 +211,6 @@ READMEs may be adapted to their new owner):
 - `images/tools/codex/install-codex.sh`
 - `images/tools/codex/verify-codex.sh`
 - `images/tools/codex/pin.json`
-- `images/tools/codex/codex_pin.py`
 - `images/tools/codex/evidence/release.json`
 - `images/tools/codex/evidence/codex-package_SHA256SUMS`
 - `images/tools/codex/evidence/codex-package-x86_64-unknown-linux-musl.tar.gz.sigstore`

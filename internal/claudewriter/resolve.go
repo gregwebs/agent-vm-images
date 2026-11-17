@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/gregwebs/agent-vm-images/internal/claudepin"
+	"github.com/gregwebs/agent-vm-images/internal/evidence"
 	"github.com/gregwebs/agent-vm-images/internal/publication"
 )
 
@@ -88,7 +89,7 @@ func (c *Client) downloadExecutables(ctx context.Context, version, work string,
 		if err := os.WriteFile(path, bytes, 0o600); err != nil {
 			return nil, refusal("cannot write %s: %s", path, err)
 		}
-		digest, size, err := claudepin.FileDigest(path, claudepin.MaxExecutableBytes,
+		digest, size, err := evidence.FileDigest(path, claudepin.MaxExecutableBytes,
 			"the downloaded executable")
 		if err != nil {
 			return nil, err

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gregwebs/agent-vm-images/internal/claudepin"
+	"github.com/gregwebs/agent-vm-images/internal/evidence"
 )
 
 // document is the pin's marshalled shape: the field order and the two-space indent
@@ -77,18 +78,18 @@ func Render(version string, upstream fetched, key []byte,
 		Manifest: evidenceDocument{
 			URL:    claudepin.ManifestURL(version),
 			Path:   claudepin.ManifestPath,
-			SHA256: claudepin.Sha256Of(upstream.manifest),
+			SHA256: evidence.Sha256Of(upstream.manifest),
 		},
 		Signature: evidenceDocument{
 			URL:    claudepin.SignatureURL(version),
 			Path:   claudepin.SignaturePath,
-			SHA256: claudepin.Sha256Of(upstream.signature),
+			SHA256: evidence.Sha256Of(upstream.signature),
 		},
 		Key: keyDocument{
 			URL:         claudepin.KeyURL,
 			Path:        claudepin.KeyPath,
 			Fingerprint: signer,
-			SHA256:      claudepin.Sha256Of(key),
+			SHA256:      evidence.Sha256Of(key),
 		},
 		Platforms: platformsDocument{AMD64: platform("linux/amd64"), ARM64: platform("linux/arm64")},
 		Authentication: authenticationDocument{
