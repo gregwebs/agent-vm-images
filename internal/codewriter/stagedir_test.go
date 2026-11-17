@@ -1,0 +1,205 @@
+package codewriter
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// fixtureRoot is a private copy of the committed closure and the Dockerfile, so a test
+// can publish without touching the checkout.
+func fixtureRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	source := repositoryRoot(t)
+	for _, name := range stageNames() {
+		if name == dockerfileName {
+			continue
+		}
+		relative := destinationOf(name)
+		destination := filepath.Join(root, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+			t.Fatalf("cannot create %s: %s", filepath.Dir(destination), err)
+		}
+		writeFixture(t, destination, string(readFile(t, filepath.Join(source, filepath.FromSlash(relative)))))
+	}
+	dockerfile := filepath.Join(root, Dockerfile)
+	if err := os.MkdirAll(filepath.Dir(dockerfile), 0o700); err != nil {
+		t.Fatalf("cannot create %s: %s", filepath.Dir(dockerfile), err)
+	}
+	writeFixture(t, dockerfile, string(readFile(t, filepath.Join(source, Dockerfile))))
+	return root
+}
+
+func writeFixture(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("%s: %s", path, err)
+	}
+}
+
+// committedProposal is the six files the checkout would publish today.
+func committedProposal(t *testing.T, root string) []proposalFile {
+	t.Helper()
+	files := make([]proposalFile, 0, len(stageNames()))
+	for _, name := range stageNames() {
+		destination := destinationOf(name)
+		files = append(files, proposalFile{destination: destination,
+			raw: readFile(t, filepath.Join(root, filepath.FromSlash(destination)))})
+	}
+	return files
+}
+
+// withDockerfile replaces the proposal's Dockerfile.
+func withDockerfile(files []proposalFile, dockerfile string) []proposalFile {
+	replaced := make([]proposalFile, 0, len(files))
+	for _, file := range files {
+		if file.destination == Dockerfile {
+			file = proposalFile{destination: Dockerfile, raw: []byte(dockerfile)}
+		}
+		replaced = append(replaced, file)
+	}
+	return replaced
+}
+
+// TestStagingRoundTripsTheFixedLayout: the proposal is written through the staging
+// discipline and read back through it, with the evidence child created once.
+func TestStagingRoundTripsTheFixedLayout(t *testing.T) {
+	root := fixtureRoot(t)
+	files := committedProposal(t, root)
+	directory := filepath.Join(t.TempDir(), "stage")
+	if err := writeStage(directory, files); err != nil {
+		t.Fatalf("write: %s", err)
+	}
+	read, err := readStage(directory, stageNames())
+	if err != nil {
+		t.Fatalf("read: %s", err)
+	}
+	if len(read) != len(files) {
+		t.Fatalf("read %d files, wrote %d", len(read), len(files))
+	}
+	for index, file := range read {
+		if file.name != stageNames()[index] {
+			t.Errorf("file %d is %s, not %s", index, file.name, stageNames()[index])
+		}
+		if string(file.raw) != string(files[index].raw) {
+			t.Errorf("%s did not round-trip", file.name)
+		}
+	}
+	info, err := os.Stat(filepath.Join(directory, evidenceName))
+	if err != nil {
+		t.Fatalf("the evidence directory is missing: %s", err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o700 {
+		t.Errorf("the evidence directory is mode %04o", mode)
+	}
+}
+
+// TestStagingRefusesACallerDirectory: only an absent or empty directory this invocation
+// may fill is written to.
+func TestStagingRefusesACallerDirectory(t *testing.T) {
+	files := committedProposal(t, fixtureRoot(t))
+	sentinel := filepath.Join(t.TempDir(), "stage")
+	if err := os.Mkdir(sentinel, 0o700); err != nil {
+		t.Fatalf("%s: %s", sentinel, err)
+	}
+	writeFixture(t, filepath.Join(sentinel, "keep.txt"), "do not delete me\n")
+	if err := writeStage(sentinel, files); err == nil ||
+		!strings.Contains(err.Error(), "not empty") {
+		t.Errorf("a non-empty staging directory reported %v", err)
+	}
+	if raw := readFile(t, filepath.Join(sentinel, "keep.txt")); string(raw) != "do not delete me\n" {
+		t.Errorf("the caller's file was modified")
+	}
+}
+
+// TestStagingRefusesASharedOrLinkedDirectory: a directory another user can reach, or a
+// symlink to one, is not a staging area.
+func TestStagingRefusesASharedOrLinkedDirectory(t *testing.T) {
+	files := committedProposal(t, fixtureRoot(t))
+	base := t.TempDir()
+	shared := filepath.Join(base, "shared")
+	if err := os.Mkdir(shared, 0o700); err != nil {
+		t.Fatalf("%s: %s", shared, err)
+	}
+	if err := os.Chmod(shared, 0o755); err != nil {
+		t.Fatalf("%s: %s", shared, err)
+	}
+	if err := writeStage(shared, files); err == nil ||
+		!strings.Contains(err.Error(), "private to this user") {
+		t.Errorf("a shared staging directory reported %v", err)
+	}
+	if entries, err := os.ReadDir(shared); err != nil || len(entries) != 0 {
+		t.Errorf("a refused staging directory was written to: %v %s", entries, err)
+	}
+
+	target := filepath.Join(base, "target")
+	if err := writeStage(target, files); err != nil {
+		t.Fatalf("write: %s", err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("%s: %s", link, err)
+	}
+	if err := writeStage(link, files); err == nil ||
+		!strings.Contains(err.Error(), "not a real directory") {
+		t.Errorf("a symlinked staging directory reported %v", err)
+	}
+}
+
+// TestPublishStageRefusesAnUnrelatedDockerfileEdit: the mask comparison is what keeps a
+// Codex publication from carrying somebody else's Dockerfile change into a commit.
+func TestPublishStageRefusesAnUnrelatedDockerfileEdit(t *testing.T) {
+	root := fixtureRoot(t)
+	before := string(readFile(t, filepath.Join(root, Dockerfile)))
+	files := withDockerfile(committedProposal(t, root),
+		strings.Replace(before, "FROM ${BASE_IMAGE}", "RUN true\nFROM ${BASE_IMAGE}", 1))
+	stageDir := filepath.Join(t.TempDir(), "stage")
+	if err := writeStage(stageDir, files); err != nil {
+		t.Fatalf("write: %s", err)
+	}
+	client, out, errOut := newClient(t, root)
+	if status := client.PublishStage(stageDir); status != 1 {
+		t.Fatalf("publish stage: status %d", status)
+	}
+	if out.Len() != 0 {
+		t.Errorf("a refused publication wrote to stdout: %s", out)
+	}
+	if !strings.Contains(errOut.String(), "changes more than the single-slot version defaults") {
+		t.Errorf("the refusal does not name the Dockerfile: %s", errOut)
+	}
+	if string(readFile(t, filepath.Join(root, Dockerfile))) != before {
+		t.Errorf("a refused publication changed the Dockerfile")
+	}
+}
+
+// TestPublishStageCarriesTheUnownedArgEdits: the bumper stages its own single-slot ARG
+// defaults into the Codex proposal, and publishing them must leave the Codex slot alone.
+func TestPublishStageCarriesTheUnownedArgEdits(t *testing.T) {
+	root := fixtureRoot(t)
+	pin, _ := committedPin(t)
+	before := string(readFile(t, filepath.Join(root, Dockerfile)))
+	staged := rewriteSlots(t, before, pin.Release, "v9.9.9", "9.9.9")
+	files := withDockerfile(committedProposal(t, root), staged)
+	stageDir := filepath.Join(t.TempDir(), "stage")
+	if err := writeStage(stageDir, files); err != nil {
+		t.Fatalf("write: %s", err)
+	}
+	client, _, errOut := newClient(t, root)
+	if status := client.PublishStage(stageDir); status != 0 {
+		t.Fatalf("publish stage: status %d: %s", status, errOut)
+	}
+	published := string(readFile(t, filepath.Join(root, Dockerfile)))
+	if err := RequireSingleSlot(published, pin.Release); err != nil {
+		t.Errorf("the published Dockerfile lost the Codex slot: %s", err)
+	}
+	for _, needle := range []string{"ARG AGENT_VERSION_OPENCODE=v9.9.9", "ARG AGENT_VERSION_COPILOT=9.9.9"} {
+		if !strings.Contains(published, needle) {
+			t.Errorf("the published Dockerfile does not carry %q", needle)
+		}
+	}
+	if string(readFile(t, filepath.Join(root, PinFile))) != string(readFile(t, filepath.Join(repositoryRoot(t), PinFile))) {
+		t.Errorf("publishing a Dockerfile-only proposal changed the pin")
+	}
+}

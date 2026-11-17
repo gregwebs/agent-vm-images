@@ -253,17 +253,16 @@ to update the fixture default after reviewing the proposal.
 verification; they never contact Sigstore. Pin-time verification is the only
 cryptographic step, it needs a maintainer host with `cosign v2.4.1` and network
 access to Sigstore's production TUF root, and it fails closed. Cryptographic
-verification is deliberately not implemented in Python and cosign is not an image
-input. No hash-only exception is used.
+verification is deliberately not implemented in `internal/codexpin` and cosign is
+not an image input. No hash-only exception is used.
 
-**Maintenance.** Only `script/dev/pin-codex.py` writes the pin, its four evidence
-files and the Codex ARG, and only through the shared Python publication
-transaction (which it still reuses from `script/dev/pin-artifact.py`, until the
-Codex writer is ported too). Typical commands:
+**Maintenance.** Only `script/dev/pin-codex.sh` writes the pin, its four evidence
+files and the Codex ARG, and only through the shared publication transaction
+(`internal/publication`, ADR 0017). Typical commands:
 
 ```bash
-python3 script/dev/pin-codex.py --check
-python3 script/dev/pin-codex.py --version rust-v0.163.0 --cosign /absolute/path/to/cosign
+script/dev/pin-codex.sh --check
+script/dev/pin-codex.sh --version rust-v0.163.0 --cosign /absolute/path/to/cosign
 bash script/build/agent-versions.sh --check
 bash script/build/agent-versions.sh --write --cosign /absolute/path/to/cosign
 ```

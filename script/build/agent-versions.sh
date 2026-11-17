@@ -137,7 +137,7 @@ fi
 [ -d "$repo_root" ] || fail "--repo-root is not a directory: $repo_root"
 repo_root="$(cd "$repo_root" && pwd -P)"
 
-codex_writer="$repo_root/script/dev/pin-codex.py"
+codex_writer="$repo_root/script/dev/pin-codex.sh"
 [ -f "$codex_writer" ] || fail "missing $codex_writer"
 agy_writer="$repo_root/script/dev/pin-agy.py"
 [ -f "$agy_writer" ] || fail "missing $agy_writer"
@@ -150,7 +150,7 @@ if [ "$check" = true ]; then
     # status.
     python3 "$agy_writer" --check --repo-root "$repo_root" || exit $?
     bash "$claude_writer" --check --root "$repo_root" || exit $?
-    exec python3 "$codex_writer" --check --repo-root "$repo_root"
+    exec bash "$codex_writer" --check --root "$repo_root"
 fi
 
 if [ "${GITHUB_ACTIONS:-}" = true ]; then
@@ -158,9 +158,10 @@ if [ "${GITHUB_ACTIONS:-}" = true ]; then
 fi
 
 # Fail before a lookup so an HTTP-200-but-garbage response reports a per-tool
-# message instead of this chokepoint. `python3` and the reviewed cosign are
-# write-mode prerequisites: nothing here resolves an upstream release until both
-# are present, and pin-codex re-checks cosign's exact version before it fetches.
+# message instead of this chokepoint. `python3` (the agy writer, until #182) and
+# the reviewed cosign are write-mode prerequisites: nothing here resolves an
+# upstream release until both are present, and pin-codex re-checks cosign's exact
+# version before it fetches.
 # gpg is a claude prerequisite: the pin's signature is verified with it, in a
 # private home under /tmp (never TMPDIR: gpg-agent's socket lives there).
 require_tools curl jq npm python3 gpg gpgconf
@@ -178,7 +179,7 @@ fi
 # incompatible verifier must stop the run without resolving a single upstream
 # tag (a lookup that then fails to verify leaves a half-finished bump story).
 probe_status=0
-python3 "$codex_writer" --probe-cosign "$cosign" --repo-root "$repo_root" \
+bash "$codex_writer" --probe-cosign "$cosign" --root "$repo_root" \
     || probe_status=$?
 [ "$probe_status" -eq 0 ] || exit "$probe_status"
 cosign_args=("--cosign" "$cosign")
@@ -410,7 +411,7 @@ fi
 # of them are staged, and the Dockerfile it stages is the one agy and claude have
 # already published.
 codex_status=0
-python3 "$codex_writer" --version "$codex" --stage-dir "$work" --repo-root "$repo_root" \
+bash "$codex_writer" --version "$codex" --stage-dir "$work" --root "$repo_root" \
     "${cosign_args[@]}" || codex_status=$?
 if [ "$codex_status" -ne 0 ]; then
     if [ "$codex_status" -eq 3 ]; then
@@ -432,7 +433,7 @@ stage_one copilot "$copilot"
 # report printed after the call would never be reached.
 echo "pin-codex: owner scratch: $work (retained if the publication is undecided)" >&2
 publish_status=0
-python3 "$codex_writer" --publish-stage "$work" --repo-root "$repo_root" \
+bash "$codex_writer" --publish-stage "$work" --root "$repo_root" \
     || publish_status=$?
 if [ "$publish_status" -ne 0 ]; then
     if [ "$publish_status" -eq 3 ]; then

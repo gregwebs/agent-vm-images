@@ -28,10 +28,9 @@ Environment:
                             sha256 is wrong, so only the writer's own validation
                             of the staged proposal can refuse it
 
-Everything below the module load runs only when this file IS the process. It is
-imported as `script/dev/pin-agy.py`'s transport by a fixture repository, exactly
-as the real `pin-codex.py` is, so an import must never parse arguments or install
-faults.
+Everything below the module load runs only when this file IS the process. A
+fixture repository imports it as `script/dev/pin-agy.py`, so an import must never
+parse arguments or install faults.
 """
 from __future__ import annotations
 

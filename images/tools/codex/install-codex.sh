@@ -14,6 +14,7 @@
 set -eu
 
 VENDOR="${AGENT_VM_VENDOR_DIR:-/opt/agent-vm/recipe-vendor}"
+CONTRACT="${AGENT_VM_CONTRACT_DIR:-/tmp/recipe-contract}"
 # Production prefix is the installer's $HOME. The seam lets the host black-box
 # test point at a temp root; production always uses the default.
 prefix="${AGENT_VM_CODEX_PREFIX:-/opt/agent}"
@@ -21,11 +22,12 @@ version="${AGENT_VM_VERSION_CODEX:?install-codex.sh needs AGENT_VM_VERSION_CODEX
 receipt="${AGENT_VM_TRANSPORT_RECEIPT:-}"
 status_dir="${AGENT_VM_INSTALL_STATUS_DIR:-/opt/agent-vm/install-status}"
 
-# The committed closure (pin.json, its evidence and codex_pin.py) lives in the
-# codex source directory. Production mounts it beside this hook; the explicit
-# seam is what keeps a hook-only mount from silently pinning nothing. There is no
-# ambient override for the pin contents, the expected hash, the URL or the trust
-# policy: the directory is the whole input.
+# The committed closure (pin.json and its evidence) lives in the codex source
+# directory. Production mounts it beside this hook; the explicit seam is what keeps
+# a hook-only mount from silently pinning nothing. There is no ambient override for
+# the pin contents, the expected hash, the URL or the trust policy: the directory is
+# the whole input, and the reader is the image's own recipe-contract (ADR 0017), so
+# the pin directory carries reviewed bytes only.
 if [ -n "${AGENT_VM_CODEX_SOURCE_DIR:-}" ]; then
     pin_dir="$AGENT_VM_CODEX_SOURCE_DIR"
 else
@@ -34,47 +36,27 @@ else
         *) pin_dir="." ;;
     esac
 fi
-[ -r "$pin_dir/pin.json" ] && [ -r "$pin_dir/codex_pin.py" ] || {
+[ -r "$pin_dir/pin.json" ] || {
     echo "install-codex.sh: no committed Codex pin at $pin_dir" >&2
     exit 1
 }
 
-# The codex contract accepts only the canonical `rust-v` spelling: no bare
-# version, no `v` alias, no dist-tag, range or URL. The vendored installer
-# normalizes the prefix and installs the exact numeric release. The grammar is
-# canonical semver for its supported alpha/beta subset: leading-zero numeric
-# components and leading-zero prerelease identifiers are NOT exact versions.
-case "$version" in
-    rust-v*) numeric="${version#rust-v}" ;;
-    *)
-        echo "install-codex.sh: expected rust-v<version>, got '$version'" >&2
-        exit 1
-        ;;
-esac
-# Reject an embedded newline first: `grep` is line-oriented, so a multi-line
-# range whose first line looks exact would otherwise reach the installer.
-if [ "$(printf '%s' "$numeric" | wc -l | tr -d ' ')" -ne 0 ]; then
-    echo "install-codex.sh: not an exact Codex version: '$version'" >&2
-    exit 1
-fi
-if ! printf '%s' "$numeric" |
-    grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-alpha(\.(0|[1-9][0-9]*)){0,2}|-beta(\.(0|[1-9][0-9]*))?)?$'; then
-    echo "install-codex.sh: not an exact Codex version: '$version'" >&2
-    exit 1
-fi
 [ -r "$VENDOR/install.sh" ] || {
     echo "install-codex.sh: vendored installer missing at $VENDOR/install.sh" >&2
     exit 1
 }
 
-# Refuse an exact-but-unpinned version here, before the vendor runs at all. The
-# vendored installer repeats this through `select`; the hook does not rely on
-# that, because a reviewable refusal at the boundary is what keeps the pin
-# authority from depending on the installer's own control flow.
-python3 "$pin_dir/codex_pin.py" check --pin-dir "$pin_dir" --release "$version" || {
-    echo "install-codex.sh: the committed Codex pin does not cover '$version'" >&2
-    exit 1
-}
+# The reader owns the exact-slot grammar and the closure: it refuses a bare
+# version, a `v` alias, a dist-tag, a range, a URL, a leading-zero component and an
+# exact-but-unpinned tag, all before the vendor runs at all. The vendored installer
+# repeats this through `select`; the hook does not rely on that, because a
+# reviewable refusal at the boundary is what keeps the pin authority from depending
+# on the installer's own control flow.
+"$CONTRACT/recipe-contract" codex-pin check --pin-dir "$pin_dir" --release "$version" ||
+    {
+        echo "install-codex.sh: the committed Codex pin does not cover '$version'" >&2
+        exit 1
+    }
 
 # A build is a fresh, non-interactive install into an empty prefix. Clearing the
 # inherited selection/update guards keeps a stale ambient value from turning it

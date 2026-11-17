@@ -334,8 +334,8 @@ exact URLs and SHA-256, the original release metadata, the original
 the operational facts are:
 
 ```bash
-python3 script/dev/pin-codex.py --check     # offline: evidence hashes, policy, ARG/label
-python3 script/dev/pin-codex.py --version rust-v0.159.3 --cosign /abs/cosign
+script/dev/pin-codex.sh --check     # offline: evidence hashes, policy, ARG/label
+script/dev/pin-codex.sh --version rust-v0.163.0 --cosign /abs/cosign
 bash script/build/agent-versions.sh --check # the same check through the bumper
 bash script/build/agent-versions.sh --write --cosign /abs/cosign
 ```
@@ -373,10 +373,15 @@ bash script/build/agent-versions.sh --write --cosign /abs/cosign
   both are preserved and must be recovered before further edits, builds or commits.
   For a standalone `--version` run the owner scratch keeps the staged six-file
   proposal; a signal-driven rollback reports both directories from the
-  publisher's own handler, because it leaves through `os._exit(3)`.
-  `script/test/agent-versions.sh` opens both printed directories and checks all
-  six staged files byte-for-byte, every numbered backup's bytes and mode, and the
-  `.complete` marker. A signal restores and exits `128+N`.
+  publisher's own handler, because it leaves through `os._exit(3)`. Those paths
+  are proved where the transaction is: `internal/publication/publish_test.go`
+  restores every touched destination after a partial write and after a signal
+  (`128+N`), exits 3 when the restore is refused, and still exits 3 when the
+  recovery record cannot be written. `script/test/agent-versions.sh` keeps the
+  bumper's side of it — a refused run leaves the closure byte- and
+  mode-identical — and, for agy, opens both printed directories and checks all
+  five staged files byte-for-byte, every numbered backup's bytes and mode, and
+  the `.complete` marker.
 - Every upstream request is bounded by one 300 s budget for the whole request —
   connection, headers, redirects and body — enforced by an independent timer as
   well as by per-read re-clamping, so a peer that drips bytes cannot hold a

@@ -17,11 +17,13 @@ import (
 	"github.com/gregwebs/agent-vm-images/internal/artifactwriter"
 	"github.com/gregwebs/agent-vm-images/internal/claudepin"
 	"github.com/gregwebs/agent-vm-images/internal/claudewriter"
+	"github.com/gregwebs/agent-vm-images/internal/codewriter"
 )
 
 type arguments struct {
 	Artifact *artifactCommand `arg:"subcommand:artifact" help:"refresh the Node or GitHub CLI release-artifact pin"`
 	Claude   *claudeCommand   `arg:"subcommand:claude" help:"refresh the Claude native payload closure"`
+	Codex    *codexCommand    `arg:"subcommand:codex" help:"refresh the Codex payload closure"`
 }
 
 func (arguments) Description() string {
@@ -53,6 +55,21 @@ func (claudeCommand) Description() string {
 	return "Resolve one exact Claude Code release, verify its signature and publish the closure."
 }
 
+type codexCommand struct {
+	Version      string `arg:"--version" placeholder:"TAG" help:"the exact openai/codex release tag, rust-v<VERSION>"`
+	Root         string `arg:"--root" placeholder:"DIR" help:"the repository to publish into (default: the working directory)"`
+	Fixtures     string `arg:"--fixture-upstream" placeholder:"DIR" help:"serve upstream bytes from DIR instead of the network (suites only)"`
+	Cosign       string `arg:"--cosign" placeholder:"FILE" help:"the reviewed cosign (v2.4.1); required for a write run"`
+	ProbeCosign  string `arg:"--probe-cosign" placeholder:"FILE" help:"require FILE to be the reviewed verifier and print it; writes nothing"`
+	StageDir     string `arg:"--stage-dir" placeholder:"DIR" help:"write the six-file proposal into DIR instead of publishing it"`
+	PublishStage string `arg:"--publish-stage" placeholder:"DIR" help:"publish that staged proposal as one transaction"`
+	Check        bool   `arg:"--check" help:"validate the committed inputs offline; writes nothing"`
+}
+
+func (codexCommand) Description() string {
+	return "Resolve one exact Codex release, verify both bundles and publish the closure."
+}
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -72,12 +89,15 @@ func run(args []string) int {
 		parser.WriteHelp(os.Stderr)
 		return 2
 	}
-	if parsed.Artifact == nil && parsed.Claude == nil {
+	if parsed.Artifact == nil && parsed.Claude == nil && parsed.Codex == nil {
 		parser.WriteHelp(os.Stderr)
 		return 2
 	}
 	if parsed.Claude != nil {
 		return runClaude(parsed.Claude)
+	}
+	if parsed.Codex != nil {
+		return runCodex(parsed.Codex)
 	}
 	command := parsed.Artifact
 	root, err := resolveRoot(command.Root)
@@ -139,8 +159,11 @@ func run(args []string) int {
 // reported by the tool the maintainer actually invoked.
 func prefixFor(args []string) string {
 	for _, argument := range args {
-		if argument == "claude" {
+		switch argument {
+		case "claude":
 			return claudewriter.Prefix
+		case "codex":
+			return codewriter.Prefix
 		}
 	}
 	return artifactwriter.Prefix
@@ -188,6 +211,59 @@ func runClaude(command *claudeCommand) int {
 		return refuse(claudewriter.Prefix, 2, err.Error())
 	}
 	return client.Refresh(context.Background(), claudewriter.Options{Version: command.Version})
+}
+
+// runCodex refreshes the Codex closure: the writer publishes the pin, its four
+// evidence files and the Dockerfile ARG default as one transaction, and the bumper
+// stages that proposal instead so it can publish several owners together.
+func runCodex(command *codexCommand) int {
+	root, err := resolveRoot(command.Root)
+	if err != nil {
+		return refuse(codewriter.Prefix, 1, err.Error())
+	}
+	client := codewriter.New(codewriter.Environment{
+		Root:      root,
+		TempRoot:  os.Getenv("TMPDIR"),
+		Variables: variables(),
+	}, os.Stdout, os.Stderr)
+	if command.Fixtures != "" {
+		// The fixture source is a flag, not an inherited variable: a pin written from
+		// fixture bytes still records the canonical upstream URL, so the seam has to
+		// be something the maintainer typed.
+		fixture, err := artifactwriter.NewFixtureFetcher(command.Fixtures)
+		if err != nil {
+			return refuse(codewriter.Prefix, 1, err.Error())
+		}
+		client.Fetch = fixture
+	}
+	if command.Check {
+		if command.Version != "" || command.Cosign != "" || command.ProbeCosign != "" ||
+			command.StageDir != "" || command.PublishStage != "" {
+			return refuse(codewriter.Prefix, 2, "--check takes no other argument")
+		}
+		return client.Check()
+	}
+	if command.ProbeCosign != "" {
+		if command.Version != "" || command.Cosign != "" || command.StageDir != "" ||
+			command.PublishStage != "" {
+			return refuse(codewriter.Prefix, 2, "--probe-cosign takes only --root")
+		}
+		return client.ProbeCosign(command.ProbeCosign)
+	}
+	if command.PublishStage != "" {
+		if command.Version != "" || command.Cosign != "" || command.StageDir != "" {
+			return refuse(codewriter.Prefix, 2, "--publish-stage takes only --root")
+		}
+		return client.PublishStage(command.PublishStage)
+	}
+	if command.Version == "" {
+		return refuse(codewriter.Prefix, 2, "--version is required for a write run")
+	}
+	return client.Refresh(context.Background(), codewriter.Options{
+		Version:  command.Version,
+		Cosign:   command.Cosign,
+		StageDir: command.StageDir,
+	})
 }
 
 // diagnose writes one contract line for the artifact writer and returns the refusal

@@ -1,13 +1,39 @@
-package claudepin
+// Package evidence is how a pin reader reaches a committed or downloaded file.
+//
+// Every read is proven regular, reached without passing through a symlink and
+// bounded, so a pin directory or a scratch directory that can redirect a read
+// cannot substitute the bytes a reviewed certificate was issued for. Both pin
+// families (Claude and Codex) read this way, so there is one implementation of the
+// rule rather than one per owner.
+package evidence
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// Refusal is a committed input that is not what the reviewed pin says it is.
+type Refusal struct{ Message string }
+
+func (r *Refusal) Error() string { return r.Message }
+
+// Refuse builds a Refusal.
+func Refuse(format string, args ...any) error {
+	return &Refusal{Message: fmt.Sprintf(format, args...)}
+}
+
+// IsRefusal reports whether err is a refusal rather than an I/O or programming
+// failure, so a caller can map it onto the refusal status.
+func IsRefusal(err error) bool {
+	var refusal *Refusal
+	return errors.As(err, &refusal)
+}
 
 // RegularFile is a regular, non-symlink file reached without passing through a
 // symlink. Every committed input is reached this way: a pin directory that can
@@ -50,7 +76,7 @@ func RegularFile(directory, relative, what string) (string, error) {
 // ReadBounded reads a file already proven regular, refusing a swap to another
 // filetype between the check and the read.
 func ReadBounded(path string, limit int64, what string) ([]byte, error) {
-	file, err := openNoFollow(path)
+	file, err := OpenNoFollow(path)
 	if err != nil {
 		return nil, Refuse("%s cannot be opened at %s: %s", what, path, err)
 	}
@@ -72,41 +98,11 @@ func ReadBounded(path string, limit int64, what string) ([]byte, error) {
 	return raw, nil
 }
 
-// openNoFollow opens a path without following a final symlink, where the platform
+// OpenNoFollow opens a path without following a final symlink, where the platform
 // has that flag.
-func openNoFollow(path string) (*os.File, error) {
+func OpenNoFollow(path string) (*os.File, error) {
 	flags := os.O_RDONLY | noFollowFlag
 	return os.OpenFile(path, flags, 0)
-}
-
-// EvidenceBytes is one committed evidence file, re-hashed now, before any use.
-func (p Pin) EvidenceBytes(relative, expected string) ([]byte, error) {
-	what := "committed " + relative
-	path, err := RegularFile(p.Directory, relative, what)
-	if err != nil {
-		return nil, err
-	}
-	raw, err := ReadBounded(path, MaxEvidenceBytes, what)
-	if err != nil {
-		return nil, err
-	}
-	if Sha256Of(raw) != expected {
-		return nil, Refuse("%s does not match the pin digest", what)
-	}
-	return raw, nil
-}
-
-// Load is the reviewed closure's structure, with `pin.json` itself proven regular.
-func Load(directory string) (Pin, error) {
-	path, err := RegularFile(directory, "pin.json", "pin.json")
-	if err != nil {
-		return Pin{}, err
-	}
-	raw, err := ReadBounded(path, MaxPinBytes, "pin.json")
-	if err != nil {
-		return Pin{}, err
-	}
-	return Parse(raw, directory)
 }
 
 // Sha256Of is the digest the pins record, in the case they record it in.
@@ -118,7 +114,7 @@ func Sha256Of(raw []byte) string {
 // FileDigest is the SHA-256 and byte count of a regular file, read in chunks so a
 // 340 MB payload never lands in memory twice.
 func FileDigest(path string, limit int64, what string) (string, int64, error) {
-	file, err := openNoFollow(path)
+	file, err := OpenNoFollow(path)
 	if err != nil {
 		return "", 0, Refuse("%s cannot be opened at %s: %s", what, path, err)
 	}
@@ -131,7 +127,7 @@ func FileDigest(path string, limit int64, what string) (string, int64, error) {
 		return "", 0, Refuse("%s at %s is not a regular file", what, path)
 	}
 	hasher := sha256.New()
-	buffer := make([]byte, ReadChunkBytes)
+	buffer := make([]byte, ChunkBytes)
 	var total int64
 	for {
 		read, err := file.Read(buffer)
@@ -151,3 +147,7 @@ func FileDigest(path string, limit int64, what string) (string, int64, error) {
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), total, nil
 }
+
+// ChunkBytes is the read size every streaming digest uses: one page-sized read, so
+// a caller can never ask a decoder for a caller-sized allocation.
+const ChunkBytes = 1 << 16

@@ -1,6 +1,6 @@
 //go:build !windows
 
-package claudepin
+package evidence
 
 import "syscall"
 

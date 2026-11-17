@@ -19,6 +19,9 @@ DAEMON_ONLY="${CODEX_INSTALL_DAEMON_ONLY:-0}"
 # this patched installer without the committed closure must fail before it
 # downloads anything, so the hook is not the only place the pin applies.
 : "${CODEX_PIN_DIR:?the codex installer needs CODEX_PIN_DIR (the committed pin directory)}"
+# The reader is the image's own recipe-contract (ADR 0017): the pin directory holds
+# reviewed bytes only, never a program.
+CODEX_PIN_CONTRACT="$AGENT_VM_CONTRACT_DIR/recipe-contract"
 
 # Native subprocesses must never see the classified-transport receipt. A native
 # exit 75 -- or a native that happens to write the receipt path -- is a hard
@@ -145,7 +148,7 @@ resolve_release() {
   # so an exact-but-unreviewed tag fails here, before a single download. The
   # record is four newline-delimited fields and is parsed positionally; no
   # `eval` and no shell-source output.
-  record="$(python3 "$CODEX_PIN_DIR/codex_pin.py" select \
+  record="$("$CODEX_PIN_CONTRACT" codex-pin select \
     --pin-dir "$CODEX_PIN_DIR" \
     --release "rust-v$normalized_version" \
     --target "$vendor_target")" || return $?
@@ -610,7 +613,7 @@ install_package_release() {
   # Re-load the committed closure and re-hash the private download, then check
   # the package metadata and the entrypoint's ELF machine, before the staging
   # directory exists. Nothing below this line can run on unverified bytes.
-  python3 "$CODEX_PIN_DIR/codex_pin.py" preflight \
+  "$CODEX_PIN_CONTRACT" codex-pin preflight \
     --pin-dir "$CODEX_PIN_DIR" \
     --release "rust-v$resolved_version" \
     --target "$vendor_target" \

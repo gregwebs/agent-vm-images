@@ -186,7 +186,11 @@ class Repository:
                             directory / 'images' / 'artifacts' / name)
         shutil.copyfile(ROOT / 'images' / 'install-artifact.sh',
                         directory / 'images' / 'install-artifact.sh')
-        for name in ('pin-agy.py', 'pin-artifact.py', 'pin-codex.py'):
+        # The agy writer imports the shared artifact model through pin-artifact.py
+        # and the maintainer HTTP transport through pin_transport.py; there is no
+        # codex writer module to copy since #181 (a compiled `avm-pin codex` behind
+        # script/dev/pin-codex.sh).
+        for name in ('pin-agy.py', 'pin-artifact.py', 'pin_transport.py'):
             shutil.copyfile(ROOT / 'script' / 'dev' / name,
                             directory / 'script' / 'dev' / name)
         (directory / DOCKERFILE).write_text(dockerfile(arg))

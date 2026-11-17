@@ -5,8 +5,8 @@
 #
 # No Docker, no network: the vendored installer is faked on a temp prefix and
 # the real run-install/report/check-tool-access helpers are used where they are
-# part of what is under test. The hook's committed-pin gate runs the REAL loader
-# (`images/tools/codex/codex_pin.py`) against a synthetic closure written by
+# part of what is under test. The hook's committed-pin gate runs the REAL reader
+# (`recipe-contract codex-pin`, ADR 0017) against a synthetic closure written by
 # `script/test/codex-pins.py --write-fixture`, so an exact-but-unpinned release is
 # proved to be refused before the vendor is ever invoked. This exercises the
 # exact `rust-v` validation, the pin authority, the classified transport
@@ -34,7 +34,6 @@ CASE=""
 # case gets its own copy of a valid closure so a case can corrupt it in place.
 write_pin_dir() { # $1 dir, $2 release
     mkdir -p "$1"
-    cp "$REPO_ROOT/images/tools/codex/codex_pin.py" "$1/codex_pin.py"
     python3 "$REPO_ROOT/script/test/codex-pins.py" --write-fixture "$1" --release "$2" \
         >/dev/null
 }
@@ -98,6 +97,7 @@ run_install() {
     RUN_OUTPUT="$(
         env -i \
             "PATH=$PYTHON_DIR:/usr/bin:/bin" \
+            "AGENT_VM_CONTRACT_DIR=$CONTRACT" \
             "AGENT_VM_VENDOR_DIR=$CASE/vendor" \
             "AGENT_VM_CODEX_SOURCE_DIR=$CASE/source" \
             "AGENT_VM_CODEX_PREFIX=$CASE/prefix" \

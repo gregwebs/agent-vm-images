@@ -1,6 +1,6 @@
 --- a/install.sh
 +++ b/install.sh
-@@ -2,17 +2,31 @@
+@@ -2,17 +2,34 @@
  
  set -eu
  
@@ -29,6 +29,9 @@
 +# this patched installer without the committed closure must fail before it
 +# downloads anything, so the hook is not the only place the pin applies.
 +: "${CODEX_PIN_DIR:?the codex installer needs CODEX_PIN_DIR (the committed pin directory)}"
++# The reader is the image's own recipe-contract (ADR 0017): the pin directory holds
++# reviewed bytes only, never a program.
++CODEX_PIN_CONTRACT="$AGENT_VM_CONTRACT_DIR/recipe-contract"
 +
 +# Native subprocesses must never see the classified-transport receipt. A native
 +# exit 75 -- or a native that happens to write the receipt path -- is a hard
@@ -40,7 +43,7 @@
  BIN_DIR="${CODEX_INSTALL_DIR:-$HOME/.local/bin}"
  BIN_PATH="$BIN_DIR/codex"
  CODE_MODE_HOST_BIN_PATH="$BIN_DIR/codex-code-mode-host"
-@@ -52,30 +66,17 @@
+@@ -52,30 +69,17 @@
  
  normalize_version() {
    case "$1" in
@@ -75,7 +78,7 @@
      return 1
    fi
  }
-@@ -96,10 +97,11 @@
+@@ -96,10 +100,11 @@
  Usage: install.sh [--release VERSION]
  
  Environment:
@@ -90,7 +93,7 @@
  EOF
          exit 0
          ;;
-@@ -116,418 +118,58 @@
+@@ -116,418 +121,58 @@
    url="$1"
    output="$2"
  
@@ -352,8 +355,6 @@
 -    echo "Could not fetch GitHub release metadata for Codex $requested_release. GitHub API may be unavailable or rate limited." >&2
 -    exit 1
 -  fi
--
--  parse_downloaded_release_metadata "$requested_release" "GitHub"
 +  # Named for its call sites, but this build has neither a releases.openai.com
 +  # fallback nor a manifest cross-check: the committed pin chose one exact
 +  # GitHub asset and one digest. Any failure -- including a classified transport
@@ -363,6 +364,8 @@
 +  output="$2"
 +  expected_digest="$3"
  
+-  parse_downloaded_release_metadata "$requested_release" "GitHub"
+-
 -  if [ "$normalized_version" = "latest" ]; then
 -    resolve_metadata_version
 -    resolved_version="$metadata_version"
@@ -420,7 +423,7 @@
 +  # so an exact-but-unreviewed tag fails here, before a single download. The
 +  # record is four newline-delimited fields and is parsed positionally; no
 +  # `eval` and no shell-source output.
-+  record="$(python3 "$CODEX_PIN_DIR/codex_pin.py" select \
++  record="$("$CODEX_PIN_CONTRACT" codex-pin select \
 +    --pin-dir "$CODEX_PIN_DIR" \
 +    --release "rust-v$normalized_version" \
 +    --target "$vendor_target")" || return $?
@@ -545,7 +548,7 @@
  }
  
  file_sha256() {
-@@ -785,7 +427,23 @@
+@@ -785,7 +430,23 @@
      return 1
    fi
  
@@ -570,7 +573,7 @@
  }
  
  current_installed_version() {
-@@ -912,6 +570,7 @@
+@@ -912,6 +573,7 @@
    fi
  
    conflict_manager="$manager"
@@ -578,7 +581,7 @@
    conflict_path="$existing_path"
    step "Detected existing $manager-managed Codex at $existing_path"
    warn "Multiple managed Codex installs can be ambiguous because PATH order decides which one runs."
-@@ -947,6 +606,16 @@
+@@ -947,6 +609,16 @@
  install_package_release() {
    release_dir="$1"
    archive_path="$2"
@@ -586,7 +589,7 @@
 +  # Re-load the committed closure and re-hash the private download, then check
 +  # the package metadata and the entrypoint's ELF machine, before the staging
 +  # directory exists. Nothing below this line can run on unverified bytes.
-+  python3 "$CODEX_PIN_DIR/codex_pin.py" preflight \
++  "$CODEX_PIN_CONTRACT" codex-pin preflight \
 +    --pin-dir "$CODEX_PIN_DIR" \
 +    --release "rust-v$resolved_version" \
 +    --target "$vendor_target" \
@@ -595,7 +598,7 @@
    stage_release="$RELEASES_DIR/.staging.$(basename "$release_dir").$$"
  
    mkdir -p "$RELEASES_DIR"
-@@ -968,33 +637,6 @@
+@@ -968,33 +640,6 @@
    mv "$stage_release" "$release_dir"
  }
  
@@ -629,7 +632,7 @@
  release_dir_is_complete() {
    release_dir="$1"
    expected_version="$2"
-@@ -1005,29 +647,16 @@
+@@ -1005,29 +650,16 @@
      [ "$(basename "$release_dir")" = "$expected_version-$expected_target" ] ||
      return 1
  
@@ -668,7 +671,7 @@
    esac
  
    installed_version="$(version_from_binary "$release_dir/bin/codex" || version_from_binary "$release_dir/codex" || true)"
-@@ -1071,7 +700,15 @@
+@@ -1071,7 +703,15 @@
  }
  
  verify_visible_command() {
@@ -685,7 +688,7 @@
    if [ "$os" = "darwin" ] && [ "$install_layout" = "package" ]; then
      [ -x "$CODE_MODE_HOST_BIN_PATH" ]
    fi
-@@ -1116,21 +753,17 @@
+@@ -1116,21 +756,17 @@
  
  if [ "$os" = "darwin" ]; then
    if [ "$arch" = "aarch64" ]; then
@@ -707,7 +710,7 @@
      vendor_target="x86_64-unknown-linux-musl"
      platform_label="Linux (x64)"
    fi
-@@ -1139,6 +772,15 @@
+@@ -1139,6 +775,15 @@
  resolve_release
  release_name="$resolved_version-$vendor_target"
  release_dir="$RELEASES_DIR/$release_name"
@@ -723,7 +726,7 @@
  current_version="$(current_installed_version)"
  
  if [ -n "$current_version" ] && [ "$current_version" != "$resolved_version" ]; then
-@@ -1235,24 +877,12 @@
+@@ -1235,24 +880,12 @@
    fi
  
    archive_path="$tmp_dir/$asset"
@@ -750,7 +753,7 @@
  fi
  if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout"; then
    echo "Installed Codex command did not report expected version $resolved_version." >&2
-@@ -1269,12 +899,7 @@
+@@ -1269,12 +902,7 @@
    fi
  fi
  update_current_link "$release_dir"

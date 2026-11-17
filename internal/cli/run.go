@@ -100,6 +100,8 @@ func (p *process) dispatch(args []string, env Environment) int {
 		return p.runInstallArtifact(args[1:])
 	case "claude-pin":
 		return p.runClaudePin(args[1:])
+	case "codex-pin":
+		return p.runCodexPin(args[1:])
 	case "artifact-pin":
 		return p.runArtifactPin(args[1:])
 	default:
@@ -139,4 +141,15 @@ func (p *process) reportSynchronousFailure(err error) int {
 
 func (p *process) reportDeferredFlushFailure(streamName string, err error) {
 	_ = p.err.writeString("Exception ignored on flushing " + streamName + ":\n" + exceptionLineText(err) + "\n")
+}
+
+// contains reports whether values holds value, so a verb's argument set can be
+// stated as a list.
+func contains(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
 }

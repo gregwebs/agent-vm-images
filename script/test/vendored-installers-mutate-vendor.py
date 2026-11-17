@@ -8,6 +8,7 @@ substitution cannot masquerade as a passing control.
 
 usage: vendored-installers-mutate-vendor.py SOURCE DESTINATION VARIANT
        variants: latest-request, substitute-before-digest,
+                 codex-skip-preflight,
                  claude-manifest-request, claude-drop-launcher,
                  claude-skip-preflight, claude-setup-skip-initial-check,
                  claude-setup-check-after-native
@@ -18,6 +19,10 @@ single anchor and a real change, so a no-op edit cannot pass as a control. Three
 of them are the ordering controls for the before-execution checks: deleting the
 installer's preflight, deleting the setup step's initial `installed` call, or
 moving that call after the native invocation must each be detected by the suite.
+
+`codex-skip-preflight` is the same ordering control for the Codex installer: the
+reader is a contract helper (`$CODEX_PIN_CONTRACT codex-pin …`, ADR 0017), never a
+script that travels with the pin, so the anchor is that command and nothing else.
 """
 from __future__ import annotations
 
@@ -35,8 +40,8 @@ LATEST_INJECTION = ("\ndownload_file 'https://api.github.com/repos/openai/codex/
 # that helper's own `verify_archive_digest`: the archive is replaced with wrong
 # bytes while the pin and its evidence stay as committed. The site matters --
 # injecting after the call site instead would land on the wrong side of the hash
-# and be refused by the later Python preflight, which would make the shell
-# checksum diagnostic this control exists to exercise unreachable.
+# and be refused by the later `codex-pin preflight` check, which would make the
+# shell checksum diagnostic this control exists to exercise unreachable.
 CORRUPT_ANCHOR = '  download_file "$url" "$output" || return $?\n'
 CORRUPT_INJECTION = ('  download_file "$url" "$output" || return $?\n'
                      "  printf 'substituted payload\\n' >\"$output\"\n")
@@ -69,23 +74,29 @@ def _delete_through(lines: list[str], start: int, end: int, what: str) -> list[s
     return lines[:start] + lines[end + 1:]
 
 
-# The reader the hooks and the vendored installer call: a contract helper, not a
-# script that travels with the pin (ADR 0017).
+# The readers the hooks and the vendored installers call: contract helpers, not
+# scripts that travel with the pin (ADR 0017).
 CLAUDE_READER = '"$CONTRACT/recipe-contract" claude-pin'
+CODEX_READER = '"$CODEX_PIN_CONTRACT" codex-pin'
+CODEX_PREFLIGHT_ANCHOR = '  "$CODEX_PIN_CONTRACT" codex-pin preflight \\'
 
 
-def _command_block(lines: list[str], anchor_index: int, what: str) -> tuple[int, int]:
-    """The reader command after an anchor line, through its last line."""
-    index = anchor_index + 1
-    while index < len(lines) and not lines[index].strip():
-        index += 1
-    if index >= len(lines) or not lines[index].lstrip().startswith(CLAUDE_READER):
-        raise SystemExit(f'{what}: no command follows the anchor')
+def _command_block(lines: list[str], anchor_index: int, what: str,
+                   reader: str = CLAUDE_READER) -> tuple[int, int]:
+    """The reader command at an anchor line, through its last line."""
+    start = anchor_index
+    if not lines[start].lstrip().startswith(reader):
+        start = anchor_index + 1
+        while start < len(lines) and not lines[start].strip():
+            start += 1
+        if start >= len(lines) or not lines[start].lstrip().startswith(reader):
+            raise SystemExit(f'{what}: no command follows the anchor')
+    index = start
     while lines[index].rstrip().endswith('\\'):
         index += 1
         if index >= len(lines):
             raise SystemExit(f'{what}: the command never ends')
-    return anchor_index + 1, index
+    return start, index
 
 
 def _delete_claude_preflight(text: str) -> str:
@@ -109,6 +120,24 @@ def _delete_claude_preflight(text: str) -> str:
     mutated = '\n'.join(_delete_through(lines, start, end, 'claude-skip-preflight'))
     if 'preflight' in mutated:
         raise SystemExit('claude-skip-preflight: a preflight call remains')
+    return mutated
+
+
+def _delete_codex_preflight(text: str) -> str:
+    lines = text.split('\n')
+    anchor = [index for index, line in enumerate(lines)
+              if line == CODEX_PREFLIGHT_ANCHOR]
+    if len(anchor) != 1:
+        raise SystemExit(f'codex-skip-preflight: expected one anchor, found '
+                         f'{len(anchor)}')
+    start, end = _command_block(lines, anchor[0], 'codex-skip-preflight',
+                                CODEX_READER)
+    span = '\n'.join(lines[start:end + 1])
+    if 'codex-pin preflight' not in span:
+        raise SystemExit('codex-skip-preflight: the deleted span is not the preflight')
+    mutated = '\n'.join(_delete_through(lines, start, end, 'codex-skip-preflight'))
+    if 'codex-pin preflight' in mutated:
+        raise SystemExit('codex-skip-preflight: a preflight call remains')
     return mutated
 
 
@@ -180,6 +209,12 @@ def mutate(source: Path, destination: Path, variant: str) -> None:
         mutated = text.replace(CLAUDE_LAUNCHER_ANCHOR, CLAUDE_LAUNCHER_INJECTION, 1)
         if mutated == text:
             raise SystemExit(f'{variant}: the mutation changed no bytes')
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(mutated)
+        destination.chmod(0o644)
+        return
+    if variant == 'codex-skip-preflight':
+        mutated = _delete_codex_preflight(text)
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(mutated)
         destination.chmod(0o644)
