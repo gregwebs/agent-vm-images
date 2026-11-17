@@ -933,6 +933,46 @@ def case_check(work: Path) -> None:
         report('--check refuses an ARG that disagrees with the pin')
 
 
+def case_statuses(work: Path) -> None:
+    """The status a maintainer's script branches on, for each kind of bad input.
+
+    A version that cannot name a release is a *refusal* (1), not a malformed
+    invocation (2): the flag was given and well formed as an argument, and the tool's
+    answer is "this cannot be pinned". A missing or contradictory argument is the
+    usage case. The deleted Python writer drew the same line.
+    """
+    case = work / 'statuses'
+    repository = Repository(case / 'repo')
+    for version in ('v1.4.11', '1.4', 'latest', '01.4.11', '1.4.11 '):
+        result = run_writer(repository, '--version', version,
+                            upstream=Upstream().write_served(case / 'upstream'))
+        if result.returncode != 1:
+            fail(f'a malformed version {version!r} is a refusal',
+                 f'status {result.returncode}: {result.stderr.strip()}')
+            continue
+        if 'exact' not in result.stderr:
+            fail(f'a malformed version {version!r} names the grammar', result.stderr.strip())
+            continue
+        if any(path.exists() for path in (repository.closure(),)):
+            fail(f'a malformed version {version!r} wrote nothing', 'the closure appeared')
+            continue
+    report('a malformed version is a status-1 refusal that writes nothing')
+
+    result = run_writer(repository, '--check', '--version', VERSION)
+    if result.returncode != 2 or '--check takes only --root' not in result.stderr:
+        fail('a contradictory argument is a usage error',
+             f'status {result.returncode}: {result.stderr.strip()}')
+    else:
+        report('a contradictory argument is a status-2 usage error')
+
+    result = run_writer(repository)
+    if result.returncode != 2 or '--version is required' not in result.stderr:
+        fail('a missing argument is a usage error',
+             f'status {result.returncode}: {result.stderr.strip()}')
+    else:
+        report('a missing argument is a status-2 usage error')
+
+
 def case_transport_failure(work: Path) -> None:
     """A failed manifest fetch publishes nothing, and names the URL it asked for."""
     case = work / 'transport'
@@ -1017,6 +1057,7 @@ CASES = [
     ('the CI refusal precedes the fetch', case_ci),
     ('--check in a bare process', case_clean_process),
     ('--check on the committed tree', case_check),
+    ('each bad input gets its own status', case_statuses),
     ('a failed fetch publishes nothing', case_transport_failure),
 ]
 

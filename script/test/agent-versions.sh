@@ -1249,15 +1249,20 @@ echo '  ok: a failed Codex staging names the already-published agy bump and the 
 
 # An undecided agy publication (status 3, both directories retained, the Codex
 # transaction never started) needs a fault injected inside the writer's own
-# transaction. The writer is a compiled binary now, so that case lives where the
-# transaction does, as a Go test: `TestIncompleteRecoveryExitsThreeAndRetainsTheRecord`
-# and `TestSignalDuringPublicationRestoresAndExits130` in
-# internal/publication/publish_test.go, plus internal/agywriter's own tests for what
-# its owner scratch holds (the five proposal files) and what a retained numbered
-# backup set looks like. This is the same split #181 made for Codex. What the bumper
-# does with that status is still covered here: it maps 3 to "agy publication is
-# undecided" and stops before Codex, and `agy-writer-failure-writes-nothing` below
-# exercises the same stop ordering through status 1.
+# transaction. The writer is a compiled binary now, so those cases live where the
+# transaction and the writer's scratch are: `TestIncompleteRecoveryExitsThreeAndRetainsTheRecord`,
+# `TestSignalDuringPublicationRestoresAndExits130`,
+# `TestSignalWithARefusedRestoreExitsThree` and
+# `TestReplacementKeepsTheDestinationsMode` in internal/publication/publish_test.go,
+# and `TestRefreshRetainsTheOwnerScratchWhenPublicationIsIncomplete` in
+# internal/agywriter for what the retained owner scratch holds. This is the same
+# split #181 made for Codex.
+#
+# What is NOT covered here any more: the bumper's mapping of status 3 to "agy
+# publication is undecided", because there is no seam to make a compiled writer
+# return 3. That mapping is unchanged code and is read, not driven. What stops the
+# run before Codex is still covered, through status 1:
+# `agy-writer-failure-writes-nothing` below.
 
 new_case agy-writer-failure-writes-nothing
 # The agy transaction is the first thing that can write, and its failure leaves the

@@ -121,8 +121,12 @@ maintained policy lives in the document that is amended when the policy changes.
 The model, the installer and the writer are Go (`internal/artifactpin`,
 `internal/artifactinstall`, `internal/agywriter`); ADR 0017 moved them off Python
 and deleted `images/artifacts/{artifact_pin,install_artifact}.py` and
-`script/dev/pin-agy.py`. The pin-time preflight is now the build's own
-`artifactinstall.PreflightArchive`, so the two cannot disagree, and the writer is
+`script/dev/pin-agy.py`. The pin-time preflight is now
+`artifactinstall.PreflightArchive`: the installer's own member inventory, reviewed
+mode/size and ELF comparison (`checkELF`), run over the downloaded archive without
+extracting it. It is not literally the install code path — the installer reads the
+ELF header from the extracted file, the writer from inside the archive — so what
+they share is every check and the comparison, not one function. The writer is
 `avm-pin agy` behind `script/dev/pin-agy.sh`. Nothing above changes: the trust
 argument is still one publisher on two channels, and the pin is still hash-only.
 
@@ -154,9 +158,12 @@ argument is still one publisher on two channels, and the pin is still hash-only.
   a clean-process `--check`. The cases that patched a Python module in-process
   (the model binding, the origin allowlist, an injected proposal digest) and the
   ones that injected a publication fault moved to Go with the program: they are
-  `internal/agywriter`'s tests and `internal/publication/publish_test.go`, which
-  keeps the recovery contract (status 3, SIGINT → 130, signal plus refused
-  restore → 3, numbered backups, modes and `.complete`).
+  `internal/agywriter`'s tests, and `internal/publication/publish_test.go` for the
+  transaction (status 3, SIGINT → 130, a signal whose restore is refused → 3 with
+  the material retained, numbered backups and their modes, `.complete`). The
+  bumper's own status-3 wording is no longer asserted end to end: a compiled
+  writer has no fault seam, so the bumper's mapping of the writer's status is read,
+  not driven.
 - `script/test/artifact-pins.py` (hermetic, the real installer as a subprocess):
   the happy install, the `--events` ordering (`verify corroboration` → one `fetch`
   → `extract` → `publish`), changed bytes, a sha512-only mismatch, every evidence

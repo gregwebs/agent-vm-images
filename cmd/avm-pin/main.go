@@ -224,9 +224,13 @@ func runAgy(command *agyCommand) int {
 	if command.Version == "" {
 		return refuse(agywriter.Prefix, 2, "--version is required for a write run")
 	}
+	// A version that cannot name a release is a refusal, not a malformed
+	// invocation: the flag was given and is well formed as an argument, so the tool's
+	// own status for "this cannot be pinned" is 1 -- which is the status the writer
+	// this replaced used, and the one `avm-pin codex` uses for the same input.
 	version, err := artifactpin.ParseVersion(command.Version, "--version")
 	if err != nil {
-		return refuse(agywriter.Prefix, 2, err.Error())
+		return refuse(agywriter.Prefix, 1, err.Error())
 	}
 	return client.Refresh(context.Background(), agywriter.Options{Version: version})
 }
