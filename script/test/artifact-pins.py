@@ -10,7 +10,8 @@ touched.
 
 What this suite cannot prove is that the upstream bytes behind the committed
 pins are still the reviewed ones: that needs a network and is the maintenance
-tool's job (`script/dev/pin-artifact.py`). The negative cases are the point here:
+tool's job (`script/dev/pin-artifact.sh`, the `avm-pin artifact`
+subcommand). The negative cases are the point here:
 changed bytes, a different architecture, a wrong version, a bad signature, a
 substituted key, a deleted authentication block, a 404, a refused connection, a
 hostile archive member, and that a failure never falls back to apt, npm, a

@@ -407,3 +407,9 @@ func checkSourceURL(name Name, rawURL string, version Version, platform Platform
 	}
 	return nil
 }
+
+// MemberPrefix is the archive's reviewed top-level prefix, computed the one way the
+// loader computes it so a writer cannot stamp a pin the loader then rejects.
+func MemberPrefix(name Name, version Version, platform Platform) string {
+	return expectedMemberPrefix(name, ExpectedFilename(name, version, platform))
+}

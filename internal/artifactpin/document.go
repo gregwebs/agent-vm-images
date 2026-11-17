@@ -248,12 +248,21 @@ type Review struct {
 	Archives map[Platform]Archive
 	OpenPGP  *OpenPGP
 	Sigstore *Sigstore
+	// HashOnly is the agy case: two corroborating records in place of a signature.
+	HashOnly *HashOnly
 	Bundled  map[string]Version
 }
 
 // Render builds the pin document a refresh publishes.
 func Render(name Name, version Version, review Review) ([]byte, error) {
-	if (review.OpenPGP == nil) == (review.Sigstore == nil) {
+	methods := 0
+	for _, present := range []bool{
+		review.OpenPGP != nil, review.Sigstore != nil, review.HashOnly != nil} {
+		if present {
+			methods++
+		}
+	}
+	if methods != 1 {
 		return nil, refuse("%s: a release needs exactly one authentication method", name)
 	}
 	pin := Pin{
@@ -272,10 +281,16 @@ func Render(name Name, version Version, review Review) ([]byte, error) {
 		pin.Install.Payload = pathMembers(GHPayload)
 		pin.Install.Links = nil
 	case Agy:
-		// agy's shape is hash-only and its writer is not ported yet (#182).
-		return nil, refuse("%s: no pin writer builds this artifact", name)
+		// agy's archive member and its published name differ, so the payload is the
+		// pair spelling rather than a bare path, and it publishes no link.
+		pin.Install.Payload = AgyPayload
+		pin.Install.Links = nil
 	}
-	pin.Authentication = Authentication{OpenPGP: review.OpenPGP, Sigstore: review.Sigstore}
+	pin.Authentication = Authentication{
+		OpenPGP:  review.OpenPGP,
+		Sigstore: review.Sigstore,
+		HashOnly: review.HashOnly,
+	}
 	return documentOf(pin).Marshal()
 }
 
@@ -290,10 +305,15 @@ func pathMembers(paths []RelPath) []Member {
 }
 
 func upstreamProject(name Name) string {
-	if name == Node {
+	switch name {
+	case Node:
 		return "https://nodejs.org/dist"
+	case GH:
+		return "https://github.com/" + GHPolicy.Repository
+	case Agy:
+		return "https://github.com/" + AgyRepository
 	}
-	return "https://github.com/" + GHPolicy.Repository
+	return ""
 }
 
 // NodeReason and GHReason are the reviewer's justification the pin records: the

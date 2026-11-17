@@ -13,6 +13,7 @@ import (
 
 	"github.com/alexflint/go-arg"
 
+	"github.com/gregwebs/agent-vm-images/internal/agywriter"
 	"github.com/gregwebs/agent-vm-images/internal/artifactpin"
 	"github.com/gregwebs/agent-vm-images/internal/artifactwriter"
 	"github.com/gregwebs/agent-vm-images/internal/claudepin"
@@ -22,6 +23,7 @@ import (
 
 type arguments struct {
 	Artifact *artifactCommand `arg:"subcommand:artifact" help:"refresh the Node or GitHub CLI release-artifact pin"`
+	Agy      *agyCommand      `arg:"subcommand:agy" help:"refresh the agy release-artifact pin"`
 	Claude   *claudeCommand   `arg:"subcommand:claude" help:"refresh the Claude native payload closure"`
 	Codex    *codexCommand    `arg:"subcommand:codex" help:"refresh the Codex payload closure"`
 }
@@ -41,6 +43,17 @@ type artifactCommand struct {
 
 func (artifactCommand) Description() string {
 	return "Resolve one exact upstream release, verify its evidence and publish the pin."
+}
+
+type agyCommand struct {
+	Version  string `arg:"--version" placeholder:"X.Y.Z" help:"the exact agy release"`
+	Root     string `arg:"--root" placeholder:"DIR" help:"the repository to publish into (default: the working directory)"`
+	Check    bool   `arg:"--check" help:"re-verify the committed pin offline; writes nothing"`
+	Fixtures string `arg:"--fixture-upstream" placeholder:"DIR" help:"serve upstream bytes from DIR instead of the network (suites only)"`
+}
+
+func (agyCommand) Description() string {
+	return "Resolve one exact agy release, corroborate it on both channels and publish the pin."
 }
 
 type claudeCommand struct {
@@ -89,9 +102,13 @@ func run(args []string) int {
 		parser.WriteHelp(os.Stderr)
 		return 2
 	}
-	if parsed.Artifact == nil && parsed.Claude == nil && parsed.Codex == nil {
+	if parsed.Artifact == nil && parsed.Agy == nil && parsed.Claude == nil &&
+		parsed.Codex == nil {
 		parser.WriteHelp(os.Stderr)
 		return 2
+	}
+	if parsed.Agy != nil {
+		return runAgy(parsed.Agy)
 	}
 	if parsed.Claude != nil {
 		return runClaude(parsed.Claude)
@@ -164,6 +181,8 @@ func prefixFor(args []string) string {
 			return claudewriter.Prefix
 		case "codex":
 			return codewriter.Prefix
+		case "agy":
+			return agywriter.Prefix
 		}
 	}
 	return artifactwriter.Prefix
@@ -173,6 +192,48 @@ func prefixFor(args []string) string {
 // status: a malformed invocation, which the tool's statuses report apart from a
 // refusal.
 func usage(message string) int { return refuse(artifactwriter.Prefix, 2, message) }
+
+// runAgy refreshes the agy selection: the writer publishes the pin, its three
+// evidence files and the Dockerfile ARG default as one transaction.
+func runAgy(command *agyCommand) int {
+	root, err := resolveRoot(command.Root)
+	if err != nil {
+		return refuse(agywriter.Prefix, 1, err.Error())
+	}
+	client := agywriter.New(agywriter.Environment{
+		Root:      root,
+		TempRoot:  os.Getenv("TMPDIR"),
+		Variables: variables(),
+	}, os.Stdout, os.Stderr)
+	if command.Fixtures != "" {
+		// The fixture source is a flag, not an inherited variable: a pin written from
+		// fixture bytes still records the canonical upstream URL, so the seam has to
+		// be something the maintainer typed.
+		fixture, err := artifactwriter.NewFixtureFetcher(command.Fixtures)
+		if err != nil {
+			return refuse(agywriter.Prefix, 1, err.Error())
+		}
+		client.Fetch = fixture
+	}
+	if command.Check {
+		if command.Version != "" {
+			return refuse(agywriter.Prefix, 2, "--check takes only --root")
+		}
+		return client.Check()
+	}
+	if command.Version == "" {
+		return refuse(agywriter.Prefix, 2, "--version is required for a write run")
+	}
+	// A version that cannot name a release is a refusal, not a malformed
+	// invocation: the flag was given and is well formed as an argument, so the tool's
+	// own status for "this cannot be pinned" is 1 -- which is the status the writer
+	// this replaced used, and the one `avm-pin codex` uses for the same input.
+	version, err := artifactpin.ParseVersion(command.Version, "--version")
+	if err != nil {
+		return refuse(agywriter.Prefix, 1, err.Error())
+	}
+	return client.Refresh(context.Background(), agywriter.Options{Version: version})
+}
 
 // runClaude refreshes the Claude closure: the writer publishes the pin, its two
 // evidence files and the Dockerfile ARG default as one transaction.

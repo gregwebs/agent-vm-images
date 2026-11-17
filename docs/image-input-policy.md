@@ -322,13 +322,13 @@ tool can only pin the release Google's manifest currently names: an older
 refused rather than re-pinned. A real bump therefore needs a human to update the
 `selections.tsv` default after reviewing the proposal.
 
-**Maintenance.** Only `script/dev/pin-agy.py` writes the pin, its three evidence
-files and the agy ARG, and only through the shared Python publication transaction.
-Typical commands:
+**Maintenance.** Only `avm-pin agy` — through `script/dev/pin-agy.sh` — writes the
+pin, its three evidence files and the agy ARG, and only through the shared
+publication transaction (ADR 0017). Typical commands:
 
 ```bash
-python3 script/dev/pin-agy.py --check
-python3 script/dev/pin-agy.py --version 1.4.11
+bash script/dev/pin-agy.sh --check
+bash script/dev/pin-agy.sh --version 1.4.11
 bash script/build/agent-versions.sh --check
 bash script/build/agent-versions.sh --write --cosign /absolute/path/to/cosign
 ```

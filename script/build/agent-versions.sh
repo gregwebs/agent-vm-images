@@ -28,7 +28,8 @@
 # cosign signature and SHA-256 for codex; two agreeing SHA records for agy, which
 # publishes no signature; a detached OpenPGP signature over the signed manifest for
 # claude) and preflights both payloads, then publishes its pin, its evidence files
-# and its ARG as ONE transaction through the shared Python publisher.
+# and its ARG as ONE transaction through the shared publication package
+# (internal/publication).
 #
 # The three transactions run agy -> claude -> Codex. agy publishes first because
 # its likeliest failure -- the updater manifest moving to a new release between
@@ -139,7 +140,7 @@ repo_root="$(cd "$repo_root" && pwd -P)"
 
 codex_writer="$repo_root/script/dev/pin-codex.sh"
 [ -f "$codex_writer" ] || fail "missing $codex_writer"
-agy_writer="$repo_root/script/dev/pin-agy.py"
+agy_writer="$repo_root/script/dev/pin-agy.sh"
 [ -f "$agy_writer" ] || fail "missing $agy_writer"
 claude_writer="$repo_root/script/dev/pin-claude.sh"
 [ -f "$claude_writer" ] || fail "missing $claude_writer"
@@ -148,7 +149,7 @@ if [ "$check" = true ]; then
     echo 'agy, claude and Codex scope only: committed pins, evidence, bundles, the Claude signature and the single ARG/label each.'
     # agy, then claude, then the codex `exec` last: the codex check owns the final
     # status.
-    python3 "$agy_writer" --check --repo-root "$repo_root" || exit $?
+    bash "$agy_writer" --check --root "$repo_root" || exit $?
     bash "$claude_writer" --check --root "$repo_root" || exit $?
     exec bash "$codex_writer" --check --root "$repo_root"
 fi
@@ -158,13 +159,15 @@ if [ "${GITHUB_ACTIONS:-}" = true ]; then
 fi
 
 # Fail before a lookup so an HTTP-200-but-garbage response reports a per-tool
-# message instead of this chokepoint. `python3` (the agy writer, until #182) and
-# the reviewed cosign are write-mode prerequisites: nothing here resolves an
-# upstream release until both are present, and pin-codex re-checks cosign's exact
-# version before it fetches.
+# message instead of this chokepoint. The reviewed cosign is a write-mode
+# prerequisite: nothing here resolves an upstream release until it is present, and
+# pin-codex re-checks its exact version before it fetches. Every writer is a
+# compiled Go binary now (`avm-pin agy`, `avm-pin claude` and `avm-pin codex`,
+# reached through its own `script/dev/pin-*.sh`), so this bumper runs no Python at
+# all: the Go toolchain each wrapper compiles with is that wrapper's prerequisite.
 # gpg is a claude prerequisite: the pin's signature is verified with it, in a
 # private home under /tmp (never TMPDIR: gpg-agent's socket lives there).
-require_tools curl jq npm python3 gpg gpgconf
+require_tools curl jq npm gpg gpgconf
 if [ -n "$cosign" ]; then
     case "$cosign" in
         /*) ;;
@@ -218,7 +221,7 @@ claude_re="^${semver_core}${semver_pre}\$"
 opencode_re="^${semver_core}${semver_pre}${semver_build}\$"
 copilot_re="^${semver_core}${semver_pre}${semver_build}\$"
 codex_re="^${semver_core}(-alpha(\.${numeric}){0,2}|-beta(\.${numeric})?)?\$"
-# agy's pin and installer accept `X.Y.Z` only (artifact_pin.VERSION), so a
+# agy's pin and installer accept `X.Y.Z` only, so a
 # pre-release or build suffix is refused here rather than committed.
 agy_re="^${semver_core}\$"
 
@@ -348,7 +351,7 @@ claude_committed="$(sed -n 's/^ARG AGENT_VERSION_CLAUDE=//p' "$file")"
 # other single-slot ARGs but not `AGENT_VERSION_AGY`, and would refuse or revert
 # the agy default.
 agy_status=0
-python3 "$agy_writer" --version "$agy" --repo-root "$repo_root" || agy_status=$?
+bash "$agy_writer" --version "$agy" --root "$repo_root" || agy_status=$?
 if [ "$agy_status" -ne 0 ]; then
     if [ "$agy_status" -eq 3 ]; then
         echo "error: agy publication is undecided; recover the directories printed above" >&2
@@ -426,11 +429,12 @@ stage_one codex "$codex" "$codex_committed"
 stage_one opencode "$opencode"
 stage_one copilot "$copilot"
 
-# ONE publication for the Dockerfile and the whole codex closure. The Python
-# publisher is the shared transaction; there is no second shell publish and no
-# nested transaction. The owner scratch is named on stderr BEFORE the publisher
-# starts: a signal-driven rollback exits from inside it with os._exit(3), so a
-# report printed after the call would never be reached.
+# ONE publication for the Dockerfile and the whole codex closure. The shared
+# publication package (internal/publication) is the transaction; there is no second
+# shell publish and no nested transaction. The owner scratch is named on stderr
+# BEFORE the publisher starts: a signal-driven rollback exits from inside the
+# transaction (status 128+N, or 3 when the restore was incomplete), so a report
+# printed after the call would never be reached.
 echo "pin-codex: owner scratch: $work (retained if the publication is undecided)" >&2
 publish_status=0
 bash "$codex_writer" --publish-stage "$work" --root "$repo_root" \

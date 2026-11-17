@@ -6649,7 +6649,7 @@ fn agy_recipe_installs_through_the_shared_installer() {
 fn agy_hook_checks_the_pin_before_installing() {
     let hook = read_text("images/tools/agy/install-agy.sh");
     let pinned = hook
-        .find("artifact-pin version")
+        .find("agy-pin check")
         .expect("the hook reads the committed pin's version");
     let install = hook
         .find("install-artifact.sh")

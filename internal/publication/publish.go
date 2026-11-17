@@ -155,7 +155,16 @@ func (t *Transaction) publishFile() error {
 			return err
 		}
 		t.touched = index + 1
-		if err := t.copyFile(filepath.Join(t.stagedDir(), relative), destination, 0o644); err != nil {
+		// Replacing a file is not a licence to widen it: an existing destination keeps
+		// its own permission bits, and only a destination publication creates gets the
+		// default. The publisher this replaced (Python's `shutil.copyfile`) left an
+		// existing mode alone for the same reason, so a committed 0600 file stayed 0600
+		// across a refresh.
+		mode := os.FileMode(0o644)
+		if info, err := os.Lstat(destination); err == nil && info.Mode().IsRegular() {
+			mode = info.Mode().Perm()
+		}
+		if err := t.copyFile(filepath.Join(t.stagedDir(), relative), destination, mode); err != nil {
 			return err
 		}
 	}

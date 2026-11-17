@@ -266,6 +266,41 @@ func TestRollbackRemovesADestinationPublicationCreated(t *testing.T) {
 	}
 }
 
+// TestReplacementKeepsTheDestinationsMode: a published file that already exists
+// keeps its permission bits, and only one the transaction creates gets the default.
+//
+// This is the difference between "a refresh replaced the bytes" and "a refresh
+// widened the file": a committed 0600 destination that came back 0644 would be a
+// change no reviewer of the diff could see.
+func TestReplacementKeepsTheDestinationsMode(t *testing.T) {
+	created := newFixture(t)
+	if err := os.Chmod(created.paths[0], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transaction := created.transaction(created.work(t))
+	attribute := filepath.Join(created.root, "images/artifacts/created.json")
+	transaction.Destinations = append(append([]string{}, created.paths...), attribute)
+	transaction.Staged = append(append([][]byte{}, created.staged()...), []byte("a b c\n"))
+	status := transaction.Run("")
+	if status != 0 {
+		t.Fatalf("publication: status %d", status)
+	}
+	info, err := os.Stat(created.paths[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Errorf("a replaced destination came back %04o, want 0600", mode)
+	}
+	info, err = os.Stat(attribute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o644 {
+		t.Errorf("a created destination is %04o, want 0644", mode)
+	}
+}
+
 // The signal path is a contract with the maintainer's shell: exit 128+N with the
 // sources restored. It needs a real process to observe the status, so the case
 // re-executes this test binary.
@@ -281,6 +316,7 @@ func TestMain(m *testing.M) {
 func signalChild() int {
 	root := os.Getenv("ARTIFACTWRITER_SIGNAL_ROOT")
 	work := os.Getenv("ARTIFACTWRITER_SIGNAL_WORK")
+	refuseRestore := os.Getenv("ARTIFACTWRITER_SIGNAL_REFUSE_RESTORE") != ""
 	transaction := &Transaction{
 		Prefix: "pin-artifact: ",
 		Root:   root,
@@ -295,8 +331,20 @@ func signalChild() int {
 	}
 	once := false
 	failOn(transaction, "Dockerfile", syscall.SIGINT, &once)
+	if refuseRestore {
+		// A restore that cannot read the backups is the case that must stay status 3
+		// rather than report the interrupt: the maintainer needs the material, not a
+		// status that says the tree is fine.
+		publishing := transaction.copyFile
+		transaction.copyFile = func(source, destination string, mode os.FileMode) error {
+			if strings.Contains(source, "backup") {
+				return os.ErrInvalid
+			}
+			return publishing(source, destination, mode)
+		}
+	}
 	status := transaction.Run("")
-	// The handler exits 130 itself; reaching here means it did not.
+	// The handler exits 130 or 3 itself; reaching here means it did not.
 	return status
 }
 
@@ -330,5 +378,45 @@ func TestSignalDuringPublicationRestoresAndExits130(t *testing.T) {
 	}
 	if _, err := os.Stat(work); !os.IsNotExist(err) {
 		t.Errorf("a restore that succeeded removes the work directory")
+	}
+}
+
+// TestSignalWithARefusedRestoreExitsThree: the interrupt restores the sources and
+// leaves 128+N, but only if the restore succeeds. When it does not, the status is 3
+// and the material is printed, because "interrupted" plus "half restored" is not a
+// state whose status may claim the tree is intact.
+//
+// The case is separate from the two it sits between (a signal that restores, and a
+// failed write whose restore is refused) because it is the crossing of them, and it
+// is the one an exit status can get wrong without any other case noticing.
+func TestSignalWithARefusedRestoreExitsThree(t *testing.T) {
+	created := newFixture(t)
+	work := created.work(t)
+	command := exec.Command(os.Args[0])
+	command.Env = append(os.Environ(),
+		signalCaseVariable+"=1",
+		"ARTIFACTWRITER_SIGNAL_REFUSE_RESTORE=1",
+		"ARTIFACTWRITER_SIGNAL_ROOT="+created.root,
+		"ARTIFACTWRITER_SIGNAL_WORK="+work)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	err := command.Run()
+	exit, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("the signal case did not exit through the handler: %v (%s)", err, stderr.String())
+	}
+	if exit.ExitCode() != 3 {
+		t.Fatalf("status %d, want 3: %s", exit.ExitCode(), stderr.String())
+	}
+	for _, needle := range []string{"restore incomplete", "recovery material retained at", "STOP: recover"} {
+		if !strings.Contains(stderr.String(), needle) {
+			t.Errorf("the incomplete recovery does not say %q: %s", needle, stderr.String())
+		}
+	}
+	if _, err := os.Stat(work); err != nil {
+		t.Errorf("an incomplete recovery retains the work directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(work, "backup")); err != nil {
+		t.Errorf("the retained material holds the backups: %v", err)
 	}
 }

@@ -26,12 +26,6 @@ if [ "${AGY_CLI_DISABLE_AUTO_UPDATE:-}" != 1 ]; then
     echo "  agy: AGY_CLI_DISABLE_AUTO_UPDATE is not set to 1 in the build environment" >&2
     exit 1
 fi
-if ! LC_ALL=C grep -q -a -F AGY_CLI_DISABLE_AUTO_UPDATE "$agy_bin"; then
-    echo "  agy: $agy_bin no longer names AGY_CLI_DISABLE_AUTO_UPDATE; the pinned" >&2
-    echo "  agy: release would self-update in a guest -- review the new release" >&2
-    exit 1
-fi
-
 # Every guest UID runs this binary: the reviewed archive's member is mode 0755, and
 # a group- or world-writable /usr/local/bin/agy would let one guest replace what
 # another executes. The shared installer refuses an archive member that is not
@@ -40,14 +34,12 @@ fi
 # second rule. AGENT_VM_AGY_EXPECTED_OWNER exists because the black-box suite
 # cannot create a root-owned file; production never sets it.
 expected_owner="${AGENT_VM_AGY_EXPECTED_OWNER:-0:0}"
-if ! shape=$(stat -c '%a %u:%g' "$agy_bin" 2>/dev/null || stat -f '%Lp %u:%g' "$agy_bin"); then
-    echo "  agy: cannot read the mode and owner of $agy_bin" >&2
-    exit 1
-fi
-if [ "$shape" != "755 $expected_owner" ]; then
-    echo "  agy: $agy_bin is '$shape', want '755 $expected_owner'" >&2
-    exit 1
-fi
+# The mode, the owner and the release's own self-update switch are one offline read
+# of the installed bytes through the image's own reader (ADR 0017). The switch check
+# stays: it is what makes a renamed variable fail the bump instead of shipping a
+# binary that updates itself in a guest.
+"$CONTRACT/recipe-contract" agy-pin installed --bin "$agy_bin" \
+    --owner "$expected_owner" || exit 1
 
 scratch=$(mktemp -d)
 # shellcheck disable=SC2064

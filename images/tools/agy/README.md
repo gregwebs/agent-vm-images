@@ -29,9 +29,9 @@ There is no build-time `latest` query, mirror or fallback. The pin names one
 release URL per architecture and the sha256 of its archive; `evidence/` holds
 the raw GitHub release document and both Google updater manifests, and the build
 first re-checks that these committed records still agree with the pin, then
-accepts only the committed digests. `script/dev/pin-agy.py` writes all five files
-in one transaction and only when the downloaded bytes equal **both** GitHub's
-asset digest and Google's manifest sha512. See
+accepts only the committed digests. `script/dev/pin-agy.sh` (`avm-pin agy`)
+writes all five files in one transaction and only when the downloaded bytes equal
+**both** GitHub's asset digest and Google's manifest sha512. See
 [ADR 0012](../../../docs/adr/0012-agy-hash-only-artifact-pin.md) for why that is
 the weakest guarantee in this repository, and
 [CONTRIBUTING](../../../CONTRIBUTING.md#agy-hash-only-pin) for the maintenance
