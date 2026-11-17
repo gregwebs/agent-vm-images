@@ -412,8 +412,8 @@ signature, attestation or immutable release**. Read
 it; it is the weakest trust guarantee in this repository and it is deliberate.
 
 ```bash
-python3 script/dev/pin-agy.py --check     # offline: evidence hashes, ARG/label, not a fresh corroboration
-python3 script/dev/pin-agy.py --version 1.4.11
+bash script/dev/pin-agy.sh --check          # offline: evidence hashes, ARG/label, not a fresh corroboration
+bash script/dev/pin-agy.sh --version 1.4.11
 bash script/build/agent-versions.sh --check   # agy then Codex, through the bumper
 bash script/build/agent-versions.sh --write --cosign /abs/cosign
 ```
@@ -422,7 +422,8 @@ bash script/build/agent-versions.sh --write --cosign /abs/cosign
   SHA-256 **and** SHA-512, plus the release metadata and both updater manifests by
   SHA-256. `images/tools/agy/` is **not** a base input: nothing in
   `images/base-inputs.sha256` covers it.
-- Only `script/dev/pin-agy.py` writes it. It accepts an archive only when the
+- Only `avm-pin agy` (through `script/dev/pin-agy.sh`) writes it. It accepts an
+  archive only when the
   downloaded bytes equal **both** GitHub's asset digest and Google's manifest
   `sha512`, which is the whole authentication story: one publisher controls both
   channels. Those SHA-256/SHA-512 comparisons are cryptographic *integrity*

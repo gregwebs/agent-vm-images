@@ -104,10 +104,10 @@ Three agent selections are content pins rather than version ARGs alone.
   a base input. See [ADR 0013](adr/0013-claude-native-payload-pin.md).
 - **`agy`** (`images/tools/agy/`): the `hash-only` pin, its three evidence files,
   the hand-written hook and verifier, and `ARG AGENT_VERSION_AGY`.
-  `script/dev/pin-agy.py` is the only writer of the generated files — the pin, the
-  three evidence files and the Dockerfile ARG — and the only place the two channels
-  are corroborated against **fresh** upstream bytes; the build re-checks the
-  committed evidence instead of fetching it. Nothing writes the hook or the
+  `script/dev/pin-agy.sh` (the `avm-pin agy` subcommand) is the only writer of the
+  generated files — the pin, the three evidence files and the Dockerfile ARG — and
+  the only place the two channels are corroborated against **fresh** upstream
+  bytes; the build re-checks the committed evidence instead of fetching it. Nothing writes the hook or the
   verifier. `images/tools/agy/` is **not** a base input — nothing in
   `images/base-inputs.sha256` covers it — because it records an agent selection the
   standard recipe owns, not a base input. See

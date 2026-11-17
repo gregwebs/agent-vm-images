@@ -38,7 +38,7 @@ signature that upstream does not publish.
 `agy` becomes a **third case in the same shared model**, with a new
 authentication kind:
 
-- **`hash-only` is a named kind in `images/artifacts/artifact_pin.py`.** It is
+- **`hash-only` is a named kind in the artifact model.** It is
   bound to the artifact name — the loader accepts it only for `agy`, and Node and
   the GitHub CLI still refuse it — so it is not a general downgrade any pin can
   claim. The variant carries the two upstream records it was reviewed against
@@ -51,7 +51,8 @@ authentication kind:
   (`images/tools/codex/`) rather than the base. Nothing in
   `images/base-inputs.sha256` covers it.
 - **Two-channel corroboration happens at pin time.**
-  `script/dev/pin-agy.py` downloads each architecture's archive once and accepts
+  `avm-pin agy` (through `script/dev/pin-agy.sh`) downloads each architecture's
+  archive once and accepts
   it only when the downloaded bytes equal **both** GitHub's asset `digest`
   (SHA-256) **and** the `sha512` in Google's manifest for that platform. The
   manifests must agree with each other and with `--version` on the version, and
@@ -115,10 +116,20 @@ is superseded. The pin's `reason` field links here rather than restating the
 condition: the pin describes the conditions it was reviewed under, and a
 maintained policy lives in the document that is amended when the policy changes.
 
+## Amended by 0017 (2026-11-17)
+
+The model, the installer and the writer are Go (`internal/artifactpin`,
+`internal/artifactinstall`, `internal/agywriter`); ADR 0017 moved them off Python
+and deleted `images/artifacts/{artifact_pin,install_artifact}.py` and
+`script/dev/pin-agy.py`. The pin-time preflight is now the build's own
+`artifactinstall.PreflightArchive`, so the two cannot disagree, and the writer is
+`avm-pin agy` behind `script/dev/pin-agy.sh`. Nothing above changes: the trust
+argument is still one publisher on two channels, and the pin is still hash-only.
+
 ## Consequences
 
 - A bump is one maintainer run (`script/build/agent-versions.sh --write`, which
-  resolves the manifest and delegates to `pin-agy.py`) plus a human edit of
+  resolves the manifest and delegates to `avm-pin agy`) plus a human edit of
   `script/test/fixtures/installer-egress/selections.tsv`. Nothing bumps
   automatically.
 - A withdrawn release makes an old commit unbuildable — the same availability
@@ -134,16 +145,18 @@ maintained policy lives in the document that is amended when the policy changes.
 
 ## Evidence
 
-- `script/test/pin-agy-maintenance.py` (hermetic, 43 cases): the whole decision
-  table with its fixture upstream, per-architecture manifest isolation, a
-  wrong-ELF archive under consistent hashes, a member mode that is not 0755, a
-  committed arm64 record disagreeing with the pin, a proposal whose own evidence
-  hash is wrong, an older manifest, a same-release
-  rewrite, a byte-identical repeat under download-count churn, a partial committed
-  directory, 0/2 ARG lines and a missing label, CI refusal with zero fetches, the
-  origin allowlist, the clean-process module binding, and the recovery contract
-  (status 3, SIGINT → 130, signal plus refused restore → 3, first-adoption
-  rollback) with the five proposed files, numbered backups, modes and `.complete`.
+- `script/test/pin-agy-maintenance.py` (hermetic): the whole decision table with
+  its fixture upstream, per-architecture manifest isolation, a wrong-ELF archive
+  under consistent hashes, a member mode that is not 0755, a committed arm64
+  record disagreeing with the pin, an older manifest, a same-release rewrite, a
+  byte-identical repeat under download-count churn, a partial committed
+  directory, 0/2 ARG lines and a missing label, CI refusal with zero fetches, and
+  a clean-process `--check`. The cases that patched a Python module in-process
+  (the model binding, the origin allowlist, an injected proposal digest) and the
+  ones that injected a publication fault moved to Go with the program: they are
+  `internal/agywriter`'s tests and `internal/publication/publish_test.go`, which
+  keeps the recovery contract (status 3, SIGINT → 130, signal plus refused
+  restore → 3, numbered backups, modes and `.complete`).
 - `script/test/artifact-pins.py` (hermetic, the real installer as a subprocess):
   the happy install, the `--events` ordering (`verify corroboration` → one `fetch`
   → `extract` → `publish`), changed bytes, a sha512-only mismatch, every evidence

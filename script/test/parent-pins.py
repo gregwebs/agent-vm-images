@@ -57,7 +57,6 @@ STAGED = {
     'images': ['Dockerfile', 'standard/Dockerfile', '.dockerignore', 'install-artifact.sh',
                'install-build-ca.sh', 'install-pnpm.sh', 'install-zellij.sh',
                'verify-base-inputs.sh', 'base-inputs.sha256',
-               'artifacts/artifact_pin.py', 'artifacts/install_artifact.py',
                'artifacts/node.json', 'artifacts/gh.json',
                'artifacts/node-release-key.asc',
                'artifacts/gh-2.103.2-linux-amd64.bundle.jsonl',

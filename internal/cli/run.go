@@ -104,6 +104,8 @@ func (p *process) dispatch(args []string, env Environment) int {
 		return p.runCodexPin(args[1:])
 	case "artifact-pin":
 		return p.runArtifactPin(args[1:])
+	case "agy-pin":
+		return p.runAgyPin(args[1:])
 	default:
 		return p.stderrStatus(2, dispatcherUsage)
 	}
