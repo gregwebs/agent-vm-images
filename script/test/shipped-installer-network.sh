@@ -126,14 +126,17 @@ assert_agy_request_log() { # $1 version, $2 marker, [$3 log file]
     log="$(tail -n "+$(( marker + 1 ))" "$log_file" 2>/dev/null || true)"
     printf '%s\n' "$log" | grep -q "$AGY_PAYLOAD_ALLOW" ||
         fail "agy $version: no payload request was allowed"
+    # The COUNT is a lower bound, not an equality: the helper retries a transient
+    # 5xx, and a retry of the one permitted request is still one permitted request.
+    # What the audit is about is *which* URLs the build asks for.
     count="$(printf '%s\n' "$log" | grep -c "$AGY_PAYLOAD_ALLOW" || true)"
-    [ "$count" = 1 ] || fail "agy $version: $count payload requests, expected exactly one"
+    [ "$count" -ge 1 ] || fail "agy $version: no payload request was allowed"
     for channel in 'api\.github\.com' 'run\.app' 'storage\.googleapis\.com'; do
         if printf '%s\n' "$log" | grep -q "$channel"; then
             fail "agy $version: a pin-time channel ($channel) was contacted at build time"
         fi
     done
-    echo "    request log: one pinned payload fetch only (no tag API, no manifest)"
+    echo "    request log: pinned payload fetches only (no tag API, no manifest)"
 }
 
 # claude's build fetches ONE url: the committed pin's executable for the
@@ -152,12 +155,16 @@ assert_claude_request_log() { # $1 version, $2 marker, [$3 log file]
     local version=$1 marker=$2 log_file=${3:-$TMP/logs/egress.log} log expected trimmed
     expected="ALLOW https://downloads.claude.ai/claude-code-releases/$version/$(claude_token)/claude"
     log="$(tail -n "+$(( marker + 1 ))" "$log_file" 2>/dev/null || true)"
-    # Blank lines are noise; every remaining line is a decision, and the only
-    # accepted decision stream is exactly one payload ALLOW.
+    # Blank lines are noise; every remaining line is a decision, and every decision
+    # must be the one payload URL. The COUNT is not fixed: a transient 5xx is retried
+    # by the helper's own policy, and a retry of the one permitted request is still
+    # one permitted request -- what must never appear is a *different* one.
     trimmed="$(printf '%s\n' "$log" | sed '/^$/d')"
-    [ "$trimmed" = "$expected" ] ||
-        fail "claude $version: the request log is not exactly one payload ALLOW line: $(printf '%s' "$trimmed" | tr '\n' '|')"
-    echo "    request log: exactly one pinned payload fetch (no manifest, signature, key, zst or redirect)"
+    [ -n "$trimmed" ] || fail "claude $version: no payload request was allowed"
+    unexpected="$(printf '%s\n' "$trimmed" | grep -vxF "$expected" || true)"
+    [ -z "$unexpected" ] ||
+        fail "claude $version: the request log carries a decision that is not the pinned payload: $(printf '%s' "$unexpected" | tr '\n' '|')"
+    echo "    request log: only pinned payload fetches (no manifest, signature, key, zst or redirect)"
 }
 
 # Exactly one version record, and never the `-` placeholder row. Comparing the
@@ -302,10 +309,12 @@ run_stream_self_test() {
         stream_expect_fail "agy request log rejects $defect" 'FAIL:' \
             assert_agy_request_log "$agy_release" 0 "$dir/agy-defect.log" || status=1
     done
-    cp "$log" "$dir/agy-twice.log"
-    printf 'ALLOW https://github.com/google-antigravity/antigravity-cli/releases/download/%s/agy_cli_linux_x64.tar.gz\n' "$agy_release" >>"$dir/agy-twice.log"
-    stream_expect_fail 'agy request log rejects a second payload request' 'exactly one' \
-        assert_agy_request_log "$agy_release" 0 "$dir/agy-twice.log" || status=1
+    # A retried payload fetch is the same permitted request twice: accepted, because
+    # a transient 5xx must not fail the audit that is meant to catch policy.
+    cp "$log" "$dir/agy-retry.log"
+    printf 'ALLOW https://github.com/google-antigravity/antigravity-cli/releases/download/%s/agy_cli_linux_x64.tar.gz\n' "$agy_release" >>"$dir/agy-retry.log"
+    stream_expect_ok 'agy request log: a retried payload fetch' \
+        assert_agy_request_log "$agy_release" 0 "$dir/agy-retry.log" || status=1
     : >"$dir/agy-empty.log"
     stream_expect_fail 'agy request log rejects no payload request' \
         'no payload request was allowed' \
@@ -316,8 +325,14 @@ run_stream_self_test() {
     [ -n "$claude_release" ] || { echo 'FAIL: no claude selection' >&2; return 1; }
     claude_url="https://downloads.claude.ai/claude-code-releases/$claude_release/$(claude_token)/claude"
     printf 'ALLOW %s\n' "$claude_url" >"$log"
-    stream_expect_ok 'claude request log: exactly one payload allow' \
+    stream_expect_ok 'claude request log: the pinned payload only' \
         assert_claude_request_log "$claude_release" 0 "$log" || status=1
+    # A transient 5xx is retried by the helper's own policy: the same permitted
+    # request twice is still one permitted request, and the marker still isolates
+    # this build's decisions from an earlier one's.
+    { printf 'ALLOW %s\n' "$claude_url"; printf 'ALLOW %s\n' "$claude_url"; } >"$dir/claude-retry.log"
+    stream_expect_ok 'claude request log: a retried payload fetch' \
+        assert_claude_request_log "$claude_release" 0 "$dir/claude-retry.log" || status=1
     for defect in manifest manifest-zst raw-sig zst second-payload learn registry; do
         cp "$log" "$dir/claude-defect.log"
         case "$defect" in
@@ -325,20 +340,21 @@ run_stream_self_test() {
             manifest-zst) printf 'ALLOW https://downloads.claude.ai/claude-code-releases/%s/manifest.zst.json\n' "$claude_release" >>"$dir/claude-defect.log" ;;
             raw-sig) printf 'ALLOW https://downloads.claude.ai/claude-code-releases/%s/manifest.json.raw-sig.json\n' "$claude_release" >>"$dir/claude-defect.log" ;;
             zst) printf 'ALLOW https://downloads.claude.ai/claude-code-releases/%s/%s/claude.zst\n' "$claude_release" "$(claude_token)" >>"$dir/claude-defect.log" ;;
-            second-payload) printf 'ALLOW %s\n' "$claude_url" >>"$dir/claude-defect.log" ;;
+            second-payload) printf 'ALLOW https://downloads.claude.ai/claude-code-releases/%s/%s/claude\n' \
+                "$claude_release" "$(other_token)" >>"$dir/claude-defect.log" ;;
             learn) printf 'LEARN https://release-assets.githubusercontent.com/x/claude?<redacted>\n' >>"$dir/claude-defect.log" ;;
             registry) printf 'ALLOW https://registry.npmjs.org/npm\n' >>"$dir/claude-defect.log" ;;
         esac
         stream_expect_fail "claude request log rejects $defect" \
-            'not exactly one payload ALLOW line' \
+            'the request log carries a decision that is not the pinned payload' \
             assert_claude_request_log "$claude_release" 0 "$dir/claude-defect.log" || status=1
     done
     : >"$dir/claude-empty.log"
     stream_expect_fail 'claude request log rejects an empty log' \
-        'not exactly one payload ALLOW line' \
+        'no payload request was allowed' \
         assert_claude_request_log "$claude_release" 0 "$dir/claude-empty.log" || status=1
     stream_expect_fail 'claude request log honours the marker' \
-        'not exactly one payload ALLOW line' \
+        'no payload request was allowed' \
         assert_claude_request_log "$claude_release" 99 "$log" || status=1
     rm -rf "$dir"
     [ "$status" -eq 0 ] || return 1
