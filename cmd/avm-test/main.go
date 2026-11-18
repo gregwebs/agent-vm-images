@@ -9,10 +9,13 @@
 // that builds a fixture for another suite is the code the cases check against, so
 // the closure handed to the bumper cannot be a hand-written lookalike.
 //
-// Every `write-fixture` here comes from a real writer run; the closure and key
-// builders below it are the Claude suite's own fixture primitives, exposed so the
-// shell suites that need a throwaway signer or a per-case closure call one
-// implementation instead of keeping their own copy of it.
+// Two kinds of fixture live here, and they are not the same kind of thing:
+// `write-fixture --tool agy` publishes through the real writer, so the agy suite and
+// the bumper hold the bytes production produces, while `write-fixture --tool claude`
+// and the `keygen`/`elf`/`closure`/`two-primaries` verbs are the Claude suite's own
+// fixture primitives -- a fixture closure is signed by a key the review has never
+// seen, which no writer run can produce. Both are exposed so the shell suites that
+// need one call this implementation instead of keeping a copy of it.
 package main
 
 import (
@@ -164,11 +167,6 @@ func runWriteFixture(command writeFixtureCommand) int {
 		return usage(fmt.Errorf("%q is not a fixture this tool builds: %s",
 			command.Tool, toolNames()))
 	}
-	// The lookup guarantees the key; the value is what gets called, so it is checked
-	// where it is handed over rather than trusted to exist.
-	if entry.build == nil {
-		return usage(fmt.Errorf("--tool %s has no builder", command.Tool))
-	}
 	if command.Signer != "" && !entry.signer {
 		return usage(fmt.Errorf("--signer is not a flag --tool %s honours", command.Tool))
 	}
@@ -251,6 +249,8 @@ func runClosure(command closureCommand) int {
 }
 
 func runTwoPrimaries(command twoPrimariesCommand) int {
+	// Every one of the three is a required positional, so none can be empty and none
+	// is skipped: an empty one is refused like a relative one.
 	for _, path := range []struct{ name, value string }{
 		{"OUT", command.Out},
 		{"FIRST", command.First},

@@ -64,6 +64,17 @@ func requireStatus(t *testing.T, status, want int, needle, stdout, stderr string
 	}
 }
 
+// TestEveryToolInTheTableHasABuilder: the table is the only way a tool name reaches a
+// call, so a family added with flags and no builder is caught here rather than by a nil
+// invocation inside harness.Command's goroutine.
+func TestEveryToolInTheTableHasABuilder(t *testing.T) {
+	for name, entry := range tools {
+		if entry.build == nil {
+			t.Fatalf("%q has no builder", name)
+		}
+	}
+}
+
 // TestTheStatusIsTheContract: 0 for a run that wrote, 2 for an invocation this tool
 // cannot honour, 1 only for a run that failed. A caller branching on the status must
 // read a typo as a typo, and the writers say the same (CONTRIBUTING.md's statuses).
@@ -224,7 +235,8 @@ func TestTheClosureBuilderVerbs(t *testing.T) {
 		dir := filepath.Join(work, "fixture")
 		status, stdout, stderr := capture(t, "write-fixture", "--tool", "claude", "--dir",
 			dir, "--version", claude.Version)
-		// Both families say what they wrote the same way, because nothing parses it.
+		// The claude family reports what it wrote in the shape the agy family uses, so
+		// the one flag has one output shape; nothing parses either line.
 		requireStatus(t, status, 0,
 			"avm-test: claude "+claude.Version+" written to "+dir, stdout, stderr)
 		for _, name := range []string{"exec/linux-x64", "exec/linux-arm64",

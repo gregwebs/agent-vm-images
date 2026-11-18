@@ -1,15 +1,20 @@
 // Package claude is the black-box suite for the committed Claude native payload
 // closure (#98).
 //
-// Every case drives a real program. The reader cases run
+// Every case but one drives a real program. The reader cases run
 // `recipe-contract claude-pin` (`internal/claudepin` + `internal/cli`), the writer
 // cases run `script/dev/pin-claude.sh` / `avm-pin claude`, and the closures they are
 // pointed at are synthesized here: real OpenPGP keys, real signatures, real ELF
 // headers, real layout checks. Nothing reaches the network and no committed evidence
-// is touched. The negative cases are the point: a rewritten manifest, a stale or
-// foreign signature, a substituted key, a signing subkey pinned as the primary, a
-// wrong-machine ELF, a group-writable directory, a launcher that points elsewhere, a
-// native state file that says updates are on.
+// is touched. The exception is the fixture seam: the case that holds
+// `avm-test write-fixture` to its layout runs the builder in-process, through the same
+// `harness.Command` adapter the command calls, because the builder -- not a program --
+// is what that case is about.
+//
+// The negative cases are the point: a rewritten manifest, a stale or foreign
+// signature, a substituted key, a signing subkey pinned as the primary, a wrong-machine
+// ELF, a group-writable directory, a launcher that points elsewhere, a native state
+// file that says updates are on.
 //
 // Three kinds of seam are used, and no others:
 //
