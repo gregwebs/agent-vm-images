@@ -174,6 +174,41 @@ func TestTheStatusIsTheContract(t *testing.T) {
 			needle: "--native-script must be absolute",
 		},
 		{
+			// A tag this family's reader would not pin is a mistyped call, not a fixture
+			// that could not be built: the two statuses mean different things to a caller.
+			name:   "a codex release that is not exact",
+			argv:   []string{"write-fixture", "--tool", "codex", "--dir", "/tmp/avm-test", "--version", "latest"},
+			status: 2,
+			needle: "the fixture release is not an exact Codex release",
+		},
+		{
+			name: "an installer fixture for a release that is not exact",
+			argv: []string{"write-installer-fixture", "--tool", "codex", "--dir", "/tmp/avm-test",
+				"--release", "latest", "--target", codexAMD64, "--native-script", "/tmp/native.sh"},
+			status: 2,
+			needle: "the fixture release is not an exact Codex release",
+		},
+		{
+			name: "an installer fixture with no release",
+			argv: []string{"write-installer-fixture", "--tool", "codex", "--dir", "/tmp/avm-test",
+				"--release", "", "--target", codexAMD64, "--native-script", "/tmp/native.sh"},
+			status: 2,
+			needle: "--release must not be empty",
+		},
+		{
+			name: "an installer fixture with an empty target",
+			argv: []string{"write-installer-fixture", "--tool", "codex", "--dir", "/tmp/avm-test",
+				"--release", codex.Release, "--target", "", "--native-script", "/tmp/native.sh"},
+			status: 2,
+			needle: "--target must not be empty",
+		},
+		{
+			name:   "a closure directory that is empty",
+			argv:   []string{"write-fixture", "--tool", "codex", "--dir", ""},
+			status: 2,
+			needle: "--dir must not be empty",
+		},
+		{
 			name: "an unknown target",
 			argv: []string{"write-installer-fixture", "--tool", "codex", "--dir", "/tmp/avm-test",
 				"--release", codex.Release, "--target", "x86_64-unknown-linux-gnu",

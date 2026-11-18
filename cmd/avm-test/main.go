@@ -209,6 +209,12 @@ func runWriteFixture(command writeFixtureCommand) int {
 	if err := pins(entry, "--version", command.Version); err != nil {
 		return usage(err)
 	}
+	// --dir is required, and an explicitly present empty one is a malformed invocation,
+	// not an empty destination the builder should judge; --signer is optional, so an
+	// empty one simply is not there.
+	if command.Dir == "" {
+		return usage(fmt.Errorf("--dir must not be empty"))
+	}
 	for _, path := range []struct{ name, value string }{
 		{"--dir", command.Dir},
 		{"--signer", command.Signer},
@@ -371,10 +377,11 @@ type tool struct {
 	build builder
 	// installer is the `write-installer-fixture` builder, nil when the family has none.
 	installer installerBuilder
-	// release refuses a tag this family cannot pin. A family without one accepts any
-	// tag its writer will judge; a family whose reader has an exact-release grammar
-	// answers here, so a mistyped tag is a malformed invocation (2) rather than a
-	// fixture that could not be built (1).
+	// release refuses a tag this family cannot pin. A family whose reader has an
+	// exact-release grammar answers here, so a mistyped tag is a malformed invocation
+	// (2) rather than a fixture that could not be built (1). A family without one
+	// builds whatever tag it is handed and leaves the verdict to its writer or its
+	// builder, which is the older agy and claude surface.
 	release func(string) error
 	// signer reports whether the tool honours --signer.
 	signer bool

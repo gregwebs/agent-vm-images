@@ -664,11 +664,12 @@ func newFixture(r harness.Reporter, dir, release string, archives map[platform][
 	for _, name := range platforms {
 		built.bundles[name] = makeBundle(r, harness.SHA256Hex(built.archives[name]))
 	}
-	// The checksum manifest is over the payloads alone -- the two packages and one
-	// decoy row, exactly as the upstream file is -- and the release document names it:
-	// computing the manifest first is what keeps the two from depending on each other.
-	// The bundles are declared by the release document, not by this file, and the
-	// reader only grants authority to the payload rows in any case.
+	// The checksum manifest is over the payloads alone -- the two packages, plus one
+	// extra row standing in for the other platforms and variants the retained upstream
+	// file lists -- and the release document names it: computing the manifest first is
+	// what keeps the two from depending on each other. The bundles are declared by the
+	// release document, not by this file, and the reader grants authority only to the
+	// payload rows in any case.
 	built.checksums = makeChecksums(built.payloadDigests(), map[string]string{"decoy": strings.Repeat("1", 64)})
 	built.metadata = makeMetadata(r, built.release, built.releaseDigests())
 	built.pin = encodeDocument(r, built.pinDocument())

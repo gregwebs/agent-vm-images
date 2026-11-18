@@ -88,14 +88,19 @@ func TestWriteInstallerFixtureWritesTheLayoutTheInstallerSuitesConsume(t *testin
 	// closure or the assets directory holds, because the bumper suite answers the
 	// writer's requests from here and a stale or substituted document would be served
 	// silently.
+	//
+	// The six URLs are spelled out rather than computed from this package's own
+	// helpers: a URL the builder and the assertion both derive from `assetURL` would
+	// agree with itself even if that helper were wrong, and the writer asks for exactly
+	// these strings.
+	const download = "https://github.com/openai/codex/releases/download/" + Release + "/"
 	served := map[string]string{
-		apiURL(Release):                   "release.json",
-		assetURL(Release, ChecksumsAsset): ChecksumsAsset,
-	}
-	for _, name := range platforms {
-		triple := targetOf(name)
-		served[assetURL(Release, assetName(triple))] = assetName(triple)
-		served[assetURL(Release, bundleName(triple))] = bundleName(triple)
+		"https://api.github.com/repos/openai/codex/releases/tags/" + Release:  "release.json",
+		download + "codex-package_SHA256SUMS":                                 ChecksumsAsset,
+		download + "codex-package-x86_64-unknown-linux-musl.tar.gz":           "codex-package-x86_64-unknown-linux-musl.tar.gz",
+		download + "codex-package-aarch64-unknown-linux-musl.tar.gz":          "codex-package-aarch64-unknown-linux-musl.tar.gz",
+		download + "codex-package-x86_64-unknown-linux-musl.tar.gz.sigstore":  "codex-package-x86_64-unknown-linux-musl.tar.gz.sigstore",
+		download + "codex-package-aarch64-unknown-linux-musl.tar.gz.sigstore": "codex-package-aarch64-unknown-linux-musl.tar.gz.sigstore",
 	}
 	for url, asset := range served {
 		_, rest, found := strings.Cut(url, "://")
@@ -121,9 +126,12 @@ func TestWriteInstallerFixtureWritesTheLayoutTheInstallerSuitesConsume(t *testin
 				record["digest"], name, want)
 		}
 	}
-	// The checksum manifest carries the two package rows and the decoy the upstream
-	// file carries, and no bundle rows: that shape is what the reader's
-	// payload-authority rule was written against.
+	// The checksum manifest's shape is the deleted Python fixture's, which is what the
+	// suites that consume this tree were written against: the two package rows, plus one
+	// extra row the review keeps and the installer never trusts. It is not a copy of the
+	// retained upstream file, which lists other platforms and package variants; what it
+	// must never gain is a bundle row, because the reader grants authority only to the
+	// payload rows and the bundle's authority comes from the release document.
 	manifest := string(harness.ReadFile(t, filepath.Join(dir, "assets", ChecksumsAsset)))
 	rows := nonEmptyLines(manifest)
 	if len(rows) != len(platforms)+1 {
