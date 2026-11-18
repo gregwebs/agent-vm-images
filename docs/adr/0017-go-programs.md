@@ -87,6 +87,20 @@ Each component's harness moves in a follow-up after the component passes the
 existing harness in Go, so the port is never checked by tests written alongside
 it.
 
+**Black-box pin suites.** A ported component's suite lives in
+`script/test/pinsuite/`, one package per suite, over `pinsuite/harness` — the
+fixture bytes (tar/gz/xz, ELF headers, a throwaway gpg signer) and the process
+plumbing. `harness` imports nothing under `internal`: a suite must be able to
+fail because the program is wrong, and must never pass because a helper agreed
+with it. Every path a suite hands a program is absolute and symlink-resolved,
+because the wrappers `cd` to their own checkout first.
+
+A suite that needs synthetic release bytes shares its builder with the suites
+above it through `avm-test write-fixture`, which publishes one release with the
+real writer and copies the closure out. `script/test/agent-versions.sh` feeds
+its bumper from that command, so the bytes the bumper is driven with are the
+ones the suite holds a writer to — not a hand-written lookalike.
+
 ## Considered options
 
 - **Keep ADR 0004's byte parity.** Rejected: it cost a 213-vector differential

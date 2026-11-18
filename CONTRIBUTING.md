@@ -433,6 +433,12 @@ bash script/build/agent-versions.sh --write --cosign /abs/cosign
   currently names: an older `--version` is refused, not fetched, and a
   same-release upstream rewrite is refused, never re-pinned. A repeat run keeps
   the committed evidence bytes, so a download-count change is not a diff.
+- The suite is `go test ./script/test/pinsuite/agy`. Its fixture builder is also a
+  command, `bash script/dev/avm-test.sh write-fixture --tool agy --dir /abs/DIR
+  [--version 1.4.11]`, which publishes one release through the real writer and
+  copies the closure out. `--dir` must be absolute: the wrapper runs from the
+  checkout. `script/test/agent-versions.sh` feeds the bumper from
+  it, so the bytes that suite is driven with are the bytes the agy suite checks.
 - Write mode is one transaction through the shared publisher with the same
   statuses: `0` published or unchanged, `1` restored failure, `2` usage, `3`
   incomplete rollback (both directories printed absolutely — stop and recover),

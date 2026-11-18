@@ -333,6 +333,11 @@ bash script/build/agent-versions.sh --check
 bash script/build/agent-versions.sh --write --cosign /absolute/path/to/cosign
 ```
 
+The suite that holds this tool to its answers is `go test
+./script/test/pinsuite/agy`; `script/dev/avm-test.sh write-fixture --tool agy
+--dir /abs/DIR` builds the release fixtures it and `script/test/agent-versions.sh`
+share, by publishing through the real writer.
+
 `--check` is offline: it re-hashes the committed evidence, requires it to agree
 with the pin and the single ARG/label, and says it is not a fresh corroboration.
 The write path downloads the manifests, the release metadata and both archives,

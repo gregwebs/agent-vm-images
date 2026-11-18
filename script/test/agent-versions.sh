@@ -195,13 +195,15 @@ write_dockerfile() { # $1 = tool, remaining args = lines
 
 # One publisher run per release, built once by the owner suite and reused: the
 # fixture repository checks in the OLD closure and the transport serves the
-# published bytes of whichever release a case selects.
+# published bytes of whichever release a case selects. The builder is the owner
+# suite's own (`script/dev/avm-test.sh`), so the bytes served here are the bytes
+# that suite holds a writer to.
 AGY_FIXTURES="$TEST_ROOT/agy-fixtures"
 agy_fixture() { # $1 = version -> directory holding source/ (closure) and assets/
     local directory="$AGY_FIXTURES/$1"
     if [[ ! -d "$directory" ]]; then
-        python3 "$REPO_ROOT/script/test/pin-agy-maintenance.py" \
-            --write-fixture "$directory" --version "$1" >/dev/null ||
+        bash "$REPO_ROOT/script/dev/avm-test.sh" write-fixture \
+            --tool agy --dir "$directory" --version "$1" >/dev/null ||
             fail "cannot build the agy $1 fixture"
     fi
     printf '%s\n' "$directory"

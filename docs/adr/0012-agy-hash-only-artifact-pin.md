@@ -149,7 +149,8 @@ argument is still one publisher on two channels, and the pin is still hash-only.
 
 ## Evidence
 
-- `script/test/pin-agy-maintenance.py` (hermetic): the whole decision table with
+- `script/test/pinsuite/agy` (hermetic, a Go test package like the artifact
+  writer's): the whole decision table with
   its fixture upstream, per-architecture manifest isolation, a wrong-ELF archive
   under consistent hashes, a member mode that is not 0755, a committed arm64
   record disagreeing with the pin, an older manifest, a same-release rewrite, a
