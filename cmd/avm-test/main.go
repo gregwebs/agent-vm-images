@@ -9,8 +9,10 @@
 // that builds a fixture for another suite is the code the cases check against, so
 // the closure handed to the bumper cannot be a hand-written lookalike.
 //
-// Every fixture here comes from a real writer run. Nothing in this binary writes a
-// pin by hand.
+// Every `write-fixture` here comes from a real writer run; the closure and key
+// builders below it are the Claude suite's own fixture primitives, exposed so the
+// shell suites that need a throwaway signer or a per-case closure call one
+// implementation instead of keeping their own copy of it.
 package main
 
 import (
@@ -24,11 +26,16 @@ import (
 	"github.com/alexflint/go-arg"
 
 	"github.com/gregwebs/agent-vm-images/script/test/pinsuite/agy"
+	"github.com/gregwebs/agent-vm-images/script/test/pinsuite/claude"
 	"github.com/gregwebs/agent-vm-images/script/test/pinsuite/harness"
 )
 
 type arguments struct {
 	WriteFixture *writeFixtureCommand `arg:"subcommand:write-fixture" help:"publish one release through its real writer and copy the closure out"`
+	Keygen       *keygenCommand       `arg:"subcommand:keygen" help:"generate one throwaway OpenPGP signer and print its fingerprint"`
+	Elf          *elfCommand          `arg:"subcommand:elf" help:"write one ELF-shaped blob for a fixture payload"`
+	Closure      *closureCommand      `arg:"subcommand:closure" help:"write one consistent Claude closure"`
+	TwoPrimaries *twoPrimariesCommand `arg:"subcommand:two-primaries" help:"concatenate two armored public keys into one file"`
 }
 
 func (arguments) Description() string {
@@ -36,13 +43,61 @@ func (arguments) Description() string {
 }
 
 type writeFixtureCommand struct {
-	Tool    string `arg:"--tool,required" placeholder:"NAME" help:"the pin family: agy"`
-	Dir     string `arg:"--dir,required" placeholder:"DIR" help:"the absolute directory to write: DIR/source and DIR/assets"`
+	Tool    string `arg:"--tool,required" placeholder:"NAME" help:"the pin family this tool builds (see the error for the list)"`
+	Dir     string `arg:"--dir,required" placeholder:"DIR" help:"the absolute directory to write"`
 	Version string `arg:"--version" placeholder:"X.Y.Z" help:"the release to publish (default: the suite's fixture release)"`
+	Signer  string `arg:"--signer" placeholder:"DIR" help:"claude only: the signer directory (default: DIR/signer, generated when it holds no key)"`
 }
 
 func (writeFixtureCommand) Description() string {
 	return "Publish one release with the real writer and copy what it produced."
+}
+
+type keygenCommand struct {
+	Out    string `arg:"positional,required" placeholder:"OUT" help:"the directory for key.asc, secret.asc and fingerprint"`
+	Subkey bool   `arg:"--subkey" help:"generate a cert-only primary and a signing subkey"`
+}
+
+func (keygenCommand) Description() string {
+	return "Generate one throwaway OpenPGP signer and print its primary fingerprint."
+}
+
+type elfCommand struct {
+	Out     string `arg:"positional,required" placeholder:"OUT" help:"the blob to write"`
+	Machine int    `arg:"--machine,required" placeholder:"62|183" help:"the e_machine to declare"`
+	Class   int    `arg:"--class" placeholder:"N" help:"the e_ident class (default 2, ELFCLASS64)"`
+	Endian  int    `arg:"--endian" placeholder:"N" help:"the e_ident data word (default 1, little-endian)"`
+	Size    int    `arg:"--size" placeholder:"N" help:"the blob's size in bytes (default 4096)"`
+}
+
+func (elfCommand) Description() string {
+	return "Write one ELF-shaped blob, for a fixture payload that is not an executable."
+}
+
+type closureCommand struct {
+	Out         string `arg:"positional,required" placeholder:"OUT" help:"the closure directory to write"`
+	Signer      string `arg:"--signer,required" placeholder:"DIR" help:"the signer directory (key.asc, secret.asc, fingerprint)"`
+	Version     string `arg:"--version,required" placeholder:"X.Y.Z" help:"the release the closure pins"`
+	AMD64       string `arg:"--amd64,required" placeholder:"FILE" help:"the linux-x64 executable"`
+	ARM64       string `arg:"--arm64,required" placeholder:"FILE" help:"the linux-arm64 executable"`
+	Key         string `arg:"--key" placeholder:"FILE" help:"the committed key file (default: the signer's public key)"`
+	Fingerprint string `arg:"--fingerprint" placeholder:"FPR" help:"the primary the pin names (default: the signer's)"`
+	Signature   string `arg:"--signature" placeholder:"FILE" help:"a detached signature over other bytes (default: sign the manifest)"`
+	Subkey      bool   `arg:"--subkey" help:"read the signing subkey fingerprint from the signer directory"`
+}
+
+func (closureCommand) Description() string {
+	return "Write one consistent Claude closure: pin, manifest, signature and key."
+}
+
+type twoPrimariesCommand struct {
+	Out    string `arg:"positional,required" placeholder:"OUT" help:"the combined key file"`
+	First  string `arg:"positional,required" placeholder:"FIRST" help:"the first armored public key"`
+	Second string `arg:"positional,required" placeholder:"SECOND" help:"the second armored public key"`
+}
+
+func (twoPrimariesCommand) Description() string {
+	return "Concatenate two armored public keys into one key file."
 }
 
 func main() {
@@ -65,42 +120,192 @@ func run(argv []string) int {
 		parser.WriteHelp(os.Stderr)
 		return 2
 	}
-	if parsed.WriteFixture == nil {
-		parser.WriteHelp(os.Stderr)
-		return 2
+	switch {
+	case parsed.WriteFixture != nil:
+		return runWriteFixture(*parsed.WriteFixture)
+	case parsed.Keygen != nil:
+		return runKeygen(*parsed.Keygen)
+	case parsed.Elf != nil:
+		return runElf(*parsed.Elf)
+	case parsed.Closure != nil:
+		return runClosure(*parsed.Closure)
+	case parsed.TwoPrimaries != nil:
+		return runTwoPrimaries(*parsed.TwoPrimaries)
 	}
-	// A flag this tool cannot honour is a malformed invocation, not a failed run: a
-	// caller that branches on the status must read a typo as a typo. The wrapper
-	// chdirs to the checkout before exec, so a relative directory would silently name
-	// a different tree here than it did for the caller.
-	build, known := tools[parsed.WriteFixture.Tool]
+	parser.WriteHelp(os.Stderr)
+	return 2
+}
+
+// absolute refuses a path this tool would reinterpret. Every path it is handed is one:
+// `script/dev/avm-test.sh` chdirs to the checkout before exec, so a relative path names
+// a different tree here than it did for the caller -- which is a malformed invocation
+// (2), not a fixture this tool could not build (1).
+func absolute(name, path string) error {
+	if filepath.IsAbs(path) {
+		return nil
+	}
+	return fmt.Errorf("%s must be absolute: %q, because this tool runs from the checkout",
+		name, path)
+}
+
+// usage reports a malformed invocation.
+func usage(err error) int {
+	fmt.Fprintf(os.Stderr, "avm-test: %v\n", err)
+	return 2
+}
+
+// runWriteFixture validates what this tool cannot honour before it builds anything: a
+// tool it does not know, a flag that tool does not take, and the two paths a fixture
+// run writes or reads through, because a caller that branches on the status must read a
+// typo as a typo.
+func runWriteFixture(command writeFixtureCommand) int {
+	entry, known := tools[command.Tool]
 	if !known {
-		fmt.Fprintf(os.Stderr, "avm-test: %q is not a fixture this tool builds: %s\n",
-			parsed.WriteFixture.Tool, toolNames())
-		return 2
+		return usage(fmt.Errorf("%q is not a fixture this tool builds: %s",
+			command.Tool, toolNames()))
 	}
-	if !filepath.IsAbs(parsed.WriteFixture.Dir) {
-		fmt.Fprintf(os.Stderr, "avm-test: --dir must be absolute: %q, because this tool runs from the checkout\n",
-			parsed.WriteFixture.Dir)
-		return 2
+	// The lookup guarantees the key; the value is what gets called, so it is checked
+	// where it is handed over rather than trusted to exist.
+	if entry.build == nil {
+		return usage(fmt.Errorf("--tool %s has no builder", command.Tool))
 	}
-	if err := writeFixture(build, *parsed.WriteFixture); err != nil {
+	if command.Signer != "" && !entry.signer {
+		return usage(fmt.Errorf("--signer is not a flag --tool %s honours", command.Tool))
+	}
+	for _, path := range []struct{ name, value string }{
+		{"--dir", command.Dir},
+		{"--signer", command.Signer},
+	} {
+		if path.value == "" {
+			continue
+		}
+		if err := absolute(path.name, path.value); err != nil {
+			return usage(err)
+		}
+	}
+	if err := writeFixture(entry.build, command); err != nil {
 		fmt.Fprintf(os.Stderr, "avm-test: %v\n", err)
 		return 1
 	}
 	return 0
 }
 
-// builder publishes one fixture and returns the line to print, including the
-// release it published when the caller accepted the default.
-type builder func(harness.Reporter, agy.Fixture) string
+func runKeygen(command keygenCommand) int {
+	if err := absolute("OUT", command.Out); err != nil {
+		return usage(err)
+	}
+	var fingerprint claude.Fingerprint
+	if status := build(func(r harness.Reporter) {
+		fingerprint = claude.Keygen(r, command.Out, command.Subkey)
+	}); status != 0 {
+		return status
+	}
+	fmt.Printf("%s\n", fingerprint)
+	return 0
+}
+
+func runElf(command elfCommand) int {
+	if err := absolute("OUT", command.Out); err != nil {
+		return usage(err)
+	}
+	return build(func(r harness.Reporter) {
+		claude.Elf(r, claude.ElfArguments{
+			Out:     command.Out,
+			Machine: command.Machine,
+			Class:   command.Class,
+			Endian:  command.Endian,
+			Size:    command.Size,
+		})
+	})
+}
+
+func runClosure(command closureCommand) int {
+	for _, path := range []struct{ name, value string }{
+		{"OUT", command.Out},
+		{"--signer", command.Signer},
+		{"--amd64", command.AMD64},
+		{"--arm64", command.ARM64},
+		{"--key", command.Key},
+		{"--signature", command.Signature},
+	} {
+		if path.value == "" {
+			continue
+		}
+		if err := absolute(path.name, path.value); err != nil {
+			return usage(err)
+		}
+	}
+	return build(func(r harness.Reporter) {
+		claude.Closure(r, claude.ClosureArguments{
+			Out:         command.Out,
+			Signer:      command.Signer,
+			Version:     command.Version,
+			AMD64:       command.AMD64,
+			ARM64:       command.ARM64,
+			Key:         command.Key,
+			Fingerprint: command.Fingerprint,
+			Signature:   command.Signature,
+			Subkey:      command.Subkey,
+		})
+	})
+}
+
+func runTwoPrimaries(command twoPrimariesCommand) int {
+	for _, path := range []struct{ name, value string }{
+		{"OUT", command.Out},
+		{"FIRST", command.First},
+		{"SECOND", command.Second},
+	} {
+		if err := absolute(path.name, path.value); err != nil {
+			return usage(err)
+		}
+	}
+	return build(func(r harness.Reporter) {
+		claude.TwoPrimaries(r, command.Out, command.First, command.Second)
+	})
+}
+
+// build runs one fixture builder and returns the status its failure carries: a
+// fixture this tool cannot build is a failed run (1), not a malformed invocation.
+func build(work func(harness.Reporter)) int {
+	if err := harness.Command(work); err != nil {
+		fmt.Fprintf(os.Stderr, "avm-test: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// builder publishes one fixture from the parsed command and returns the exact text to
+// print, so a tool whose output a caller parses says what that caller reads.
+type builder func(harness.Reporter, writeFixtureCommand) string
+
+// tool is one fixture family: the builder, and which of this command's flags apply to
+// it at all.
+type tool struct {
+	build builder
+	// signer reports whether the tool honours --signer.
+	signer bool
+}
 
 // tools is the fixture families this command builds: the table the flag value is
 // looked up in, and the whole list of what exists.
-var tools = map[string]builder{
-	"agy": func(r harness.Reporter, fixture agy.Fixture) string {
-		version := agy.WriteFixture(r, fixture)
-		return fmt.Sprintf("agy %s written to %s", version, fixture.Dir)
+var tools = map[string]tool{
+	"agy": {
+		build: func(r harness.Reporter, command writeFixtureCommand) string {
+			version := agy.WriteFixture(r, agy.Fixture{Dir: command.Dir, Version: command.Version})
+			return fmt.Sprintf("avm-test: agy %s written to %s\n", version, command.Dir)
+		},
+	},
+	"claude": {
+		signer: true,
+		build: func(r harness.Reporter, command writeFixtureCommand) string {
+			version := claude.WriteFixture(r, claude.Fixture{
+				Dir:     command.Dir,
+				Version: command.Version,
+				Signer:  command.Signer,
+			})
+			return fmt.Sprintf("avm-test: claude %s written to %s\n", version, command.Dir)
+		},
 	},
 }
 
@@ -113,15 +318,14 @@ func toolNames() string {
 	return strings.Join(names, ", ")
 }
 
-// writeFixture runs one builder. It takes the builder rather than looking it up,
-// so a name that is not in the table cannot reach a failed lookup: the caller
-// validates the flag value and hands over the entry it found.
+// writeFixture runs one builder. It takes the builder rather than looking it up, so a
+// name that is not in the table cannot reach a failed lookup: the caller validates the
+// flag value and hands over the entry it found.
 func writeFixture(build builder, command writeFixtureCommand) error {
-	fixture := agy.Fixture{Dir: command.Dir, Version: command.Version}
-	var summary string
-	if err := harness.Command(func(r harness.Reporter) { summary = build(r, fixture) }); err != nil {
+	summary := ""
+	if err := harness.Command(func(r harness.Reporter) { summary = build(r, command) }); err != nil {
 		return err
 	}
-	fmt.Printf("avm-test: %s\n", summary)
+	fmt.Print(summary)
 	return nil
 }

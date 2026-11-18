@@ -992,10 +992,10 @@ done
 echo "== claude (real vendored install.sh) =="
 
 CLAUDE_SETUP="$REPO_ROOT/images/tools/claude/setup-claude.sh"
-CLAUDE_FIXTURE="$REPO_ROOT/script/test/fixtures/claude/claude_fixture.py"
+CLAUDE_FIXTURE_TOOL="$REPO_ROOT/script/dev/avm-test.sh"
 MUTATOR="$REPO_ROOT/script/test/vendored-installers-mutate-vendor.py"
 CLAUDE_SIGNER="$TEST_ROOT/claude-signer"
-[ -f "$CLAUDE_SIGNER/secret.asc" ] || python3 "$CLAUDE_FIXTURE" keygen "$CLAUDE_SIGNER" >/dev/null
+[ -f "$CLAUDE_SIGNER/secret.asc" ] || bash "$CLAUDE_FIXTURE_TOOL" keygen "$CLAUDE_SIGNER" >/dev/null
 
 # gpg and gpgconf only, for the same reason as claude-installer.sh: the pin
 # verifier allocates its own private GNUPGHOME and its cleanup needs gpgconf.
@@ -1034,7 +1034,7 @@ claude_url() { # $1 version
 
 claude_closure() { # $1 version, $2 dir, $3 amd64 file, $4 arm64 file, [$5 signature]
     rm -rf "$2"
-    python3 "$CLAUDE_FIXTURE" closure "$2" --signer "$CLAUDE_SIGNER" --version "$1" \
+    bash "$CLAUDE_FIXTURE_TOOL" closure "$2" --signer "$CLAUDE_SIGNER" --version "$1" \
         --amd64 "$3" --arm64 "$4" ${5:+--signature "$5"} >/dev/null
 }
 
@@ -1043,11 +1043,11 @@ claude_closure() { # $1 version, $2 dir, $3 amd64 file, $4 arm64 file, [$5 signa
 claude_assets() { # $1 version, [$2 amd64 file, $3 arm64 file]
     local version="$1" amd64="${2:-}" arm64="${3:-}"
     if [ -z "$amd64" ]; then
-        python3 "$CLAUDE_FIXTURE" elf "$CASE/assets/amd64" --machine 62
+        bash "$CLAUDE_FIXTURE_TOOL" elf "$CASE/assets/amd64" --machine 62
         amd64="$CASE/assets/amd64"
     fi
     if [ -z "$arm64" ]; then
-        python3 "$CLAUDE_FIXTURE" elf "$CASE/assets/arm64" --machine 183
+        bash "$CLAUDE_FIXTURE_TOOL" elf "$CASE/assets/arm64" --machine 183
         arm64="$CASE/assets/arm64"
     fi
     claude_closure "$version" "$CASE/source" "$amd64" "$arm64"
@@ -1235,7 +1235,7 @@ for arch in x86_64 aarch64; do
         linux-x64) wrong_machine=183 ;;
         *) wrong_machine=62 ;;
     esac
-    python3 "$CLAUDE_FIXTURE" elf "$other" --machine "$wrong_machine"
+    bash "$CLAUDE_FIXTURE_TOOL" elf "$other" --machine "$wrong_machine"
     claude_assets "$V" "$other" "$other"
     run_claude "$V" "$CLAUDE_VENDOR"
     expect_hard "claude $arch wrong machine"
@@ -1245,8 +1245,8 @@ for arch in x86_64 aarch64; do
 
     # Manifest and executable rewritten consistently, signature left stale.
     new_claude_case "claude-$arch-stale-signature" "$arch"
-    python3 "$CLAUDE_FIXTURE" elf "$CASE/assets/amd64" --machine 62
-    python3 "$CLAUDE_FIXTURE" elf "$CASE/assets/arm64" --machine 183
+    bash "$CLAUDE_FIXTURE_TOOL" elf "$CASE/assets/amd64" --machine 62
+    bash "$CLAUDE_FIXTURE_TOOL" elf "$CASE/assets/arm64" --machine 183
     claude_closure "$V" "$CASE/stale" "$CASE/assets/amd64" "$CASE/assets/arm64"
     printf 'a rewritten payload\n' >"$CASE/assets/rewritten"
     claude_closure "$V" "$CASE/source" "$CASE/assets/rewritten" "$CASE/assets/rewritten" \

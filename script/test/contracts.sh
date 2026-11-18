@@ -106,10 +106,10 @@ if [ "$guard_only" = false ]; then
     # here because this file is the list of what runs.
     bash script/test/artifact-pins.sh
     # The pin writers' own harnesses, in Go and in one place: the artifact
-    # maintenance table (#96, #179) and the agy owner writer's (#131, #182) drive
-    # script/dev/pin-*.sh end to end. They run concurrently: each suite compiles into
-    # its own path, and the wrappers' shared output is installed by rename, so a
-    # reader never sees a half-written binary.
+    # maintenance table (#96, #179), the agy owner writer's (#131, #182) and the
+    # Claude closure's (#98, #202) drive script/dev/pin-*.sh end to end. They run
+    # concurrently: each suite compiles into its own path, and the wrappers' shared
+    # output is installed by rename, so a reader never sees a half-written binary.
     (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test "${harness_packages[@]}")
     # The bumper's own table: it drives all three writers in one run and is the only
     # caller of the fixture builder the pin suites share (`script/dev/avm-test.sh`),
@@ -124,11 +124,11 @@ if [ "$guard_only" = false ]; then
     # corroboration, latest-only refusal and five-file transaction are the Go
     # table above; the hook/verifier pair that gates the layer is below. Both are
     # hermetic; the real pin and the finished image are the evidence phase's work.
-    # The committed Claude payload closure (#98): the offline pin/evidence/
-    # signature/layout/preflight table, the owner writer's staging rules and the
-    # real-transport redirect policy. The hook/vendor pair is in its own suites
-    # below; the real pin and the finished image are the evidence phase's work.
-    python3 script/test/claude-pins.py
+    # The committed Claude payload closure (#98) is the Go table above: the offline
+    # pin/evidence/signature/layout/preflight cases and the owner writer's staging
+    # rules. The hook/vendor pair and the real-transport redirect policy are in
+    # their own suites below; the real pin and the finished image are the evidence
+    # phase's work.
     # The restricted-egress gate's stream assertions and its addon policy are the
     # parts a native run cannot check cheaply: the allow-list log shape, the `-`
     # placeholder row, and whether a learned redirect target keeps the HTTPS/port/

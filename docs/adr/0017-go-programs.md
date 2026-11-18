@@ -96,10 +96,16 @@ with it. Every path a suite hands a program is absolute and symlink-resolved,
 because the wrappers `cd` to their own checkout first.
 
 A suite that needs synthetic release bytes shares its builder with the suites
-above it through `avm-test write-fixture`, which publishes one release with the
-real writer and copies the closure out. `script/test/agent-versions.sh` feeds
-its bumper from that command, so the bytes the bumper is driven with are the
-ones the suite holds a writer to — not a hand-written lookalike.
+above it through `avm-test`, which the shell suites reach at
+`script/dev/avm-test.sh`. `write-fixture --tool agy` publishes one release with the
+real writer and copies the closure out; `write-fixture --tool claude` synthesizes a
+committed-shape closure instead, because a fixture closure is signed by a throwaway
+key the review has never seen. `script/test/agent-versions.sh` feeds its bumper
+from both, so the bytes the bumper is driven with are the ones the suite holds a
+writer to — not a hand-written lookalike. The Claude suite's `keygen`, `elf`,
+`closure` and `two-primaries` verbs are the same builder its cases call, so
+`script/test/claude-installer.sh` and `script/test/vendored-installers.sh` need no
+Python fixture either.
 
 ## Considered options
 

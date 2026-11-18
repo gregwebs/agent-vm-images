@@ -233,8 +233,8 @@ without private scratch:
 
 The pull request that introduced this decision carries the run logs: the native
 arm64 build, the finished-image audit, the strict-egress Claude request log and
-its denial control, and the closure-mutation builds. `script/test/claude-pins.py`
-holds the hermetic case table for every refusal described here.
+its denial control, and the closure-mutation builds. The hermetic case table for
+every refusal described here is `go test ./script/test/pinsuite/claude`.
 
 ## Amended by 0017 (2026-11-16)
 
@@ -257,3 +257,9 @@ closure and who writes it, per [0017](0017-go-programs.md).
   at its three closure sites instead of `python3 "$CLAUDE_PIN_DIR/claude_pin.py"`,
   and the committed `install.patch` was regenerated so it still reproduces
   `vendor/install.sh` byte-for-byte.
+- The suite is `go test ./script/test/pinsuite/claude`, in Go beside the other pin
+  suites (#202). `script/test/claude-pins.py` and
+  `script/test/fixtures/claude/claude_fixture.py` are deleted: the fixture closures,
+  keys and ELF blobs come from that package, reached by the three shell suites through
+  `script/dev/avm-test.sh` (`keygen`, `elf`, `closure`, `two-primaries`,
+  `write-fixture --tool claude`).
