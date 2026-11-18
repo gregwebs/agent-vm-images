@@ -82,9 +82,13 @@ expect_failure() {  # MODE EXPECTED_STATUS STDERR_NEEDLE
     contract_run "$1" "${@:4}"
     [ "$contract_status" = "$2" ] || fail "$1/$3: status $contract_status, want $2: $(cat "$work/stderr")"
     grep -qF -- "$3" "$work/stderr" || fail "$1/$3: missing '$3' in: $(cat "$work/stderr")"
-    case "$contract_go_calls" in
-        *test*) fail "$1/$3: a behaviour suite started before the gate failed" ;;
-    esac
+    # A behaviour suite is a `go test` invocation, and the shim logs the argv
+    # without the binary name, so a line that starts with `test` is one. Matching
+    # the substring anywhere was wrong: the gate's own `go list` names
+    # `./script/test/...`, and a package path is not a suite starting.
+    if printf '%s\n' "$contract_go_calls" | grep -q '^test'; then
+        fail "$1/$3: a behaviour suite started before the gate failed"
+    fi
 }
 
 for mode in default guard-only; do
@@ -121,7 +125,9 @@ for mode in default guard-only; do
     case "$(cat "$work/stderr")" in
         *SHOULD-NOT-RUN*|*'formatter failed'*|*'missing formatter'*) fail "$mode/wrong-path: used the PATH gofmt" ;;
     esac
-    grep -qx 'vet ./internal/... ./images/...' "$work/go-log" ||
+    # The package sets are matched as a set, not by substring: the pin suites were
+    # added beside the module's own and the vet line has to carry both.
+    grep -qx 'vet ./internal/... ./images/... ./script/test/pinsuite/...' "$work/go-log" ||
         fail "$mode/wrong-path: go log: $(cat "$work/go-log")"
     echo "formatter gate control $mode passed"
 done

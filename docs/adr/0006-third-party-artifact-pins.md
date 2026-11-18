@@ -179,7 +179,7 @@ script/dev/pin-artifact.sh        the only writer of a pin (maintenance host, on
   `npx --version`, `/usr/bin/node` and `gh --version` equal the pins, `npm` and
   `npx` resolve into `/usr/local/lib/node_modules/npm`, and `pnpm` still resolves
   through `/usr/bin/node`.
-- `script/test/pin-artifact-maintenance.py` (hermetic): the maintenance writer
+- `script/test/pinsuite/artifactmaintenance` (Go, hermetic): the maintenance writer
   driven as a program - a failed second architecture, an archive the signed
   manifest does not name, a manifest signed by a foreign key, a publication that
   cannot be restored (exit 3 with retained material), a symlinked destination and

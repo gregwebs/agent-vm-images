@@ -760,7 +760,7 @@ follow-up step, because the pin is a base input:
 bash script/build/base-inputs.sh --write
 git add images/artifacts images/Dockerfile images/base-inputs.sha256 \
     examples/base-extension/Dockerfile
-bash script/test/artifact-pins.sh && python3 script/test/pin-artifact-maintenance.py
+bash script/test/artifact-pins.sh && go test ./script/test/pinsuite/...
 bash script/test/node-toolchain.sh agent-vm-base:local --platform linux/arm64  # after a native rebuild
 ```
 
