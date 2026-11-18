@@ -55,7 +55,7 @@ formatter="$selected_goroot/bin/gofmt"
 # fast `go test` aggregate below -- they run once, in the slow section, as the one
 # place their cases are listed. A single root keeps them out of that aggregate by
 # construction rather than by an exclusion list that can rot.
-go_packages=(./internal/... ./images/...)
+go_packages=(./internal/... ./images/... ./cmd/...)
 harness_packages=(./script/test/pinsuite/...)
 if package_dirs=$(cd "$contract_module" && GOTOOLCHAIN=auto go list -f '{{.Dir}}' "${go_packages[@]}" "${harness_packages[@]}"); then :; else
     status=$?; echo 'cannot list the module packages' >&2; exit "$status"
@@ -106,18 +106,20 @@ if [ "$guard_only" = false ]; then
     # here because this file is the list of what runs.
     bash script/test/artifact-pins.sh
     # The pin writers' own harnesses, in Go and in one place: the artifact
-    # maintenance table (#96, #179) drives script/dev/pin-artifact.sh end to end.
-    (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test "${harness_packages[@]}")
+    # maintenance table (#96, #179) and the agy owner writer's (#131, #182) drive
+    # script/dev/pin-*.sh end to end. One process at a time: each wrapper compiles
+    # into the same path in the checkout, and two of them writing it at once is a
+    # truncated executable rather than a test result.
+    (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test -p 1 "${harness_packages[@]}")
     # The committed Codex payload closure (#97): the offline pin/evidence schema,
     # the archive/preflight budgets and the owner writer's staging rules. Real
     # cosign and the two native architecture rows are the evidence phase's work,
     # never this aggregate.
     python3 script/test/codex-pins.py
     # The committed agy pin (#131) is hash-only: the owner writer's two-channel
-    # corroboration, latest-only refusal and five-file transaction, plus the
-    # hook/verifier pair that gates the layer. Both are hermetic; the real
-    # pin and the finished image are the evidence phase's work.
-    python3 script/test/pin-agy-maintenance.py
+    # corroboration, latest-only refusal and five-file transaction are the Go
+    # table above; the hook/verifier pair that gates the layer is below. Both are
+    # hermetic; the real pin and the finished image are the evidence phase's work.
     # The committed Claude payload closure (#98): the offline pin/evidence/
     # signature/layout/preflight table, the owner writer's staging rules and the
     # real-transport redirect policy. The hook/vendor pair is in its own suites

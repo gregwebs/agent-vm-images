@@ -11,4 +11,5 @@
 # repository always name their output (`-o`), and a committed binary is never a
 # source.
 /avm-pin
+/avm-test
 /recipe-contract

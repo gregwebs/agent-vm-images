@@ -26,8 +26,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
-	"testing"
+	"sync"
 	"time"
 
 	"github.com/ulikunitz/xz"
@@ -37,14 +38,100 @@ import (
 // than occupy a CI job until the job's own limit.
 const Timeout = 10 * time.Minute
 
+// Reporter is the failure surface a fixture builder writes to. *testing.T
+// implements it, so the code that builds a fixture in a case is the same code a
+// command runs: a fixture generated for another suite must not be a lookalike of
+// the one the cases check against.
+//
+// Fatalf does not return, and a Reporter made by Command stops the builder there.
+type Reporter interface {
+	Helper()
+	Cleanup(func())
+	Fatalf(format string, args ...any)
+	Skipf(format string, args ...any)
+}
+
+// Command runs a fixture builder outside a test and returns its first failure,
+// nil when it finished. The builder runs on its own goroutine because that is
+// where a reporter may stop it: Go does not let the main goroutine exit that way.
+func Command(build func(Reporter)) error {
+	reporter := &commandReporter{}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		build(reporter)
+	}()
+	<-done
+	for index := len(reporter.cleanups) - 1; index >= 0; index-- {
+		reporter.cleanups[index]()
+	}
+	return reporter.err
+}
+
+// commandReporter records the first failure instead of printing it, and runs the
+// builder's cleanups whatever happened.
+type commandReporter struct {
+	err      error
+	cleanups []func()
+}
+
+func (c *commandReporter) Helper() {}
+
+func (c *commandReporter) Cleanup(cleanup func()) { c.cleanups = append(c.cleanups, cleanup) }
+
+func (c *commandReporter) Skipf(format string, args ...any) { c.Fatalf(format, args...) }
+
+func (c *commandReporter) Fatalf(format string, args ...any) {
+	if c.err == nil {
+		c.err = fmt.Errorf(format, args...)
+	}
+	runtime.Goexit()
+}
+
+// Compile builds one program in this checkout, once per test process, and returns
+// the path to it.
+//
+// The suites drive the maintainer wrapper for the one case that is about the
+// wrapper, because a per-case `go build` costs more than the run it starts, and
+// every wrapper in `script/dev` compiles into the same output path: two suites in
+// one `go test` would race on that file, which is a truncated executable rather
+// than a test failure worth reading. A per-process path cannot race.
+var compiled = struct {
+	sync.Mutex
+	paths map[string]string
+}{paths: map[string]string{}}
+
+func Compile(r Reporter, name, packagePath string) string {
+	r.Helper()
+	compiled.Lock()
+	defer compiled.Unlock()
+	if path, built := compiled.paths[name]; built {
+		return path
+	}
+	root := Repository(r)
+	path := filepath.Join(root, "target", "pin-suite", name, filepath.Base(packagePath))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		r.Fatalf("cannot create the build directory for %s: %v", packagePath, err)
+	}
+	result := run(r, Spec{Argv: []string{"go", "build", "-o", path, packagePath}, Dir: root}, Timeout)
+	if result.Status != 0 {
+		r.Fatalf("cannot build %s\n%s", packagePath, result.Report())
+	}
+	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+		r.Fatalf("the build of %s wrote no binary at %s", packagePath, path)
+	}
+	compiled.paths[name] = path
+	return path
+}
+
 // Repository is the checkout root, found by walking up to the module file. It is
 // the answer to "where is the program under test" and to "where is the committed
 // bytes this fixture is built from".
-func Repository(t *testing.T) string {
-	t.Helper()
+func Repository(r Reporter) string {
+	r.Helper()
 	dir, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("cannot read the working directory: %v", err)
+		r.Fatalf("cannot read the working directory: %v", err)
 	}
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
@@ -52,7 +139,7 @@ func Repository(t *testing.T) string {
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatalf("no go.mod above %s", dir)
+			r.Fatalf("no go.mod above %s", dir)
 		}
 		dir = parent
 	}
@@ -61,11 +148,11 @@ func Repository(t *testing.T) string {
 // RequireTools skips the case when a prerequisite is missing. The whole-suite
 // gate (`script/test/contracts.sh`) names its prerequisites and fails without
 // them; this skip is for a developer running one package directly.
-func RequireTools(t *testing.T, names ...string) {
-	t.Helper()
+func RequireTools(r Reporter, names ...string) {
+	r.Helper()
 	for _, name := range names {
 		if _, err := exec.LookPath(name); err != nil {
-			t.Skipf("%s is required by this case", name)
+			r.Skipf("%s is required by this case", name)
 		}
 	}
 }
@@ -74,77 +161,77 @@ func RequireTools(t *testing.T, names ...string) {
 // resolved. It is not t.TempDir: macOS resolves /var to /private/var, and a
 // program that prints an absolute path it retained must print the same string the
 // suite compares against.
-func TempDir(t *testing.T, prefix string) string {
-	t.Helper()
+func TempDir(r Reporter, prefix string) string {
+	r.Helper()
 	dir, err := os.MkdirTemp("", prefix)
 	if err != nil {
-		t.Fatalf("cannot create a temporary directory: %v", err)
+		r.Fatalf("cannot create a temporary directory: %v", err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	r.Cleanup(func() { _ = os.RemoveAll(dir) })
 	resolved, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		t.Fatalf("cannot resolve %s: %v", dir, err)
+		r.Fatalf("cannot resolve %s: %v", dir, err)
 	}
 	return resolved
 }
 
 // Scratch is a named directory inside a case's temporary tree.
-func Scratch(t *testing.T, parent, name string) string {
-	t.Helper()
+func Scratch(r Reporter, parent, name string) string {
+	r.Helper()
 	dir := filepath.Join(parent, name)
 	if err := os.Mkdir(dir, 0o755); err != nil {
-		t.Fatalf("cannot create %s: %v", dir, err)
+		r.Fatalf("cannot create %s: %v", dir, err)
 	}
 	return dir
 }
 
 // ReadFile reads a file the case asserts on.
-func ReadFile(t *testing.T, path string) []byte {
-	t.Helper()
+func ReadFile(r Reporter, path string) []byte {
+	r.Helper()
 	body, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("cannot read %s: %v", path, err)
+		r.Fatalf("cannot read %s: %v", path, err)
 	}
 	return body
 }
 
 // WriteFile writes a fixture file, creating its directory.
-func WriteFile(t *testing.T, path string, body []byte) {
-	t.Helper()
+func WriteFile(r Reporter, path string, body []byte) {
+	r.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("cannot create the directory of %s: %v", path, err)
+		r.Fatalf("cannot create the directory of %s: %v", path, err)
 	}
 	if err := os.WriteFile(path, body, 0o644); err != nil {
-		t.Fatalf("cannot write %s: %v", path, err)
+		r.Fatalf("cannot write %s: %v", path, err)
 	}
 }
 
 // CopyFile copies one regular file, preserving nothing but its bytes: the mode a
 // fixture file starts with is never the thing under test.
-func CopyFile(t *testing.T, source, destination string) {
-	t.Helper()
-	body := ReadFile(t, source)
+func CopyFile(r Reporter, source, destination string) {
+	r.Helper()
+	body := ReadFile(r, source)
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
-		t.Fatalf("cannot create the directory of %s: %v", destination, err)
+		r.Fatalf("cannot create the directory of %s: %v", destination, err)
 	}
 	if err := os.WriteFile(destination, body, 0o644); err != nil {
-		t.Fatalf("cannot write %s: %v", destination, err)
+		r.Fatalf("cannot write %s: %v", destination, err)
 	}
 }
 
 // CopyFiles copies every regular file in one directory, not recursing. It is how
 // the committed artifacts directory becomes a fixture root.
-func CopyFiles(t *testing.T, source, destination string) {
-	t.Helper()
+func CopyFiles(r Reporter, source, destination string) {
+	r.Helper()
 	entries, err := os.ReadDir(source)
 	if err != nil {
-		t.Fatalf("cannot read %s: %v", source, err)
+		r.Fatalf("cannot read %s: %v", source, err)
 	}
 	for _, entry := range entries {
 		if !entry.Type().IsRegular() {
 			continue
 		}
-		CopyFile(t, filepath.Join(source, entry.Name()), filepath.Join(destination, entry.Name()))
+		CopyFile(r, filepath.Join(source, entry.Name()), filepath.Join(destination, entry.Name()))
 	}
 }
 
@@ -174,21 +261,21 @@ type Result struct {
 
 // Run executes a child process and captures its streams. A status other than
 // zero is data, not an error: the suites assert on statuses.
-func Run(t *testing.T, spec Spec) Result {
-	t.Helper()
-	return run(t, spec, Timeout)
+func Run(r Reporter, spec Spec) Result {
+	r.Helper()
+	return run(r, spec, Timeout)
 }
 
-func run(t *testing.T, spec Spec, timeout time.Duration) Result {
-	t.Helper()
+func run(r Reporter, spec Spec, timeout time.Duration) Result {
+	r.Helper()
 	if len(spec.Argv) == 0 {
-		t.Fatalf("cannot run an empty command")
+		r.Fatalf("cannot run an empty command")
 	}
 	// The child is wrapped in a watchdog rather than using exec's own timeout,
 	// because a gate that hangs must report the command it hung on.
 	path, err := exec.LookPath(spec.Argv[0])
 	if err != nil {
-		t.Fatalf("cannot find %s: %v", spec.Argv[0], err)
+		r.Fatalf("cannot find %s: %v", spec.Argv[0], err)
 	}
 	command := exec.Command(path, spec.Argv[1:]...)
 	command.Dir = spec.Dir
@@ -201,7 +288,7 @@ func run(t *testing.T, spec Spec, timeout time.Duration) Result {
 	command.Stderr = &stderr
 	result := Result{Argv: spec.Argv, Dir: spec.Dir}
 	if err := command.Start(); err != nil {
-		t.Fatalf("cannot start %s: %v", strings.Join(spec.Argv, " "), err)
+		r.Fatalf("cannot start %s: %v", strings.Join(spec.Argv, " "), err)
 	}
 	done := make(chan error, 1)
 	go func() { done <- command.Wait() }()
@@ -213,14 +300,14 @@ func run(t *testing.T, spec Spec, timeout time.Duration) Result {
 		}
 		var exit *exec.ExitError
 		if !errors.As(err, &exit) {
-			t.Fatalf("%s: %v", strings.Join(spec.Argv, " "), err)
+			r.Fatalf("%s: %v", strings.Join(spec.Argv, " "), err)
 		}
 		result.Status = exit.ExitCode()
 		return result
 	case <-time.After(timeout):
 		_ = command.Process.Kill()
 		<-done
-		t.Fatalf("%s did not finish in %s", strings.Join(spec.Argv, " "), timeout)
+		r.Fatalf("%s did not finish in %s", strings.Join(spec.Argv, " "), timeout)
 		return Result{}
 	}
 }
@@ -255,26 +342,26 @@ func (r Result) Report() string {
 }
 
 // RequireStatus fails the case when the status is not the one the contract names.
-func (r Result) RequireStatus(t *testing.T, want int) {
-	t.Helper()
+func (r Result) RequireStatus(reporter Reporter, want int) {
+	reporter.Helper()
 	if r.Status != want {
-		t.Fatalf("status %d, want %d\n%s", r.Status, want, r.Report())
+		reporter.Fatalf("status %d, want %d\n%s", r.Status, want, r.Report())
 	}
 }
 
 // RequireStdout and RequireStderr assert on a substring a consumer parses. The
 // suites freeze text only where something reads it.
-func (r Result) RequireStdout(t *testing.T, needle string) {
-	t.Helper()
+func (r Result) RequireStdout(reporter Reporter, needle string) {
+	reporter.Helper()
 	if !strings.Contains(r.Stdout, needle) {
-		t.Fatalf("stdout does not carry %q\n%s", needle, r.Report())
+		reporter.Fatalf("stdout does not carry %q\n%s", needle, r.Report())
 	}
 }
 
-func (r Result) RequireStderr(t *testing.T, needle string) {
-	t.Helper()
+func (r Result) RequireStderr(reporter Reporter, needle string) {
+	reporter.Helper()
 	if !strings.Contains(r.Stderr, needle) {
-		t.Fatalf("stderr does not carry %q\n%s", needle, r.Report())
+		reporter.Fatalf("stderr does not carry %q\n%s", needle, r.Report())
 	}
 }
 
@@ -286,43 +373,43 @@ type Upstream struct {
 	Dir string
 }
 
-func NewUpstream(t *testing.T) *Upstream {
-	t.Helper()
-	return &Upstream{Dir: TempDir(t, "upstream.")}
+func NewUpstream(r Reporter) *Upstream {
+	r.Helper()
+	return &Upstream{Dir: TempDir(r, "upstream.")}
 }
 
 // Path is where the fixture keeps the body for one URL. A URL that is not a
 // plain scheme-and-host is a fixture defect, not something to guess around.
-func (u *Upstream) Path(t *testing.T, url string) string {
-	t.Helper()
+func (u *Upstream) Path(r Reporter, url string) string {
+	r.Helper()
 	scheme, rest, found := strings.Cut(url, "://")
 	if !found || scheme == "" || rest == "" {
-		t.Fatalf("not an absolute URL: %q", url)
+		r.Fatalf("not an absolute URL: %q", url)
 	}
 	if strings.Contains(rest, "..") {
-		t.Fatalf("URL traverses: %q", url)
+		r.Fatalf("URL traverses: %q", url)
 	}
 	return filepath.Join(u.Dir, filepath.FromSlash(rest))
 }
 
 // Write serves body at url.
-func (u *Upstream) Write(t *testing.T, url string, body []byte) {
-	t.Helper()
-	WriteFile(t, u.Path(t, url), body)
+func (u *Upstream) Write(r Reporter, url string, body []byte) {
+	r.Helper()
+	WriteFile(r, u.Path(r, url), body)
 }
 
 // Read returns the body currently served at url.
-func (u *Upstream) Read(t *testing.T, url string) []byte {
-	t.Helper()
-	return ReadFile(t, u.Path(t, url))
+func (u *Upstream) Read(r Reporter, url string) []byte {
+	r.Helper()
+	return ReadFile(r, u.Path(r, url))
 }
 
 // Remove deletes the body at url, so the next fetch is a transport failure.
-func (u *Upstream) Remove(t *testing.T, url string) {
-	t.Helper()
-	path := u.Path(t, url)
+func (u *Upstream) Remove(r Reporter, url string) {
+	r.Helper()
+	path := u.Path(r, url)
 	if err := os.Remove(path); err != nil {
-		t.Fatalf("cannot remove %s: %v", path, err)
+		r.Fatalf("cannot remove %s: %v", path, err)
 	}
 }
 
@@ -337,8 +424,8 @@ type Member struct {
 }
 
 // TarArchive renders the members as an uncompressed tar stream.
-func TarArchive(t *testing.T, members []Member) []byte {
-	t.Helper()
+func TarArchive(r Reporter, members []Member) []byte {
+	r.Helper()
 	var buffer bytes.Buffer
 	writer := tar.NewWriter(&buffer)
 	for _, member := range members {
@@ -363,59 +450,59 @@ func TarArchive(t *testing.T, members []Member) []byte {
 			header.Name += "/"
 		}
 		if err := writer.WriteHeader(header); err != nil {
-			t.Fatalf("cannot write the archive member %s: %v", member.Name, err)
+			r.Fatalf("cannot write the archive member %s: %v", member.Name, err)
 		}
 		if header.Typeflag == tar.TypeReg && len(member.Body) > 0 {
 			if _, err := writer.Write(member.Body); err != nil {
-				t.Fatalf("cannot write the archive member %s: %v", member.Name, err)
+				r.Fatalf("cannot write the archive member %s: %v", member.Name, err)
 			}
 		}
 	}
 	if err := writer.Close(); err != nil {
-		t.Fatalf("cannot close the archive: %v", err)
+		r.Fatalf("cannot close the archive: %v", err)
 	}
 	return buffer.Bytes()
 }
 
 // Gzip compresses raw bytes.
-func Gzip(t *testing.T, raw []byte) []byte {
-	t.Helper()
+func Gzip(r Reporter, raw []byte) []byte {
+	r.Helper()
 	var buffer bytes.Buffer
 	writer := gzip.NewWriter(&buffer)
 	if _, err := writer.Write(raw); err != nil {
-		t.Fatalf("cannot gzip: %v", err)
+		r.Fatalf("cannot gzip: %v", err)
 	}
 	if err := writer.Close(); err != nil {
-		t.Fatalf("cannot gzip: %v", err)
+		r.Fatalf("cannot gzip: %v", err)
 	}
 	return buffer.Bytes()
 }
 
 // XZ compresses raw bytes with the vendored xz writer.
-func XZ(t *testing.T, raw []byte) []byte {
-	t.Helper()
+func XZ(r Reporter, raw []byte) []byte {
+	r.Helper()
 	var buffer bytes.Buffer
 	writer, err := xz.NewWriter(&buffer)
 	if err != nil {
-		t.Fatalf("cannot start the xz writer: %v", err)
+		r.Fatalf("cannot start the xz writer: %v", err)
 	}
 	if _, err := writer.Write(raw); err != nil {
-		t.Fatalf("cannot xz: %v", err)
+		r.Fatalf("cannot xz: %v", err)
 	}
 	if err := writer.Close(); err != nil {
-		t.Fatalf("cannot xz: %v", err)
+		r.Fatalf("cannot xz: %v", err)
 	}
 	return buffer.Bytes()
 }
 
 // TarXZ and TarGz render and compress in one step, which is the whole of what most
 // fixture archives are.
-func TarXZ(t *testing.T, members []Member) []byte {
-	return XZ(t, TarArchive(t, members))
+func TarXZ(r Reporter, members []Member) []byte {
+	return XZ(r, TarArchive(r, members))
 }
 
-func TarGz(t *testing.T, members []Member) []byte {
-	return Gzip(t, TarArchive(t, members))
+func TarGz(r Reporter, members []Member) []byte {
+	return Gzip(r, TarArchive(r, members))
 }
 
 // SHA256Hex and SHA512Hex are the digests the pins and manifests are written in.
@@ -439,62 +526,62 @@ type Signer struct {
 }
 
 // NewSigner generates an ed25519 signing key in a fresh 0700 home.
-func NewSigner(t *testing.T, home string) *Signer {
-	t.Helper()
+func NewSigner(r Reporter, home string) *Signer {
+	r.Helper()
 	if err := os.MkdirAll(home, 0o700); err != nil {
-		t.Fatalf("cannot create the key home %s: %v", home, err)
+		r.Fatalf("cannot create the key home %s: %v", home, err)
 	}
 	signer := &Signer{Home: home}
-	signer.gpg(t, "--batch", "--quiet", "--pinentry-mode", "loopback",
+	signer.gpg(r, "--batch", "--quiet", "--pinentry-mode", "loopback",
 		"--passphrase", "", "--quick-generate-key",
 		fmt.Sprintf("fixture %s <fixture-%s@example.invalid>", filepath.Base(home), filepath.Base(home)),
 		"ed25519", "sign", "0")
-	for _, line := range strings.Split(signer.gpg(t, "--batch", "--with-colons", "--list-keys"), "\n") {
+	for _, line := range strings.Split(signer.gpg(r, "--batch", "--with-colons", "--list-keys"), "\n") {
 		if strings.HasPrefix(line, "fpr:") {
 			fields := strings.Split(line, ":")
 			signer.Fingerprint = strings.ToUpper(fields[9])
 			return signer
 		}
 	}
-	t.Fatalf("the generated key has no fingerprint: %s", home)
+	r.Fatalf("the generated key has no fingerprint: %s", home)
 	return nil
 }
 
 // Export returns the armored public key.
-func (s *Signer) Export(t *testing.T) string {
-	t.Helper()
-	return s.gpg(t, "--batch", "--armor", "--export", s.Fingerprint)
+func (s *Signer) Export(r Reporter) string {
+	r.Helper()
+	return s.gpg(r, "--batch", "--armor", "--export", s.Fingerprint)
 }
 
 // SignDetached writes path+".sig" for path.
-func (s *Signer) SignDetached(t *testing.T, path string) {
-	t.Helper()
-	s.gpg(t, "--batch", "--quiet", "--pinentry-mode", "loopback", "--passphrase", "",
+func (s *Signer) SignDetached(r Reporter, path string) {
+	r.Helper()
+	s.gpg(r, "--batch", "--quiet", "--pinentry-mode", "loopback", "--passphrase", "",
 		"--armor", "--yes", "--detach-sign", "--output", path+".sig", path)
 	if _, err := os.Stat(path + ".sig"); err != nil {
-		t.Fatalf("the signature was not written: %v", err)
+		r.Fatalf("the signature was not written: %v", err)
 	}
 }
 
 // gpg runs gpg against this signer's home and fails the case on a non-zero status:
 // a fixture that cannot sign must not be reported as the program refusing.
-func (s *Signer) gpg(t *testing.T, argv ...string) string {
-	t.Helper()
-	result := Run(t, Spec{
+func (s *Signer) gpg(r Reporter, argv ...string) string {
+	r.Helper()
+	result := Run(r, Spec{
 		Argv:  append([]string{"gpg"}, argv...),
 		Env:   map[string]string{"GNUPGHOME": s.Home, "LC_ALL": "C"},
 		Unset: []string{"GPG_AGENT_INFO"},
 	})
 	if result.Status != 0 {
-		t.Fatalf("the fixture key operation failed\n%s", result.Report())
+		r.Fatalf("the fixture key operation failed\n%s", result.Report())
 	}
 	return result.Stdout
 }
 
 // Walk lists the regular files and symlinks under root as slash-separated paths
 // relative to root, sorted. It is how a case states "nothing was published".
-func Walk(t *testing.T, root string) []string {
-	t.Helper()
+func Walk(r Reporter, root string) []string {
+	r.Helper()
 	var paths []string
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -514,15 +601,15 @@ func Walk(t *testing.T, root string) []string {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("cannot walk %s: %v", root, err)
+		r.Fatalf("cannot walk %s: %v", root, err)
 	}
 	return paths
 }
 
 // CopyTree copies a directory tree, keeping modes. Symlinks are copied as links,
 // so a fixture that has to contain one can.
-func CopyTree(t *testing.T, source, destination string) {
-	t.Helper()
+func CopyTree(r Reporter, source, destination string) {
+	r.Helper()
 	err := filepath.WalkDir(source, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -554,6 +641,6 @@ func CopyTree(t *testing.T, source, destination string) {
 		}
 	})
 	if err != nil {
-		t.Fatalf("cannot copy %s to %s: %v", source, destination, err)
+		r.Fatalf("cannot copy %s to %s: %v", source, destination, err)
 	}
 }

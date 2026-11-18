@@ -127,7 +127,7 @@ for mode in default guard-only; do
     esac
     # The package sets are matched as a set, not by substring: the pin suites were
     # added beside the module's own and the vet line has to carry both.
-    grep -qx 'vet ./internal/... ./images/... ./script/test/pinsuite/...' "$work/go-log" ||
+    grep -qx 'vet ./internal/... ./images/... ./cmd/... ./script/test/pinsuite/...' "$work/go-log" ||
         fail "$mode/wrong-path: go log: $(cat "$work/go-log")"
     echo "formatter gate control $mode passed"
 done
