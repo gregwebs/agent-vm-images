@@ -107,10 +107,14 @@ if [ "$guard_only" = false ]; then
     bash script/test/artifact-pins.sh
     # The pin writers' own harnesses, in Go and in one place: the artifact
     # maintenance table (#96, #179) and the agy owner writer's (#131, #182) drive
-    # script/dev/pin-*.sh end to end. One process at a time: each wrapper compiles
-    # into the same path in the checkout, and two of them writing it at once is a
-    # truncated executable rather than a test result.
-    (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test -p 1 "${harness_packages[@]}")
+    # script/dev/pin-*.sh end to end. They run concurrently: each suite compiles into
+    # its own path, and the wrappers' shared output is installed by rename, so a
+    # reader never sees a half-written binary.
+    (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test "${harness_packages[@]}")
+    # The bumper's own table: it drives all three writers in one run and is the only
+    # caller of the fixture builder the pin suites share (`script/dev/avm-test.sh`),
+    # so leaving it ungated leaves that seam asserted by nothing in CI.
+    bash script/test/agent-versions.sh
     # The committed Codex payload closure (#97): the offline pin/evidence schema,
     # the archive/preflight budgets and the owner writer's staging rules. Real
     # cosign and the two native architecture rows are the evidence phase's work,

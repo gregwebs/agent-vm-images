@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -79,7 +80,12 @@ func (c *commandReporter) Helper() {}
 
 func (c *commandReporter) Cleanup(cleanup func()) { c.cleanups = append(c.cleanups, cleanup) }
 
-func (c *commandReporter) Skipf(format string, args ...any) { c.Fatalf(format, args...) }
+// Skipf fails instead of skipping: a command has no suite to skip a case of, and a
+// fixture builder that cannot do its job must say so in its own vocabulary rather
+// than in a test's.
+func (c *commandReporter) Skipf(format string, args ...any) {
+	c.Fatalf("a fixture builder cannot skip: "+format, args...)
+}
 
 func (c *commandReporter) Fatalf(format string, args ...any) {
 	if c.err == nil {
@@ -92,10 +98,11 @@ func (c *commandReporter) Fatalf(format string, args ...any) {
 // the path to it.
 //
 // The suites drive the maintainer wrapper for the one case that is about the
-// wrapper, because a per-case `go build` costs more than the run it starts, and
-// every wrapper in `script/dev` compiles into the same output path: two suites in
-// one `go test` would race on that file, which is a truncated executable rather
-// than a test failure worth reading. A per-process path cannot race.
+// wrapper, because a per-case `go build` costs more than the run it starts. The
+// build goes to a per-suite path rather than the wrapper's shared one so that two
+// suites under one `go test` do not both relink the same file: `go build -o`
+// installs by rename and would stay correct, but two suites relinking one path is
+// two builds paid for one binary.
 var compiled = struct {
 	sync.Mutex
 	paths map[string]string
@@ -603,6 +610,38 @@ func Walk(r Reporter, root string) []string {
 	if err != nil {
 		r.Fatalf("cannot walk %s: %v", root, err)
 	}
+	return paths
+}
+
+// Census is every file and directory under root as slash-separated paths relative
+// to root, sorted, with a trailing slash on a directory. It is what "the served
+// tree is untouched" means: Walk alone cannot see a directory a refused run created,
+// and an empty tree that stays empty is a claim about both.
+func Census(r Reporter, root string) []string {
+	r.Helper()
+	var paths []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == root {
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		if entry.IsDir() {
+			relative += "/"
+		}
+		paths = append(paths, relative)
+		return nil
+	})
+	if err != nil {
+		r.Fatalf("cannot walk %s: %v", root, err)
+	}
+	sort.Strings(paths)
 	return paths
 }
 

@@ -143,7 +143,7 @@ func TestTheDecisionTable(t *testing.T) {
 		},
 		{
 			name:   "manifests disagree",
-			mutate: func(served *release) { served.manifestVersions["linux/arm64"] = Newer },
+			mutate: func(served *release) { served.manifestVersions[linuxARM64] = Newer },
 			needle: "name linux/amd64",
 		},
 		{
@@ -158,20 +158,20 @@ func TestTheDecisionTable(t *testing.T) {
 		{
 			name: "GitHub digest disagrees",
 			mutate: func(served *release) {
-				served.releaseDigests[assetName("linux/amd64")] = "sha256:" + strings.Repeat("0", 64)
+				served.releaseDigests[linuxAMD64] = "sha256:" + strings.Repeat("0", 64)
 			},
 			needle: "but the downloaded bytes are",
 		},
 		{
 			name: "manifest sha512 disagrees",
 			mutate: func(served *release) {
-				served.manifestSHA512["linux/arm64"] = strings.Repeat("0", 128)
+				served.manifestSHA512[linuxARM64] = strings.Repeat("0", 128)
 			},
 			needle: "manifest records sha512",
 		},
 		{
 			name:   "GitHub omits the asset",
-			mutate: func(served *release) { served.dropAssets[assetName("linux/arm64")] = true },
+			mutate: func(served *release) { served.dropAssets[linuxARM64] = true },
 			needle: "does not list",
 		},
 		{
@@ -216,8 +216,8 @@ func TestAPlatformIsCheckedAgainstItsOwnManifest(t *testing.T) {
 	repo := newRepository(t, filepath.Join(work, "repo"), Version)
 	served := newRelease(t, Version)
 	other := newRelease(t, Version)
-	served.manifestSHA512["linux/arm64"] = other.manifestSHA512["linux/amd64"]
-	if served.manifestURLs["linux/amd64"] == served.manifestURLs["linux/arm64"] {
+	served.manifestSHA512[linuxARM64] = other.manifestSHA512[linuxAMD64]
+	if served.manifestURLs[linuxAMD64] == served.manifestURLs[linuxARM64] {
 		t.Fatal("the fixture urls are equal, so the row proves nothing")
 	}
 	upstream := served.writeServed(t, filepath.Join(work, "upstream"))
@@ -234,10 +234,9 @@ func TestAWrongArchitectureBinaryIsRefused(t *testing.T) {
 	work := harness.TempDir(t, "agy-wrong-elf.")
 	repo := newRepository(t, filepath.Join(work, "repo"), Version)
 	served := newRelease(t, Version)
-	served.machines["linux/amd64"] = 183
-	served.bodies["linux/amd64"] = binary(t, 183, reviewedMode, nil)
-	served.manifestSHA512["linux/amd64"] = harness.SHA512Hex(served.bodies["linux/amd64"])
-	served.releaseDigests[assetName("linux/amd64")] = "sha256:" + harness.SHA256Hex(served.bodies["linux/amd64"])
+	// An amd64 row whose archive is the arm64 machine: consistent digests on both
+	// channels, and the binary is still the wrong one.
+	served.setBody(t, linuxAMD64, binary(t, platformSpellings[linuxARM64].machine, reviewedMode, nil))
 	upstream := served.writeServed(t, filepath.Join(work, "upstream"))
 	before := repo.state(t)
 
@@ -258,9 +257,7 @@ func TestTheArchiveMemberModes(t *testing.T) {
 			repo := newRepository(t, filepath.Join(work, "repo"), Version)
 			served := newRelease(t, Version)
 			for _, platform := range platforms {
-				served.bodies[platform] = binary(t, served.machines[platform], mode, nil)
-				served.manifestSHA512[platform] = harness.SHA512Hex(served.bodies[platform])
-				served.releaseDigests[assetName(platform)] = "sha256:" + harness.SHA256Hex(served.bodies[platform])
+				served.setBody(t, platform, binary(t, platform.spell(t).machine, mode, nil))
 			}
 			upstream := served.writeServed(t, filepath.Join(work, "upstream"))
 			before := repo.state(t)
@@ -297,14 +294,14 @@ func TestTheCommittedSecondPlatformIsCorroborated(t *testing.T) {
 		mutate(doc)
 		repo.write(t, relative, encodeDocument(t, doc))
 	}
-	rehashManifest := func(t *testing.T, repo *repository, platform string) {
+	rehashManifest := func(t *testing.T, repo *repository, platform platform) {
 		t.Helper()
-		evidence := PinDirectory + "/evidence/manifest-linux-" + arch[platform] + ".json"
+		evidence := manifestEvidence(t, platform)
 		digest := harness.SHA256Hex(repo.read(t, evidence))
 		retarget(t, repo, func(pin map[string]any) {
 			authentication := object(t, pin, "authentication")
 			manifests := object(t, authentication, "manifests")
-			object(t, manifests, platform)["sha256"] = digest
+			object(t, manifests, string(platform))["sha256"] = digest
 		})
 	}
 	rehashRelease := func(t *testing.T, repo *repository) {
@@ -317,7 +314,7 @@ func TestTheCommittedSecondPlatformIsCorroborated(t *testing.T) {
 	stripArchives := func(t *testing.T, upstream string) {
 		t.Helper()
 		for _, platform := range platforms {
-			if err := os.Remove(servedPath(t, upstream, assetURL(Version, assetName(platform)))); err != nil {
+			if err := os.Remove(servedPath(t, upstream, assetURL(Version, assetName(t, platform)))); err != nil {
 				t.Fatalf("cannot strip the %s archive: %v", platform, err)
 			}
 		}
@@ -339,21 +336,21 @@ func TestTheCommittedSecondPlatformIsCorroborated(t *testing.T) {
 		rewrite(t, repo, PinDirectory+"/evidence/manifest-linux-arm64.json", func(doc map[string]any) {
 			doc["sha512"] = strings.Repeat("0", 128)
 		})
-		rehashManifest(t, repo, "linux/arm64")
+		rehashManifest(t, repo, linuxARM64)
 		refused(t, repo, "the pin says", repo.state(t), work)
 	})
 
 	t.Run("the arm64 release digest", func(t *testing.T) {
 		work := harness.TempDir(t, "agy-second-platform-release.")
 		repo := newRepository(t, filepath.Join(work, "repo"), Version).install(t, committed)
-		target := assetName("linux/arm64")
+		target := linuxARM64
 		rewrite(t, repo, PinDirectory+"/evidence/release.json", func(doc map[string]any) {
 			for _, entry := range list(t, doc, "assets") {
 				asset, ok := entry.(map[string]any)
 				if !ok {
 					t.Fatalf("a release asset is not an object: %T", entry)
 				}
-				if asset["name"] == target {
+				if asset["name"] == assetName(t, target) {
 					asset["digest"] = "sha256:" + strings.Repeat("0", 64)
 				}
 			}
@@ -386,10 +383,7 @@ func TestLatestOnlyAndTheSameReleaseRewrite(t *testing.T) {
 		work := harness.TempDir(t, "agy-same-release-rewrite.")
 		repo := newRepository(t, filepath.Join(work, "repo"), Version).install(t, committed)
 		rewritten := newRelease(t, Version)
-		rewritten.bodies["linux/amd64"] = binary(t, 62, reviewedMode, append(elfHeader(62), "# rewritten\n"...))
-		rewritten.manifestSHA512["linux/amd64"] = harness.SHA512Hex(rewritten.bodies["linux/amd64"])
-		rewritten.releaseDigests[assetName("linux/amd64")] =
-			"sha256:" + harness.SHA256Hex(rewritten.bodies["linux/amd64"])
+		rewritten.setBody(t, linuxAMD64, binary(t, platformSpellings[linuxAMD64].machine, reviewedMode, append(elfHeader(62), "# rewritten\n"...)))
 		upstream := rewritten.writeServed(t, filepath.Join(work, "upstream"))
 		before := repo.state(t)
 		result := runWriter(t, repo, arguments("--version", Version), serving(upstream))
@@ -431,8 +425,8 @@ func TestARepeatRunIsByteIdentical(t *testing.T) {
 	reformatted := newRelease(t, Version)
 	reformatted.downloadCount = 9999
 	servedDir := reformatted.writeServed(t, upstream)
-	path := servedPath(t, servedDir, manifestURL("linux/amd64"))
-	harness.WriteFile(t, path, append(encodeIndented(t, document(t, harness.ReadFile(t, path)), "    "), '\n'))
+	path := servedPath(t, servedDir, manifestURL(t, linuxAMD64))
+	harness.WriteFile(t, path, encodeIndented(t, document(t, harness.ReadFile(t, path)), "    "))
 	result = runWriter(t, repo, arguments("--version", Version), serving(servedDir))
 	requireStatus(t, result, 0)
 	if !strings.Contains(result.Stdout, "unchanged") {
@@ -592,8 +586,8 @@ func TestTheCIRefusalPrecedesTheFetch(t *testing.T) {
 	if strings.Contains(result.Stdout+result.Stderr, "cannot fetch") {
 		t.Fatalf("a fetch was attempted before the CI refusal\n%s", result.Report())
 	}
-	if walked := harness.Walk(t, empty); len(walked) != 0 {
-		t.Fatalf("a refused CI run wrote into the served tree: %v", walked)
+	if census := harness.Census(t, empty); len(census) != 0 {
+		t.Fatalf("a refused CI run wrote into the served tree: %v", census)
 	}
 
 	// --check is the offline reader: CI may run it, and the marker changes nothing.
@@ -605,9 +599,9 @@ func TestTheCIRefusalPrecedesTheFetch(t *testing.T) {
 	}
 }
 
-// TestCheckInABareProcess: `--check` reads only the committed bytes, and a mutated
-// evidence byte is a refusal, not a warning.
-func TestCheckInABareProcess(t *testing.T) {
+// TestCheckReadsOnlyTheCommittedBytes: `--check` re-hashes what is committed, and a
+// mutated evidence byte is a refusal, not a warning.
+func TestCheckReadsOnlyTheCommittedBytes(t *testing.T) {
 	work := harness.TempDir(t, "agy-clean.")
 	repo := newRepository(t, filepath.Join(work, "repo"), Version)
 	published(t, repo, newRelease(t, Version), work, Version)
@@ -696,7 +690,7 @@ func TestAFailedFetchPublishesNothing(t *testing.T) {
 	work := harness.TempDir(t, "agy-transport.")
 	repo := newRepository(t, filepath.Join(work, "repo"), Version)
 	upstream := newRelease(t, Version).writeServed(t, filepath.Join(work, "upstream"))
-	missing := manifestURL("linux/arm64")
+	missing := manifestURL(t, linuxARM64)
 	if err := os.Remove(servedPath(t, upstream, missing)); err != nil {
 		t.Fatalf("cannot remove the %s manifest: %v", missing, err)
 	}
@@ -704,4 +698,64 @@ func TestAFailedFetchPublishesNothing(t *testing.T) {
 
 	result := runWriter(t, repo, arguments("--version", Version), serving(upstream))
 	requireRefusal(t, result, "cannot fetch "+missing, repo, before)
+}
+
+// TestWriteFixturePublishesTheClosureTheBumperConsumes holds the fixture seam to its
+// contract, because `script/test/agent-versions.sh` reads what it wrote and that
+// script is not part of the gate.
+//
+// The layout is the contract: `source/images/tools/agy/` is a real publication (the
+// pin and its three evidence files), and `assets/` holds the served documents by the
+// names the bumper serves them under. It runs through `harness.Command`, which is
+// exactly what `avm-test write-fixture` calls, so the adapter is exercised too.
+func TestWriteFixturePublishesTheClosureTheBumperConsumes(t *testing.T) {
+	dir := filepath.Join(harness.TempDir(t, "agy-fixture."), "out")
+	if err := harness.Command(func(r harness.Reporter) {
+		WriteFixture(r, Fixture{Dir: dir, Version: Version})
+	}); err != nil {
+		t.Fatalf("the fixture builder refused: %v", err)
+	}
+
+	for _, name := range append([]string{"pin.json", "evidence/release.json"}, []string{
+		"evidence/" + "manifest-linux-amd64.json", "evidence/manifest-linux-arm64.json",
+	}...) {
+		path := filepath.Join(dir, "source", PinDirectory, name)
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("the source closure is missing %s: %v", name, err)
+		}
+	}
+	pin := document(t, harness.ReadFile(t, filepath.Join(dir, "source", PinFile)))
+	if pin["version"] != Version {
+		t.Fatalf("the fixture pin names %v, want %s", pin["version"], Version)
+	}
+
+	want := []string{
+		"agy_cli_linux_arm64.tar.gz",
+		"agy_cli_linux_x64.tar.gz",
+		"linux_amd64.json",
+		"linux_arm64.json",
+		"release.json",
+	}
+	got := make([]string, 0, len(want))
+	entries, err := os.ReadDir(filepath.Join(dir, "assets"))
+	if err != nil {
+		t.Fatalf("the fixture wrote no assets directory: %v", err)
+	}
+	for _, entry := range entries {
+		got = append(got, entry.Name())
+	}
+	sort.Strings(got)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("the fixture assets are %v, want %v", got, want)
+	}
+
+	// The bumper reuses a fixture directory, so a second write into one is a refusal
+	// rather than a merge.
+	if err := harness.Command(func(r harness.Reporter) {
+		WriteFixture(r, Fixture{Dir: dir, Version: Version})
+	}); err == nil {
+		t.Fatal("a second fixture write into the same directory was accepted")
+	} else if !strings.Contains(err.Error(), "already holds a fixture") {
+		t.Fatalf("the refusal does not name the existing fixture: %v", err)
+	}
 }

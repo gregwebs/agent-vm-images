@@ -17,6 +17,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/alexflint/go-arg"
 
@@ -34,8 +37,8 @@ func (arguments) Description() string {
 
 type writeFixtureCommand struct {
 	Tool    string `arg:"--tool,required" placeholder:"NAME" help:"the pin family: agy"`
-	Dir     string `arg:"--dir,required" placeholder:"DIR" help:"the directory to write: DIR/source and DIR/assets"`
-	Version string `arg:"--version" placeholder:"X.Y.Z" help:"the release to publish (default: the committed one)"`
+	Dir     string `arg:"--dir,required" placeholder:"DIR" help:"the absolute directory to write: DIR/source and DIR/assets"`
+	Version string `arg:"--version" placeholder:"X.Y.Z" help:"the release to publish (default: the fixture release, 1.4.11)"`
 }
 
 func (writeFixtureCommand) Description() string {
@@ -66,6 +69,20 @@ func run(argv []string) int {
 		parser.WriteHelp(os.Stderr)
 		return 2
 	}
+	// A flag this tool cannot honour is a malformed invocation, not a failed run: a
+	// caller that branches on the status must read a typo as a typo. The wrapper
+	// chdirs to the checkout before exec, so a relative directory would silently name
+	// a different tree here than it did for the caller.
+	if _, known := tools[parsed.WriteFixture.Tool]; !known {
+		fmt.Fprintf(os.Stderr, "avm-test: %q is not a fixture this tool builds: %s\n",
+			parsed.WriteFixture.Tool, toolNames())
+		return 2
+	}
+	if !filepath.IsAbs(parsed.WriteFixture.Dir) {
+		fmt.Fprintf(os.Stderr, "avm-test: --dir must be absolute: %q, because this tool runs from the checkout\n",
+			parsed.WriteFixture.Dir)
+		return 2
+	}
 	if err := writeFixture(*parsed.WriteFixture); err != nil {
 		fmt.Fprintf(os.Stderr, "avm-test: %v\n", err)
 		return 1
@@ -73,21 +90,34 @@ func run(argv []string) int {
 	return 0
 }
 
-func writeFixture(command writeFixtureCommand) error {
-	switch command.Tool {
-	case "agy":
-		version := command.Version
-		if version == "" {
-			version = agy.Version
-		}
-		if err := harness.Command(func(r harness.Reporter) {
-			agy.WriteFixture(r, command.Dir, version)
-		}); err != nil {
-			return err
-		}
-		fmt.Printf("avm-test: agy %s written to %s\n", version, command.Dir)
-		return nil
-	default:
-		return fmt.Errorf("unknown tool %q: the fixtures are agy", command.Tool)
+// tools is the fixture families this command builds. One entry, and the union is
+// the switch below: a family added to one and not the other does not compile.
+var tools = map[string]func(harness.Reporter, agy.Fixture) string{
+	"agy": func(r harness.Reporter, fixture agy.Fixture) string {
+		agy.WriteFixture(r, fixture)
+		return fmt.Sprintf("agy %s written to %s", fixture.Version, fixture.Dir)
+	},
+}
+
+func toolNames() string {
+	names := make([]string, 0, len(tools))
+	for name := range tools {
+		names = append(names, name)
 	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+func writeFixture(command writeFixtureCommand) error {
+	fixture := agy.Fixture{Dir: command.Dir, Version: command.Version}
+	if fixture.Version == "" {
+		fixture.Version = agy.Version
+	}
+	var summary string
+	build := tools[command.Tool]
+	if err := harness.Command(func(r harness.Reporter) { summary = build(r, fixture) }); err != nil {
+		return err
+	}
+	fmt.Printf("avm-test: %s\n", summary)
+	return nil
 }
