@@ -61,5 +61,5 @@ The owning recipe is `images/standard/Dockerfile`, with read-only canonical help
 mounts. Suites: `script/test/claude-installer.sh` (hook, gate, patch
 reproduction), `script/test/vendored-installers.sh` (the real installer and the
 offline setup step, including before-execution controls),
-`script/test/claude-pins.py` (the closure and the writer) and
+`go test ./script/test/pinsuite/claude` (the closure and the writer) and
 `script/test/shipped-installer-network.sh` (single-URL egress).

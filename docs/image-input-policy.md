@@ -427,6 +427,11 @@ bash script/build/agent-versions.sh --write --cosign /absolute/path/to/cosign
 bash script/test/shipped-installer-network.sh agent-vm-base:local --platform linux/arm64 --tool claude
 ```
 
+The suite that holds this closure to its answers is
+`go test ./script/test/pinsuite/claude`; `bash script/dev/avm-test.sh write-fixture
+--tool claude --dir /abs/DIR --signer /abs/DIR` builds the closure fixtures it and
+`script/test/agent-versions.sh` share, signed by the throwaway key in `--signer`.
+
 `--check` is offline: it re-hashes the committed evidence, verifies the signature,
 requires the reviewed signer and the single ARG/label, and says it is not a fresh
 fetch. The write path requires the published key to be byte-identical to the

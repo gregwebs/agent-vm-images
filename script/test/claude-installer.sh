@@ -6,18 +6,18 @@
 # No Docker, no network: the vendored installer is faked on a temp prefix and
 # the real run-install/report/download/check-tool-access helpers are used where
 # they are part of what is under test. The committed closure is a per-run fixture
-# key and per-case closure (`script/test/fixtures/claude/claude_fixture.py`), so
-# the hook's pin refusal and the gate's payload/layout/state checks run against
-# real signatures. This exercises the exact-version validation, the pin refusal,
-# the classified transport softening (and every way it must NOT soften), and the
-# report/T5 gate.
+# key and per-case closure (the Claude pin suite's own builder, through
+# `script/dev/avm-test.sh`), so the hook's pin refusal and the gate's
+# payload/layout/state checks run against real signatures. This exercises the
+# exact-version validation, the pin refusal, the classified transport softening
+# (and every way it must NOT soften), and the report/T5 gate.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VENDOR_SRC="$REPO_ROOT/images/tools/claude/vendor"
 INSTALL="$REPO_ROOT/images/tools/claude/install-claude.sh"
 VERIFY="$REPO_ROOT/images/tools/claude/verify-claude.sh"
-FIXTURE="$REPO_ROOT/script/test/fixtures/claude/claude_fixture.py"
+FIXTURE_TOOL="$REPO_ROOT/script/dev/avm-test.sh"
 # The converted verifiers execute `recipe-contract` from the contract directory,
 # so build the native composed directory once before any restricted env -i or
 # fixture PATH replaces the tooling.
@@ -27,7 +27,6 @@ TEST_ROOT="$(mktemp -d /tmp/claude-installer.XXXXXX)"
 chmod 0755 "$TEST_ROOT"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
-PYTHON_DIR="$(dirname "$(command -v python3)")"
 TIMEOUT_DIR="$(dirname "$(command -v timeout)")"
 
 # gpg and gpgconf only: the pin verifier allocates its own private GNUPGHOME, and
@@ -39,14 +38,14 @@ ln -s "$(command -v gpgconf)" "$GPGBIN/gpgconf"
 
 # One throwaway OpenPGP key for the whole run; every closure below is signed by it.
 SIGNER="$TEST_ROOT/signer"
-python3 "$FIXTURE" keygen "$SIGNER" >/dev/null
+bash "$FIXTURE_TOOL" keygen "$SIGNER" >/dev/null
 
 CASE=""
 
 # make_closure <version> <dir> <amd64 file> <arm64 file>
 make_closure() {
     rm -rf "$2"
-    python3 "$FIXTURE" closure "$2" --signer "$SIGNER" --version "$1" \
+    bash "$FIXTURE_TOOL" closure "$2" --signer "$SIGNER" --version "$1" \
         --amd64 "$3" --arm64 "$4" >/dev/null
 }
 
@@ -121,7 +120,7 @@ run_install() {
     set +e
     RUN_OUTPUT="$(
         env -i \
-            "PATH=$GPGBIN:$PYTHON_DIR:/usr/bin:/bin" \
+            "PATH=$GPGBIN:/usr/bin:/bin" \
             "AGENT_VM_VENDOR_DIR=$CASE/vendor" \
             "AGENT_VM_CONTRACT_DIR=$CONTRACT" \
             "AGENT_VM_CLAUDE_PREFIX=$CASE/prefix" \
@@ -355,7 +354,7 @@ run_gate() {
     set +e
     RUN_OUTPUT="$(
         env -i \
-            "PATH=$GPGBIN:$CASE/prefix/.local/bin:$TIMEOUT_DIR:$PYTHON_DIR:/usr/bin:/bin" \
+            "PATH=$GPGBIN:$CASE/prefix/.local/bin:$TIMEOUT_DIR:/usr/bin:/bin" \
             "AGENT_VM_CONTRACT_DIR=$CONTRACT" \
             "AGENT_VM_CLAUDE_PREFIX=$CASE/prefix" \
             "AGENT_VM_CLAUDE_SOURCE_DIR=$CASE/source" \

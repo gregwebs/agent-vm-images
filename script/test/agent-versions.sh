@@ -212,8 +212,8 @@ agy_fixture() { # $1 = version -> directory holding source/ (closure) and assets
 claude_fixture() { # $1 = version -> directory holding closure/ and upstream/
     local directory="$CLAUDE_FIXTURES/$1"
     if [[ ! -d "$directory" ]]; then
-        python3 "$REPO_ROOT/script/test/claude-pins.py" --write-fixture "$directory" \
-            --version "$1" --signer "$CLAUDE_SIGNER" >/dev/null ||
+        bash "$REPO_ROOT/script/dev/avm-test.sh" write-fixture --tool claude \
+            --dir "$directory" --version "$1" --signer "$CLAUDE_SIGNER" >/dev/null ||
             fail "cannot build the claude $1 fixture"
     fi
     printf '%s\n' "$directory"

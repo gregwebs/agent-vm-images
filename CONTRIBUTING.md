@@ -503,6 +503,14 @@ bash script/test/shipped-installer-network.sh agent-vm-base:local --platform lin
   --platform linux/<arch> --tool claude` (one `ALLOW` line, plus the
   real-network `DENY` control) and the standard-image audits on native amd64
   **and** arm64.
+- The suite is `go test ./script/test/pinsuite/claude`. Its fixture builder is also a
+  command, `bash script/dev/avm-test.sh write-fixture --tool claude --dir /abs/DIR
+  [--version X.Y.Z] [--signer /abs/DIR]`: a committed-shape closure signed by a
+  throwaway key, plus the upstream tree `script/test/agent-versions.sh` serves. The
+  same command's `keygen`, `elf` and `closure` verbs build the per-case fixtures the
+  hook and vendored-installer suites check. Every path it is given must be absolute:
+  the wrapper runs from the checkout, so a relative path would name a different tree
+  than it did for the caller, and it is refused rather than guessed.
 
 **Key rotation (manual; not supported by the writer in this release).**
 
