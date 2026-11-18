@@ -585,34 +585,6 @@ func (s *Signer) gpg(r Reporter, argv ...string) string {
 	return result.Stdout
 }
 
-// Walk lists the regular files and symlinks under root as slash-separated paths
-// relative to root, sorted. It is how a case states "nothing was published".
-func Walk(r Reporter, root string) []string {
-	r.Helper()
-	var paths []string
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if path == root {
-			return nil
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		relative, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		paths = append(paths, filepath.ToSlash(relative))
-		return nil
-	})
-	if err != nil {
-		r.Fatalf("cannot walk %s: %v", root, err)
-	}
-	return paths
-}
-
 // Census is every file and directory under root as slash-separated paths relative
 // to root, sorted, with a trailing slash on a directory. It is what "the served
 // tree is untouched" means: Walk alone cannot see a directory a refused run created,

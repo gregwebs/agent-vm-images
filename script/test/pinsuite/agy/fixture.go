@@ -10,9 +10,10 @@
 // The bytes are synthesized: real tar/gzip archives, real ELF headers, real
 // digests. The archive's tar flavour is nobody's contract — the digests in both
 // channels are taken over whatever bytes this file serves — so the fixture does not
-// reproduce the deleted Python builder's GNU headers byte for byte. What is a
-// contract is the served JSON: it ends with a newline, like the documents upstream
-// serves, because a consumer that reads those bytes exists.
+// reproduce the deleted Python builder's GNU headers byte for byte. The served JSON
+// does end with a newline, as the documents upstream serves do: no consumer in this
+// repository compares those bytes, but the fixture should look like the thing it
+// stands in for wherever that costs nothing.
 //
 // Nothing here imports a production package, and no case patches a function: the
 // writer is a compiled program reached through its own entry point.
@@ -616,9 +617,11 @@ type Fixture struct {
 // DIR/source/ holds the committed closure at the same relative path production
 // uses, and DIR/assets/ the served documents by their canonical names. Both come
 // from a real run, so the bumper suite holds the bytes production publishes rather
-// than a hand-written lookalike.
-func WriteFixture(t harness.Reporter, fixture Fixture) {
+// than a hand-written lookalike. It returns the release it published, which is the
+// default when the caller named none.
+func WriteFixture(t harness.Reporter, fixture Fixture) string {
 	t.Helper()
+	// The default lives here, once, and the caller is told which release it got.
 	if fixture.Version == "" {
 		fixture.Version = Version
 	}
@@ -658,4 +661,5 @@ func WriteFixture(t harness.Reporter, fixture Fixture) {
 
 	harness.CopyTree(t, filepath.Join(repo.path, PinDirectory), filepath.Join(dir, "source", PinDirectory))
 	served.writeAssets(t, filepath.Join(dir, "assets"))
+	return fixture.Version
 }

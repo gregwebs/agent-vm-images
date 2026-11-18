@@ -38,7 +38,7 @@ func (arguments) Description() string {
 type writeFixtureCommand struct {
 	Tool    string `arg:"--tool,required" placeholder:"NAME" help:"the pin family: agy"`
 	Dir     string `arg:"--dir,required" placeholder:"DIR" help:"the absolute directory to write: DIR/source and DIR/assets"`
-	Version string `arg:"--version" placeholder:"X.Y.Z" help:"the release to publish (default: the fixture release, 1.4.11)"`
+	Version string `arg:"--version" placeholder:"X.Y.Z" help:"the release to publish (default: the suite's fixture release)"`
 }
 
 func (writeFixtureCommand) Description() string {
@@ -73,7 +73,8 @@ func run(argv []string) int {
 	// caller that branches on the status must read a typo as a typo. The wrapper
 	// chdirs to the checkout before exec, so a relative directory would silently name
 	// a different tree here than it did for the caller.
-	if _, known := tools[parsed.WriteFixture.Tool]; !known {
+	build, known := tools[parsed.WriteFixture.Tool]
+	if !known {
 		fmt.Fprintf(os.Stderr, "avm-test: %q is not a fixture this tool builds: %s\n",
 			parsed.WriteFixture.Tool, toolNames())
 		return 2
@@ -83,19 +84,23 @@ func run(argv []string) int {
 			parsed.WriteFixture.Dir)
 		return 2
 	}
-	if err := writeFixture(*parsed.WriteFixture); err != nil {
+	if err := writeFixture(build, *parsed.WriteFixture); err != nil {
 		fmt.Fprintf(os.Stderr, "avm-test: %v\n", err)
 		return 1
 	}
 	return 0
 }
 
-// tools is the fixture families this command builds. One entry, and the union is
-// the switch below: a family added to one and not the other does not compile.
-var tools = map[string]func(harness.Reporter, agy.Fixture) string{
+// builder publishes one fixture and returns the line to print, including the
+// release it published when the caller accepted the default.
+type builder func(harness.Reporter, agy.Fixture) string
+
+// tools is the fixture families this command builds: the table the flag value is
+// looked up in, and the whole list of what exists.
+var tools = map[string]builder{
 	"agy": func(r harness.Reporter, fixture agy.Fixture) string {
-		agy.WriteFixture(r, fixture)
-		return fmt.Sprintf("agy %s written to %s", fixture.Version, fixture.Dir)
+		version := agy.WriteFixture(r, fixture)
+		return fmt.Sprintf("agy %s written to %s", version, fixture.Dir)
 	},
 }
 
@@ -108,13 +113,12 @@ func toolNames() string {
 	return strings.Join(names, ", ")
 }
 
-func writeFixture(command writeFixtureCommand) error {
+// writeFixture runs one builder. It takes the builder rather than looking it up,
+// so a name that is not in the table cannot reach a failed lookup: the caller
+// validates the flag value and hands over the entry it found.
+func writeFixture(build builder, command writeFixtureCommand) error {
 	fixture := agy.Fixture{Dir: command.Dir, Version: command.Version}
-	if fixture.Version == "" {
-		fixture.Version = agy.Version
-	}
 	var summary string
-	build := tools[command.Tool]
 	if err := harness.Command(func(r harness.Reporter) { summary = build(r, fixture) }); err != nil {
 		return err
 	}

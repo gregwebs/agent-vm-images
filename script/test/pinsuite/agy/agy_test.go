@@ -294,14 +294,14 @@ func TestTheCommittedSecondPlatformIsCorroborated(t *testing.T) {
 		mutate(doc)
 		repo.write(t, relative, encodeDocument(t, doc))
 	}
-	rehashManifest := func(t *testing.T, repo *repository, platform platform) {
+	rehashManifest := func(t *testing.T, repo *repository, target platform) {
 		t.Helper()
-		evidence := manifestEvidence(t, platform)
+		evidence := manifestEvidence(t, target)
 		digest := harness.SHA256Hex(repo.read(t, evidence))
 		retarget(t, repo, func(pin map[string]any) {
 			authentication := object(t, pin, "authentication")
 			manifests := object(t, authentication, "manifests")
-			object(t, manifests, string(platform))["sha256"] = digest
+			object(t, manifests, string(target))["sha256"] = digest
 		})
 	}
 	rehashRelease := func(t *testing.T, repo *repository) {
@@ -716,10 +716,13 @@ func TestWriteFixturePublishesTheClosureTheBumperConsumes(t *testing.T) {
 		t.Fatalf("the fixture builder refused: %v", err)
 	}
 
-	for _, name := range append([]string{"pin.json", "evidence/release.json"}, []string{
-		"evidence/" + "manifest-linux-amd64.json", "evidence/manifest-linux-arm64.json",
-	}...) {
-		path := filepath.Join(dir, "source", PinDirectory, name)
+	for _, name := range []string{
+		PinFile,
+		PinDirectory + "/evidence/release.json",
+		manifestEvidence(t, linuxAMD64),
+		manifestEvidence(t, linuxARM64),
+	} {
+		path := filepath.Join(dir, "source", name)
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("the source closure is missing %s: %v", name, err)
 		}
