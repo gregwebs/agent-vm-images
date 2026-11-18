@@ -106,22 +106,24 @@ if [ "$guard_only" = false ]; then
     # here because this file is the list of what runs.
     bash script/test/artifact-pins.sh
     # The pin writers' own harnesses, in Go and in one place: the artifact
-    # maintenance table (#96, #179), the agy owner writer's (#131, #182) and the
-    # Claude closure's (#98, #202) drive script/dev/pin-*.sh end to end. They run
-    # concurrently: each suite compiles into its own path, and the wrappers' shared
-    # output is installed by rename, so a reader never sees a half-written binary.
+    # maintenance table (#96, #179), the agy owner writer's (#131, #182), the
+    # Codex payload closure's (#97, #203) and the Claude closure's (#98, #202)
+    # drive script/dev/pin-*.sh end to end and hold the fixture builders their
+    # shell suites call. They run concurrently: each suite compiles into its own
+    # path, and the wrappers' shared output is installed by rename, so a reader
+    # never sees a half-written binary.
     (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test "${harness_packages[@]}")
     # The bumper's own table: it drives all three writers in one run and is the
     # end-to-end caller of the fixture builder the pin suites share
-    # (`script/dev/avm-test.sh`; its other callers are the Claude hook and
-    # vendored-installer suites below), so leaving it ungated leaves that seam
-    # unexercised in CI.
+    # (`script/dev/avm-test.sh`; the Claude and Codex hook suites and the
+    # vendored-installer suite below call it too), so leaving it ungated leaves
+    # that seam unexercised in CI.
     bash script/test/agent-versions.sh
-    # The committed Codex payload closure (#97): the offline pin/evidence schema,
-    # the archive/preflight budgets and the owner writer's staging rules. Real
-    # cosign and the two native architecture rows are the evidence phase's work,
-    # never this aggregate.
-    python3 script/test/codex-pins.py
+    # The committed Codex payload closure (#97) is the Go table above: the offline
+    # pin/evidence/archive/preflight cases and the owner writer's staging rules.
+    # The hook and the real patched installer are below; the real pin, real cosign
+    # and the two native architecture rows are the evidence phase's work, never
+    # this aggregate.
     # The committed agy pin (#131) is hash-only: the owner writer's two-channel
     # corroboration, latest-only refusal and five-file transaction are the Go
     # table above; the hook/verifier pair that gates the layer is below. Both are

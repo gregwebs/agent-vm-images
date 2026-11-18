@@ -278,6 +278,19 @@ sources unchanged or fully restored, `2` usage, `3` undecided/incomplete recover
 with every retained directory printed, `128+N` after a signal whose rollback
 succeeded.
 
+The suite that holds this tool to its answers is
+`go test ./script/test/pinsuite/codex`. Its fixture builders are also commands,
+`script/dev/avm-test.sh write-fixture --tool codex --dir /abs/DIR [--version
+rust-v0.163.0]` and `write-installer-fixture --tool codex --dir /abs/DIR
+--release rust-v0.163.0 --target TRIPLE --native-script /abs/FILE
+[--package-version V] [--package-target TRIPLE]`: a synthetic committed-shape
+closure, and the closure plus the six upstream documents, the selected archive and
+the served tree that `script/test/codex-installer.sh`,
+`script/test/agent-versions.sh` and `script/test/vendored-installers.sh` mount.
+Both are the same builders the cases call. Every path must be absolute: the
+wrapper runs from the checkout, so a relative path would name a different tree
+than it did for the caller.
+
 ## The agy hash-only artifact
 
 The Antigravity CLI is a release artifact with **no upstream signature at all**.

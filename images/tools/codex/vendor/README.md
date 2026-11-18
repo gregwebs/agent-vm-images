@@ -91,6 +91,7 @@ The owning recipe is `images/standard/Dockerfile`, with read-only canonical
 helper mounts including the whole `tools/codex` directory. Evidence:
 `script/test/codex-installer.sh` (hook and pin gate, patch reproduction),
 `script/test/vendored-installers.sh` (the real patched script, exact request
-streams), `script/test/codex-pins.py` (the reader and writer programs, black box)
+streams), `go test ./script/test/pinsuite/codex` (the reader and writer programs,
+black box)
 and `internal/codexpin/pin_test.go` (the schema, the archive policy and the
 preflight bounds).

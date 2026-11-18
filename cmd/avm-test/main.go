@@ -16,6 +16,12 @@
 // fixture primitives -- a fixture closure is signed by a key the review has never
 // seen, which no writer run can produce. Both are exposed so the shell suites that
 // need one call this implementation instead of keeping a copy of it.
+//
+// `write-fixture --tool codex` and `write-installer-fixture --tool codex` are the
+// Codex suite's own builders: a synthetic closure (no writer run can produce a
+// fixture's evidence without a real cosign), and the four-part installer fixture its
+// two shell suites mount. Both are tool-scoped through the same table as every other
+// mode, so a tool that has no such fixture says so instead of writing a lookalike.
 package main
 
 import (
@@ -30,15 +36,17 @@ import (
 
 	"github.com/gregwebs/agent-vm-images/script/test/pinsuite/agy"
 	"github.com/gregwebs/agent-vm-images/script/test/pinsuite/claude"
+	"github.com/gregwebs/agent-vm-images/script/test/pinsuite/codex"
 	"github.com/gregwebs/agent-vm-images/script/test/pinsuite/harness"
 )
 
 type arguments struct {
-	WriteFixture *writeFixtureCommand `arg:"subcommand:write-fixture" help:"publish one release through its real writer and copy the closure out"`
-	Keygen       *keygenCommand       `arg:"subcommand:keygen" help:"generate one throwaway OpenPGP signer and print its fingerprint"`
-	Elf          *elfCommand          `arg:"subcommand:elf" help:"write one ELF-shaped blob for a fixture payload"`
-	Closure      *closureCommand      `arg:"subcommand:closure" help:"write one consistent Claude closure"`
-	TwoPrimaries *twoPrimariesCommand `arg:"subcommand:two-primaries" help:"concatenate two armored public keys into one file"`
+	WriteFixture          *writeFixtureCommand          `arg:"subcommand:write-fixture" help:"write one fixture closure for a pin family (see --tool)"`
+	WriteInstallerFixture *writeInstallerFixtureCommand `arg:"subcommand:write-installer-fixture" help:"write one installer suite fixture: closure, assets, archive and served tree"`
+	Keygen                *keygenCommand                `arg:"subcommand:keygen" help:"generate one throwaway OpenPGP signer and print its fingerprint"`
+	Elf                   *elfCommand                   `arg:"subcommand:elf" help:"write one ELF-shaped blob for a fixture payload"`
+	Closure               *closureCommand               `arg:"subcommand:closure" help:"write one consistent Claude closure"`
+	TwoPrimaries          *twoPrimariesCommand          `arg:"subcommand:two-primaries" help:"concatenate two armored public keys into one file"`
 }
 
 func (arguments) Description() string {
@@ -53,7 +61,21 @@ type writeFixtureCommand struct {
 }
 
 func (writeFixtureCommand) Description() string {
-	return "Publish one release with the real writer and copy what it produced."
+	return "Write one fixture closure. A family that publishes through its real writer does; a family whose closure carries a signer the review has never seen synthesizes it."
+}
+
+type writeInstallerFixtureCommand struct {
+	Tool           string `arg:"--tool,required" placeholder:"NAME" help:"the pin family this tool builds (see the error for the list)"`
+	Dir            string `arg:"--dir,required" placeholder:"DIR" help:"the absolute directory to write"`
+	Release        string `arg:"--release,required" placeholder:"TAG" help:"the exact release the fixture pins"`
+	Target         string `arg:"--target,required" placeholder:"TRIPLE" help:"the platform whose archive goes to DIR/archive.tgz"`
+	NativeScript   string `arg:"--native-script,required" placeholder:"FILE" help:"the absolute script body the fixture entrypoint carries"`
+	PackageVersion string `arg:"--package-version" placeholder:"X.Y.Z" help:"the package metadata version (default: the release's)"`
+	PackageTarget  string `arg:"--package-target" placeholder:"TRIPLE" help:"the package metadata target (default: the platform's)"`
+}
+
+func (writeInstallerFixtureCommand) Description() string {
+	return "Write one installer suite fixture: the closure, the upstream documents, the selected archive and the served tree."
 }
 
 type keygenCommand struct {
@@ -126,6 +148,8 @@ func run(argv []string) int {
 	switch {
 	case parsed.WriteFixture != nil:
 		return runWriteFixture(*parsed.WriteFixture)
+	case parsed.WriteInstallerFixture != nil:
+		return runWriteInstallerFixture(*parsed.WriteInstallerFixture)
 	case parsed.Keygen != nil:
 		return runKeygen(*parsed.Keygen)
 	case parsed.Elf != nil:
@@ -151,6 +175,18 @@ func absolute(name, path string) error {
 		name, path)
 }
 
+// pins refuses a release this family's reader would not pin. An absent value means the
+// caller took the default, which the builder owns.
+func pins(entry tool, name, release string) error {
+	if release == "" || entry.release == nil {
+		return nil
+	}
+	if err := entry.release(release); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	return nil
+}
+
 // usage reports a malformed invocation.
 func usage(err error) int {
 	fmt.Fprintf(os.Stderr, "avm-test: %v\n", err)
@@ -158,9 +194,9 @@ func usage(err error) int {
 }
 
 // runWriteFixture validates what this tool cannot honour before it builds anything: a
-// tool it does not know, a flag that tool does not take, and the two paths a fixture
-// run writes or reads through, because a caller that branches on the status must read a
-// typo as a typo.
+// tool it does not know, a flag that tool does not take, a release that tool cannot
+// pin, and the two paths a fixture run writes or reads through, because a caller that
+// branches on the status must read a typo as a typo.
 func runWriteFixture(command writeFixtureCommand) int {
 	entry, known := tools[command.Tool]
 	if !known {
@@ -169,6 +205,9 @@ func runWriteFixture(command writeFixtureCommand) int {
 	}
 	if command.Signer != "" && !entry.signer {
 		return usage(fmt.Errorf("--signer is not a flag --tool %s honours", command.Tool))
+	}
+	if err := pins(entry, "--version", command.Version); err != nil {
+		return usage(err)
 	}
 	for _, path := range []struct{ name, value string }{
 		{"--dir", command.Dir},
@@ -181,11 +220,54 @@ func runWriteFixture(command writeFixtureCommand) int {
 			return usage(err)
 		}
 	}
-	if err := writeFixture(entry.build, command); err != nil {
-		fmt.Fprintf(os.Stderr, "avm-test: %v\n", err)
-		return 1
+	return emit(func(r harness.Reporter) string { return entry.build(r, command) })
+}
+
+// runWriteInstallerFixture validates what this mode cannot honour before it builds
+// anything: a tool it does not know, a tool whose family has no installer fixture, the
+// two paths a fixture run writes or reads through, and the two triples -- an unknown
+// triple is a caller's typo, so it is usage (2), never a failed build (1).
+func runWriteInstallerFixture(command writeInstallerFixtureCommand) int {
+	entry, known := tools[command.Tool]
+	if !known {
+		return usage(fmt.Errorf("%q is not a fixture this tool builds: %s",
+			command.Tool, toolNames()))
 	}
-	return 0
+	if entry.installer == nil {
+		return usage(fmt.Errorf("--tool %s has no installer fixture", command.Tool))
+	}
+	if command.Release == "" {
+		return usage(fmt.Errorf("--release must not be empty"))
+	}
+	if err := pins(entry, "--release", command.Release); err != nil {
+		return usage(err)
+	}
+	for _, path := range []struct{ name, value string }{
+		{"--dir", command.Dir},
+		{"--native-script", command.NativeScript},
+	} {
+		if err := absolute(path.name, path.value); err != nil {
+			return usage(err)
+		}
+	}
+	for _, triple := range []struct{ name, value string }{
+		{"--target", command.Target},
+		{"--package-target", command.PackageTarget},
+	} {
+		// --target is required, and an explicitly empty one is a malformed invocation
+		// rather than a package for whatever platform the builder picks.
+		if triple.value == "" && triple.name == "--target" {
+			return usage(fmt.Errorf("%s must not be empty", triple.name))
+		}
+		if triple.value == "" {
+			continue
+		}
+		if !codex.KnownTarget(triple.value) {
+			return usage(fmt.Errorf("%s must be one of %s, found %q", triple.name,
+				strings.Join(codex.Targets, ", "), triple.value))
+		}
+	}
+	return emit(func(r harness.Reporter) string { return entry.installer(r, command) })
 }
 
 func runKeygen(command keygenCommand) int {
@@ -279,10 +361,21 @@ func build(work func(harness.Reporter)) int {
 // print, so a tool whose output a caller parses says what that caller reads.
 type builder func(harness.Reporter, writeFixtureCommand) string
 
-// tool is one fixture family: the builder, and which of this command's flags apply to
-// it at all.
+// installerBuilder is the installer fixture mode's builder. A family that has none
+// says so instead of answering with a lookalike.
+type installerBuilder func(harness.Reporter, writeInstallerFixtureCommand) string
+
+// tool is one fixture family: the builders it has, and which of this command's flags
+// apply to it at all.
 type tool struct {
 	build builder
+	// installer is the `write-installer-fixture` builder, nil when the family has none.
+	installer installerBuilder
+	// release refuses a tag this family cannot pin. A family without one accepts any
+	// tag its writer will judge; a family whose reader has an exact-release grammar
+	// answers here, so a mistyped tag is a malformed invocation (2) rather than a
+	// fixture that could not be built (1).
+	release func(string) error
 	// signer reports whether the tool honours --signer.
 	signer bool
 }
@@ -307,6 +400,25 @@ var tools = map[string]tool{
 			return fmt.Sprintf("avm-test: claude %s written to %s\n", version, command.Dir)
 		},
 	},
+	"codex": {
+		release: codex.ReleaseSupported,
+		build: func(r harness.Reporter, command writeFixtureCommand) string {
+			release := codex.WriteFixture(r, codex.Fixture{Dir: command.Dir, Release: command.Version})
+			return fmt.Sprintf("avm-test: codex %s written to %s\n", release, command.Dir)
+		},
+		installer: func(r harness.Reporter, command writeInstallerFixtureCommand) string {
+			release := codex.WriteInstallerFixture(r, codex.InstallerFixture{
+				Dir:            command.Dir,
+				Release:        command.Release,
+				Target:         command.Target,
+				NativeScript:   command.NativeScript,
+				PackageVersion: command.PackageVersion,
+				PackageTarget:  command.PackageTarget,
+			})
+			return fmt.Sprintf("avm-test: codex installer fixture for %s %s written to %s\n",
+				release, command.Target, command.Dir)
+		},
+	},
 }
 
 func toolNames() string {
@@ -318,14 +430,15 @@ func toolNames() string {
 	return strings.Join(names, ", ")
 }
 
-// writeFixture runs one builder. It takes the builder rather than looking it up, so a
-// name that is not in the table cannot reach a failed lookup: the caller validates the
-// flag value and hands over the entry it found.
-func writeFixture(build builder, command writeFixtureCommand) error {
+// emit runs one fixture mode's builder and prints its one line. Both modes reach their
+// builder through here, so neither has a switch of its own and a mode that reported its
+// summary differently would be visible in one place.
+func emit(build func(harness.Reporter) string) int {
 	summary := ""
-	if err := harness.Command(func(r harness.Reporter) { summary = build(r, command) }); err != nil {
-		return err
+	if err := harness.Command(func(r harness.Reporter) { summary = build(r) }); err != nil {
+		fmt.Fprintf(os.Stderr, "avm-test: %v\n", err)
+		return 1
 	}
 	fmt.Print(summary)
-	return nil
+	return 0
 }
