@@ -301,11 +301,10 @@ func (p *process) runDshProbe(args []string) int {
 	return p.stdoutStatus(string(report))
 }
 
-const probeBoundText = "probe bounds must be positive and at most the production deadline"
-
-// probeBound parses one optional seconds bound. Nil means "keep the production
-// value"; a named bound must be positive and no longer than the production
-// deadline, so a caller cannot buy a slower gate.
+// probeBound parses one optional seconds bound. Nil means "keep the production value".
+// Only the parse is this layer's job: the package owns the ceiling, so it holds for every
+// caller of `Probe` rather than for this CLI alone. Finiteness has to be decided here,
+// because a NaN or an infinity is not a duration at all.
 func probeBound(text string) (*time.Duration, error) {
 	if text == "" {
 		return nil, nil
@@ -315,12 +314,9 @@ func probeBound(text string) (*time.Duration, error) {
 	// finiteness test is what keeps a bound the deadline arithmetic cannot express from
 	// passing as "positive and small enough".
 	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
-		return nil, &dsh.Usage{Text: probeBoundText}
+		return nil, &dsh.Usage{Text: dsh.ProbeBoundRefusal}
 	}
 	bound := time.Duration(seconds * float64(time.Second))
-	if seconds <= 0 || bound > dsh.DefaultReadiness {
-		return nil, &dsh.Usage{Text: probeBoundText}
-	}
 	return &bound, nil
 }
 

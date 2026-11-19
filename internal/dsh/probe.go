@@ -43,9 +43,29 @@ const (
 	maxAttempts    = 3
 )
 
-// DefaultReadiness is the production readiness deadline and the largest bound a
-// caller may name: a longer wait is not a health gate.
+// DefaultReadiness is the production readiness deadline and the largest bound a caller
+// may name: a longer wait is not a health gate. `validateBounds` enforces that here, so
+// it holds for any caller of `Probe` and not only for this repository's CLI.
 const DefaultReadiness = 60 * time.Second
+
+// ProbeBoundRefusal is the one wording for a bound this program cannot accept, shared
+// with the CLI so a reader sees one message whichever layer refused the argument.
+const ProbeBoundRefusal = "probe bounds must be positive and at most the production deadline"
+
+// validateBounds keeps the deadline a ceiling rather than a default. A bound only limits
+// the run, which is why production accepts one, but it may not buy a slower gate than the
+// production deadline.
+func validateBounds(readiness, escalation *time.Duration) error {
+	for _, bound := range []*time.Duration{readiness, escalation} {
+		if bound == nil {
+			continue
+		}
+		if *bound <= 0 || *bound > DefaultReadiness {
+			return &Usage{Text: ProbeBoundRefusal}
+		}
+	}
+	return nil
+}
 
 // DefaultEscalation is how long a TERM is given before a KILL, in production.
 const DefaultEscalation = 5 * time.Second
@@ -148,9 +168,14 @@ func Probe(ctx context.Context, options ProbeOptions) ([]byte, error) {
 	stop := notifyInterrupts(interrupts)
 	defer stop()
 	report, err := probe(ctx, options, interrupts, productionProber())
-	// The last word. A signal that arrives while the exec TMPDIR is removed or the report
-	// is rendered is still an interruption, so it is reported rather than published as a
-	// pass the caller never asked for.
+	return interruptedReport(interrupts, report, err)
+}
+
+// interruptedReport is the last word. A signal that arrives while the exec TMPDIR is
+// removed or the report is rendered still owns the outcome: the caller asked for a run
+// that reported, not for a pass it never witnessed. It is a function so the decision is
+// reachable from a test -- the window it covers is too short to schedule.
+func interruptedReport(interrupts <-chan int, report []byte, err error) ([]byte, error) {
 	if status, ok := interrupted(interrupts); ok {
 		return nil, &Interrupted{Status: status}
 	}
@@ -194,6 +219,11 @@ func notifyInterrupts(destination chan<- int) func() {
 }
 
 func probe(ctx context.Context, options ProbeOptions, interrupts <-chan int, environment prober) ([]byte, error) {
+	// A malformed bound is refused before anything is authorized or executed: it is a
+	// usage mistake about this invocation, not a property of the payload.
+	if err := validateBounds(options.Readiness, options.Escalation); err != nil {
+		return nil, err
+	}
 	project := Project{Source: options.Source}
 	if err := project.Guard(ctx, options.Prefix); err != nil {
 		return nil, err
@@ -285,9 +315,9 @@ var reservedChildEnv = map[string]bool{
 // One principle decides the statuses: a fixture seam is a request a production
 // capability cannot honour, so it is a refusal (1); a bound only limits the run, so it
 // is accepted in production. The readiness and escalation overrides are therefore not
-// refused here -- the production deadline remains the default, and a caller that names
-// a bound gets a shorter gate, which is exactly what the predecessor's argparse
-// allowed.
+// refused here. The predecessor's argparse accepted the flags and `probe-dsh.py`'s
+// `main` then refused them for a production capability; the refusal is what moved, not
+// the parsing.
 func probeSeam(production bool, options ProbeOptions) error {
 	if production && len(options.FixtureChildEnv) > 0 {
 		return &Refusal{Text: "production runtime does not accept a fixture child environment"}

@@ -24,8 +24,6 @@ func TestDshUsageIsStatusTwo(t *testing.T) {
 	for _, args := range [][]string{
 		{"dsh-probe"},
 		{"dsh-probe", "--prefix", "/opt/agent-vm/dsh"},
-		{"dsh-probe", "--source", "/s", "--prefix", "/p", "--command", "/c", "--scratch-root", "/r", "--readiness-seconds", "0"},
-		{"dsh-probe", "--source", "/s", "--prefix", "/p", "--command", "/c", "--scratch-root", "/r", "--readiness-seconds", "61"},
 		{"dsh-probe", "--source", "/s", "--prefix", "/p", "--command", "/c", "--scratch-root", "/r", "--readiness-seconds", "soon"},
 		{"dsh-probe", "--self-test", "--prefix", "/opt/agent-vm/dsh"},
 		{"dsh-prepare-lock"},
@@ -91,11 +89,18 @@ func TestProbeBound(t *testing.T) {
 	if err != nil || bound == nil || *bound != 500*time.Millisecond {
 		t.Fatalf("0.5 = %v, %v", bound, err)
 	}
-	for _, rejected := range []string{"0", "-1", "60.5", "80", "abc", "NaN", "Inf", "-Inf", "Infinity"} {
+	// Only the parse is this layer's: a value that is not a number at all. The ceiling
+	// is the package's rule (TestProbeBounds), so it holds for every caller of Probe.
+	for _, rejected := range []string{"abc", "NaN", "Inf", "-Inf", "Infinity"} {
 		var usage *dsh.Usage
 		err := func() error { _, err := probeBound(rejected); return err }()
 		if err == nil || !errors.As(err, &usage) {
 			t.Errorf("probeBound(%q) = %v, want a usage refusal", rejected, err)
+		}
+	}
+	for _, outOfRange := range []string{"0", "-1", "60.5", "80"} {
+		if _, err := probeBound(outOfRange); err != nil {
+			t.Errorf("probeBound(%q) = %v; the range is the package's decision", outOfRange, err)
 		}
 	}
 	if _, err := probeBound("60"); err != nil {

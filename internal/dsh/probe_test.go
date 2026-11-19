@@ -719,6 +719,28 @@ func TestBoundedKeepsTheTail(t *testing.T) {
 	}
 }
 
+// TestProbeBounds keeps the production deadline a ceiling rather than a default, and it
+// lives here so the exported Probe cannot be called with a slower gate than the CLI
+// allows.
+func TestProbeBounds(t *testing.T) {
+	bound := func(seconds time.Duration) *time.Duration { return &seconds }
+	if err := validateBounds(nil, nil); err != nil {
+		t.Fatalf("no bound = %v", err)
+	}
+	if err := validateBounds(bound(DefaultReadiness), bound(DefaultEscalation)); err != nil {
+		t.Fatalf("the production deadline was refused: %v", err)
+	}
+	for _, rejected := range []time.Duration{0, -time.Second, DefaultReadiness + time.Millisecond} {
+		for _, pair := range [][2]*time.Duration{{bound(rejected), nil}, {nil, bound(rejected)}} {
+			err := validateBounds(pair[0], pair[1])
+			var usage *Usage
+			if err == nil || !errors.As(err, &usage) || usage.Text != ProbeBoundRefusal {
+				t.Errorf("validateBounds(%v) = %v", rejected, err)
+			}
+		}
+	}
+}
+
 // TestScratchTokenMatchesTheSharedModule keeps the one literal this package owns in
 // step with the consumer table: the token names the directory a leftover belongs to,
 // and no verb exposes it.
@@ -827,4 +849,43 @@ func newIdleCapture(t *testing.T) *capture {
 func newIdleChild(t *testing.T) *webChild {
 	t.Helper()
 	return &webChild{capture: newIdleCapture(t), alive: func(int) bool { return false }}
+}
+
+// TestInterruptedReportIsTheLastWord covers the decision `Probe` makes after its work
+// returns: the window is sub-millisecond, so the rule is tested here rather than through
+// a run that would have to lose a race to observe it.
+func TestInterruptedReportIsTheLastWord(t *testing.T) {
+	report := []byte(`{"attempts": 1}`)
+
+	// No signal: the report and the error pass through unchanged, including the nil pair.
+	if payload, err := interruptedReport(nil, nil, nil); payload != nil || err != nil {
+		t.Fatalf("nil pair = %q, %v", payload, err)
+	}
+	if payload, err := interruptedReport(make(chan int), report, nil); string(payload) != string(report) || err != nil {
+		t.Fatalf("quiet = %q, %v", payload, err)
+	}
+	failure := refusal("something else failed")
+	if payload, err := interruptedReport(make(chan int), nil, failure); payload != nil || err != failure {
+		t.Fatalf("quiet failure = %q, %v", payload, err)
+	}
+
+	// A delivered signal outranks both: a report the caller never witnessed must not be
+	// published, and the interruption is what it asked to know about.
+	for _, queued := range []int{129, 130, 143} {
+		// A fresh channel per call, so a refusal to read it fails the assertion instead of
+		// blocking the second send.
+		withReport := make(chan int, 1)
+		withReport <- queued
+		payload, err := interruptedReport(withReport, report, nil)
+		var interruption *Interrupted
+		if payload != nil || !errors.As(err, &interruption) || interruption.Status != queued {
+			t.Errorf("queued %d with a report = %q, %v", queued, payload, err)
+		}
+		withFailure := make(chan int, 1)
+		withFailure <- queued
+		payload, err = interruptedReport(withFailure, nil, failure)
+		if payload != nil || !errors.As(err, &interruption) || interruption.Status != queued {
+			t.Errorf("queued %d with a failure = %q, %v", queued, payload, err)
+		}
+	}
 }
