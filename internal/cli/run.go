@@ -98,6 +98,12 @@ func (p *process) dispatch(args []string, env Environment) int {
 		return p.runDshUpgradeStage(args[1:])
 	case "install-artifact":
 		return p.runInstallArtifact(args[1:])
+	case "pnpm-bootstrap":
+		return p.runPnpmBootstrap(args[1:])
+	case "pnpm-verify":
+		return p.runPnpmVerify(args[1:])
+	case "pnpm-pin-version":
+		return p.runPnpmPinVersion(args[1:])
 	case "claude-pin":
 		return p.runClaudePin(args[1:])
 	case "codex-pin":
