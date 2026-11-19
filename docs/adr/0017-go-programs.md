@@ -1,7 +1,7 @@
 # 0017: Programs are Go; shell is for entry points and automation
 
 Status: accepted. Amends [ADR 0004](0004-go-build-helpers.md) (layout, delivery,
-parity bar). Not yet implemented; step 0 is #178.
+parity bar). Being implemented; the order list records what has landed.
 
 ## Context
 
@@ -67,23 +67,59 @@ for new ports.
 through slog, vendored like `yaml/v3`. Every HTTP client goes through
 failsafe-go behind one internal package that checks status codes.
 
-**Who may reach the network.** These rules are about *recipes*: the
-`install-*.sh` and `verify-*.sh` entry points and the `recipe-contract`
-subcommands they run. An installer fetches exactly the URL its pin names
-through `internal/fetch` — never a mirror, a dist-tag or a second origin — and
-`download.sh` stays the only path for the evidence and archives a build
-downloads beside its pins. A helper that is not an installer makes no network
-request at all. The pnpm bootstrap is an installer that runs during the base
-build and `pnpm-extract` is one that runs on a developer host: both fetch the
-single archive their pin names (or take bytes a caller already holds), so this
-rule names them rather than exempting them silently.
+**Build egress.** This section is a rule for the programs this port moves to
+Go, not a description of the repository today; the order list below is the
+schedule for the rest. A Go program that acquires bytes does so through
+`internal/fetch`, which owns the retry and status policy and the redirect
+allowlist. It fetches only the URLs its pin names — never a URL composed from a
+version, a mirror or a dist-tag — and a program that acquires nothing fetches
+nothing. The pnpm bootstrap and `pnpm-extract` are named here because they are
+the two that acquire today: the bootstrap fetches the one archive its pin names
+during the base build, and `pnpm-extract` either fetches that same URL
+(`--download`) or authenticates bytes a caller already holds (`--archive`),
+comparing the SHA-512 against the pin on both paths. "Build helper" and "pin
+writer" mean what [`CONTEXT.md`](../../CONTEXT.md) says; "network request" there
+means something else entirely — a TLS destination the finished image contacts at
+runtime — and this section is not about those.
 
-Maintainer programs are not covered by that sentence and are not meant to be.
-`avm-pin`, `avm-release`, `avm-ci` and `avm-test` talk to the network as their
-subject: a pin writer has to fetch the upstream bytes it is pinning, and a
-reader that cannot reach them can still check what is committed. They go
-through the same `internal/fetch`, and the distinction that matters is what a
-*recipe* is allowed to do, not what a maintainer command is for.
+Four kinds of build traffic are deliberately outside that rule, and naming them
+is the point:
+
+- **A package manager resolving its own graph** is its own transport, and the
+  lockfile is the pin. `pnpm install --frozen-lockfile`, `npm install -g
+  <pkg>@<version>`, `apt-get` (a [Floating distro
+  input](../../CONTEXT.md)) and a `FROM` pull are the pinning mechanisms for
+  those inputs; routing them through `internal/fetch` would defeat what the
+  lockfile proves.
+- **A build-time lock or project preparation** that must ask the registry what a
+  dist-tag resolves to before it writes a lock is the one place a version
+  becomes a URL; `prepare-lock.sh` and `prepare-project.py` do this, and they
+  belong to the install they prepare.
+- **A readiness probe** speaks HTTP to a server the program itself started on
+  the loopback interface. That is not a fetch and has no pin: the token in the
+  URL is what proves the identity of the child, so the probe for dsh and the
+  probe for OpenCode keep doing it.
+- **The example layers** are self-contained by decision (see below) and cannot
+  import `./internal`, so their `install-*.sh` use `download.sh` and `curl`.
+
+**What still predates the rule.** Most recipe installers do not fetch through
+`internal/fetch` yet, and the port replaces them one ticket at a time: the
+vendored Claude, Codex and OpenCode installers and Pi download through
+`download.sh`, `install-zellij.sh` calls `curl` directly, `install-copilot.sh`
+runs `npm install -g`, and the pnpm consumers fetch their locked graphs with
+`pnpm install --frozen-lockfile`. `download.sh` therefore remains the path for
+the shell recipes that have not been ported; when a recipe becomes Go, its
+fetch moves to `internal/fetch` and its `download.sh` call goes away.
+
+**Maintainer programs are out of scope, on purpose.** A *pin writer* fetches the
+upstream bytes it is pinning — that is its subject, not a side effect — and the
+bump scripts resolve dist-tags with `curl`, `npm view` and `pnpm view`. They do
+not all use `internal/fetch` today: `avm-pin` shells to `gh attestation
+download` and `cosign verify-blob`, which carry their own transports. What
+bounds a maintainer program's access is review of its diff, not this rule.
+`avm-test` is offline by construction — it writes fixtures from file trees and
+publishes nothing — and `avm-release` and `avm-ci` do not exist yet (order step
+5).
 
 **Order.**
 
