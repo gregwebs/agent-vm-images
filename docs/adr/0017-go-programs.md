@@ -1,7 +1,7 @@
 # 0017: Programs are Go; shell is for entry points and automation
 
 Status: accepted. Amends [ADR 0004](0004-go-build-helpers.md) (layout, delivery,
-parity bar). Not yet implemented; step 0 is #178.
+parity bar). Being implemented.
 
 ## Context
 
@@ -65,13 +65,46 @@ for new ports.
 
 **Conventions for new commands.** Arguments are parsed with go-arg and logs go
 through slog, vendored like `yaml/v3`. Every HTTP client goes through
-failsafe-go behind one internal package that checks status codes, and an
-installer fetches exactly the URL its pin names through it — never a mirror, a
-dist-tag or a second origin. A helper that is not an installer makes no network
-requests at all, and `download.sh` stays the only path for the evidence and
-archives a build downloads beside its pins. The pnpm bootstrap is an installer
-that runs during the base build: it fetches the one archive its pin names, so
-this rule names it instead of exempting it silently.
+failsafe-go behind one internal package that checks status codes; a readiness
+probe talking to its own loopback server is not a client of that package.
+
+**Build egress.** A `recipe-contract` subcommand that acquires bytes, whoever
+invokes it, does so through `internal/fetch`, which owns the retry, status and
+redirect policy, and fetches only the URLs its pin names — never a URL composed
+from a version, a mirror or a dist-tag. A subcommand that acquires nothing
+fetches nothing.
+
+Egress this rule does not govern includes:
+
+- **A package manager resolving its own graph.** `pnpm install
+  --frozen-lockfile`, `npm install -g <pkg>@<version>`, `apt-get` (a [Floating
+  distro input](../../CONTEXT.md)) and a `FROM` pull use the tool's own
+  transport. Whether that input is pinned is a question about that tool's
+  mechanism — a lockfile where there is one, a digest where there is one — and
+  not something `internal/fetch` can supply. Where none exists yet, as with
+  `install-copilot.sh`, that is the pinning gap [#42](https://github.com/gregwebs/agent-vm-images/issues/42)
+  already tracks.
+- **A build step from before this port**, which still downloads with whatever
+  it always did — `download.sh`, `curl`, a package manager, an interpreter's
+  own HTTP client — for example the vendored Claude, Codex and OpenCode
+  installers, Pi, `install-zellij.sh`, and the example layers. The order list
+  replaces what can be replaced. A vendored upstream script stays vendored, and
+  the example layers stay self-contained, so not all of these become Go.
+- **A readiness probe** speaking HTTP to a server the program itself started on
+  the loopback interface. That is not a fetch and has no pin.
+- **A maintainer program.** A *pin writer* fetches the upstream bytes it is
+  pinning — that is its subject, not a side effect — and the bump scripts
+  resolve dist-tags with `curl`, `npm view` and `pnpm view`. They do not all use
+  `internal/fetch`: `avm-pin` shells to `gh attestation download` and `cosign
+  verify-blob`, which carry their own transports. What bounds them is review of
+  their diff, not this rule.
+
+**Known gap.** `install-artifact` runs `gh attestation verify --bundle` without
+`--custom-trusted-root`, so `gh` refreshes the Sigstore trusted root over its own
+transport: a build-time fetch from URLs no pin names, outside `internal/fetch`.
+The build is therefore not hermetic in that step, and `install.go`'s comment that
+`--bundle` reads only the committed bytes is wrong. Pinning a trusted root and
+passing it explicitly is [#215](https://github.com/gregwebs/agent-vm-images/issues/215).
 
 **Order.**
 
@@ -101,7 +134,7 @@ because the wrappers `cd` to their own checkout first.
 
 A suite that needs synthetic release bytes shares its builder with the suites
 above it through `avm-test`, which the shell suites reach at
-`script/dev/avm-test.sh`. `write-fixture --tool agy` publishes one release with the
+`script/dev/avm-test.sh`. `write-fixture --tool agy` writes one staged release through the
 real writer and copies the closure out; `write-fixture --tool claude` synthesizes a
 committed-shape closure instead, because a fixture closure is signed by a throwaway
 key the review has never seen. `script/test/agent-versions.sh` feeds its bumper
@@ -141,7 +174,9 @@ the distribution audit the dsh hook re-runs around its own health gate, and the
 same verb over `--prefix/--commands/--node/--source/--fixture-root` is what the
 host manager authenticates with, so host maintenance has no second copy of the
 pin, digest, member or package rules. `pnpm-extract` is that host acquisition
-boundary.
+boundary, and it is in scope of build egress above: with `--download` it
+fetches the pin's own URL through `internal/fetch`, and with `--archive` it
+authenticates bytes the caller already holds. Neither path skips the pin.
 
 ## Considered options
 
