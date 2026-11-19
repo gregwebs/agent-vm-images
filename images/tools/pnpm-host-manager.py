@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Acquire and authenticate a consumer's stock manager; never PATH pnpm.
+"""Acquire the reviewed stock manager for a host; never PATH pnpm.
 
-Host maintenance needs pnpm 11.11.0 from the reviewed distribution. This helper
-downloads that distribution, checks it against the reviewed pin and hands back
-argv for the extracted copy. It is developer-only: production starts the fixed
-base launcher instead, so the acquisition variables are refused there.
+Host maintenance needs pnpm 11.11.0 from the reviewed distribution. This entry
+point authorizes the consumer's capability and then asks the composed
+recipe-contract helper for the distribution: `pnpm-extract` downloads the pin's own
+URL through `internal/fetch`, authenticates the bytes, validates the member
+inventory and unpacks the package, all under the rules the image build runs. The
+pin, digest, extraction and package policy live in `internal/pnpm` and nowhere
+else, so a host cannot execute a distribution selected under different rules.
+
+It is developer-only: production starts the fixed base launcher instead, so the
+acquisition variables are refused there.
 
 The consumer is a closed profile, not a caller option with a default: every
 consumer names its own acquisition variables, and no consumer can claim another's
@@ -16,7 +22,6 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-import tarfile
 
 sys.dont_write_bytecode = True
 
@@ -42,6 +47,9 @@ def main(argv=None, consumer=None):
         parser.add_argument('--consumer', required=True,
                             choices=sorted(load_project().CONSUMERS))
     parser.add_argument('prefix')
+    parser.add_argument('--archive',
+                        help='authenticate this already-downloaded archive instead of '
+                             'fetching the pinned URL')
     options = parser.parse_args(argv)
     project = load_project()
     profile = project.consumer_of(options.consumer if consumer is None else consumer)
@@ -54,23 +62,23 @@ def main(argv=None, consumer=None):
     # mount: that seam names the base image's sources for a version check, while
     # acquisition must be the exact pin this source tree ships.
     source = Path(__file__).resolve().parents[1] / 'pnpm'
-    pin = project.read_pnpm_pin(source / 'pin.json')
     destination = prefix.parent / 'manager'
     project.no_redirect(destination, capability.root)
     project.disjoint([destination, prefix, capability.basePin])
     destination.mkdir(mode=0o700)
-    archive = destination / 'pnpm.tgz'
-    subprocess.run(['curl', '--fail', '--silent', '--show-error', '--location', '--proto', '=https',
-                    '--connect-timeout', '15', '--max-time', '180', pin['url'], '-o', str(archive)], check=True)
-    project.authenticate_pnpm_archive(archive, pin)
-    package = project.extract_pnpm_package(archive, destination, pin)
-    print(json.dumps({'package': str(package), 'archive': str(archive)}))
+    arguments = ['pnpm-extract', '--destination', str(destination), '--source', str(source)]
+    if options.archive is None:
+        arguments.append('--download')
+    else:
+        arguments += ['--archive', str(project.absolute(options.archive))]
+    unpacked = json.loads(project.run_contract([prefix], *arguments))
+    print(json.dumps({'package': unpacked['package'], 'archive': unpacked['archive']}))
 
 
 def entry(consumer=None):
     try:
         main(consumer=consumer)
-    except (ValueError, OSError, tarfile.TarError, subprocess.CalledProcessError) as error:
+    except (ValueError, OSError, subprocess.CalledProcessError) as error:
         print('pnpm host manager: ' + str(error), file=sys.stderr)
         sys.exit(1)
 

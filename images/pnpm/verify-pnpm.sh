@@ -7,8 +7,16 @@
 # install-pnpm.sh, and images/standard/verify-standard.sh runs it twice. The
 # helper's `pnpm-verify` without `--certify` is the distribution audit alone,
 # which is what the dsh hook re-runs around its own health gate.
+#
+# The helper is named by RECIPE_CONTRACT_HELPER, else by AGENT_VM_CONTRACT_DIR --
+# which verify-standard.sh and the fixtures have always exported -- else by the
+# fixed build mount.
 set -eu
-helper=${RECIPE_CONTRACT_HELPER:-/tmp/recipe-contract/recipe-contract}
+if [ -n "${RECIPE_CONTRACT_HELPER-}" ]; then
+    helper=$RECIPE_CONTRACT_HELPER
+else
+    helper="${AGENT_VM_CONTRACT_DIR:-/tmp/recipe-contract}/recipe-contract"
+fi
 if [ ! -x "$helper" ]; then
     echo "verify-pnpm.sh: no recipe-contract helper at $helper" >&2
     exit 1

@@ -8,22 +8,18 @@ select a production path, a scratch parent or a manager route by argument or
 environment.
 """
 import argparse
-import base64
 from dataclasses import dataclass, field
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
-from pathlib import PurePosixPath
 import platform
-import re
 import shutil
 import signal
 import stat
 import subprocess
 import sys
-import tarfile
 import tempfile
 from typing import Literal
 
@@ -804,165 +800,52 @@ def reviewed_pnpm_source():
     return Path(__file__).resolve().parents[1] / 'pnpm'
 
 
-PIN_FIELDS = ('version', 'url', 'integrity', 'sha512', 'bundleSha256',
-              'upstreamTag', 'upstreamCommit')
-EXACT_VERSION = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)')
-# The upstream files the reviewed selection must carry, as regular non-empty files.
-PNPM_UPSTREAM_FILES = ('bin/pnpm.mjs', 'bin/pnpx.mjs', 'dist/pnpm.mjs', 'LICENSE')
+def contract_helper(prefixes=None):
+    """The composed recipe-contract helper this invocation may execute.
 
-
-def read_pnpm_pin(path):
-    """Read one reviewed base pin for the host acquisition path.
-
-    The build helpers are Go (`internal/pnpm`, `recipe-contract pnpm-bootstrap`),
-    and that implementation is the reviewed one. This copy exists only because
-    host maintenance and the fixture harnesses authenticate a stock distribution
-    before a manager starts; #62 moves them onto the Go path and deletes it. The
-    rules are identical, because a caller that accepted a pin a build refuses
-    would authenticate different bytes than the image does.
+    Authorization comes first: the directory selects executable policy, so
+    `authorize_contract` is what decides whether this invocation may spawn from
+    it. The prefixes are the project prefixes whose capability the caller holds.
     """
-    raw = json.loads(Path(path).read_text())
-    if not isinstance(raw, dict) or set(raw) != set(PIN_FIELDS):
-        raise ValueError('invalid pin fields')
-    if not all(isinstance(raw[key], str) for key in PIN_FIELDS):
-        raise ValueError('pin fields must be strings')
-    pin = {key: raw[key] for key in PIN_FIELDS}
-    if not EXACT_VERSION.fullmatch(pin['version']):
-        raise ValueError('pin must be exact stable version')
-    if pin['url'] != f"https://registry.npmjs.org/pnpm/-/pnpm-{pin['version']}.tgz":
-        raise ValueError('unexpected archive URL')
-    for key, length in (('sha512', 128), ('bundleSha256', 64), ('upstreamCommit', 40)):
-        if not re.fullmatch('[0-9a-f]{' + str(length) + '}', pin[key]):
-            raise ValueError('invalid digest/commit: ' + key)
-    if pin['integrity'] != 'sha512-' + base64.b64encode(bytes.fromhex(pin['sha512'])).decode():
-        raise ValueError('SRI and hex digest disagree')
-    if pin['upstreamTag'] != 'v' + pin['version']:
-        raise ValueError('upstream tag disagrees')
-    return pin
+    directory = authorize_contract(prefixes or ())
+    return directory / 'recipe-contract'
 
 
-def authenticate_pnpm_archive(archive, pin):
-    if hashlib.sha512(Path(archive).read_bytes()).hexdigest() != pin['sha512']:
-        raise ValueError('archive SHA-512 mismatch')
+def run_contract(prefixes, *arguments):
+    """Run one recipe-contract subcommand and return its stdout.
 
-
-def extract_pnpm_package(archive, destination, pin):
-    """Validate the whole archive inventory, then extract it into `destination`.
-
-    Same member rules as the Go bootstrap: one `package/` prefix, no `..`, no
-    absolute name, no duplicates, regular files and directories only.
+    The helper is the single authority for the pnpm pin, archive, distribution and
+    extraction rules: two implementations of one security policy is exactly what
+    drifts, so host maintenance calls the same subcommands the image build does and
+    reports their refusal instead of forming its own opinion.
     """
-    with tarfile.open(archive, 'r:gz') as tar:
-        members = tar.getmembers()
-        seen = set()
-        for member in members:
-            parts = PurePosixPath(member.name).parts
-            if (not parts or parts[0] != 'package' or '..' in parts
-                    or member.name.startswith('/') or member.name in seen
-                    or not (member.isfile() or member.isdir())):
-                raise ValueError('unsafe archive member: ' + member.name)
-            seen.add(member.name)
-        tar.extractall(destination, members=members)
-    package = Path(destination) / 'package'
-    metadata = json.loads((package / 'package.json').read_text())
-    if metadata.get('name') != 'pnpm' or metadata.get('version') != pin['version']:
-        raise ValueError('package selection mismatch')
-    for name in PNPM_UPSTREAM_FILES:
-        path = package / name
-        if not path.is_file() or path.is_symlink() or not path.stat().st_size:
-            raise ValueError('missing regular upstream file: ' + name)
-    if 'MIT' not in (package / 'LICENSE').read_text():
-        raise ValueError('upstream MIT license missing')
-    if hashlib.sha256((package / 'dist/pnpm.mjs').read_bytes()).hexdigest() != pin['bundleSha256']:
-        raise ValueError('pristine bundle SHA-256 mismatch')
-    return package
-
-
-def dereferenced_paths(path):
-    # Every path the kernel dereferences while resolving `path`, one hop at a
-    # time: realpath() would hide a writable directory that is only a waypoint.
-    paths = []
-    resolved = Path(path.anchor or '/')
-    pending = list(path.parts)
-    hops = 0
-    while pending:
-        candidate = resolved / pending.pop(0)
-        paths.append(candidate)
-        if not candidate.is_symlink():
-            resolved = candidate
-            continue
-        hops += 1
-        if hops > 40:
-            raise ValueError('symlink chain too deep: ' + str(path))
-        target = Path(os.readlink(candidate))
-        if not target.is_absolute():
-            target = resolved / target
-        resolved = Path(target.anchor or '/')
-        pending = list(target.parts) + pending
-    return paths
-
-
-def distribution_entries(prefix):
-    # The authenticated extraction contains no links, so a link is an
-    # unauthenticated redirect rather than part of the reviewed distribution.
-    entries = []
-    pending = [prefix]
-    while pending:
-        with os.scandir(pending.pop()) as scan:
-            for entry in scan:
-                if entry.is_symlink():
-                    raise ValueError('unexpected symlinked distribution entry: ' + entry.path)
-                item = Path(entry.path)
-                entries.append(item)
-                if entry.is_dir(follow_symlinks=False):
-                    pending.append(item)
-    return entries
+    helper = contract_helper(prefixes)
+    result = subprocess.run([str(helper), *arguments], capture_output=True, text=True)
+    if result.returncode:
+        message = (result.stderr.strip() or result.stdout.strip()
+                   or f'{arguments[0]} exited {result.returncode}')
+        raise ValueError(message)
+    return result.stdout
 
 
 def verify_base_distribution(commands=PNPM_COMMANDS, prefix=PNPM_PREFIX, node=PNPM_NODE,
-                            source=None, fixture_root=None):
-    """Authenticate the installed base manager (`recipe-contract pnpm-verify` semantics).
+                             source=None, fixture_root=None, prefixes=None):
+    """Authenticate an installed distribution through the composed helper.
 
-    A fixture install must not accept a same-version shadow or a modified
-    launcher/bundle, so presence of the fixed path is never enough.
+    `recipe-contract pnpm-verify` is the audit the image runs, over the paths this
+    caller hands it: the pin agreement, the pristine bundle, the launcher bytes and
+    mode, the relative aliases, the first PATH candidate, and every component of
+    the physical resolution path's ownership and access. A fixture install must not
+    accept a same-version shadow or a modified launcher/bundle, so the host path
+    asks the same question the image does rather than a weaker copy of it.
     """
     source = Path(source) if source is not None else reviewed_pnpm_source()
-    pin = read_pnpm_pin(source / 'pin.json')
-    if read_pnpm_pin(prefix / 'pin.json') != pin:
-        raise ValueError('installed pin disagrees with reviewed source')
-    if hashlib.sha256((prefix / 'dist/pnpm.mjs').read_bytes()).hexdigest() != pin['bundleSha256']:
-        raise ValueError('pristine pnpm distribution changed')
-    launcher = commands / 'pnpm'
-    if launcher.is_symlink() or not launcher.is_file():
-        raise ValueError('pnpm launcher must be a regular file')
-    if launcher.read_bytes() != (source / 'launcher.sh').read_bytes():
-        raise ValueError('pnpm launcher changed')
-    for alias in ('pnx', 'pnpx'):
-        link = commands / alias
-        if not link.is_symlink() or os.readlink(link) != 'pnpm':
-            raise ValueError('pnpm alias must link relatively to pnpm: ' + alias)
-    checked = set()
-
-    def audit(part):
-        if fixture_root is not None and part in fixture_root.parents:
-            return
-        if part in checked:
-            return
-        checked.add(part)
-        info = part.stat()
-        if fixture_root is None and (info.st_uid != 0 or info.st_gid != 0):
-            raise ValueError('non-image-owned distribution path: ' + str(part))
-        if info.st_mode & 0o022:
-            raise ValueError('group/other-writable distribution path: ' + str(part))
-        required = 0o005 if stat.S_ISDIR(info.st_mode) or part in (launcher, node) else 0o004
-        if info.st_mode & required != required:
-            raise ValueError('unreadable distribution path: ' + str(part))
-
-    for path in [prefix, launcher, commands, node, *distribution_entries(prefix)]:
-        for part in dereferenced_paths(path):
-            audit(part)
-    if stat.S_IMODE(launcher.stat().st_mode) != 0o755:
-        raise ValueError('pnpm launcher mode must be 0755')
+    arguments = ['pnpm-verify',
+                 '--prefix', str(prefix), '--commands', str(commands),
+                 '--node', str(node), '--source', str(source)]
+    if fixture_root is not None:
+        arguments += ['--fixture-root', str(fixture_root)]
+    run_contract(prefixes if prefixes is not None else [prefix], *arguments)
 
 
 def command_identity(name, expected):
@@ -1436,7 +1319,7 @@ def _acquire_manager(profile, production, root, prefix):
         # The focused native harness installs under a fixture prefix with the real
         # installed base launcher. Returning the fixed absolute path (never a PATH
         # lookup) is allowed only after the whole distribution authenticates.
-        verify_base_distribution()
+        verify_base_distribution(prefixes=[prefix])
         return [str(PNPM_COMMANDS / 'pnpm')]
     raise ValueError('fixture requires an authorized fake or the authenticated base launcher')
 
@@ -1477,17 +1360,24 @@ def authenticated_host_argv(prefix, package, archive, node, *, consumer=DSH):
     regular(archive)
     if not package.is_dir():
         raise ValueError('stock distribution must be a directory')
-    # Trust the reviewed source pin, not a caller-supplied same-version pin.
+    # Trust the reviewed source pin, not a caller-supplied same-version pin. The
+    # version is a selection check on the committed file; the pin's own rules, the
+    # archive digest, the member inventory and the package checks belong to the
+    # helper the next call runs.
     source = Path(__file__).resolve().parents[1] / 'pnpm'
-    pin = read_pnpm_pin(source / 'pin.json')
-    if pin['version'] != '11.11.0':
+    version = run_contract([capability.prefix], 'pnpm-pin-version',
+                           str(source / 'pin.json')).strip()
+    if version != '11.11.0':
         raise ValueError('unsupported base manager selection')
     if capability.basePin.read_bytes() != (source / 'pin.json').read_bytes():
         raise ValueError('fixture base pin differs from reviewed pin')
-    authenticate_pnpm_archive(archive, pin)
     scratch = owned_scratch(capability)
     try:
-        expected = extract_pnpm_package(archive, scratch, pin)
+        unpacked = json.loads(run_contract(
+            [capability.prefix], 'pnpm-extract', '--archive', str(archive),
+            '--source', str(source), '--destination', str(scratch)))
+        expected = Path(unpacked['package'])
+
         def inventory(root):
             result = {}
             for directory, dirs, files in os.walk(root, followlinks=False):

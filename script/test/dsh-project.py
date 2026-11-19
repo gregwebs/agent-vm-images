@@ -651,14 +651,21 @@ class ProjectTests(unittest.TestCase):
         return base, source
 
     def verify(self, base, source):
-        project.verify_base_distribution(commands=base / 'usr/local/bin', prefix=base / 'opt/agent-vm/pnpm',
-                                         node=base / 'usr/bin/node', source=source, fixture_root=self.root)
+        # The delegated audit also proves the first PATH candidate is the installed
+        # file, so the fixture's own command directory leads.
+        environment = dict(os.environ, PATH=str(base / 'usr/local/bin') + os.pathsep + os.environ['PATH'])
+        with patch.dict(os.environ, environment):
+            project.verify_base_distribution(
+                commands=base / 'usr/local/bin', prefix=base / 'opt/agent-vm/pnpm',
+                node=base / 'usr/bin/node', source=source, fixture_root=self.root)
 
     def test_fixture_base_launcher_requires_full_distribution(self):
+        # The diagnostics are the delegated audit's own: this fixture holds the
+        # shared module to one implementation of the policy, not to its old copy.
         cases = {
-            'pristine pnpm distribution changed': lambda base: (base / 'opt/agent-vm/pnpm/dist/pnpm.mjs').write_text('// raw shadow\n'),
+            'pristine distribution changed': lambda base: (base / 'opt/agent-vm/pnpm/dist/pnpm.mjs').write_text('// raw shadow\n'),
             'pnpm launcher changed': lambda base: (base / 'usr/local/bin/pnpm').write_text('#!/bin/sh\nexec pnpm "$@"\n'),
-            'pnpm alias must link relatively to pnpm': lambda base: (base / 'usr/local/bin/pnpx').unlink() or (base / 'usr/local/bin/pnpx').write_text('#!/bin/sh\n'),
+            'alias must link relatively to pnpm': lambda base: (base / 'usr/local/bin/pnpx').unlink() or (base / 'usr/local/bin/pnpx').write_text('#!/bin/sh\n'),
             'launcher mode must be 0755': lambda base: (base / 'usr/local/bin/pnpm').chmod(0o7755),
             'group/other-writable distribution path': lambda base: (base / 'opt/agent-vm/pnpm/dist/pnpm.mjs').chmod(0o666),
             'unexpected symlinked distribution entry': lambda base: (base / 'opt/agent-vm/pnpm/dist/alias.mjs').symlink_to('pnpm.mjs'),
@@ -692,7 +699,7 @@ class ProjectTests(unittest.TestCase):
                         clear=False):
             with patch.object(project, 'verify_base_distribution') as verified:
                 self.assertEqual(project.manager_argv(capability), ['/usr/local/bin/pnpm'])
-                verified.assert_called_once_with()
+                verified.assert_called_once_with(prefixes=[capability.prefix])
         # Without a successful verification the fixed path is never returned.
         with patch.dict(os.environ, {'AGENT_VM_FIXTURE_BASE_PNPM':'1'}):
             with patch.object(project, 'verify_base_distribution', side_effect=ValueError('unverified')):

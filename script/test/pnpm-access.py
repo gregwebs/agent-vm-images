@@ -39,7 +39,6 @@ def main() -> None:
         env = os.environ | {'PNPM_SOURCE_DIR': str(source), 'PNPM_FIXTURE_DESTINATION': str(destination),
                             'PNPM_FIXTURE_VERSION': version, 'AGENT_VM_FIXTURE_ROOT': str(work),
                             'PYTHONDONTWRITEBYTECODE': '1',
-                            'RECIPE_CONTRACT_HELPER': str(contract),
                             'PATH': str(commands) + ':' + os.environ['PATH']}
 
         def check(ok: bool) -> None:

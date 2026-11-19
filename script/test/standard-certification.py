@@ -13,7 +13,7 @@ r=Path(__file__).resolve().parents[2]
 os.umask(0o022)
 sys.path.insert(0, str(r / 'script/test'))
 from contract_context import native_contract_directory  # noqa: E402  (path first)
-tmp=Path(tempfile.mkdtemp(prefix='gate.', dir='/tmp')); tmp.chmod(0o755)
+tmp=Path(tempfile.mkdtemp(prefix='gate.', dir='/tmp')).resolve(); tmp.chmod(0o755)
 atexit.register(shutil.rmtree, tmp)
 records=tmp/'records'; records.mkdir(); tools=tmp/'tools'; commands=tmp/'bin'; commands.mkdir()
 names=['dsh','pi','pi-claude-bridge','pi-antigravity','codex','opencode','claude','copilot','agy','opencode-claude']; verifiers=['dsh','pi','codex','opencode','claude','copilot','agy']
@@ -38,7 +38,7 @@ prefix=tmp/'prefix'
 for name,folder in [('codex','.local'),('claude','.local'),('opencode','.opencode')]:
  p=prefix/folder/'bin'/name; p.parent.mkdir(parents=True,exist_ok=True); p.symlink_to(commands/name)
 contract=native_contract_directory(r)
-env=dict(os.environ,AGENT_VM_CONTRACT_DIR=str(contract),RECIPE_CONTRACT_HELPER=str(contract/'recipe-contract'),AGENT_VM_TOOL_SOURCE_DIR=str(tools),AGENT_VM_INSTALL_STATUS_DIR=str(records),AGENT_INSTALL_SOFT_FAIL='1',AGENT_VM_CODEX_PREFIX=str(prefix),AGENT_VM_OPENCODE_PREFIX=str(prefix),AGENT_VM_CLAUDE_PREFIX=str(prefix),AGENT_VM_DSH_PREFIX=str(dsh_prefix),AGENT_VM_PI_WRAPPER=str(commands/'pi'),AGENT_VM_AGY_BIN=str(commands/'agy'),CALLS=str(tmp/'calls'),PATH=str(commands)+':'+os.environ['PATH'],AGENT_VM_VERSION_CODEX='rust-v0.159.3')
+env=dict(os.environ,AGENT_VM_CONTRACT_DIR=str(contract),AGENT_VM_TOOL_SOURCE_DIR=str(tools),AGENT_VM_INSTALL_STATUS_DIR=str(records),AGENT_INSTALL_SOFT_FAIL='1',AGENT_VM_CODEX_PREFIX=str(prefix),AGENT_VM_OPENCODE_PREFIX=str(prefix),AGENT_VM_CLAUDE_PREFIX=str(prefix),AGENT_VM_DSH_PREFIX=str(dsh_prefix),AGENT_VM_PI_WRAPPER=str(commands/'pi'),AGENT_VM_AGY_BIN=str(commands/'agy'),CALLS=str(tmp/'calls'),PATH=str(commands)+':'+os.environ['PATH'],AGENT_VM_VERSION_CODEX='rust-v0.159.3')
 spec=importlib.util.spec_from_file_location('pnpm_fixture',r/'script/test/fixtures/pnpm/verifier-fixture.py')
 fixture_module=importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture_module)
 fixture=tmp/'pnpm-fixture'; fixture.mkdir()

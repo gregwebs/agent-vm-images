@@ -25,7 +25,10 @@ def main() -> None:
     contract = native_contract_directory(ROOT) / 'recipe-contract'
     assert contract.is_file(), contract
     with tempfile.TemporaryDirectory(prefix='install-pnpm-test-') as directory:
-        work = Path(directory)
+        # Every path this suite hands the program is absolute and symlink-resolved:
+        # a lexical /tmp is a different spelling from the physical one the audit
+        # walks, and a test that passes the symlinked one cannot see the difference.
+        work = Path(directory).resolve()
         source = work / 'source'
         shutil.copytree(ROOT / 'images/pnpm', source)
         archive = work / 'package.tgz'
@@ -38,7 +41,8 @@ def main() -> None:
                  'package/LICENSE': b'MIT License'}
         cases = ['valid', 'corrupt-archive', 'bad-bundle', 'version', 'missing-entry',
                  'missing-license', 'unsafe-path', 'unsafe-link', 'bad-url', 'bad-sri',
-                 'bad-version', 'download-timeout', 'conflict', 'escape-opt', 'escape-bin']
+                 'bad-version', 'unreadable-fixture-archive', 'conflict', 'escape-opt',
+                 'escape-bin']
         for case in cases:
             members = files.copy()
             if case == 'version':
@@ -91,12 +95,16 @@ def main() -> None:
                 commands.mkdir(parents=True)
                 (commands / 'pnpm').write_text('existing')
             # `--fixture-archive` is the bootstrap's hermetic stand-in for the
-            # download: the bytes it would have fetched are the ones named here.
-            # The transport failure has no replacement seam of its own, so the
-            # download-timeout case names an archive that is not there: an
-            # unreadable fixture archive is a refusal like any other, and it must
-            # leave no destination behind either.
-            fixture_archive = absent_archive if case == 'download-timeout' else archive
+            # download: the bytes it would have fetched are the ones named here, and
+            # they still have to authenticate against the pin. The download branch
+            # itself -- statuses, retries, its ceiling -- is `internal/pnpm`'s
+            # transport table, which drives a fake `http.RoundTripper` through the
+            # real `internal/fetch` client.
+            #
+            # `unreadable-fixture-archive` names a file that is not there. It proves
+            # a missing archive is a refusal that leaves no destination behind; it is
+            # not a timeout, and the case says so by its name.
+            fixture_archive = absent_archive if case == 'unreadable-fixture-archive' else archive
             env = os.environ | {'PNPM_SOURCE_DIR': str(source),
                                 'AGENT_VM_FIXTURE_ROOT': str(work),
                                 'PNPM_FIXTURE_DESTINATION': str(destination),
@@ -108,12 +116,19 @@ def main() -> None:
             if case == 'valid':
                 assert result.returncode == 0, result.stderr
                 prefix = destination / 'opt/agent-vm/pnpm'
-                assert (prefix / 'dist/pnpm.mjs').read_bytes() == files['package/dist/pnpm.mjs']
                 assert (commands / 'pnpm').read_bytes() == (source / 'launcher.sh').read_bytes()
                 assert (commands / 'pnpm').stat().st_mode & 0o777 == 0o755
-                assert (prefix / 'dist/pnpm.mjs').stat().st_mode & 0o777 == 0o644
                 for alias in ('pnx', 'pnpx'):
                     assert os.readlink(commands / alias) == 'pnpm'
+                # Every published regular file is the authenticated member, not just
+                # the bundle whose digest the pin records: the launcher execs the two
+                # `bin/` entrypoints, and they are outside that digest.
+                published = {str(path.relative_to(prefix)): path.read_bytes()
+                             for path in prefix.rglob('*') if path.is_file()}
+                expected = {name[len('package/'):]: content for name, content in files.items()}
+                expected['pin.json'] = (source / 'pin.json').read_bytes()
+                assert published == expected, (sorted(published), sorted(expected))
+                assert (prefix / 'dist/pnpm.mjs').stat().st_mode & 0o777 == 0o644
             else:
                 assert result.returncode != 0, case
                 if case != 'conflict':
