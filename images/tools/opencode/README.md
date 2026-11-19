@@ -1,9 +1,16 @@
 # OpenCode layer
 
 `vendor/` holds the reviewed installer snapshot and patch; `install-opencode.sh`
-and `verify-opencode.sh` are the owning hook and build gate. The
+is the owning hook and `verify-opencode.sh` the build gate. The
 [installer documentation](../README.md#trust-limits-and-reviewed-locks) is
 canonical for that contract. This file covers runtime shape.
+
+`verify-opencode.sh`, `verify-opencode-plugins.sh` and
+`plugins/prepare-lock.sh` are entry points: each names its environment as flags and
+execs `recipe-contract`, so the path state, the exact report, the reviewed bytes,
+the payload gates and the access audits live once, in `./internal/opencode`
+(ADR 0017, #218). `plugins/upgrade-plugins.sh` keeps its policy because its
+publication transaction is shared with the other upgrades.
 
 ## One shared background server per HOME
 
@@ -164,6 +171,11 @@ manager/network and preserves committed bytes; frozen installation still verifie
 registry age/provenance metadata. There is no npm execution/fallback or lock
 conversion in this path, no lifecycle exception and no safety-default relaxation.
 
+`prepare-lock.sh` only locates the helper: `recipe-contract
+opencode-prepare-lock` owns the selection grammar, the prefix authorization, the
+preload and environment guards, the manager identity check, the seeded staged
+resolution and the three-input publication (#218).
+
 Installation uses the base launcher, frozen production flags, copied package
 files and invocation-private HOME/XDG/store, and suppresses pnpm's update
 notifier on every invocation so no build spends a registry round trip on a
@@ -182,6 +194,10 @@ exclude separate pnpm verification calls. The independent finished-image oracle
 checks raw evidence under four numeric UID/GID pairs and `--network none`.
 Both native architectures and the separate frozen-policy egress profile remain
 acceptance requirements; host fixtures are not that evidence.
+
+`probe-opencode.py` is not a build helper to be ported: its bytes are rendered into
+the released image's own self-certification, which runs with no network and no
+mounts and cannot carry the composed helper, so it stays Python (ADR 0017, #185).
 
 ### Migration risk
 

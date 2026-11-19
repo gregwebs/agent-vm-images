@@ -98,6 +98,12 @@ func (p *process) dispatch(args []string, env Environment) int {
 		return p.runDshInstall(args[1:])
 	case "dsh-verify":
 		return p.runDshVerify(args[1:])
+	case "opencode-prepare-lock":
+		return p.runOpencodePrepareLock(args[1:])
+	case "opencode-verify":
+		return p.runOpencodeVerify(args[1:])
+	case "opencode-verify-plugins":
+		return p.runOpencodeVerifyPlugins(args[1:])
 	case "dsh-lock-update":
 		return p.runDshLockUpdate(args[1:])
 	case "dsh-cordis-overrides":
