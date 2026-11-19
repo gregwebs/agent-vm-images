@@ -13,6 +13,8 @@ sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / 'script/test/fixtures/pnpm'
+sys.path.insert(0, str(ROOT / 'script/test'))
+from contract_context import native_contract_directory  # noqa: E402  (path first)
 spec = importlib.util.spec_from_file_location('verifier_fixture', FIXTURES / 'verifier-fixture.py')
 assert spec and spec.loader
 fixture = importlib.util.module_from_spec(spec)
@@ -20,6 +22,9 @@ spec.loader.exec_module(fixture)
 
 
 def main() -> None:
+    # The distribution audit is a recipe-contract subcommand, so the fixture needs
+    # the composed helper the image would mount.
+    contract = native_contract_directory(ROOT) / 'recipe-contract'
     with tempfile.TemporaryDirectory(prefix='pnpm-access-', dir='/tmp') as directory:
         # Resolve so the lexical fixture paths do not pass through a symlinked
         # /tmp (macOS): a lexical /tmp ancestor would be audited as a writable
@@ -37,7 +42,7 @@ def main() -> None:
                             'PATH': str(commands) + ':' + os.environ['PATH']}
 
         def check(ok: bool) -> None:
-            result = subprocess.run(['python3', str(source / 'verify.py')], env=env,
+            result = subprocess.run([str(contract), 'pnpm-verify'], env=env,
                                     capture_output=True, text=True, timeout=10)
             assert (result.returncode == 0) == ok, result.stderr
 

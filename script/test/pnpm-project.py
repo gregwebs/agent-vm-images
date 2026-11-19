@@ -184,22 +184,17 @@ class CapabilityTests(unittest.TestCase):
             self.assertIn('ambiguous fixture manager selection', str(raised.exception))
 
     def test_host_manager_entry_is_consumer_scoped(self):
-        # No network: a PATH `curl` writes bytes that cannot match the reviewed
-        # pin, so the acquisition must stop at authentication, before extraction.
-        # This is the only test of the host-bootstrap adapter and its ordering.
-        bin_dir = self.root / 'curl-bin'
-        bin_dir.mkdir()
-        (bin_dir / 'curl').write_text('#!/bin/sh\n'
-                                      'while [ "$#" -gt 0 ]; do\n'
-                                      '    case $1 in -o) shift; output=$1 ;; esac\n'
-                                      '    shift\n'
-                                      'done\n'
-                                      "printf 'not the authenticated distribution\\n' >\"$output\"\n")
-        (bin_dir / 'curl').chmod(0o755)
-        env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + '/usr/bin:/bin',
-                   HOME=str(self.root))
+        # No network: `--archive` names bytes that cannot match the reviewed pin, so
+        # the acquisition must stop at authentication, before extraction. The
+        # download path itself is `--download`, which the helper's own transport
+        # table covers. This is the only test of the host-bootstrap adapter and its
+        # ordering.
+        rejected = self.root / 'rejected.tgz'
+        rejected.write_bytes(b'not the authenticated distribution\n')
+        env = dict(os.environ, HOME=str(self.root))
         prefix = self.make_prefix('host-prefix', 'host')
-        run = subprocess.run([sys.executable, str(HOST_ADAPTER), str(prefix)],
+        run = subprocess.run([sys.executable, str(HOST_ADAPTER), str(prefix),
+                              '--archive', str(rejected)],
                              capture_output=True, env=env, text=True)
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertIn('archive SHA-512 mismatch', run.stderr)
@@ -210,7 +205,8 @@ class CapabilityTests(unittest.TestCase):
         # The shared entry names the consumer explicitly; the adapter does not
         # accept the flag and fixes dsh.
         shared = subprocess.run([sys.executable, str(HOST_MANAGER), '--consumer', 'pi',
-                                 str(self.make_prefix('host-pi', 'host'))],
+                                 str(self.make_prefix('host-pi', 'host')),
+                                 '--archive', str(rejected)],
                                 capture_output=True, env=env, text=True)
         self.assertEqual(shared.returncode, 1, shared.stdout + shared.stderr)
         self.assertIn('archive SHA-512 mismatch', shared.stderr)

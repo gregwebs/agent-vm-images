@@ -22,6 +22,9 @@ POLICY = ('--config.minimum-release-age=1440', '--config.minimum-release-age-str
           '--package-import-method=copy')
 
 
+CHECKER = '/fixtures/contract/recipe-contract'
+
+
 def environment():
     return dict(os.environ, AGENT_VM_FIXTURE_ROOT=str(ROOT), AGENT_VM_FIXTURE_BASE_PNPM='1',
                 AGENT_VM_DSH_PREFIX=str(PREFIX), AGENT_VM_DSH_COMMAND=str(BIN),
@@ -69,7 +72,7 @@ def home(uid, gid):
 
 
 def base_identity():
-    run(['python3', '/source/images/pnpm/verify.py'])
+    run([CHECKER, 'pnpm-verify'])
     return hashlib.sha256(Path('/opt/agent-vm/pnpm/dist/pnpm.mjs').read_bytes()).hexdigest()
 
 

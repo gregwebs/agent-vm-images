@@ -669,15 +669,20 @@ Dockerfile publish transactionally; rollback status 3 retains recovery material
 and requires recovery before further work.
 
 Lock work on a host without the Linux launcher (macOS) authenticates the stock
-distribution instead of using PATH pnpm: extract the reviewed archive with
-`images/pnpm/bootstrap.py` into invocation-owned scratch, run that
-`package/bin/pnpm.mjs` with an absolute Node path, and export the five defaults
-plus a private HOME/XDG. That is authenticated stock 11.11.0 and claims no
-launcher identity. The upgrade script does this internally; run it, do not
-reconstruct the argv by hand. The five image defaults arrive through the exported
-environment plus the explicit policy flags on every manager call, and the
-resolving call is `install --lockfile-only --no-frozen-lockfile`, which
-re-verifies the emitted lock.
+distribution instead of using PATH pnpm: the host manager
+(`images/tools/pnpm-host-manager.py`) authorizes the consumer's capability, then
+asks the composed helper — `recipe-contract pnpm-extract` — to fetch the reviewed
+pin's own URL through `internal/fetch`, authenticate the bytes, validate the
+member inventory and unpack the package into invocation-owned scratch, and hands
+back argv for that `package/bin/pnpm.mjs` with an absolute Node path, the five
+defaults and a private HOME/XDG. Node is a prerequisite, and it is run by absolute
+path; nothing here is a launcher claim. The pin, digest, member and package rules
+exist once, in `internal/pnpm`, so a host cannot execute a distribution the image
+would refuse. The upgrade script does this internally; run it, do not reconstruct
+the argv by hand. The five image defaults arrive
+through the exported environment plus the explicit policy flags on every manager
+call, and the resolving call is `install --lockfile-only --no-frozen-lockfile`,
+which re-verifies the emitted lock.
 
 ```bash
 bash script/test/dsh-prepare-lock.sh

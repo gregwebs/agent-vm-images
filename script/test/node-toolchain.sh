@@ -43,7 +43,7 @@ node_version=$(pin_version node) || fail 'cannot read the node pin'
 gh_version=$(pin_version gh) || fail 'cannot read the gh pin'
 bundled_npm=$("$contract" artifact-pin version "$ROOT/images/artifacts/node.json" --npm) ||
     fail 'cannot read the bundled npm pin'
-pnpm_version=$(python3 "$ROOT/images/pnpm/read-pin-version.py" "$ROOT/images/pnpm/pin.json")
+pnpm_version=$("$contract" pnpm-pin-version "$ROOT/images/pnpm/pin.json") || fail 'cannot read the pnpm pin'
 
 # One container, one command, every claim: a second run could see a different
 # image if the tag moved underneath the suite.

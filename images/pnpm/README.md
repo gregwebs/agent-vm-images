@@ -6,7 +6,17 @@ https://registry.npmjs.org/pnpm/-/pnpm-11.11.0.tgz, upstream tag v11.11.0 at
 equivalence before extraction, package layout/version/MIT license, and pristine
 `dist/pnpm.mjs` SHA-256 before installing. The upstream MIT license and bundled
 notices stay in `/opt/agent-vm/pnpm`; no upstream distribution bytes are edited.
-The build-only Python helpers do not ship in the installed package.
+
+This directory carries reviewed inputs and the two things a recipe installs or
+runs from it; the programs that act on them are not here. The bootstrap, the
+certification, the host-side extraction and the version reader are
+`recipe-contract` subcommands (`internal/pnpm`), run from the host-compiled
+helper, so no interpreter and no build helper is installed into the image. What
+ships is `launcher.sh`, installed as `/usr/local/bin/pnpm` with two relative
+aliases; what the build mounts and executes is `verify-pnpm.sh`, the entry point
+that runs the certification after `install-pnpm.sh` published the distribution,
+and `node-version-check.js`, which the bootstrap runs once against the image's
+`/usr/bin/node` before it publishes.
 
 The shared POSIX launcher exports five caller-overridable defaults and execs
 the fixed Node interpreter and immutable upstream entrypoint. Alias symlinks

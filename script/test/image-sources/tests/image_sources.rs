@@ -9171,9 +9171,40 @@ fn base_pnpm_pin_and_launcher_ownership() {
     assert!(
         launcher.contains("pnx|pnpx) exec /usr/bin/node /opt/agent-vm/pnpm/bin/pnpx.mjs \"$@\"")
     );
-    let bootstrap = read_text("images/pnpm/bootstrap.py");
-    assert!(!bootstrap.contains("patch"));
-    assert!(!bootstrap.contains("write_text"));
+    // The pin directory carries reviewed inputs and the two things a recipe
+    // installs or runs from it: `launcher.sh` (installed as /usr/local/bin/pnpm),
+    // `verify-pnpm.sh` (the entry point the recipes mount) and
+    // `node-version-check.js` (run once by the bootstrap). The bootstrap, the
+    // certification, the host extraction and the version reader are
+    // `recipe-contract` subcommands (`internal/pnpm`, #183). A file appearing in
+    // this list is a reviewed change to what the base image installs or runs, which
+    // is what this asserts.
+    //
+    // The "never edits upstream bytes" rule is proved where the bootstrap runs:
+    // `internal/pnpm`'s publication test compares every published regular file with
+    // the authenticated archive member, and `script/test/install-pnpm.py`'s `valid`
+    // case compares the whole published inventory.
+    let mut base_pnpm_files: Vec<String> = std::fs::read_dir(repo_path("images/pnpm"))
+        .expect("the base pnpm directory")
+        .map(|entry| {
+            entry
+                .expect("a base pnpm entry")
+                .file_name()
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    base_pnpm_files.sort();
+    assert_eq!(
+        base_pnpm_files,
+        [
+            "README.md",
+            "launcher.sh",
+            "node-version-check.js",
+            "pin.json",
+            "verify-pnpm.sh"
+        ]
+    );
 }
 
 fn check_base_pnpm_sources(

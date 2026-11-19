@@ -687,8 +687,11 @@ dsh is now an image-owned pnpm project. Its owning sources are:
   `images/recipe-contract/pnpmlock`; `pnpm-host-manager.py` represents the
   authenticated stock manager as argv for host maintenance (`pnpm-project.py
   manager`), and production refuses its `{AGENT_VM_DSH,PI,BRIDGE}_PNPM_PACKAGE|_ARCHIVE|_NODE`
-  variables instead of accepting a host-selected manager. None of these ship in
-  the image.
+  variables instead of accepting a host-selected manager. Neither module holds a
+  pnpm rule of its own: the pin, archive digest, member inventory, package checks
+  and the installed-distribution audit are `recipe-contract pnpm-extract` and
+  `pnpm-verify`, called through the composed helper the invocation already
+  authorizes. None of these ship in the image.
 - Maintenance: `images/tools/dsh/upgrade-dsh.sh` (transactional four-input and
   central-Dockerfile publication, Cordis proposal/approval).
 - Tests: `script/test/{dsh-prepare-lock.sh,dsh-verify.sh,dsh-project.py,pnpm-project.py,dsh-upgrade.py,upgrade-scripts.sh,standard-node-layout.py,standard-node-policy.sh,standard-node-policy.py,standard-node-policy-self-test.py,standard-node-consumers.sh,standard-node-consumers.py,standard-node-dsh.py}`,

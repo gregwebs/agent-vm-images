@@ -12,9 +12,9 @@
 # deliberately never consults it).
 #
 # pnpm is inherited from the base image, not a dsh dependency. Its expected
-# report therefore comes from the base pin, and `images/pnpm/verify.py` proves
-# the launcher/distribution identity. A same-version raw shadow earlier on PATH
-# is a different program and fails.
+# report therefore comes from the base pin, and `recipe-contract pnpm-verify`
+# proves the launcher/distribution identity. A same-version raw shadow earlier on
+# PATH is a different program and fails.
 #
 # Only after the exact reports, the same-file PATH identity, the real runtime
 # probes (sandbox, PTY, libc FFI, genai, protobuf, Cordis subprocess, bounded web
@@ -51,8 +51,6 @@ PROBE=$SOURCE/probe-dsh.py
 for helper in "$PROJECT" "$RUNTIME_CHECK" "$PROBE"; do
     [ -f "$helper" ] || die "dsh: build helper is missing at $helper"
 done
-PNPM_SOURCE=${PNPM_SOURCE_DIR:-$SOURCE/../../pnpm}
-[ -f "$PNPM_SOURCE/verify.py" ] || die "dsh: reviewed pnpm sources are missing at $PNPM_SOURCE"
 
 python3 "$PROJECT" guard "$PREFIX" || die 'dsh: the environment guard rejected this invocation'
 # The contract helpers this gate executes (run-report.sh, recipe-contract)
@@ -69,7 +67,7 @@ CONTRACT=$(python3 "$PROJECT" contract-dir "$PREFIX") || die 'dsh: contract dire
 facts=$(python3 "$PROJECT" authorize "$PREFIX" --command "$COMMAND" --status-dir "$status_dir") ||
     die 'dsh: prefix, command or status destination is not authorized'
 base_pin=$(printf '%s\n' "$facts" | jq -er '.basePin') || die 'dsh: authorization returned no base pin'
-base_pnpm=$(python3 "$PNPM_SOURCE/read-pin-version.py" "$base_pin") || die 'dsh: cannot read the base pin'
+base_pnpm=$("$CONTRACT/recipe-contract" pnpm-pin-version "$base_pin") || die 'dsh: cannot read the base pin'
 want_dsh=$(jq -er '.dependencies["@deepseek-ai/dsh"]' "$PREFIX/package.json") ||
     die 'dsh: the committed manifest selects no dsh version'
 package_manager=$(jq -er '.packageManager' "$PREFIX/package.json") ||
@@ -98,7 +96,7 @@ command -v pnpm >/dev/null 2>&1 || die "pnpm: MISSING — hard sanity failure ('
 # the normal image layout and passes.
 python3 "$PROJECT" command-identity dsh "$COMMAND" ||
     die 'dsh: the first PATH candidate is not the installed command'
-python3 "$PNPM_SOURCE/verify.py" || die 'pnpm: base launcher/distribution identity failed'
+"$CONTRACT/recipe-contract" pnpm-verify || die 'pnpm: base launcher/distribution identity failed'
 
 work=$(python3 "$PROJECT" scratch "$PREFIX") || die 'dsh: cannot create invocation scratch'
 cleanup() {
@@ -189,7 +187,7 @@ fi
 # Health must not have rewritten the identity assumptions it just proved.
 python3 "$PROJECT" command-identity dsh "$COMMAND" ||
     die 'dsh: PATH identity changed during the health gate'
-python3 "$PNPM_SOURCE/verify.py" || die 'pnpm: base identity changed during the health gate'
+"$CONTRACT/recipe-contract" pnpm-verify || die 'pnpm: base identity changed during the health gate'
 
 # Tree access covers the whole payload; a tree audit alone does not certify
 # executables or the interpreter chain, so the commands are audited explicitly,

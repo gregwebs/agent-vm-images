@@ -22,7 +22,8 @@ ACL = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *entry) for entry in A
 
 
 def command(args, **kwargs):
-    environment = dict(os.environ, PNPM_SOURCE_DIR='/source/images/pnpm', AGENT_VM_CONTRACT_DIR='/contract', PYTHONDONTWRITEBYTECODE='1')
+    environment = dict(os.environ, PNPM_SOURCE_DIR='/source/images/pnpm', AGENT_VM_CONTRACT_DIR='/contract',
+                       PYTHONDONTWRITEBYTECODE='1')
     result = subprocess.run(args, capture_output=True, text=True, timeout=170, env=environment, **kwargs)
     if result.returncode:
         raise RuntimeError(f'{args}: status {result.returncode}: {result.stderr}')
@@ -127,7 +128,7 @@ def probe(token, stage, uid, gid, expected_hash):
     assert {interface.name for interface in Path('/sys/class/net').iterdir()} == {'lo'}, 'non-loopback network interface'
     assert command(['node', '--version']).strip().startswith('v22.')
     assert command(['/usr/local/bin/pnpm', '--version']).strip() == '11.11.0'
-    command(['python3', '/source/images/pnpm/verify.py'])
+    command([CHECKER, 'pnpm-verify'])
     command([CHECKER, 'tool-access', 'pnpm', 'pnx', 'pnpx', '/usr/bin/node',
              '/opt/agent-vm/pnpm/bin/pnpm.mjs', '/opt/agent-vm/pnpm/bin/pnpx.mjs'])
     assert launcher_hash() == expected_hash
