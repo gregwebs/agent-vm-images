@@ -158,8 +158,9 @@ The filesystem/manager/publication boundary is not dsh-specific: it lives in
 `images/tools/pnpm-project.py` (with `images/tools/pnpm-host-manager.py` for host
 acquisition) because Pi and its bridge share it. `images/tools/dsh/project.py`
 and `dsh/host-manager.py` are adapters that load the shared module and supply the
-dsh consumer, so dsh's scripts, imports and mounts are unchanged; the dsh install
-and verify RUNs add one read-only mount of the shared file at `/tmp/pnpm-project.py`.
+dsh consumer, so the dsh entry points and the Go helper subcommands keep asking for
+exactly the rules they always asked for; the dsh install and verify RUNs add one
+read-only mount of the shared file at `/tmp/pnpm-project.py`.
 
 The lock is functional, not only reproducibility. A floating dsh install can
 pull a newer `dsh-base` and nest `dsh-sandbox-local` under its node_modules,

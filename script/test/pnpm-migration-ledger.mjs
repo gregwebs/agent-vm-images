@@ -519,30 +519,31 @@ function peerRows(graph) {
   return rows;
 }
 
-/** The five defaults are owned by the preparation script; derive the policy
- * from its exports and refuse to disagree with the resolved argv. */
+/** The five defaults are owned by the Go helper (ADR 0017, #184); derive the policy
+ * from its exports and refuse to disagree with the resolved argv in the same file. */
 function policySection() {
-  const prepare = read(`${PROJECT}/prepare-lock.sh`);
-  const install = read(`${PROJECT}/install-dsh.sh`);
+  // The preparation driver and the install hook both come from this one package, so
+  // one source carries the exports and the flags they must agree with.
+  const helper = read("internal/dsh/manager.go");
   const value = (source, pattern, file) => {
     const match = new RegExp(pattern).exec(source);
     assert.ok(match, `${file}: policy value not found (${pattern})`);
     return match[1];
   };
   const policy = {
-    minimumReleaseAge: Number(value(prepare, "PNPM_CONFIG_MINIMUM_RELEASE_AGE=(\\d+)", "prepare-lock.sh")),
-    minimumReleaseAgeStrict: value(prepare, "PNPM_CONFIG_MINIMUM_RELEASE_AGE_STRICT=(\\w+)", "prepare-lock.sh") === "true",
-    minimumReleaseAgeIgnoreMissingTime: value(prepare, "PNPM_CONFIG_MINIMUM_RELEASE_AGE_IGNORE_MISSING_TIME=(\\w+)", "prepare-lock.sh") === "true",
-    trustPolicy: value(prepare, "PNPM_CONFIG_TRUST_POLICY=([a-z-]+)", "prepare-lock.sh"),
-    ignoreScripts: value(prepare, "PNPM_CONFIG_IGNORE_SCRIPTS=(\\w+)", "prepare-lock.sh") === "true",
+    minimumReleaseAge: Number(value(helper, "PNPM_CONFIG_MINIMUM_RELEASE_AGE=(\\d+)", "internal/dsh/manager.go")),
+    minimumReleaseAgeStrict: value(helper, "PNPM_CONFIG_MINIMUM_RELEASE_AGE_STRICT=(\\w+)", "internal/dsh/manager.go") === "true",
+    minimumReleaseAgeIgnoreMissingTime: value(helper, "PNPM_CONFIG_MINIMUM_RELEASE_AGE_IGNORE_MISSING_TIME=(\\w+)", "internal/dsh/manager.go") === "true",
+    trustPolicy: value(helper, "PNPM_CONFIG_TRUST_POLICY=([a-z-]+)", "internal/dsh/manager.go"),
+    ignoreScripts: value(helper, "PNPM_CONFIG_IGNORE_SCRIPTS=(\\w+)", "internal/dsh/manager.go") === "true",
   };
-  for (const source of [prepare, install]) {
-    for (const [flag, expected] of [["minimum-release-age", policy.minimumReleaseAge],
-      ["minimum-release-age-strict", policy.minimumReleaseAgeStrict], ["trust-policy", policy.trustPolicy]]) {
-      assert.ok(source.includes(`--config.${flag}=${expected}`), `--config.${flag}=${expected} missing from a dsh script`);
-    }
-    assert.ok(source.includes("--ignore-scripts"), "resolving argv must carry --ignore-scripts");
+  for (const [flag, expected] of [["minimum-release-age", policy.minimumReleaseAge],
+    ["minimum-release-age-strict", policy.minimumReleaseAgeStrict],
+    ["minimum-release-age-ignore-missing-time", policy.minimumReleaseAgeIgnoreMissingTime],
+    ["trust-policy", policy.trustPolicy]]) {
+    assert.ok(helper.includes(`--config.${flag}=${expected}`), `--config.${flag}=${expected} missing from the dsh helper`);
   }
+  assert.ok(helper.includes("--ignore-scripts"), "resolving argv must carry --ignore-scripts");
   return policy;
 }
 
@@ -1015,8 +1016,8 @@ function render(baseline, history) {
       graphSource: `historical: the four dsh inputs, the selection, every delta row and every reported hash are read out of ${history.sourceSha}`,
       measuredOn: RECORDED.measuredOn,
       graphReader: "recipe-contract pnpm-lock (images/recipe-contract/pnpmlock)",
-      policySource: "current images/tools/dsh/{prepare-lock.sh,install-dsh.sh} (compatibility check)",
-      currentInputs: "validated outside this record, by the gates that read today's four inputs: the committed-graph guards in script/test/image-sources (read_graph on MigratedProject::committed, plus every_dsh_locked_package_carries_integrity for the root and archive SRIs), Go's TestCommittedDshCheckFinal, and install-dsh.sh at build time; the fixture suites run check on their own fixtures instead, and bash script/build/base-inputs.sh --check proves only that these inputs are not base inputs, so an adoption of this project moves no base identity",
+      policySource: "internal/dsh/manager.go (compatibility check; the dsh policy moved to Go in #184)",
+      currentInputs: "validated outside this record, by the gates that read today's four inputs: the committed-graph guards in script/test/image-sources (read_graph on MigratedProject::committed, plus every_dsh_locked_package_carries_integrity for the root and archive SRIs), Go's TestCommittedDshCheckFinal, and `recipe-contract dsh-install` at build time; the fixture suites run check on their own fixtures instead, and bash script/build/base-inputs.sh --check proves only that these inputs are not base inputs, so an adoption of this project moves no base identity",
     },
     baseline: {
       sourceSha: baseline.sourceSha,

@@ -143,6 +143,33 @@ host manager authenticates with, so host maintenance has no second copy of the
 pin, digest, member or package rules. `pnpm-extract` is that host acquisition
 boundary.
 
+**The dsh probe and three of its four hooks are Go (#184).**
+`recipe-contract dsh-probe` replaces `images/tools/dsh/probe-dsh.py`, which is
+deleted. It keeps the source job: monotonic deadlines, a private session,
+bounded concurrent capture of both pipes, the token handshake, the TERM-to-KILL
+teardown that proves nothing survived, and the Linux listener-ownership proof
+through procfs. The ownership proof still fails closed on Linux or in
+production, and only an explicit non-Linux fixture host records a skip. Its
+fixture seam is command-line only (`--fixture-child-env`, `--fixture-exec-tmpdir`);
+it reads no environment variable of its own. `check-runtime.mjs` stays Node.
+
+`recipe-contract dsh-install`, `dsh-prepare-lock` and `dsh-verify` replace the
+policy in `images/tools/dsh/{install-dsh.sh,prepare-lock.sh,verify-dsh.sh}`, which
+remain as entry points that resolve the composed helper through the shared
+project module's `contract-dir` verb and pass their caller's argv. That is a
+deliberate divergence from `install-pnpm.sh`, which falls back to the fixed
+build mount: `dsh-verify.sh` must never execute a helper from a fixed mount, and
+its suite proves a decoy there is never reached. Exit status and diagnostics are
+the predecessors': usage is 2, a refusal is 1 on stderr, and a child keeps its
+own status. `dsh` still needs `python3` at install time, because
+`project.py` is Python until #62.
+
+`images/tools/dsh/upgrade-dsh.sh` is **not** ported. Its load-bearing surface is
+the five-file publication transaction with signal-inclusive rollback, which lives
+in `script/build/transactional-publish.sh` and is shared with the Pi and bridge
+upgrades; porting one of the three consumers would leave two owners for one
+rollback contract. The transaction moves once, when all three upgrades do.
+
 ## Considered options
 
 - **Keep ADR 0004's byte parity.** Rejected: it cost a 213-vector differential

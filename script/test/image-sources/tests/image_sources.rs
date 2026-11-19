@@ -2473,7 +2473,6 @@ fn exact_image_install_hooks_exist() {
         "dsh/verify-dsh.sh",
         "dsh/prepare-lock.sh",
         "dsh/check-runtime.mjs",
-        "dsh/probe-dsh.py",
         "dsh/project.py",
         "pi/install-pi.sh",
         "pi/install-pi-packages.sh",

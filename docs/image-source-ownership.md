@@ -645,7 +645,10 @@ existing owners. No executable maintenance helper ships in the image.
 dsh is now an image-owned pnpm project. Its owning sources are:
 
 - Reviewed inputs: `images/tools/dsh/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,pnpm-inputs.sha256}`.
-- Preparation, installation and verification: `images/tools/dsh/{prepare-lock.sh,install-dsh.sh,verify-dsh.sh}`.
+- Preparation, installation and verification: `images/tools/dsh/{prepare-lock.sh,install-dsh.sh,verify-dsh.sh}`
+  are entry points only. The policy is `recipe-contract dsh-prepare-lock`,
+  `dsh-install` and `dsh-verify` in `./internal/dsh` (ADR 0017, #184). The one
+  exception is the developer upgrade below.
 - Shared build-only boundary: `images/tools/pnpm-project.py` and
   `images/tools/pnpm-host-manager.py`. The filesystem/manager/publication
   implementation moved here when Pi and its bridge began sharing it, so one
@@ -666,12 +669,15 @@ dsh is now an image-owned pnpm project. Its owning sources are:
 - dsh adapters: `images/tools/dsh/{project.py,host-manager.py}` load the shared
   module through `sys.modules` (one instance, so capability types keep one
   identity), re-export it unchanged and supply the dsh consumer. dsh's scripts,
-  `probe-dsh.py`, its imports and its Docker mounts keep naming the old paths; the
+  its imports and its Docker mounts keep naming the old paths; the
   install and verify RUNs add one read-only mount of
   `tools/pnpm-project.py` at `/tmp/pnpm-project.py`, which is where the adapter's
   `../pnpm-project.py` resolves. The shared CLI requires
   `--consumer dsh|pi|bridge|antigravity`; the adapters reject the flag.
-- Other build-only dsh helpers: `images/tools/dsh/{check-runtime.mjs,probe-dsh.py}`.
+- Other build-only dsh helpers: `images/tools/dsh/check-runtime.mjs` stays Node
+  because it exists to exercise Node. The bounded web readiness driver is
+  `recipe-contract dsh-probe`, which owns the deadlines, the private process group,
+  the token handshake, the teardown and the Linux listener-ownership proof.
   The shared module authorizes the composed contract
   directory **before** anything in it is executed (the environment guard included)
   and accepts exactly these shapes: the production build mount

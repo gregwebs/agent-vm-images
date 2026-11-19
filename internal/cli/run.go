@@ -90,6 +90,14 @@ func (p *process) dispatch(args []string, env Environment) int {
 		return p.runPnpmYAML(args[1:])
 	case "pnpm-json":
 		return p.runPnpmJSON(args[1:])
+	case "dsh-probe":
+		return p.runDshProbe(args[1:])
+	case "dsh-prepare-lock":
+		return p.runDshPrepareLock(args[1:])
+	case "dsh-install":
+		return p.runDshInstall(args[1:])
+	case "dsh-verify":
+		return p.runDshVerify(args[1:])
 	case "dsh-lock-update":
 		return p.runDshLockUpdate(args[1:])
 	case "dsh-cordis-overrides":
