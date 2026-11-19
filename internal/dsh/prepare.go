@@ -41,12 +41,12 @@ type prepareRequest struct {
 // driver does not have made a usage mistake (status 2), not a refused request.
 func ParsePrepareArguments(args []string) (prepareRequest, error) {
 	if len(args) < 3 {
-		return prepareRequest{}, &Usage{Text: prepareUsage}
+		return prepareRequest{}, &Usage{Text: prepareUsage, Bare: true}
 	}
 	request := prepareRequest{prefix: args[0], dshVersion: args[1], pnpmVersion: args[2]}
 	for _, option := range args[3:] {
 		if option != "--refresh-lock" || request.refresh {
-			return prepareRequest{}, &Usage{Text: prepareUsage}
+			return prepareRequest{}, &Usage{Text: prepareUsage, Bare: true}
 		}
 		request.refresh = true
 	}

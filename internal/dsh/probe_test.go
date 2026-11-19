@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -252,7 +253,8 @@ func startIgnoringChild(t *testing.T) (*webChild, int) {
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	child := &webChild{command: command, pgid: command.Process.Pid, done: make(chan int, 1), alive: groupAlive}
+	child := &webChild{command: command, pgid: command.Process.Pid, done: make(chan int, 1), alive: groupAlive,
+		capture: newIdleCapture(t)}
 	go func() { child.done <- replayStatus(command.Wait()) }()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -661,7 +663,6 @@ func statusOf(err error) int {
 // distinction the predecessors made: a well-formed request the capability cannot
 // honour is a refusal (1), a malformed one is usage (2).
 func TestProbeSeamRefusals(t *testing.T) {
-	bound := time.Second
 	cases := []struct {
 		name       string
 		production bool
@@ -671,8 +672,7 @@ func TestProbeSeamRefusals(t *testing.T) {
 	}{
 		{"production child env", true, ProbeOptions{FixtureChildEnv: []string{"DSH_WEB_FIXTURE_CASE=valid"}},
 			"does not accept a fixture child environment", 1},
-		{"production exec temp", true, ProbeOptions{FixtureExecTmpdir: "/tmp"}, "exec temp parent is fixed", 2},
-		{"production bound", true, ProbeOptions{Readiness: &bound}, "bounds are fixed", 2},
+		{"production exec temp", true, ProbeOptions{FixtureExecTmpdir: "/tmp"}, "exec temp parent is fixed", 1},
 		{"malformed entry", false, ProbeOptions{FixtureChildEnv: []string{"NOT_AN_ASSIGNMENT"}},
 			"takes NAME=VALUE", 2},
 		{"bad name", false, ProbeOptions{FixtureChildEnv: []string{"1BAD=value"}}, "takes NAME=VALUE", 2},
@@ -694,6 +694,12 @@ func TestProbeSeamRefusals(t *testing.T) {
 	}
 	if err := probeSeam(false, ProbeOptions{FixtureChildEnv: []string{"DSH_WEB_FIXTURE_CASE=valid"}}); err != nil {
 		t.Fatalf("a fixture entry was refused in a fixture: %v", err)
+	}
+	// A bound is not a seam: production honours a shorter one, because a bound only
+	// limits the run and the production deadline stays the default.
+	short := time.Second
+	if err := probeSeam(true, ProbeOptions{Readiness: &short, Escalation: &short}); err != nil {
+		t.Fatalf("production refused a bound: %v", err)
 	}
 }
 
@@ -729,4 +735,96 @@ func TestScratchTokenMatchesTheSharedModule(t *testing.T) {
 	if row[3] != scratchToken {
 		t.Fatalf("scratchToken = %q, the module says %q", scratchToken, row[3])
 	}
+}
+
+// TestAwaitReadyHonoursTheCallerDeadline pins the outer bound where it is checked: a
+// readiness loop with a cancelled context fails instead of polling until its own
+// deadline. Without it the gate's 70 s allowance would be a comment.
+func TestAwaitReadyHonoursTheCallerDeadline(t *testing.T) {
+	child, _ := startIgnoringChild(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	run := probeRun{
+		ctx:        ctx,
+		command:    "/bin/true",
+		readiness:  30 * time.Second,
+		escalation: 100 * time.Millisecond,
+		prober:     prober{host: "darwin", proc: t.TempDir()},
+	}
+	started := time.Now()
+	_, _, err := awaitReady(run, child, 1)
+	if err == nil || !strings.Contains(err.Error(), "exceeded its caller's deadline") {
+		t.Fatalf("awaitReady = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("a cancelled context did not shorten the readiness loop: %s", elapsed)
+	}
+}
+
+// TestFinishReportsASignalThatLandedAfterTeardown covers the window between the group
+// being emptied and the report being built: a signal there must report, not pass.
+func TestFinishReportsASignalThatLandedAfterTeardown(t *testing.T) {
+	port, err := reservePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	interrupts := make(chan int, 1)
+	run := probeRun{interrupts: interrupts, command: "/bin/true"}
+	report, err := run.finish(newIdleChild(t), port, webFacts{Status: 200}, 1)
+	if err != nil {
+		t.Fatalf("finish = %v", err)
+	}
+	if report.Port != port || report.Facts.Status != 200 {
+		t.Fatalf("report = %+v", report)
+	}
+	interrupts <- 143
+	if _, err := run.finish(newIdleChild(t), port, webFacts{Status: 200}, 1); err == nil ||
+		!strings.Contains(err.Error(), "signal") {
+		t.Fatalf("finish = %v, want the interruption", err)
+	} else {
+		var interrupted *Interrupted
+		if !errors.As(err, &interrupted) || interrupted.Status != 143 {
+			t.Fatalf("finish = %v, want Interrupted{143}", err)
+		}
+	}
+}
+
+// TestFinishRefusesAListenerThatSurvived keeps the residual-port rule where the survey
+// reads it: a listener left on the reserved port is a failed proof, not a released one.
+func TestFinishRefusesAListenerThatSurvived(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = listener.Close() }()
+	port := listener.Addr().(*net.TCPAddr).Port
+	run := probeRun{command: "/bin/true"}
+	if _, err := run.finish(newIdleChild(t), port, webFacts{Status: 200}, 1); err == nil ||
+		!strings.Contains(err.Error(), "still has a listener after cleanup") {
+		t.Fatalf("finish = %v", err)
+	}
+}
+
+// newIdleCapture is a capture over two already-closed pipes: a case that reads the
+// child's output only needs an empty one.
+func newIdleCapture(t *testing.T) *capture {
+	t.Helper()
+	stdoutRead, stdoutWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderrRead, stderrWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = stdoutWrite.Close()
+	_ = stderrWrite.Close()
+	return newCapture(stdoutRead, stderrRead)
+}
+
+// newIdleChild is a child whose pipes are already closed and whose group is empty: the
+// survey's inputs are all that matter.
+func newIdleChild(t *testing.T) *webChild {
+	t.Helper()
+	return &webChild{capture: newIdleCapture(t), alive: func(int) bool { return false }}
 }

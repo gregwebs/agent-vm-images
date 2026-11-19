@@ -147,7 +147,14 @@ func Probe(ctx context.Context, options ProbeOptions) ([]byte, error) {
 	interrupts := make(chan int, 1)
 	stop := notifyInterrupts(interrupts)
 	defer stop()
-	return probe(ctx, options, interrupts, productionProber())
+	report, err := probe(ctx, options, interrupts, productionProber())
+	// The last word. A signal that arrives while the exec TMPDIR is removed or the report
+	// is rendered is still an interruption, so it is reported rather than published as a
+	// pass the caller never asked for.
+	if status, ok := interrupted(interrupts); ok {
+		return nil, &Interrupted{Status: status}
+	}
+	return report, err
 }
 
 // notifyInterrupts turns the three signals the shell handled into the 128+N status
@@ -273,19 +280,20 @@ var reservedChildEnv = map[string]bool{
 	"NODE_OPTIONS": true, "NODE_PATH": true, "BUN_OPTIONS": true,
 }
 
-// probeSeam validates the fixture inputs. Production refuses them, and the refusal
-// of a stray `DSH_WEB_FIXTURE_` entry is a refusal (1), not a usage mistake: the
-// request is well formed and the capability cannot honour it, which is what the
-// predecessor's meaning was even though its argparse reported it as usage.
+// probeSeam validates the fixture inputs.
+//
+// One principle decides the statuses: a fixture seam is a request a production
+// capability cannot honour, so it is a refusal (1); a bound only limits the run, so it
+// is accepted in production. The readiness and escalation overrides are therefore not
+// refused here -- the production deadline remains the default, and a caller that names
+// a bound gets a shorter gate, which is exactly what the predecessor's argparse
+// allowed.
 func probeSeam(production bool, options ProbeOptions) error {
 	if production && len(options.FixtureChildEnv) > 0 {
 		return &Refusal{Text: "production runtime does not accept a fixture child environment"}
 	}
 	if production && options.FixtureExecTmpdir != "" {
-		return &Usage{Text: "production exec temp parent is fixed"}
-	}
-	if production && (options.Readiness != nil || options.Escalation != nil) {
-		return &Usage{Text: "production readiness and escalation bounds are fixed"}
+		return &Refusal{Text: "production exec temp parent is fixed"}
 	}
 	for _, entry := range options.FixtureChildEnv {
 		name, _, found := strings.Cut(entry, "=")
@@ -352,8 +360,9 @@ func execTempParent(options ProbeOptions, capability RuntimeCapability, owns fun
 // One clause of `no_redirect` is deliberately not reproduced: `no_redirect` also
 // refuses when `path.resolve()` is outside the root, and this does not re-resolve.
 // With every component on the way down refused as a link, the resolved path can only
-// leave the root through the root itself, which `no_redirect` does not check either,
-// and which `authorize-runtime` has already refused for the probe's own root.
+// leave the root through the root itself, which `no_redirect` does not check either --
+// the same clause the shared module's own `_authorize_destination` leaves alone, since
+// `authorized_root` is what names the root in the first place.
 func containedBy(path, root string) bool {
 	if path == root || !strings.HasPrefix(path, root+string(filepath.Separator)) {
 		return false
@@ -446,6 +455,13 @@ func (run probeRun) attempt(number int, cwd string) (probeReport, error) {
 	if readyErr != nil {
 		return probeReport{}, readyErr
 	}
+	return run.finish(child, port, *facts, number)
+}
+
+// finish is the success survey: the readers, the capture bound, the released port, a
+// signal that landed after teardown, and only then the report. It is a separate step so
+// each refusal is reachable from a test without a browser.
+func (run probeRun) finish(child *webChild, port int, facts webFacts, number int) (probeReport, error) {
 	// The readers drain before the success report: a read error or an overflow that
 	// lands after the readiness response is still a failed proof, and a reader that
 	// stopped at the capture bound would silently truncate it.
@@ -469,7 +485,7 @@ func (run probeRun) attempt(number int, cwd string) (probeReport, error) {
 		Attempts:  number,
 		Cleanup:   cleanup,
 		Command:   run.command,
-		Facts:     *facts,
+		Facts:     facts,
 		Ownership: child.proof,
 		Port:      port,
 		URL:       fmt.Sprintf("http://127.0.0.1:%d/", port),

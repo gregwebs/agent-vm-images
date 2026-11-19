@@ -8,7 +8,14 @@ import (
 
 // Usage is a malformed argument: the invocation is wrong, not the request. The
 // predecessors exited 2 for it and 1 for a well-formed request they refused.
-type Usage struct{ Text string }
+//
+// Bare marks text that is already the whole diagnostic line -- the documented
+// `usage: prepare-lock.sh …` interface, which the shell printed without a program
+// prefix. Everything else is a sentence the caller's own header introduces.
+type Usage struct {
+	Text string
+	Bare bool
+}
 
 func (u *Usage) Error() string { return u.Text }
 

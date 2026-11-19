@@ -182,7 +182,15 @@ func childCommand(ctx context.Context, directory string, argv []string) *exec.Cm
 
 // cancelGrace is how long a cancelled child's session gets to unwind on TERM before it
 // is killed.
-const cancelGrace = 3 * time.Second
+//
+// It is derived, not chosen. `run-pnpm.sh` runs the manager under
+// `timeout --kill-after=5`, so the envelope's own backstop fires five seconds after the
+// TERM it forwards. If this waited less than that, `endSession` would return while the
+// resolver was still running, the caller's cleanup would remove the payload underneath
+// it, and the invariant this function exists for would be restored two seconds later by
+// `timeout` rather than by us. A test binds `killAfter` to that literal so the two
+// cannot drift apart silently.
+const cancelGrace = killAfter + time.Second
 
 // endSession stops a child and everything it started.
 //

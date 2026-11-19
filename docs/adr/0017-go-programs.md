@@ -151,10 +151,13 @@ teardown that proves nothing survived, and the Linux listener-ownership proof
 through procfs. The ownership proof still fails closed on Linux or in
 production, and only an explicit non-Linux fixture host records a skip. Its
 fixture inputs are flags (`--fixture-child-env NAME=VALUE`, `--fixture-exec-tmpdir`)
-and it reads no environment variable of its own; the gate above it still names the
+and it reads no environment variable of its own. The gate above it still names the
 existing `DSH_WEB_FIXTURE_` boundary from its own environment and hands it down as
-those flags, and a production capability refuses that input instead of ignoring it.
-`check-runtime.mjs` stays Node.
+those flags; moving that boundary is #213's, and until then a production capability
+refuses the input instead of ignoring it. Statuses follow one principle there: a
+fixture seam is a well-formed request production cannot honour, so it is a refusal
+(1), while a readiness or escalation bound only limits the run and is accepted in
+production. `check-runtime.mjs` stays Node.
 
 `recipe-contract dsh-install`, `dsh-prepare-lock` and `dsh-verify` replace the
 policy in `images/tools/dsh/{install-dsh.sh,prepare-lock.sh,verify-dsh.sh}`, which
@@ -166,9 +169,16 @@ its suite proves a decoy there is never reached. Exit status and diagnostics are
 the predecessors': usage is 2, a refusal is 1 on stderr, and a child keeps its own
 status and its own bytes. Two differences are deliberate and tested: an install
 hook collapses a preparation failure to 1, as its `*) exit 1` did, and a fixture
-input in a production probe is a refusal (1), because the request is well formed
-and the capability cannot honour it. `dsh` still needs `python3` at install time,
-because `project.py` is Python until #62.
+input in a production probe is a refusal (1), while a readiness or escalation bound
+is accepted there because it only limits the run. `dsh` still needs `python3` at
+install time, because `project.py` is Python until #62.
+
+**Ordering in the entry points.** `contract-dir` now runs before the environment
+guard, because the entry point has to locate the helper before it can exec it, and
+`verify-dsh.sh` may not fall back to a fixed mount. That is deliberate: the guard
+still authorizes the composed directory itself (it runs `pnpm-environment` from it)
+and refuses the same environment, so the only change is that a hostile variable is
+reported one process later than it used to be.
 
 `images/tools/dsh/upgrade-dsh.sh` is **not** ported. Its load-bearing surface is
 the five-file publication transaction with signal-inclusive rollback, which lives

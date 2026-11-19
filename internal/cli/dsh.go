@@ -198,6 +198,9 @@ var (
 func (p *process) dshFailure(diagnostics dshDiagnostics, err error) int {
 	var usage *dsh.Usage
 	if errors.As(err, &usage) {
+		if usage.Bare {
+			return p.stderrStatus(2, usage.Text+"\n")
+		}
 		return p.stderrStatus(2, diagnostics.Usage+usage.Text+"\n")
 	}
 	var interrupted *dsh.Interrupted

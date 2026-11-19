@@ -103,9 +103,10 @@ func Install(ctx context.Context, options InstallOptions) (failure error) {
 			return &Interrupted{Status: signal}
 		}
 		// The predecessor collapsed every preparation failure to 1 (`*) exit 1`), so a
-		// usage refusal or an incomplete rollback inside the preparation driver does
-		// not escape an install hook's own contract. It keeps 3 alone, because 3 is the
-		// one status that means the recovery material must be kept by the caller.
+		// usage refusal or an incomplete rollback inside the preparation driver does not
+		// escape an install hook's own contract: this hook reports 1, and 3 never leaves
+		// it. The preparation driver keeps 3 for its direct callers, which are the ones
+		// that must preserve the recovery material.
 		return &Silent{Status: 1}
 	}
 

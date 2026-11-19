@@ -875,6 +875,11 @@ before=$(hash_prefix)
 run_install
 assert_failure
 assert_contains 'frozen install failed'
+# The install envelope's own diagnostics are what a reader acts on: `run-pnpm.sh`
+# publishes the manager's line and its hard-failure line, so the hook's verdict must
+# not be all that is left of a failed production install.
+assert_contains 'stub pnpm: install failed'
+assert_contains 'run-pnpm.sh: hard failure (status 7); no transport classification'
 [[ ! -e "$PREFIX/node_modules" ]] || fail 'failed install left a partial node_modules'
 assert_prefix_unchanged "$before"
 assert_no_scratch
@@ -941,6 +946,10 @@ fi
 # A preparation refusal is the install hook's failure, and it collapses to 1: the
 # predecessor's `*) exit 1` meant an install hook reported one status, so a
 # preparation status (2, or 3 with material retained) cannot escape as its own.
+#
+# This case makes publication fail by making the prefix unwritable (`chmod 0555`), so it
+# needs a runner that is not root: as root the write succeeds and the case fails
+# loudly, which is the intended signal rather than a silent pass.
 new_case install-preparation-rollback
 write_result tiny-dsh-previous
 RUN_DSH_VERSION=0.1.5-rc.1

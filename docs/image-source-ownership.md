@@ -683,18 +683,22 @@ dsh is now an image-owned pnpm project. Its owning sources are:
   because it exists to exercise Node. The bounded web readiness driver is
   `recipe-contract dsh-probe`, which owns the deadlines, the private process group,
   the token handshake, the teardown and the Linux listener-ownership proof.
-  The shared module authorizes the composed contract
-  directory **before** anything in it is executed (the environment guard included)
-  and accepts exactly these shapes: the production build mount
+  The shared module's `contract-dir` verb authorizes the composed contract
+  directory and accepts exactly these shapes: the production build mount
   `/tmp/recipe-contract` with a `/opt/agent-vm/dsh` prefix, a directory inside an
   authorized fixture root, the checkout's own tracked `images/recipe-contract`, or
   the composed directory that checkout's `script/build/recipe-contract.sh --native`
   published (`target/recipe-contract/OS-ARCH/out`), with prefixes below that
   checkout or inside the invocation's scratch root (`AGENT_VM_SCRATCH_ROOT`, the
   developer-upgrade spelling of the same capability, which never claims a fixture
-  root it does not have). The graph reader, comparator, derivation and staging
-  helpers are `recipe-contract` subcommands (`pnpm-lock`, `dsh-lock-update`,
-  `dsh-cordis-overrides`, `dsh-upgrade-stage`) reaching
+  root it does not have). The dsh entry points call that verb first and then exec the
+  helper it names, so directory authorization precedes the environment guard rather
+  than the other way round: the guard cannot run before the program that performs it
+  has been located, and `verify-dsh.sh` may not fall back to a fixed mount. The guard
+  authorizes the same directory itself (it executes `pnpm-environment` from it), so
+  the ordering change costs nothing and is deliberate. The graph reader, comparator,
+  derivation and staging helpers are `recipe-contract` subcommands (`pnpm-lock`,
+  `dsh-lock-update`, `dsh-cordis-overrides`, `dsh-upgrade-stage`) reaching
   `images/recipe-contract/pnpmlock`; `pnpm-host-manager.py` represents the
   authenticated stock manager as argv for host maintenance (`pnpm-project.py
   manager`), and production refuses its `{AGENT_VM_DSH,PI,BRIDGE}_PNPM_PACKAGE|_ARCHIVE|_NODE`
