@@ -54,10 +54,7 @@ def main(argv=None, consumer=None):
     # mount: that seam names the base image's sources for a version check, while
     # acquisition must be the exact pin this source tree ships.
     source = Path(__file__).resolve().parents[1] / 'pnpm'
-    spec = importlib.util.spec_from_file_location('pnpm_bootstrap', source / 'bootstrap.py')
-    bootstrap = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(bootstrap)
-    pin = bootstrap.read_pin(source / 'pin.json')
+    pin = project.read_pnpm_pin(source / 'pin.json')
     destination = prefix.parent / 'manager'
     project.no_redirect(destination, capability.root)
     project.disjoint([destination, prefix, capability.basePin])
@@ -65,8 +62,8 @@ def main(argv=None, consumer=None):
     archive = destination / 'pnpm.tgz'
     subprocess.run(['curl', '--fail', '--silent', '--show-error', '--location', '--proto', '=https',
                     '--connect-timeout', '15', '--max-time', '180', pin['url'], '-o', str(archive)], check=True)
-    bootstrap.authenticate(archive, pin)
-    package = bootstrap.extract(archive, destination, pin)
+    project.authenticate_pnpm_archive(archive, pin)
+    package = project.extract_pnpm_package(archive, destination, pin)
     print(json.dumps({'package': str(package), 'archive': str(archive)}))
 
 

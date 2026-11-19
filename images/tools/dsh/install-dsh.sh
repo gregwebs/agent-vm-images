@@ -56,9 +56,9 @@ CONTRACT=$(python3 "$PROJECT" contract-dir "$PREFIX") || exit 1
 [ -x "$CONTRACT/recipe-contract" ] || fail "no executable recipe-contract in $CONTRACT"
 [ -f "$CONTRACT/run-pnpm.sh" ] || fail "hard runner is missing in $CONTRACT"
 
-PNPM_SOURCE=${PNPM_SOURCE_DIR:-$SOURCE/../../pnpm}
-[ -f "$PNPM_SOURCE/read-pin-version.py" ] || fail "cannot locate the reviewed pnpm sources at $PNPM_SOURCE"
-base_pnpm=$(python3 "$PNPM_SOURCE/read-pin-version.py" "$base_pin") || fail 'cannot read the base pin'
+# The base pin is read by the composed helper: images/pnpm/ holds reviewed
+# inputs, and the reader is the `pnpm-pin-version` subcommand (ADR 0017).
+base_pnpm=$("$CONTRACT/recipe-contract" pnpm-pin-version "$base_pin") || fail 'cannot read the base pin'
 [ "$base_pnpm" = '11.11.0' ] || fail "unsupported base manager selection: $base_pnpm"
 [ -z "$PNPM_VERSION" ] || [ "$PNPM_VERSION" = "$base_pnpm" ] ||
     fail 'pnpm compatibility slot must equal base pin'

@@ -37,7 +37,8 @@ writeexe(dsh_target,'#!/usr/bin/env node\n')
 prefix=tmp/'prefix'
 for name,folder in [('codex','.local'),('claude','.local'),('opencode','.opencode')]:
  p=prefix/folder/'bin'/name; p.parent.mkdir(parents=True,exist_ok=True); p.symlink_to(commands/name)
-env=dict(os.environ,AGENT_VM_CONTRACT_DIR=str(native_contract_directory(r)),AGENT_VM_TOOL_SOURCE_DIR=str(tools),AGENT_VM_INSTALL_STATUS_DIR=str(records),AGENT_INSTALL_SOFT_FAIL='1',AGENT_VM_CODEX_PREFIX=str(prefix),AGENT_VM_OPENCODE_PREFIX=str(prefix),AGENT_VM_CLAUDE_PREFIX=str(prefix),AGENT_VM_DSH_PREFIX=str(dsh_prefix),AGENT_VM_PI_WRAPPER=str(commands/'pi'),AGENT_VM_AGY_BIN=str(commands/'agy'),CALLS=str(tmp/'calls'),PATH=str(commands)+':'+os.environ['PATH'],AGENT_VM_VERSION_CODEX='rust-v0.159.3')
+contract=native_contract_directory(r)
+env=dict(os.environ,AGENT_VM_CONTRACT_DIR=str(contract),RECIPE_CONTRACT_HELPER=str(contract/'recipe-contract'),AGENT_VM_TOOL_SOURCE_DIR=str(tools),AGENT_VM_INSTALL_STATUS_DIR=str(records),AGENT_INSTALL_SOFT_FAIL='1',AGENT_VM_CODEX_PREFIX=str(prefix),AGENT_VM_OPENCODE_PREFIX=str(prefix),AGENT_VM_CLAUDE_PREFIX=str(prefix),AGENT_VM_DSH_PREFIX=str(dsh_prefix),AGENT_VM_PI_WRAPPER=str(commands/'pi'),AGENT_VM_AGY_BIN=str(commands/'agy'),CALLS=str(tmp/'calls'),PATH=str(commands)+':'+os.environ['PATH'],AGENT_VM_VERSION_CODEX='rust-v0.159.3')
 spec=importlib.util.spec_from_file_location('pnpm_fixture',r/'script/test/fixtures/pnpm/verifier-fixture.py')
 fixture_module=importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture_module)
 fixture=tmp/'pnpm-fixture'; fixture.mkdir()

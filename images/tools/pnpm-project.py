@@ -8,18 +8,22 @@ select a production path, a scratch parent or a manager route by argument or
 environment.
 """
 import argparse
+import base64
 from dataclasses import dataclass, field
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 import platform
+import re
 import shutil
 import signal
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 from typing import Literal
 
@@ -790,13 +794,6 @@ def publish(staged_prefix, prefix, *, replace=os.replace, consumer=DSH):
             signal.signal(item, handler)
 
 
-def _bootstrap(source):
-    spec = importlib.util.spec_from_file_location('dsh_pnpm_bootstrap', source / 'bootstrap.py')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def reviewed_pnpm_source():
     # Containers mount the reviewed base sources read-only; a host checkout keeps
     # them beside this module. The mounted path is the documented build mount,
@@ -805,6 +802,80 @@ def reviewed_pnpm_source():
     if (mounted / 'pin.json').is_file():
         return mounted
     return Path(__file__).resolve().parents[1] / 'pnpm'
+
+
+PIN_FIELDS = ('version', 'url', 'integrity', 'sha512', 'bundleSha256',
+              'upstreamTag', 'upstreamCommit')
+EXACT_VERSION = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)')
+# The upstream files the reviewed selection must carry, as regular non-empty files.
+PNPM_UPSTREAM_FILES = ('bin/pnpm.mjs', 'bin/pnpx.mjs', 'dist/pnpm.mjs', 'LICENSE')
+
+
+def read_pnpm_pin(path):
+    """Read one reviewed base pin for the host acquisition path.
+
+    The build helpers are Go (`internal/pnpm`, `recipe-contract pnpm-bootstrap`),
+    and that implementation is the reviewed one. This copy exists only because
+    host maintenance and the fixture harnesses authenticate a stock distribution
+    before a manager starts; #62 moves them onto the Go path and deletes it. The
+    rules are identical, because a caller that accepted a pin a build refuses
+    would authenticate different bytes than the image does.
+    """
+    raw = json.loads(Path(path).read_text())
+    if not isinstance(raw, dict) or set(raw) != set(PIN_FIELDS):
+        raise ValueError('invalid pin fields')
+    if not all(isinstance(raw[key], str) for key in PIN_FIELDS):
+        raise ValueError('pin fields must be strings')
+    pin = {key: raw[key] for key in PIN_FIELDS}
+    if not EXACT_VERSION.fullmatch(pin['version']):
+        raise ValueError('pin must be exact stable version')
+    if pin['url'] != f"https://registry.npmjs.org/pnpm/-/pnpm-{pin['version']}.tgz":
+        raise ValueError('unexpected archive URL')
+    for key, length in (('sha512', 128), ('bundleSha256', 64), ('upstreamCommit', 40)):
+        if not re.fullmatch('[0-9a-f]{' + str(length) + '}', pin[key]):
+            raise ValueError('invalid digest/commit: ' + key)
+    if pin['integrity'] != 'sha512-' + base64.b64encode(bytes.fromhex(pin['sha512'])).decode():
+        raise ValueError('SRI and hex digest disagree')
+    if pin['upstreamTag'] != 'v' + pin['version']:
+        raise ValueError('upstream tag disagrees')
+    return pin
+
+
+def authenticate_pnpm_archive(archive, pin):
+    if hashlib.sha512(Path(archive).read_bytes()).hexdigest() != pin['sha512']:
+        raise ValueError('archive SHA-512 mismatch')
+
+
+def extract_pnpm_package(archive, destination, pin):
+    """Validate the whole archive inventory, then extract it into `destination`.
+
+    Same member rules as the Go bootstrap: one `package/` prefix, no `..`, no
+    absolute name, no duplicates, regular files and directories only.
+    """
+    with tarfile.open(archive, 'r:gz') as tar:
+        members = tar.getmembers()
+        seen = set()
+        for member in members:
+            parts = PurePosixPath(member.name).parts
+            if (not parts or parts[0] != 'package' or '..' in parts
+                    or member.name.startswith('/') or member.name in seen
+                    or not (member.isfile() or member.isdir())):
+                raise ValueError('unsafe archive member: ' + member.name)
+            seen.add(member.name)
+        tar.extractall(destination, members=members)
+    package = Path(destination) / 'package'
+    metadata = json.loads((package / 'package.json').read_text())
+    if metadata.get('name') != 'pnpm' or metadata.get('version') != pin['version']:
+        raise ValueError('package selection mismatch')
+    for name in PNPM_UPSTREAM_FILES:
+        path = package / name
+        if not path.is_file() or path.is_symlink() or not path.stat().st_size:
+            raise ValueError('missing regular upstream file: ' + name)
+    if 'MIT' not in (package / 'LICENSE').read_text():
+        raise ValueError('upstream MIT license missing')
+    if hashlib.sha256((package / 'dist/pnpm.mjs').read_bytes()).hexdigest() != pin['bundleSha256']:
+        raise ValueError('pristine bundle SHA-256 mismatch')
+    return package
 
 
 def dereferenced_paths(path):
@@ -850,15 +921,14 @@ def distribution_entries(prefix):
 
 def verify_base_distribution(commands=PNPM_COMMANDS, prefix=PNPM_PREFIX, node=PNPM_NODE,
                             source=None, fixture_root=None):
-    """Authenticate the installed base manager (images/pnpm/verify.py semantics).
+    """Authenticate the installed base manager (`recipe-contract pnpm-verify` semantics).
 
     A fixture install must not accept a same-version shadow or a modified
     launcher/bundle, so presence of the fixed path is never enough.
     """
     source = Path(source) if source is not None else reviewed_pnpm_source()
-    bootstrap = _bootstrap(source)
-    pin = bootstrap.read_pin(source / 'pin.json')
-    if bootstrap.read_pin(prefix / 'pin.json') != pin:
+    pin = read_pnpm_pin(source / 'pin.json')
+    if read_pnpm_pin(prefix / 'pin.json') != pin:
         raise ValueError('installed pin disagrees with reviewed source')
     if hashlib.sha256((prefix / 'dist/pnpm.mjs').read_bytes()).hexdigest() != pin['bundleSha256']:
         raise ValueError('pristine pnpm distribution changed')
@@ -1409,16 +1479,15 @@ def authenticated_host_argv(prefix, package, archive, node, *, consumer=DSH):
         raise ValueError('stock distribution must be a directory')
     # Trust the reviewed source pin, not a caller-supplied same-version pin.
     source = Path(__file__).resolve().parents[1] / 'pnpm'
-    bootstrap = _bootstrap(source)
-    pin = bootstrap.read_pin(source / 'pin.json')
+    pin = read_pnpm_pin(source / 'pin.json')
     if pin['version'] != '11.11.0':
         raise ValueError('unsupported base manager selection')
     if capability.basePin.read_bytes() != (source / 'pin.json').read_bytes():
         raise ValueError('fixture base pin differs from reviewed pin')
-    bootstrap.authenticate(archive, pin)
+    authenticate_pnpm_archive(archive, pin)
     scratch = owned_scratch(capability)
     try:
-        expected = bootstrap.extract(archive, scratch, pin)
+        expected = extract_pnpm_package(archive, scratch, pin)
         def inventory(root):
             result = {}
             for directory, dirs, files in os.walk(root, followlinks=False):

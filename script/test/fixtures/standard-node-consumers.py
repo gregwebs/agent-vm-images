@@ -127,7 +127,7 @@ def probe(token, stage, uid, gid, expected_hash):
     assert {interface.name for interface in Path('/sys/class/net').iterdir()} == {'lo'}, 'non-loopback network interface'
     assert command(['node', '--version']).strip().startswith('v22.')
     assert command(['/usr/local/bin/pnpm', '--version']).strip() == '11.11.0'
-    command(['python3', '/source/images/pnpm/verify.py'])
+    command([CHECKER, 'pnpm-verify'])
     command([CHECKER, 'tool-access', 'pnpm', 'pnx', 'pnpx', '/usr/bin/node',
              '/opt/agent-vm/pnpm/bin/pnpm.mjs', '/opt/agent-vm/pnpm/bin/pnpx.mjs'])
     assert launcher_hash() == expected_hash

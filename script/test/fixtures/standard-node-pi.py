@@ -164,7 +164,7 @@ def home(uid, gid):
 
 
 def base_identity():
-    run(['python3', '/source/images/pnpm/verify.py'], seconds=120)
+    run([str(CONTRACT / 'recipe-contract'), 'pnpm-verify'], seconds=120)
     return hashlib.sha256(Path('/opt/agent-vm/pnpm/dist/pnpm.mjs').read_bytes()).hexdigest()
 
 

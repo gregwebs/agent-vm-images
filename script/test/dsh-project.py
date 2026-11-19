@@ -619,7 +619,7 @@ class ProjectTests(unittest.TestCase):
         source = self.root / 'source'
         shutil.rmtree(source, ignore_errors=True)
         source.mkdir()
-        for name in ('pin.json', 'launcher.sh', 'bootstrap.py'):
+        for name in ('pin.json', 'launcher.sh'):
             shutil.copyfile(reviewed / name, source / name)
         launcher = (source / 'launcher.sh').read_bytes()
         (base / 'usr/local/bin/pnpm').write_bytes(launcher)

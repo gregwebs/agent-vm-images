@@ -8,24 +8,28 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from contract_context import native_contract_directory  # noqa: E402  (path first)
+
 ROOT = Path(__file__).resolve().parents[2]
-FIXTURES = ROOT / 'script/test/fixtures/pnpm'
 
 
 def main() -> None:
+    # The bootstrap is a recipe-contract subcommand, so the hermetic probe needs
+    # the composed helper exactly as a build would mount it.
+    contract = native_contract_directory(ROOT) / 'recipe-contract'
+    assert contract.is_file(), contract
     with tempfile.TemporaryDirectory(prefix='install-pnpm-test-') as directory:
         work = Path(directory)
         source = work / 'source'
         shutil.copytree(ROOT / 'images/pnpm', source)
-        fakebin = work / 'bin'
-        fakebin.mkdir()
-        curl = fakebin / 'curl'
-        shutil.copyfile(FIXTURES / 'curl-stub.sh', curl)
-        curl.chmod(0o755)
         archive = work / 'package.tgz'
+        absent_archive = work / 'absent-package.tgz'
         baseline = json.loads((source / 'pin.json').read_text())
         files = {'package/package.json': b'{"name":"pnpm","version":"11.11.0"}',
                  'package/bin/pnpm.mjs': b'upstream pnpm entry',
@@ -86,13 +90,20 @@ def main() -> None:
             if case == 'conflict':
                 commands.mkdir(parents=True)
                 (commands / 'pnpm').write_text('existing')
-            env = os.environ | {'PNPM_SOURCE_DIR': str(source), 'ARCHIVE': str(archive),
+            # `--fixture-archive` is the bootstrap's hermetic stand-in for the
+            # download: the bytes it would have fetched are the ones named here.
+            # The transport failure has no replacement seam of its own, so the
+            # download-timeout case names an archive that is not there: an
+            # unreadable fixture archive is a refusal like any other, and it must
+            # leave no destination behind either.
+            fixture_archive = absent_archive if case == 'download-timeout' else archive
+            env = os.environ | {'PNPM_SOURCE_DIR': str(source),
                                 'AGENT_VM_FIXTURE_ROOT': str(work),
                                 'PNPM_FIXTURE_DESTINATION': str(destination),
                                 'AGENT_INSTALL_SOFT_FAIL': '1',
-                                'PATH': str(fakebin) + ':' + os.environ['PATH'],
-                                'FAIL_DOWNLOAD': 'yes' if case == 'download-timeout' else ''}
-            result = subprocess.run(['bash', str(ROOT / 'images/install-pnpm.sh')],
+                                'RECIPE_CONTRACT_HELPER': str(contract)}
+            result = subprocess.run(['bash', str(ROOT / 'images/install-pnpm.sh'),
+                                     '--fixture-archive', str(fixture_archive)],
                                     env=env, capture_output=True, text=True, timeout=15)
             if case == 'valid':
                 assert result.returncode == 0, result.stderr

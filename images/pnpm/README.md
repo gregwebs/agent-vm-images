@@ -6,7 +6,9 @@ https://registry.npmjs.org/pnpm/-/pnpm-11.11.0.tgz, upstream tag v11.11.0 at
 equivalence before extraction, package layout/version/MIT license, and pristine
 `dist/pnpm.mjs` SHA-256 before installing. The upstream MIT license and bundled
 notices stay in `/opt/agent-vm/pnpm`; no upstream distribution bytes are edited.
-The build-only Python helpers do not ship in the installed package.
+This directory holds reviewed inputs only: the bootstrap, the certification and
+the version reader are `recipe-contract` subcommands (`internal/pnpm`), executed
+from the host-compiled helper, so no program is installed or mounted from here.
 
 The shared POSIX launcher exports five caller-overridable defaults and execs
 the fixed Node interpreter and immutable upstream entrypoint. Alias symlinks

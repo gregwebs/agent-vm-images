@@ -85,9 +85,15 @@ base_pin=$(printf '%s\n' "$facts" | jq -er '.basePin') || fail 'authorization re
 # deliberately ignored because the manager never sees it.
 python3 "$PROJECT" guard "$PREFIX" || exit 1
 
-PNPM_SOURCE=${PNPM_SOURCE_DIR:-$self_dir/../../pnpm}
-[ -f "$PNPM_SOURCE/read-pin-version.py" ] || fail "cannot locate the reviewed pnpm sources at $PNPM_SOURCE"
-base_pnpm=$(python3 "$PNPM_SOURCE/read-pin-version.py" "$base_pin") || fail 'cannot read the base pin'
+# The contract directory executes policy (the composed helper, its manager
+# envelope), so project.py authorizes it before any of it is spawned. The build
+# mount is named by AGENT_VM_CONTRACT_DIR; a host upgrade builds and names its own.
+CONTRACT=$(python3 "$PROJECT" contract-dir "$PREFIX") || exit 1
+[ -x "$CONTRACT/recipe-contract" ] || fail "no executable recipe-contract in $CONTRACT"
+
+# The base pin is read by the composed helper, never by a program in the pin
+# directory: images/pnpm/ carries reviewed inputs only (ADR 0017).
+base_pnpm=$("$CONTRACT/recipe-contract" pnpm-pin-version "$base_pin") || fail 'cannot read the base pin'
 [ "$base_pnpm" = '11.11.0' ] || fail "unsupported base manager selection: $base_pnpm"
 [ -z "$PNPM_VERSION" ] || [ "$PNPM_VERSION" = "$base_pnpm" ] ||
     fail 'pnpm compatibility selection disagrees with base pin'
@@ -98,12 +104,6 @@ package_manager=$(jq -er '.packageManager' "$manifest") || fail 'committed manif
     fail "manifest packageManager $package_manager disagrees with base pin $base_pnpm"
 committed_dsh=$(jq -er '.dependencies["@deepseek-ai/dsh"]' "$manifest") || fail 'committed manifest selects no dsh version'
 effective_dsh=${DSH_VERSION:-$committed_dsh}
-
-# The contract directory executes policy (the composed helper, its manager
-# envelope), so project.py authorizes it before any of it is spawned. The build
-# mount is named by AGENT_VM_CONTRACT_DIR; a host upgrade builds and names its own.
-CONTRACT=$(python3 "$PROJECT" contract-dir "$PREFIX") || exit 1
-[ -x "$CONTRACT/recipe-contract" ] || fail "no executable recipe-contract in $CONTRACT"
 
 changed=0
 [ "$effective_dsh" = "$committed_dsh" ] || changed=1
