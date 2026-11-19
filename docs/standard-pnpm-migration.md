@@ -32,7 +32,7 @@ separately, by the gates that actually read them — the committed-graph guards 
 `script/test/image-sources/tests/image_sources.rs` (`read_graph` on
 `MigratedProject::committed("dsh", …)` runs `pnpm-lock check` on the committed
 prefix, and `every_dsh_locked_package_carries_integrity` is the root/archive SRI
-guard), Go's `TestCommittedDshCheckFinal`, and `install-dsh.sh` at build time.
+guard), Go's `TestCommittedDshCheckFinal`, and `recipe-contract dsh-install` at build time.
 `bash script/build/base-inputs.sh --check` proves only that these inputs are not
 base inputs. The fixture suites (`pnpm-lock-inputs.mjs`, `dsh-verify.sh`,
 `dsh-prepare-lock.sh`) run `check` on their own fixtures, not on this project. The
@@ -250,7 +250,7 @@ re-inspected**, so they are not evidence for the shipped bytes. What still cover
 them is the enforcement plus the runtime probe:
 
 - every preparation and installation argv carries `--ignore-scripts`
-  (`prepare-lock.sh:189`, `install-dsh.sh:144`), and
+  (`internal/dsh/manager.go`, the one place both commands take their flags from), and
   `PNPM_CONFIG_IGNORE_SCRIPTS=true` is pinned in the ledger's policy measurement,
   so no lifecycle script of any identity can run at build or install time;
 - the focused native arm64 consumer run built and used the real payloads
@@ -368,7 +368,7 @@ bytes or the historical pin is inconsistent. Today's inputs are covered
 elsewhere, by the gates that read them: the committed-graph guards in
 `script/test/image-sources` (`read_graph` on `MigratedProject::committed`, plus
 `every_dsh_locked_package_carries_integrity` for the root and archive SRIs), Go's
-`TestCommittedDshCheckFinal`, and `install-dsh.sh` at build time.
+`TestCommittedDshCheckFinal`, and `recipe-contract dsh-install` at build time.
 `bash script/build/base-inputs.sh --check` proves only that these inputs are not
 base inputs, and the fixture suites run `check` on fixtures. An adoption-delta
 review with an independently sourced root integrity stays a review item.
