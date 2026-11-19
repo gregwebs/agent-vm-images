@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Black-box contract tests for the dsh build gate (images/tools/dsh/verify-dsh.sh)
-# and for the bounded web readiness driver (images/tools/dsh/probe-dsh.py).
+# and for the bounded web readiness driver (`recipe-contract dsh-probe`).
 #
 # No Docker, no npm, no real dsh: the target is a fixture prefix that mirrors the
 # physical pnpm isolated layout with stub packages, and the web server is a
@@ -38,7 +38,8 @@ done
 
 # The probe's ownership proof must fail closed when procfs cannot be read; that is
 # a unit property of the driver, so it is checked before the fixture black box.
-"$REAL_PYTHON" "$SOURCE_DIR/probe-dsh.py" --self-test
+PROBE_HELPER="$CONTRACT_CONTEXT/out/recipe-contract"
+"$PROBE_HELPER" dsh-probe --self-test
 
 cleanup_test_root() {
     # A detached descendant fixture deliberately escapes the probe's process
@@ -79,6 +80,7 @@ RUN_STATUS=0
 RUN_GATE_CONTRACT="default"
 PROBE_OUTPUT=""
 PROBE_STATUS=0
+PROBE_CHILD_ENV=()
 AGENT_VM_VERSION_DSH=""
 AGENT_VM_VERSION_PNPM=""
 AGENT_INSTALL_SOFT_FAIL=""
@@ -207,13 +209,15 @@ probe_env() {
         "HOME=$CASE/home"
         "AGENT_VM_FIXTURE_ROOT=$CASE"
         "AGENT_VM_CONTRACT_DIR=$CASE/recipe-contract"
-        "AGENT_VM_FIXTURE_EXEC_TMPDIR=$CASE/exec-temp"
-        "DSH_WEB_FIXTURE_CASE=$web_case"
-        "DSH_WEB_FIXTURE_TMP_RECORD=$CASE/exec-temp-path"
-        "DSH_WEB_FIXTURE_SCRIPT=$FIXTURES/web.py"
-        "DSH_WEB_FIXTURE_PYTHON=$REAL_PYTHON"
-        "DSH_WEB_FIXTURE_PIDFILE=$CASE/leak.pid"
-        "DSH_WEB_FIXTURE_DELAY=${DSH_WEB_FIXTURE_DELAY-}"
+    )
+    # The probe has no environment seam of its own: every fixture input is a flag.
+    PROBE_CHILD_ENV=(
+        --fixture-child-env "DSH_WEB_FIXTURE_CASE=$web_case"
+        --fixture-child-env "DSH_WEB_FIXTURE_TMP_RECORD=$CASE/exec-temp-path"
+        --fixture-child-env "DSH_WEB_FIXTURE_SCRIPT=$FIXTURES/web.py"
+        --fixture-child-env "DSH_WEB_FIXTURE_PYTHON=$REAL_PYTHON"
+        --fixture-child-env "DSH_WEB_FIXTURE_PIDFILE=$CASE/leak.pid"
+        --fixture-child-env "DSH_WEB_FIXTURE_DELAY=${DSH_WEB_FIXTURE_DELAY-}"
     )
 }
 
@@ -223,7 +227,8 @@ run_probe() {
     probe_env "$web_case"
     set +e
     PROBE_OUTPUT="$(env -i "${PROBE_ENV[@]}" \
-        python3 "$SOURCE_DIR/probe-dsh.py" "${PROBE_ARGS[@]}" 2>&1)"
+        "$PROBE_HELPER" dsh-probe --source "$SOURCE_DIR" \
+        --fixture-exec-tmpdir "$CASE/exec-temp" "${PROBE_CHILD_ENV[@]}" "${PROBE_ARGS[@]}" 2>&1)"
     PROBE_STATUS=$?
     set -e
     [[ -z "$(find "$CASE/exec-temp" -mindepth 1 -print -quit)" ]] || fail 'exec TMPDIR survived success/failure'
@@ -620,7 +625,8 @@ stage_prefix
 probe_argv 10 ""
 probe_env hang
 set +e
-env -i "${PROBE_ENV[@]}" python3 "$SOURCE_DIR/probe-dsh.py" "${PROBE_ARGS[@]}" \
+env -i "${PROBE_ENV[@]}" "$PROBE_HELPER" dsh-probe --source "$SOURCE_DIR" \
+    --fixture-exec-tmpdir "$CASE/exec-temp" "${PROBE_CHILD_ENV[@]}" "${PROBE_ARGS[@]}" \
     >"$CASE/probe.log" 2>&1 &
 probe_pid=$!
 sleep 0.5
@@ -634,13 +640,36 @@ leftover=$(find "$CASE/home/scratch" -mindepth 1 | sed -n '1p')
 
 [[ -z "$(find "$CASE/exec-temp" -mindepth 1 -print -quit)" ]] || fail 'interrupt leaked private exec TMPDIR'
 
+# A signal that lands while the group is being emptied is an interruption too. The
+# child ignores TERM, so the driver sits in its escalation with nothing to do but wait;
+# a SIGTERM then must be reported (143) and must still leave no scratch behind. Without
+# the poll the driver would finish the escalation and report the run as a pass.
+new_case probe-interrupt-teardown
+stage_prefix
+probe_argv 10 5
+probe_env ignore-term
+set +e
+env -i "${PROBE_ENV[@]}" "$PROBE_HELPER" dsh-probe --source "$SOURCE_DIR" \
+    --fixture-exec-tmpdir "$CASE/exec-temp" "${PROBE_CHILD_ENV[@]}" "${PROBE_ARGS[@]}" \
+    >"$CASE/probe.log" 2>&1 &
+probe_pid=$!
+sleep 1
+kill -TERM "$probe_pid" 2>/dev/null || true
+wait "$probe_pid"
+PROBE_STATUS=$?
+set -e
+[[ $PROBE_STATUS -eq 143 ]] || fail "a signal during teardown must exit 143 (got $PROBE_STATUS: $(cat "$CASE/probe.log"))"
+leftover=$(find "$CASE/home/scratch" -mindepth 1 | sed -n '1p')
+[[ -z "$leftover" ]] || fail "an interrupted teardown leaked scratch: $leftover"
+[[ -z "$(find "$CASE/exec-temp" -mindepth 1 -print -quit)" ]] || fail 'an interrupted teardown leaked the exec TMPDIR'
+
 new_case probe-temp-escape
 stage_prefix
 probe_argv 10 ''
 probe_env valid
-PROBE_ENV+=("AGENT_VM_FIXTURE_EXEC_TMPDIR=$TEST_ROOT/tmp")
 set +e
-PROBE_OUTPUT="$(env -i "${PROBE_ENV[@]}" python3 "$SOURCE_DIR/probe-dsh.py" "${PROBE_ARGS[@]}" 2>&1)"
+PROBE_OUTPUT="$(env -i "${PROBE_ENV[@]}" "$PROBE_HELPER" dsh-probe --source "$SOURCE_DIR" \
+    --fixture-exec-tmpdir "$TEST_ROOT/tmp" "${PROBE_CHILD_ENV[@]}" "${PROBE_ARGS[@]}" 2>&1)"
 PROBE_STATUS=$?
 set -e
 [[ $PROBE_STATUS -eq 1 ]] || fail 'exec temp override must remain in fixture root'

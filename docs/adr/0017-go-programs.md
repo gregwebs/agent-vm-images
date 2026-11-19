@@ -178,6 +178,49 @@ boundary, and it is in scope of build egress above: with `--download` it
 fetches the pin's own URL through `internal/fetch`, and with `--archive` it
 authenticates bytes the caller already holds. Neither path skips the pin.
 
+**The dsh probe and three of its four hooks are Go (#184).**
+`recipe-contract dsh-probe` replaces `images/tools/dsh/probe-dsh.py`, which is
+deleted. It keeps the source job: monotonic deadlines, a private session,
+bounded concurrent capture of both pipes, the token handshake, the TERM-to-KILL
+teardown that proves nothing survived, and the Linux listener-ownership proof
+through procfs. The ownership proof still fails closed on Linux or in
+production, and only an explicit non-Linux fixture host records a skip. Its
+fixture inputs are flags (`--fixture-child-env NAME=VALUE`, `--fixture-exec-tmpdir`)
+and it reads no environment variable of its own. The gate above it still names the
+existing `DSH_WEB_FIXTURE_` boundary from its own environment and hands it down as
+those flags; moving that boundary is #213's, and until then a production capability
+refuses the input instead of ignoring it. Statuses follow one principle there: a
+fixture seam is a well-formed request production cannot honour, so it is a refusal
+(1), while a readiness or escalation bound only limits the run and is accepted in
+production. `check-runtime.mjs` stays Node.
+
+`recipe-contract dsh-install`, `dsh-prepare-lock` and `dsh-verify` replace the
+policy in `images/tools/dsh/{install-dsh.sh,prepare-lock.sh,verify-dsh.sh}`, which
+remain as entry points that resolve the composed helper through the shared
+project module's `contract-dir` verb and pass their caller's argv. That is a
+deliberate divergence from `install-pnpm.sh`, which falls back to the fixed
+build mount: `dsh-verify.sh` must never execute a helper from a fixed mount, and
+its suite proves a decoy there is never reached. Exit status and diagnostics are
+the predecessors': usage is 2, a refusal is 1 on stderr, and a child keeps its own
+status and its own bytes. Two differences are deliberate and tested: an install
+hook collapses a preparation failure to 1, as its `*) exit 1` did, and a fixture
+input in a production probe is a refusal (1), while a readiness or escalation bound
+is accepted there because it only limits the run. `dsh` still needs `python3` at
+install time, because `project.py` is Python until #62.
+
+**Ordering in the entry points.** `contract-dir` now runs before the environment
+guard, because the entry point has to locate the helper before it can exec it, and
+`verify-dsh.sh` may not fall back to a fixed mount. That is deliberate: the guard
+still authorizes the composed directory itself (it runs `pnpm-environment` from it)
+and refuses the same environment, so the only change is that a hostile variable is
+reported one process later than it used to be.
+
+`images/tools/dsh/upgrade-dsh.sh` is **not** ported. Its load-bearing surface is
+the five-file publication transaction with signal-inclusive rollback, which lives
+in `script/build/transactional-publish.sh` and is shared with the Pi and bridge
+upgrades; porting one of the three consumers would leave two owners for one
+rollback contract. The transaction moves once, when all three upgrades do.
+
 ## Considered options
 
 - **Keep ADR 0004's byte parity.** Rejected: it cost a 213-vector differential

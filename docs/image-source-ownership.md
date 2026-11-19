@@ -645,7 +645,12 @@ existing owners. No executable maintenance helper ships in the image.
 dsh is now an image-owned pnpm project. Its owning sources are:
 
 - Reviewed inputs: `images/tools/dsh/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,pnpm-inputs.sha256}`.
-- Preparation, installation and verification: `images/tools/dsh/{prepare-lock.sh,install-dsh.sh,verify-dsh.sh}`.
+- Preparation, installation and verification:
+  `images/tools/dsh/{prepare-lock.sh,install-dsh.sh,verify-dsh.sh}` are entry
+  points only; the policy is `recipe-contract dsh-prepare-lock`, `dsh-install` and
+  `dsh-verify` in `./internal/dsh` (ADR 0017, #184). `upgrade-dsh.sh` is the one
+  dsh hook that keeps its policy, because its publication transaction is shared
+  with the Pi and bridge upgrades.
 - Shared build-only boundary: `images/tools/pnpm-project.py` and
   `images/tools/pnpm-host-manager.py`. The filesystem/manager/publication
   implementation moved here when Pi and its bridge began sharing it, so one
@@ -665,25 +670,35 @@ dsh is now an image-owned pnpm project. Its owning sources are:
   it can only stage — never install, publish to the live prefix or write status.
 - dsh adapters: `images/tools/dsh/{project.py,host-manager.py}` load the shared
   module through `sys.modules` (one instance, so capability types keep one
-  identity), re-export it unchanged and supply the dsh consumer. dsh's scripts,
-  `probe-dsh.py`, its imports and its Docker mounts keep naming the old paths; the
-  install and verify RUNs add one read-only mount of
-  `tools/pnpm-project.py` at `/tmp/pnpm-project.py`, which is where the adapter's
-  `../pnpm-project.py` resolves. The shared CLI requires
-  `--consumer dsh|pi|bridge|antigravity`; the adapters reject the flag.
-- Other build-only dsh helpers: `images/tools/dsh/{check-runtime.mjs,probe-dsh.py}`.
-  The shared module authorizes the composed contract
-  directory **before** anything in it is executed (the environment guard included)
-  and accepts exactly these shapes: the production build mount
+  identity), re-export it unchanged and supply the dsh consumer. Every dsh entry
+  point and every Go helper subcommand asks this adapter for the rules it needs
+  (`authorize`, `authorize-runtime`, `guard`, `contract-dir`, `scratch`,
+  `cleanup`, `manager`, `publish`, `command-identity`, `remove-install`), so the
+  layer still needs `python3` at install time until #62 moves the module; the
+  install and verify RUNs keep the one read-only mount of `tools/pnpm-project.py`
+  at `/tmp/pnpm-project.py`, which is where the adapter's `../pnpm-project.py`
+  resolves. The shared CLI requires `--consumer dsh|pi|bridge|antigravity`; the
+  adapters reject the flag.
+- Other build-only dsh helpers: `images/tools/dsh/check-runtime.mjs` stays Node
+  because it exists to exercise Node. The bounded web readiness driver is
+  `recipe-contract dsh-probe`, which owns the deadlines, the private process group,
+  the token handshake, the teardown and the Linux listener-ownership proof.
+  The shared module's `contract-dir` verb authorizes the composed contract
+  directory and accepts exactly these shapes: the production build mount
   `/tmp/recipe-contract` with a `/opt/agent-vm/dsh` prefix, a directory inside an
   authorized fixture root, the checkout's own tracked `images/recipe-contract`, or
   the composed directory that checkout's `script/build/recipe-contract.sh --native`
   published (`target/recipe-contract/OS-ARCH/out`), with prefixes below that
   checkout or inside the invocation's scratch root (`AGENT_VM_SCRATCH_ROOT`, the
   developer-upgrade spelling of the same capability, which never claims a fixture
-  root it does not have). The graph reader, comparator, derivation and staging
-  helpers are `recipe-contract` subcommands (`pnpm-lock`, `dsh-lock-update`,
-  `dsh-cordis-overrides`, `dsh-upgrade-stage`) reaching
+  root it does not have). The dsh entry points call that verb first and then exec the
+  helper it names, so directory authorization precedes the environment guard rather
+  than the other way round: the guard cannot run before the program that performs it
+  has been located, and `verify-dsh.sh` may not fall back to a fixed mount. The guard
+  authorizes the same directory itself (it executes `pnpm-environment` from it), so
+  the ordering change costs nothing and is deliberate. The graph reader, comparator,
+  derivation and staging helpers are `recipe-contract` subcommands (`pnpm-lock`,
+  `dsh-lock-update`, `dsh-cordis-overrides`, `dsh-upgrade-stage`) reaching
   `images/recipe-contract/pnpmlock`; `pnpm-host-manager.py` represents the
   authenticated stock manager as argv for host maintenance (`pnpm-project.py
   manager`), and production refuses its `{AGENT_VM_DSH,PI,BRIDGE}_PNPM_PACKAGE|_ARCHIVE|_NODE`

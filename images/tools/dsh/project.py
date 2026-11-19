@@ -5,8 +5,9 @@ The filesystem/manager/publication implementation lives in `../pnpm-project.py`,
 because dsh, Pi and the bridge share one security boundary and two copies of it
 would drift. This adapter keeps dsh's CLI, its imported Python surface and its
 module identity: install-dsh.sh, prepare-lock.sh, upgrade-dsh.sh, verify-dsh.sh
-and probe-dsh.py keep naming `project.py` beside them, and the Docker mount of
-`tools/dsh` stays sufficient together with one mount of the shared file.
+and the `dsh-probe`/`dsh-install`/`dsh-prepare-lock`/`dsh-verify` subcommands of
+the composed helper keep naming `project.py`, and the Docker mount of `tools/dsh`
+stays sufficient together with one mount of the shared file.
 
 dsh is the default consumer here, so `--consumer` is not accepted: the shared CLI
 (and only it) requires the flag. The shared module is registered in sys.modules

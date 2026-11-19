@@ -2,6 +2,7 @@ package pnpmlock
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
 
 	"github.com/gregwebs/agent-vm-images/internal/document"
@@ -139,6 +140,22 @@ func CompareDshUpdate(request UpdateRequest) (UpdateComparison, *DshProject, err
 		return UpdateComparison{}, nil, err
 	}
 	return compareDshProjects(request, before, after)
+}
+
+// CompareDshUpdateDiagnostic is the human line one dsh lock update reports. The
+// lock-update subcommand and the preparation driver are the same comparison, so the
+// line is rendered once: a second copy would let the two drift in mode or peers.
+func CompareDshUpdateDiagnostic(request UpdateRequest, argument string) (string, error) {
+	comparison, after, err := CompareDshUpdateArgument(request, argument)
+	if err != nil {
+		return "", err
+	}
+	exact, err := after.ExactPeers()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("dsh lock update: %s %s -> %s; %d exact peers satisfied\n",
+		comparison.Mode, comparison.BeforeVersion, comparison.AfterVersion, exact), nil
 }
 
 // CompareDshUpdateArgument preserves the retired CLI's read-before-version-check

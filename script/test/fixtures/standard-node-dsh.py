@@ -207,8 +207,8 @@ def probe(token, source, version, uid, gid):
         run(['/fixtures/contract/recipe-contract', 'tool-access', '--tree', str(PREFIX)], env=env)
         run(['/fixtures/contract/recipe-contract', 'tool-access', str(BIN), 'pnpm'], env=env)
         runtime = json.loads(run(['node', str(SOURCE / 'check-runtime.mjs'), str(PREFIX), '--runtime'], seconds=60, env=env))
-        web = json.loads(run(['python3', str(SOURCE / 'probe-dsh.py'), '--prefix', str(PREFIX), '--command', str(BIN),
-             '--scratch-root', str(scratch)], seconds=75, env=env))
+        web = json.loads(run([CHECKER, 'dsh-probe', '--source', str(SOURCE), '--prefix', str(PREFIX),
+                              '--command', str(BIN), '--scratch-root', str(scratch)], seconds=75, env=env))
         report = json.loads(run(['node', '/source/script/test/fixtures/dsh/oracle.mjs', str(PREFIX), version], seconds=30, env=env))
         assert report['subprocess'] == {'stdout': 'independent-dsh\n', 'exitCode': 7, 'disposed': True}
         assert base_identity() == invocation['base']
