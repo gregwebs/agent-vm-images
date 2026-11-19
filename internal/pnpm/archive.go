@@ -11,10 +11,23 @@ import (
 	"strings"
 )
 
-// MaxArchiveBytes bounds one pnpm archive. The reviewed tarball is a few
-// megabytes, so the ceiling only stops a stream that never ends; internal/fetch
-// applies it while reading.
-const MaxArchiveBytes = 64 << 20
+// The three ceilings are different bounds and each one stops a different attack:
+//
+//   - MaxArchiveBytes bounds the *compressed* archive, so a response or a file
+//     that is not the reviewed tarball is never read into memory;
+//   - MaxExpandedBytes bounds the sum of the member sizes the archive claims, so
+//     a compression bomb cannot fill the disk the build runs on;
+//   - MaxMembers bounds how many members an archive may carry, so a flood of tiny
+//     entries cannot exhaust the inode table.
+//
+// The reviewed tarball (pnpm 11.11.0) is far inside all three: the numbers leave a
+// wide margin for an upstream such as a future release growing, and a pin that
+// outgrew them would refuse rather than silently change the contract.
+const (
+	MaxArchiveBytes  = 64 << 20
+	MaxExpandedBytes = 512 << 20
+	MaxMembers       = 20000
+)
 
 // upstreamFiles are the entries the distribution must carry as regular non-empty
 // files: the two entrypoints the launcher execs, the bundle whose digest the pin
@@ -23,22 +36,22 @@ var upstreamFiles = []string{"bin/pnpm.mjs", "bin/pnpx.mjs", "dist/pnpm.mjs", "L
 
 // extract authenticates nothing: the caller has already compared the archive
 // bytes with the pin. It validates the whole member inventory before writing
-// anything, then unpacks it into scratch and returns the `package/` tree.
+// anything, then unpacks it under destination and returns the `package/` tree.
 //
 // The member rules are the security property, not an artifact of one library:
 // every member is under a single `package/` prefix, there is no `..` and no
 // absolute name, no name appears twice, and only regular files and directories
 // are allowed. Links and device nodes are refused outright, which is what makes
 // the published tree immutable without an ownership audit of every member.
-func extract(archivePath, scratch string, pin Pin) (string, error) {
+func extract(archivePath, destination string, pin Pin) (string, error) {
 	members, err := archiveMembers(archivePath)
 	if err != nil {
 		return "", err
 	}
-	if err := unpack(archivePath, scratch, members); err != nil {
+	if err := unpack(archivePath, destination, members); err != nil {
 		return "", err
 	}
-	packageDir := filepath.Join(scratch, "package")
+	packageDir := filepath.Join(destination, "package")
 	if err := checkPackage(packageDir, pin); err != nil {
 		return "", err
 	}
@@ -47,7 +60,8 @@ func extract(archivePath, scratch string, pin Pin) (string, error) {
 
 // archiveMembers is the validation pass. Nothing is written until the whole
 // inventory has been accepted, so a hostile member cannot leave a partial tree
-// behind for a later step to publish.
+// behind for a later step to publish, and the two resource ceilings are enforced
+// here -- before the first byte reaches the disk.
 func archiveMembers(archivePath string) ([]string, error) {
 	stream, closeArchive, err := openArchive(archivePath)
 	if err != nil {
@@ -57,6 +71,7 @@ func archiveMembers(archivePath string) ([]string, error) {
 	reader := tar.NewReader(stream)
 	seen := make(map[string]bool)
 	var members []string
+	var expanded int64
 	for {
 		header, err := reader.Next()
 		if errors.Is(err, io.EOF) {
@@ -73,6 +88,13 @@ func archiveMembers(archivePath string) ([]string, error) {
 		}
 		seen[header.Name] = true
 		members = append(members, header.Name)
+		if len(members) > MaxMembers {
+			return nil, refuse("the archive carries more than %d members", MaxMembers)
+		}
+		expanded += header.Size
+		if expanded > MaxExpandedBytes {
+			return nil, refuse("the archive expands past the %d byte ceiling", MaxExpandedBytes)
+		}
 	}
 }
 

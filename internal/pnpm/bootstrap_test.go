@@ -1,28 +1,33 @@
 package pnpm
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/gregwebs/agent-vm-images/internal/fetch"
 )
 
 func TestBootstrap(t *testing.T) {
-	t.Run("publishes the reviewed distribution", func(t *testing.T) {
+	t.Run("publishes every authenticated byte", func(t *testing.T) {
 		staged := stageInstall(t)
 		if err := staged.publish(t, staged.archive); err != nil {
 			t.Fatalf("bootstrap refused the reviewed fixture: %v", err)
 		}
-		bundle, err := os.ReadFile(filepath.Join(staged.prefix, "dist/pnpm.mjs"))
+		// Not just the bundle the pin records a digest for: the entrypoints the
+		// launcher execs are outside that digest, so every regular file the archive
+		// authenticated is compared with the file the image would run.
+		authenticated, err := extract(staged.archive, t.TempDir(), staged.pin)
 		if err != nil {
-			t.Fatalf("cannot read the published bundle: %v", err)
+			t.Fatalf("cannot extract the reviewed archive for comparison: %v", err)
 		}
-		// The published bundle is the archive member, byte for byte: the build
-		// never edits upstream bytes.
-		if string(bundle) != "pristine fixture bundle" {
-			t.Fatalf("published bundle is %q", bundle)
-		}
+		assertSameTree(t, authenticated, staged.prefix, []string{"pin.json"})
 		launcher, err := os.ReadFile(filepath.Join(staged.commands, "pnpm"))
 		if err != nil {
 			t.Fatalf("cannot read the launcher: %v", err)
@@ -207,5 +212,173 @@ func TestBootstrapNeedsRootInProduction(t *testing.T) {
 	_, _, _, targetErr := publicationTargets("")
 	if targetErr == nil || targetErr.Error() != "production bootstrap requires root" {
 		t.Fatalf("refusal is %v", targetErr)
+	}
+}
+
+// assertSameTree compares every regular file under want with the same relative
+// path under got, byte for byte, and refuses a file only one of them carries.
+// allowed lists the paths the publisher is expected to add.
+func assertSameTree(t *testing.T, want, got string, allowed []string) {
+	t.Helper()
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, name := range allowed {
+		allowedSet[name] = true
+	}
+	wanted := treeFiles(t, want)
+	published := treeFiles(t, got)
+	for relative, content := range wanted {
+		present, ok := published[relative]
+		if !ok {
+			t.Fatalf("published tree is missing %s", relative)
+		}
+		if string(present) != string(content) {
+			t.Fatalf("published %s is %q, the archive carries %q", relative, present, content)
+		}
+	}
+	for relative := range published {
+		if _, ok := wanted[relative]; ok || allowedSet[relative] {
+			continue
+		}
+		t.Fatalf("published tree carries %s, which the archive did not authenticate", relative)
+	}
+}
+
+// treeFiles is every regular file under root, by relative path.
+func treeFiles(t *testing.T, root string) map[string][]byte {
+	t.Helper()
+	files := map[string][]byte{}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		files[relative] = content
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("cannot walk %s: %v", root, err)
+	}
+	return files
+}
+
+// roundTripFunc is an http.RoundTripper a test drives itself: the download branch
+// runs its real code against a fake network.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+// endlessZeros is a body that never ends, so a ceiling case does not allocate the
+// ceiling.
+type endlessZeros struct{}
+
+func (endlessZeros) Read(buffer []byte) (int, error) {
+	for index := range buffer {
+		buffer[index] = 0
+	}
+	return len(buffer), nil
+}
+
+func TestBootstrapDownload(t *testing.T) {
+	cases := []struct {
+		name string
+		// respond answers one attempt with a status and a body.
+		respond func(staged *install) (int, io.Reader)
+		want    string
+		// wantAttempts is how many requests the reviewed budget allows.
+		wantAttempts int
+	}{
+		{
+			name: "the pinned archive is fetched and published",
+			respond: func(staged *install) (int, io.Reader) {
+				payload, err := os.ReadFile(staged.archive)
+				if err != nil {
+					t.Fatalf("cannot read the fixture archive: %v", err)
+				}
+				return http.StatusOK, bytes.NewReader(payload)
+			},
+			wantAttempts: 1,
+		},
+		{
+			name: "a status the pin cannot produce is refused with its URL",
+			respond: func(*install) (int, io.Reader) {
+				return http.StatusNotFound, strings.NewReader("missing")
+			},
+			want:         "cannot fetch https://registry.npmjs.org/pnpm/-/pnpm-11.11.0.tgz: HTTP 404",
+			wantAttempts: 1,
+		},
+		{
+			name: "a 5xx is retried up to the reviewed budget and then refused",
+			respond: func(*install) (int, io.Reader) {
+				return http.StatusInternalServerError, strings.NewReader("busy")
+			},
+			want:         "cannot fetch https://registry.npmjs.org/pnpm/-/pnpm-11.11.0.tgz: HTTP 500",
+			wantAttempts: fetch.Attempts,
+		},
+		{
+			// The ceiling lives in internal/fetch, which retries every refusal that
+			// is not an HTTP status -- a transport failure and a payload past its
+			// ceiling are the same class there. So this costs the full budget; the
+			// predicate belongs to that shared package, not to this program.
+			name: "a body past the compressed ceiling is refused",
+			respond: func(*install) (int, io.Reader) {
+				return http.StatusOK, io.LimitReader(endlessZeros{}, MaxArchiveBytes+1)
+			},
+			want:         "is larger than the 67108864 byte ceiling",
+			wantAttempts: fetch.Attempts,
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			staged := stageInstall(t)
+			attempts := 0
+			client := fetch.New()
+			client.HTTP.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				if request.URL.String() != staged.pin.URL {
+					t.Errorf("the download asked for %s, the pin names %s", request.URL, staged.pin.URL)
+				}
+				attempts++
+				status, body := testCase.respond(staged)
+				return &http.Response{
+					StatusCode: status,
+					Status:     http.StatusText(status),
+					Body:       io.NopCloser(body),
+					Request:    request,
+				}, nil
+			})
+			t.Setenv(FixtureRootVariable, staged.root)
+			t.Setenv(FixtureDestinationVariable, staged.destination)
+			err := Bootstrap(context.Background(), Options{SourceDir: staged.source, Fetch: client})
+			if attempts != testCase.wantAttempts {
+				t.Fatalf("%d attempts, the reviewed budget allows %d", attempts, testCase.wantAttempts)
+			}
+			if testCase.want == "" {
+				if err != nil {
+					t.Fatalf("bootstrap refused the fetched archive: %v", err)
+				}
+				if _, err := os.Stat(filepath.Join(staged.prefix, "pin.json")); err != nil {
+					t.Fatalf("the fetched archive was not published: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("bootstrap accepted a refused download: want %q", testCase.want)
+			}
+			if !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("refusal is %q, want it to carry %q", err.Error(), testCase.want)
+			}
+			assertNoDestination(t, staged)
+		})
 	}
 }

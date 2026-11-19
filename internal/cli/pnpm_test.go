@@ -1,6 +1,9 @@
 package cli
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base64"
@@ -18,8 +21,12 @@ import (
 // calls the certification makes -- the report and the five defaults -- so a case
 // can move one answer without a Node process.
 const fixtureLauncher = `#!/bin/sh
-if [ "${1-}" = --version ]; then printf '%s\n' "${FIXTURE_REPORT}"; exit 0; fi
+if [ "${1-}" = --version ]; then
+    if [ -n "${FIXTURE_REPORT_STATUS-}" ]; then printf 'report-failed\n' >&2; exit "$FIXTURE_REPORT_STATUS"; fi
+    printf '%s\n' "${FIXTURE_REPORT}"; exit 0
+fi
 if [ -n "${FIXTURE_DEFAULT_KEY-}" ] && [ "${3-}" = "$FIXTURE_DEFAULT_KEY" ]; then
+    if [ -n "${FIXTURE_DEFAULT_STATUS-}" ]; then printf 'config-failed\n' >&2; exit "$FIXTURE_DEFAULT_STATUS"; fi
     printf '%s\n' "${FIXTURE_DEFAULT}"; exit 0
 fi
 case "${3-}" in
@@ -75,7 +82,11 @@ func stagePnpmFixture(t *testing.T) *pnpmFixture {
 		}
 	}
 	bundle := []byte("pristine fixture bundle")
-	pin := staged.pin(t, bundle)
+	archive := fixtureArchive(t, bundle)
+	if err := os.WriteFile(filepath.Join(staged.source, "pnpm.tgz"), archive, 0o644); err != nil {
+		t.Fatalf("cannot write the fixture archive: %v", err)
+	}
+	pin := staged.pin(t, bundle, archive)
 	staged.write(t, filepath.Join(staged.source, "pin.json"), pin, 0o644)
 	staged.write(t, filepath.Join(staged.source, "launcher.sh"), []byte(fixtureLauncher), 0o644)
 	staged.write(t, filepath.Join(staged.prefix, "pin.json"), pin, 0o644)
@@ -92,10 +103,45 @@ func stagePnpmFixture(t *testing.T) *pnpmFixture {
 	return staged
 }
 
-// pin is a self-consistent pin document for the fixture bundle.
-func (f *pnpmFixture) pin(t *testing.T, bundle []byte) []byte {
+// fixtureArchive is the tarball the fixture pin authenticates: the reviewed shape,
+// with the bundle the distribution publishes.
+func fixtureArchive(t *testing.T, bundle []byte) []byte {
 	t.Helper()
-	sum := sha512.Sum512([]byte("fixture archive"))
+	var compressed bytes.Buffer
+	stream := gzip.NewWriter(&compressed)
+	writer := tar.NewWriter(stream)
+	members := []struct {
+		name string
+		body []byte
+	}{
+		{name: "package/package.json", body: []byte(`{"name":"pnpm","version":"11.11.0"}`)},
+		{name: "package/bin/pnpm.mjs", body: []byte("entry")},
+		{name: "package/bin/pnpx.mjs", body: []byte("alias entry")},
+		{name: "package/dist/pnpm.mjs", body: bundle},
+		{name: "package/LICENSE", body: []byte("MIT License")},
+	}
+	for _, entry := range members {
+		header := &tar.Header{Name: entry.name, Mode: 0o644, Size: int64(len(entry.body)), Typeflag: tar.TypeReg}
+		if err := writer.WriteHeader(header); err != nil {
+			t.Fatalf("cannot write the archive header: %v", err)
+		}
+		if _, err := writer.Write(entry.body); err != nil {
+			t.Fatalf("cannot write the archive member: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("cannot close the archive: %v", err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("cannot close the archive stream: %v", err)
+	}
+	return compressed.Bytes()
+}
+
+// pin is a self-consistent pin document for the fixture bundle and archive.
+func (f *pnpmFixture) pin(t *testing.T, bundle, archive []byte) []byte {
+	t.Helper()
+	sum := sha512.Sum512(archive)
 	digest := hex.EncodeToString(sum[:])
 	document := map[string]any{
 		"version":        "11.11.0",
@@ -137,8 +183,10 @@ func (f *pnpmFixture) environment(t *testing.T) Environment {
 	t.Setenv("PNPM_SOURCE_DIR", f.source)
 	t.Setenv("PATH", f.commands+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("FIXTURE_REPORT", "11.11.0")
+	t.Setenv("FIXTURE_REPORT_STATUS", "")
 	t.Setenv("FIXTURE_DEFAULT_KEY", "")
 	t.Setenv("FIXTURE_DEFAULT", "")
+	t.Setenv("FIXTURE_DEFAULT_STATUS", "")
 	return testEnv(toolaccess.PhysicalDirectoryOf(f.root), os.Getenv("PATH"))
 }
 
@@ -168,6 +216,33 @@ func TestPnpmVerifyCertifyStatuses(t *testing.T) {
 			},
 			status: 1,
 			stderr: "pnpm: default minimum-release-age mismatch: 60\n",
+		},
+		{
+			// Parity is the status: the shell entry point exited with the config
+			// command's own status and stderr, so a manager that exits 42 still
+			// exits 42 here.
+			name: "a failing default keeps its status",
+			change: func(t *testing.T, _ *pnpmFixture) {
+				t.Setenv("FIXTURE_DEFAULT_KEY", "minimum-release-age")
+				t.Setenv("FIXTURE_DEFAULT_STATUS", "42")
+			},
+			status: 42,
+			stderr: "config-failed\n",
+		},
+		{
+			// run-report.sh's one mapping: 75 is not a transport classification.
+			name: "the report runner maps its documented status",
+			change: func(t *testing.T, _ *pnpmFixture) {
+				t.Setenv("FIXTURE_REPORT_STATUS", "75")
+			},
+			status: 1,
+		},
+		{
+			name: "a failing report keeps its status",
+			change: func(t *testing.T, _ *pnpmFixture) {
+				t.Setenv("FIXTURE_REPORT_STATUS", "3")
+			},
+			status: 3,
 		},
 		{
 			name: "the distribution audit",
@@ -304,6 +379,103 @@ func TestPnpmPinVersionStatuses(t *testing.T) {
 		result := runInProcess(t, env, "pnpm-pin-version", invalid)
 		if result.status != 1 || string(result.stderr) != "pnpm-pin-version: invalid pin fields\n" {
 			t.Fatalf("status %d, stderr %q", result.status, result.stderr)
+		}
+	})
+}
+
+// TestPnpmVerifyExplicitTarget exercises the flags the shared project module
+// delegates with: the same audit, over a tree the caller holds.
+func TestPnpmVerifyExplicitTarget(t *testing.T) {
+	fixture := stagePnpmFixture(t)
+	env := fixture.environment(t)
+	args := []string{"pnpm-verify",
+		"--prefix", fixture.prefix,
+		"--commands", fixture.commands,
+		"--node", filepath.Join(fixture.destination, "usr/bin/node"),
+		"--source", fixture.source,
+		"--fixture-root", fixture.root,
+	}
+	if result := runInProcess(t, env, args...); result.status != 0 {
+		t.Fatalf("the explicit target was refused: %q (status %d)", result.stderr, result.status)
+	}
+	// Naming part of the tree mixes a caller's path with an image default.
+	partial := append([]string{"pnpm-verify"}, "--prefix", fixture.prefix)
+	if result := runInProcess(t, env, partial...); result.status != 2 {
+		t.Fatalf("a partial target is status %d, want 2", result.status)
+	}
+}
+
+// TestPnpmExtractStatuses is the host acquisition boundary: one authenticated
+// unpack, with the image's pin, digest, member and package rules.
+func TestPnpmExtractStatuses(t *testing.T) {
+	t.Run("the authenticated archive is unpacked", func(t *testing.T) {
+		fixture := stagePnpmFixture(t)
+		env := fixture.environment(t)
+		destination := filepath.Join(fixture.root, "manager")
+		if err := os.Mkdir(destination, 0o700); err != nil {
+			t.Fatalf("cannot create the destination: %v", err)
+		}
+		archive := filepath.Join(fixture.source, "pnpm.tgz")
+		result := runInProcess(t, env, "pnpm-extract", "--archive", archive, "--destination", destination)
+		if result.status != 0 {
+			t.Fatalf("pnpm-extract refused the reviewed archive: %q (status %d)", result.stderr, result.status)
+		}
+		var report struct{ Package, Archive string }
+		if err := json.Unmarshal(result.stdout, &report); err != nil {
+			t.Fatalf("stdout is not the documented JSON: %q (%v)", result.stdout, err)
+		}
+		if report.Package != filepath.Join(destination, "package") || report.Archive != archive {
+			t.Fatalf("report is %+v", report)
+		}
+		if _, err := os.Stat(filepath.Join(report.Package, "LICENSE")); err != nil {
+			t.Fatalf("the unpacked package is missing its license: %v", err)
+		}
+	})
+	t.Run("an archive the pin does not authenticate is refused", func(t *testing.T) {
+		fixture := stagePnpmFixture(t)
+		env := fixture.environment(t)
+		destination := filepath.Join(fixture.root, "manager")
+		if err := os.Mkdir(destination, 0o700); err != nil {
+			t.Fatalf("cannot create the destination: %v", err)
+		}
+		corrupt := filepath.Join(fixture.root, "corrupt.tgz")
+		archive, err := os.ReadFile(filepath.Join(fixture.source, "pnpm.tgz"))
+		if err != nil {
+			t.Fatalf("cannot read the fixture archive: %v", err)
+		}
+		archive[len(archive)-1] ^= 1
+		if err := os.WriteFile(corrupt, archive, 0o600); err != nil {
+			t.Fatalf("cannot write the corrupt archive: %v", err)
+		}
+		result := runInProcess(t, env, "pnpm-extract", "--archive", corrupt, "--destination", destination)
+		if result.status != 1 || string(result.stderr) != "pnpm extract: archive SHA-512 mismatch\n" {
+			t.Fatalf("status %d, stderr %q", result.status, result.stderr)
+		}
+		if _, err := os.Stat(filepath.Join(destination, "package")); err == nil {
+			t.Fatal("a refused archive was unpacked")
+		}
+	})
+	t.Run("the two sources are exclusive", func(t *testing.T) {
+		fixture := stagePnpmFixture(t)
+		env := fixture.environment(t)
+		destination := filepath.Join(fixture.root, "manager")
+		if err := os.Mkdir(destination, 0o700); err != nil {
+			t.Fatalf("cannot create the destination: %v", err)
+		}
+		result := runInProcess(t, env, "pnpm-extract", "--download",
+			"--archive", filepath.Join(fixture.source, "pnpm.tgz"), "--destination", destination)
+		if result.status != 1 || !strings.Contains(string(result.stderr), "exclusive") {
+			t.Fatalf("status %d, stderr %q", result.status, result.stderr)
+		}
+	})
+	t.Run("the destination is required", func(t *testing.T) {
+		fixture := stagePnpmFixture(t)
+		fixture.environment(t)
+		// go-arg terminates the process for a missing required flag, so the usage
+		// status is only observable through a child.
+		result := runChildProcess(t, childSpec{args: []string{"pnpm-extract", "--download"}, env: os.Environ()})
+		if result.status != 2 {
+			t.Fatalf("status is %d, want 2", result.status)
 		}
 	})
 }

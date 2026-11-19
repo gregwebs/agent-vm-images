@@ -5,18 +5,23 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// member is one archive entry the cases assemble.
+// member is one archive entry the cases assemble. A declared size with no body is
+// how a case writes a member whose content would not fit in a test's memory: the
+// writer streams zeros for exactly that many bytes.
 type member struct {
 	name     string
 	body     []byte
 	typeflag byte
 	linkname string
+	declared int64
 }
 
 func regular(name string, body string) member {
@@ -42,25 +47,32 @@ func writeArchive(t *testing.T, members []member) string {
 	gzipWriter := gzip.NewWriter(&compressed)
 	tarWriter := tar.NewWriter(gzipWriter)
 	for _, entry := range members {
+		size := int64(len(entry.body))
+		if entry.declared > size {
+			size = entry.declared
+		}
 		header := &tar.Header{
 			Name:     entry.name,
 			Mode:     0o644,
-			Size:     int64(len(entry.body)),
+			Size:     size,
 			Typeflag: entry.typeflag,
 			Linkname: entry.linkname,
 		}
-		if entry.typeflag == tar.TypeDir {
-			header.Size = 0
-		}
-		if entry.typeflag == tar.TypeSymlink || entry.typeflag == tar.TypeChar {
+		if entry.typeflag == tar.TypeDir || entry.typeflag == tar.TypeSymlink || entry.typeflag == tar.TypeChar {
 			header.Size = 0
 		}
 		if err := tarWriter.WriteHeader(header); err != nil {
 			t.Fatalf("cannot write archive header %q: %v", entry.name, err)
 		}
-		if header.Size > 0 {
+		switch {
+		case header.Size == 0:
+		case len(entry.body) > 0:
 			if _, err := tarWriter.Write(entry.body); err != nil {
 				t.Fatalf("cannot write archive member %q: %v", entry.name, err)
+			}
+		default:
+			if _, err := io.CopyN(tarWriter, endlessZeros{}, header.Size); err != nil {
+				t.Fatalf("cannot stream archive member %q: %v", entry.name, err)
 			}
 		}
 	}
@@ -229,4 +241,51 @@ func TestExtract(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestArchiveCeilings is the difference between bounding a download and bounding
+// extraction: a bomb and a member flood are refused before anything is unpacked.
+func TestArchiveCeilings(t *testing.T) {
+	t.Run("an expanded-size bomb is refused", func(t *testing.T) {
+		members := reviewedMembers()
+		// A single member that claims more than the expanded ceiling. The archive
+		// itself stays small, so only the decompressed bound can catch it.
+		members = append(members, member{
+			name:     "package/bomb.bin",
+			typeflag: tar.TypeReg,
+			declared: MaxExpandedBytes + 1,
+		})
+		archive := writeArchive(t, members)
+		pin := archivePin(t, archive, members)
+		_, err := extract(archive, t.TempDir(), pin)
+		if err == nil || err.Error() != "the archive expands past the 536870912 byte ceiling" {
+			t.Fatalf("refusal is %v, want the expanded-size ceiling", err)
+		}
+	})
+	t.Run("a member flood is refused", func(t *testing.T) {
+		members := reviewedMembers()
+		for index := 0; index <= MaxMembers; index++ {
+			members = append(members, regular("package/flood/"+itoa(index), "x"))
+		}
+		archive := writeArchive(t, members)
+		pin := archivePin(t, archive, members)
+		_, err := extract(archive, t.TempDir(), pin)
+		if err == nil || err.Error() != "the archive carries more than 20000 members" {
+			t.Fatalf("refusal is %v, want the member ceiling", err)
+		}
+	})
+	t.Run("the file seam applies the compressed ceiling", func(t *testing.T) {
+		oversized := filepath.Join(t.TempDir(), "oversized.tgz")
+		if err := os.WriteFile(oversized, make([]byte, MaxArchiveBytes+1), 0o600); err != nil {
+			t.Fatalf("cannot write the oversized archive: %v", err)
+		}
+		_, err := readArchiveFile(oversized, "archive")
+		if err == nil || err.Error() != oversized+" is larger than the 67108864 byte ceiling" {
+			t.Fatalf("refusal is %v, want the compressed ceiling", err)
+		}
+	})
+}
+
+func itoa(value int) string {
+	return strconv.Itoa(value)
 }

@@ -102,6 +102,8 @@ func (p *process) dispatch(args []string, env Environment) int {
 		return p.runPnpmBootstrap(args[1:])
 	case "pnpm-verify":
 		return p.runPnpmVerify(args[1:])
+	case "pnpm-extract":
+		return p.runPnpmExtract(args[1:])
 	case "pnpm-pin-version":
 		return p.runPnpmPinVersion(args[1:])
 	case "claude-pin":

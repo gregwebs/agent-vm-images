@@ -141,7 +141,7 @@ func TestVerify(t *testing.T) {
 			if testCase.change != nil {
 				testCase.change(t, staged, target)
 			}
-			err := Verify(target, staged.source)
+			err := Verify(VerifyOptions{Target: target, Source: staged.source, PathIdentity: true})
 			if testCase.want == "" {
 				if err != nil {
 					t.Fatalf("Verify refused the reviewed installation: %v", err)
@@ -178,7 +178,7 @@ func TestVerifyExemptsAFixtureSamefile(t *testing.T) {
 		t.Fatalf("cannot link the fixture launcher: %v", err)
 	}
 	t.Setenv("PATH", shadow+string(os.PathListSeparator)+target.Commands+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := Verify(target, staged.source); err != nil {
+	if err := Verify(VerifyOptions{Target: target, Source: staged.source, PathIdentity: true}); err != nil {
 		t.Fatalf("Verify refused a samefile fixture candidate: %v", err)
 	}
 }
@@ -273,4 +273,69 @@ func copyBytes(t *testing.T, source, destination string, mode os.FileMode) {
 
 func hasPrefix(text, prefix string) bool {
 	return len(text) >= len(prefix) && text[:len(prefix)] == prefix
+}
+
+// TestFirstCandidateEmptyComponents is the identity rule a shell actually applies:
+// an empty PATH entry is the current directory, so a same-version `pnpm` sitting
+// there is the program the image would run.
+func TestFirstCandidateEmptyComponents(t *testing.T) {
+	staged := stageInstall(t)
+	target := staged.installed(t)
+	// The working directory is the fixture root, and it carries a shadow that
+	// reports the same version as the reviewed launcher.
+	shadow := filepath.Join(staged.root, "pnpm")
+	if err := os.WriteFile(shadow, []byte("#!/bin/sh\necho 11.11.0\n"), 0o755); err != nil {
+		t.Fatalf("cannot write the shadow command: %v", err)
+	}
+	t.Chdir(staged.root)
+	installed := target.Commands
+	separator := string(os.PathListSeparator)
+	absent := filepath.Join(staged.root, "absent")
+	cases := []struct {
+		name   string
+		path   string
+		refuse bool
+	}{
+		// Each empty entry sits before the installed directory, so the current
+		// directory is the first place the shell would find the command.
+		{name: "leading empty component", path: separator + installed + separator + os.Getenv("PATH"), refuse: true},
+		{name: "interior empty component", path: absent + separator + separator + installed, refuse: true},
+		{name: "trailing empty component", path: absent + separator, refuse: true},
+		{name: "only the shadow", path: separator, refuse: true},
+		// An empty entry after the installed directory is harmless: the first
+		// candidate is still the installed file.
+		{name: "the installed command first", path: installed + separator + absent + separator, refuse: false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv("PATH", testCase.path)
+			err := Verify(VerifyOptions{Target: target, Source: staged.source, PathIdentity: true})
+			if testCase.refuse {
+				if err == nil || err.Error() != "unexpected first PATH candidate for pnpm" {
+					t.Fatalf("refusal is %v, want the first-candidate rule", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Verify refused an installation whose PATH starts with it: %v", err)
+			}
+		})
+	}
+}
+
+// TestFirstCandidateIsShellResolved pins the spelling too: the candidate for an
+// empty entry is the cwd-relative name, not the absolute one.
+func TestFirstCandidateIsShellResolved(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.WriteFile(filepath.Join(root, "pnpm"), []byte("x"), 0o755); err != nil {
+		t.Fatalf("cannot write the shadow: %v", err)
+	}
+	candidate, found := firstCandidate(string(os.PathListSeparator)+"/usr/bin", "pnpm")
+	if !found {
+		t.Fatal("the empty PATH entry was skipped")
+	}
+	if candidate != "."+string(filepath.Separator)+"pnpm" {
+		t.Fatalf("candidate is %q, want the cwd-relative ./pnpm", candidate)
+	}
 }

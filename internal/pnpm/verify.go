@@ -18,9 +18,27 @@ type Target struct {
 	Prefix   string
 	Commands string
 	Node     string
-	// FixtureRoot is the invocation-owned root a fixture install lives in. Nil
+	// FixtureRoot is the invocation-owned root a fixture install lives in. Empty
 	// means a real image, where the image-owned-uid rule applies.
 	FixtureRoot string
+}
+
+// VerifyOptions is one audit.
+type VerifyOptions struct {
+	Target Target
+	// Source is the read-only mount carrying pin.json and launcher.sh.
+	Source string
+	// PathIdentity requires the first PATH candidate for each published name to be
+	// the installed file. The image certification always asks for it; a caller
+	// that authenticates a tree it holds (the host manager, a project fixture)
+	// asks the same audit without claiming anything about a PATH.
+	PathIdentity bool
+}
+
+// ExplicitTarget builds the target a caller named on the command line, so the
+// same audit can authenticate a tree that is not at the image's fixed paths.
+func ExplicitTarget(prefix, commands, node, fixtureRoot string) Target {
+	return Target{Prefix: prefix, Commands: commands, Node: node, FixtureRoot: fixtureRoot}
 }
 
 // ResolveTarget reads the environment's target: a fixture destination when the
@@ -58,7 +76,9 @@ func ResolveTarget() (Target, error) {
 // walks the physical resolution path of each target -- every intermediate link's
 // target and that target's ancestor chain -- and checks ownership, writability and
 // the readable bits on each component.
-func Verify(target Target, sourceDir string) error {
+func Verify(options VerifyOptions) error {
+	target := options.Target
+	sourceDir := options.Source
 	if sourceDir == "" {
 		sourceDir = SourceDir()
 	}
@@ -99,8 +119,10 @@ func Verify(target Target, sourceDir string) error {
 	if !bytes.Equal(installedLauncher, reviewedLauncher) {
 		return refuseText("pnpm launcher changed")
 	}
-	if err := checkCandidates(target); err != nil {
-		return err
+	if options.PathIdentity {
+		if err := checkCandidates(target); err != nil {
+			return err
+		}
 	}
 	entries, err := distributionEntries(target.Prefix)
 	if err != nil {
@@ -114,7 +136,11 @@ func Verify(target Target, sourceDir string) error {
 	if err != nil {
 		return refuseCause(err)
 	}
-	if launcherInfo.Mode().Perm() != 0o755 {
+	// Exactly 0755, including the special bits: a setuid or setgid launcher would
+	// execute the interpreter with another identity, and 0755 is the mode the
+	// image review signed off on.
+	specials := os.ModeSetuid | os.ModeSetgid | os.ModeSticky
+	if launcherInfo.Mode().Perm() != 0o755 || launcherInfo.Mode()&specials != 0 {
 		return refuseText("launcher mode must be 0755")
 	}
 	return nil
@@ -143,11 +169,11 @@ func checkCandidates(target Target) error {
 		if name == "pnpm" {
 			continue
 		}
+		// A regular file where an alias belongs is refused with the alias rule
+		// rather than as a readlink error: both predecessors said the same thing,
+		// and "this is not the reviewed link" is the fact a reader needs.
 		link, err := os.Readlink(first)
-		if err != nil {
-			return refuseCause(err)
-		}
-		if link != "pnpm" {
+		if err != nil || link != "pnpm" {
 			return refuseText("alias must link relatively to pnpm")
 		}
 	}
@@ -155,14 +181,20 @@ func checkCandidates(target Target) error {
 }
 
 // firstCandidate is the first PATH entry that names the command. Existence is
-// lstat existence, so a dangling link is a candidate rather than a skip: the
-// image would try to run it.
+// lstat existence, so a dangling link is a candidate rather than a skip: the image
+// would try to run it.
+//
+// An empty PATH component means the current directory — `PATH=:/usr/bin` resolves
+// `pnpm` to `./pnpm` — so it is searched like any other, and the candidate is
+// spelled relative to the cwd. That is the rule the image's identity boundary
+// rests on: a same-version `pnpm` in the working directory is a different program,
+// and skipping the entry would certify it.
 func firstCandidate(pathVariable, name string) (string, bool) {
 	for _, directory := range filepath.SplitList(pathVariable) {
-		if directory == "" {
-			continue
-		}
 		candidate := filepath.Join(directory, name)
+		if directory == "" {
+			candidate = "." + string(filepath.Separator) + name
+		}
 		if _, err := os.Lstat(candidate); err == nil {
 			return candidate, true
 		}

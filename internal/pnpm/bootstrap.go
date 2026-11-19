@@ -107,24 +107,133 @@ func publicationTargets(fixture string) (prefix, commands string, production boo
 
 // archivePayload is the bytes the pin authenticates: the named fixture archive
 // when the caller supplied one, otherwise the pinned URL through internal/fetch.
+//
+// The download uses internal/fetch's reviewed policy -- six attempts, 300 seconds
+// each -- rather than the deleted `curl` invocation's own flags. ADR 0017 gives
+// that package the repository's single retry policy, so this program does not get
+// private numbers; the consequence is a longer worst case for an unreachable
+// registry, and it is the one budget every installer here shares.
 func archivePayload(ctx context.Context, options Options, pin Pin) ([]byte, error) {
-	if options.FixtureArchive == "" {
+	if options.FixtureArchive != "" {
+		return readArchiveFile(options.FixtureArchive, "fixture archive")
+	}
+	client := options.Fetch
+	if client == nil {
+		client = fetch.New()
+	}
+	return client.Get(ctx, pin.URL, MaxArchiveBytes)
+}
+
+// readArchiveFile is the file seam both the harness and the host acquisition use.
+// It applies the same compressed ceiling the download does, so a file cannot be
+// handed bytes the reviewed contract would refuse over the network, and it
+// requires an absolute path: a relative one would name a different file for this
+// program than for the caller.
+func readArchiveFile(path, label string) ([]byte, error) {
+	if !filepath.IsAbs(path) {
+		return nil, refuseText(label + " must be an absolute path: " + path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		// A missing or unreadable archive is a refusal like any other, and it
+		// leaves no destination behind.
+		return nil, refuseCause(err)
+	}
+	if info.Size() > MaxArchiveBytes {
+		return nil, refuse("%s is larger than the %d byte ceiling", path, MaxArchiveBytes)
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return nil, refuseCause(err)
+	}
+	return payload, nil
+}
+
+// ExtractOptions is one host-side acquisition of the reviewed distribution: bytes
+// the caller already holds, or the pin's own URL, authenticated and unpacked
+// without the image's publication layout.
+type ExtractOptions struct {
+	Source string
+	// Archive is an absolute file to authenticate instead of downloading. It is
+	// how a suite proves the ordering without a network, and how a maintainer
+	// authenticates an archive they fetched themselves.
+	Archive string
+	// Download fetches the pin's URL through internal/fetch.
+	Download    bool
+	Destination string
+	Fetch       *fetch.Client
+}
+
+// Unpacked is one authenticated archive.
+type Unpacked struct {
+	Archive string
+	Package string
+}
+
+// Extract authenticates the pinned archive and unpacks it under Destination.
+//
+// This is the acquisition boundary the host maintenance path needs, and it is the
+// same code the image build runs: one pin validation, one SHA-512 comparison, one
+// member inventory and one package check, so a host cannot execute a distribution
+// selected under rules the image would refuse.
+func Extract(ctx context.Context, options ExtractOptions) (Unpacked, error) {
+	source := options.Source
+	if source == "" {
+		source = SourceDir()
+	}
+	pin, err := LoadPin(filepath.Join(source, "pin.json"))
+	if err != nil {
+		return Unpacked{}, err
+	}
+	destination := options.Destination
+	if !filepath.IsAbs(destination) {
+		return Unpacked{}, refuseText("destination must be an absolute path: " + destination)
+	}
+	info, err := os.Stat(destination)
+	if err != nil {
+		return Unpacked{}, refuseCause(err)
+	}
+	if !info.IsDir() {
+		return Unpacked{}, refuseText("destination is not a directory: " + destination)
+	}
+	packageDir := filepath.Join(destination, "package")
+	if _, err := os.Lstat(packageDir); err == nil {
+		return Unpacked{}, refuseText("destination already carries a package: " + destination)
+	}
+	archive := filepath.Join(destination, "pnpm.tgz")
+	var payload []byte
+	switch {
+	case options.Download && options.Archive != "":
+		return Unpacked{}, refuseText("--download and --archive are exclusive")
+	case options.Download:
 		client := options.Fetch
 		if client == nil {
 			client = fetch.New()
 		}
-		return client.Get(ctx, pin.URL, MaxArchiveBytes)
+		payload, err = client.Get(ctx, pin.URL, MaxArchiveBytes)
+		if err != nil {
+			return Unpacked{}, err
+		}
+		if err := os.WriteFile(archive, payload, 0o600); err != nil {
+			return Unpacked{}, refuseCause(err)
+		}
+	case options.Archive != "":
+		payload, err = readArchiveFile(options.Archive, "archive")
+		if err != nil {
+			return Unpacked{}, err
+		}
+		archive = options.Archive
+	default:
+		return Unpacked{}, refuseText("one of --download or --archive is required")
 	}
-	if !filepath.IsAbs(options.FixtureArchive) {
-		return nil, refuseText("fixture archive must be an absolute path: " + options.FixtureArchive)
+	if actual := Sum512(payload); actual != pin.SHA512 {
+		return Unpacked{}, refuseText("archive SHA-512 mismatch")
 	}
-	payload, err := os.ReadFile(options.FixtureArchive)
+	packageDir, err = extract(archive, destination, pin)
 	if err != nil {
-		// A missing or unreadable fixture archive is the hermetic stand-in for a
-		// failed download, and it is a refusal like any other.
-		return nil, refuseCause(err)
+		return Unpacked{}, err
 	}
-	return payload, nil
+	return Unpacked{Archive: archive, Package: packageDir}, nil
 }
 
 // publish copies the authenticated tree into the image root and normalizes what
