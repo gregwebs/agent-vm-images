@@ -92,7 +92,9 @@ CONTRACT=$(python3 "$PROJECT" contract-dir "$PREFIX") || exit 1
 [ -x "$CONTRACT/recipe-contract" ] || fail "no executable recipe-contract in $CONTRACT"
 
 # The base pin is read by the composed helper, never by a program in the pin
-# directory: images/pnpm/ carries reviewed inputs only (ADR 0017).
+# directory: images/pnpm/ carries the reviewed pin with the launcher and the two
+# shell entry points a recipe installs or mounts, and the reader is the
+# `pnpm-pin-version` subcommand (ADR 0017).
 base_pnpm=$("$CONTRACT/recipe-contract" pnpm-pin-version "$base_pin") || fail 'cannot read the base pin'
 [ "$base_pnpm" = '11.11.0' ] || fail "unsupported base manager selection: $base_pnpm"
 [ -z "$PNPM_VERSION" ] || [ "$PNPM_VERSION" = "$base_pnpm" ] ||

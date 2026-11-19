@@ -65,9 +65,13 @@ for new ports.
 
 **Conventions for new commands.** Arguments are parsed with go-arg and logs go
 through slog, vendored like `yaml/v3`. Every HTTP client goes through
-failsafe-go behind one internal package that checks status codes. Build
-helpers make no network requests; `download.sh` stays the only download path
-during a build.
+failsafe-go behind one internal package that checks status codes, and an
+installer fetches exactly the URL its pin names through it — never a mirror, a
+dist-tag or a second origin. A helper that is not an installer makes no network
+requests at all, and `download.sh` stays the only path for the evidence and
+archives a build downloads beside its pins. The pnpm bootstrap is an installer
+that runs during the base build: it fetches the one archive its pin names, so
+this rule names it instead of exempting it silently.
 
 **Order.**
 
@@ -111,18 +115,33 @@ run) and `write-installer-fixture --tool codex`, which its hook and
 vendored-installer suites mount and `script/test/agent-versions.sh` serves from.
 
 **The pnpm bootstrap is Go.** `recipe-contract pnpm-bootstrap|pnpm-verify|
-pnpm-pin-version` replace `images/pnpm/{bootstrap,verify,read-pin-version}.py`,
-which are deleted; `images/install-pnpm.sh` and `images/pnpm/verify-pnpm.sh` stay
-as the entry points the base image mounts, and `images/pnpm/` keeps reviewed
-inputs only (the pin, the launcher, the version check). The download goes through
-`internal/fetch`, so the hermetic suite cannot shim a downloader onto PATH any
-more: `pnpm-bootstrap --fixture-archive ABSOLUTE_PATH` names the bytes it would
-have fetched, and an unreadable fixture archive stands in for a transport
-failure. The certification the shell entry point used to spell out (the exact
-report, the exec-target access audit, the five policy defaults) is
-`pnpm-verify --certify`, because its `pnpm: …` diagnostics are quoted in
-documentation and read in build logs; bare `pnpm-verify` is the distribution
-audit the dsh hook re-runs around its own health gate.
+pnpm-extract|pnpm-pin-version` replace
+`images/pnpm/{bootstrap,verify,read-pin-version}.py`, which are deleted.
+`images/pnpm/` keeps its reviewed inputs plus what the recipes actually install
+and run from it: `launcher.sh` is installed as `/usr/local/bin/pnpm`,
+`node-version-check.js` is executed once by the bootstrap, and
+`verify-pnpm.sh` is the entry point the recipes mount. `images/install-pnpm.sh`
+and `images/pnpm/verify-pnpm.sh` stay shell as those entry points, resolving
+`RECIPE_CONTRACT_HELPER`, then `AGENT_VM_CONTRACT_DIR`, then the fixed build
+mount.
+
+The bootstrap is an installer: it fetches the pinned archive through
+`internal/fetch` and nothing else. That means the hermetic suite cannot shim a
+downloader onto PATH any more, so `pnpm-bootstrap --fixture-archive
+ABSOLUTE_PATH` names the bytes it would have fetched, and the download branch
+itself — statuses, retries, ceiling — is proved by driving a fake transport
+through the real client. An unreadable fixture archive is a refusal that leaves
+no destination behind, which is the case the harness names.
+
+The certification the shell entry point used to spell out (the exact report, the
+exec-target access audit, the five policy defaults) is `pnpm-verify --certify`,
+because its `pnpm: …` diagnostics are quoted in documentation and read in build
+logs; a child that fails keeps its own status and stderr. Bare `pnpm-verify` is
+the distribution audit the dsh hook re-runs around its own health gate, and the
+same verb over `--prefix/--commands/--node/--source/--fixture-root` is what the
+host manager authenticates with, so host maintenance has no second copy of the
+pin, digest, member or package rules. `pnpm-extract` is that host acquisition
+boundary.
 
 ## Considered options
 

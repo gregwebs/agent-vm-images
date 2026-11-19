@@ -9171,16 +9171,19 @@ fn base_pnpm_pin_and_launcher_ownership() {
     assert!(
         launcher.contains("pnx|pnpx) exec /usr/bin/node /opt/agent-vm/pnpm/bin/pnpx.mjs \"$@\"")
     );
-    // The pin directory holds reviewed inputs, not programs: the bootstrap, the
-    // certification and the version reader are `recipe-contract` subcommands
-    // (`internal/pnpm`, #183), so the only program that stays here is the shared
-    // launcher whose bytes the certification compares. A file reappearing in this
-    // list is the regression this pins down.
+    // The pin directory carries reviewed inputs and the two things a recipe
+    // installs or runs from it: `launcher.sh` (installed as /usr/local/bin/pnpm),
+    // `verify-pnpm.sh` (the entry point the recipes mount) and
+    // `node-version-check.js` (run once by the bootstrap). The bootstrap, the
+    // certification, the host extraction and the version reader are
+    // `recipe-contract` subcommands (`internal/pnpm`, #183). A file appearing in
+    // this list is a reviewed change to what the base image installs or runs, which
+    // is what this asserts.
     //
-    // The "never edits upstream bytes" rule those sources used to be scanned for
-    // is now proved where it runs: `internal/pnpm`'s bootstrap tests and the
-    // harness's `valid` case compare the published distribution with the archive
-    // members byte for byte.
+    // The "never edits upstream bytes" rule is proved where the bootstrap runs:
+    // `internal/pnpm`'s publication test compares every published regular file with
+    // the authenticated archive member, and `script/test/install-pnpm.py`'s `valid`
+    // case compares the whole published inventory.
     let mut base_pnpm_files: Vec<String> = std::fs::read_dir(repo_path("images/pnpm"))
         .expect("the base pnpm directory")
         .map(|entry| {
