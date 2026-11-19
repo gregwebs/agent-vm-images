@@ -65,13 +65,25 @@ for new ports.
 
 **Conventions for new commands.** Arguments are parsed with go-arg and logs go
 through slog, vendored like `yaml/v3`. Every HTTP client goes through
-failsafe-go behind one internal package that checks status codes, and an
-installer fetches exactly the URL its pin names through it — never a mirror, a
-dist-tag or a second origin. A helper that is not an installer makes no network
-requests at all, and `download.sh` stays the only path for the evidence and
-archives a build downloads beside its pins. The pnpm bootstrap is an installer
-that runs during the base build: it fetches the one archive its pin names, so
-this rule names it instead of exempting it silently.
+failsafe-go behind one internal package that checks status codes.
+
+**Who may reach the network.** These rules are about *recipes*: the
+`install-*.sh` and `verify-*.sh` entry points and the `recipe-contract`
+subcommands they run. An installer fetches exactly the URL its pin names
+through `internal/fetch` — never a mirror, a dist-tag or a second origin — and
+`download.sh` stays the only path for the evidence and archives a build
+downloads beside its pins. A helper that is not an installer makes no network
+request at all. The pnpm bootstrap is an installer that runs during the base
+build and `pnpm-extract` is one that runs on a developer host: both fetch the
+single archive their pin names (or take bytes a caller already holds), so this
+rule names them rather than exempting them silently.
+
+Maintainer programs are not covered by that sentence and are not meant to be.
+`avm-pin`, `avm-release`, `avm-ci` and `avm-test` talk to the network as their
+subject: a pin writer has to fetch the upstream bytes it is pinning, and a
+reader that cannot reach them can still check what is committed. They go
+through the same `internal/fetch`, and the distinction that matters is what a
+*recipe* is allowed to do, not what a maintainer command is for.
 
 **Order.**
 
@@ -141,7 +153,9 @@ the distribution audit the dsh hook re-runs around its own health gate, and the
 same verb over `--prefix/--commands/--node/--source/--fixture-root` is what the
 host manager authenticates with, so host maintenance has no second copy of the
 pin, digest, member or package rules. `pnpm-extract` is that host acquisition
-boundary.
+boundary, and it is an installer for the purpose above: with `--download` it
+fetches the pin's own URL through `internal/fetch`, and with `--archive` it
+authenticates bytes the caller already holds. Neither path skips the pin.
 
 ## Considered options
 
