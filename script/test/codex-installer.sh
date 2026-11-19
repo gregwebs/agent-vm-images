@@ -7,9 +7,9 @@
 # the real run-install/report/check-tool-access helpers are used where they are
 # part of what is under test. The hook's committed-pin gate runs the REAL reader
 # (`recipe-contract codex-pin`, ADR 0017) against a synthetic closure written by
-# `script/test/codex-pins.py --write-fixture`, so an exact-but-unpinned release is
-# proved to be refused before the vendor is ever invoked. This exercises the
-# exact `rust-v` validation, the pin authority, the classified transport
+# `script/dev/avm-test.sh write-fixture --tool codex`, so an exact-but-unpinned
+# release is proved to be refused before the vendor is ever invoked. This exercises
+# the exact `rust-v` validation, the pin authority, the classified transport
 # softening (and every way it must NOT soften), and the report/T5 gate.
 set -euo pipefail
 
@@ -34,8 +34,8 @@ CASE=""
 # case gets its own copy of a valid closure so a case can corrupt it in place.
 write_pin_dir() { # $1 dir, $2 release
     mkdir -p "$1"
-    python3 "$REPO_ROOT/script/test/codex-pins.py" --write-fixture "$1" --release "$2" \
-        >/dev/null
+    bash "$REPO_ROOT/script/dev/avm-test.sh" write-fixture --tool codex --dir "$1" \
+        --version "$2" >/dev/null
 }
 SHARED_SOURCE="$TEST_ROOT/shared-source"
 write_pin_dir "$SHARED_SOURCE" rust-v0.159.3

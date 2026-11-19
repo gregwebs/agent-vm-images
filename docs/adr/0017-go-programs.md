@@ -105,7 +105,10 @@ from both, so the bytes the bumper is driven with are the ones the suite holds a
 writer to — not a hand-written lookalike. The Claude suite's `keygen`, `elf`,
 `closure` and `two-primaries` verbs are the same builder its cases call, so
 `script/test/claude-installer.sh` and `script/test/vendored-installers.sh` need no
-Python fixture either.
+Python fixture either. The Codex suite adds `write-fixture --tool codex` (a
+synthetic closure, because a fixture's evidence cannot come from a real cosign
+run) and `write-installer-fixture --tool codex`, which its hook and
+vendored-installer suites mount and `script/test/agent-versions.sh` serves from.
 
 ## Considered options
 

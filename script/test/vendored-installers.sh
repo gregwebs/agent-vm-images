@@ -548,8 +548,8 @@ SH
 codex_fixture() { # $1 out dir, $2 release, $3 target, $4 native body, rest: extra
     local out=$1 release=$2 target=$3 body=$4
     shift 4
-    python3 "$REPO_ROOT/script/test/codex-pins.py" --write-installer-fixture "$out" \
-        --release "$release" --target "$target" --native-script "$body" "$@" >/dev/null
+    bash "$REPO_ROOT/script/dev/avm-test.sh" write-installer-fixture --tool codex \
+        --dir "$out" --release "$release" --target "$target" --native-script "$body" "$@" >/dev/null
 }
 
 new_codex_case() { # $1 name, $2 uname arch, $3 release, $4 native exit, $5 hang

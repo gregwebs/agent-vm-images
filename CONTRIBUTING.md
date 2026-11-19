@@ -390,6 +390,17 @@ bash script/build/agent-versions.sh --write --cosign /abs/cosign
   `script/test/fixtures/installer-egress/selections.tsv` and review it. The tool
   deliberately does not edit that file, and there is no alternate Codex selection
   (the column is `-`): an arbitrary exact Codex version is not installable.
+- The suite is `go test ./script/test/pinsuite/codex`. Its fixture builders are
+  also commands, and both are the builders the cases call:
+  `bash script/dev/avm-test.sh write-fixture --tool codex --dir /abs/DIR
+  [--version rust-v0.163.0]` writes the committed-shape closure
+  `script/test/codex-installer.sh` mounts, and `write-installer-fixture --tool
+  codex --dir /abs/DIR --release rust-v0.163.0 --target TRIPLE --native-script
+  /abs/FILE [--package-version V] [--package-target TRIPLE]` writes the closure,
+  the six upstream documents, the selected `archive.tgz` and the served tree the
+  hook, bumper and vendored-installer suites consume. Every path must be absolute
+  (the wrapper runs from the checkout) and every triple is validated against the
+  two maintained ones.
 - Native evidence is mandatory and is not replaced by fixtures:
   `bash script/test/shipped-installer-network.sh agent-vm-base:local --platform linux/<arch> --tool codex`
   plus the full strict run, and the standard-image audits, on native amd64 **and**

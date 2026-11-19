@@ -255,8 +255,8 @@ reset_fixture() {
     # The committed OLD closure plus the fixture's own writer entry point.
     mkdir -p "$FIXTURE_ROOT/images/tools/codex" "$FIXTURE_ROOT/script/dev"
     codex_native_body_file "$FIXTURE_OLD_CODEX" "$CASE/native-committed.sh"
-    python3 "$REPO_ROOT/script/test/codex-pins.py" --write-installer-fixture \
-        "$CASE/codex-committed" --release "$FIXTURE_OLD_CODEX" \
+    bash "$REPO_ROOT/script/dev/avm-test.sh" write-installer-fixture --tool codex \
+        --dir "$CASE/codex-committed" --release "$FIXTURE_OLD_CODEX" \
         --target x86_64-unknown-linux-musl \
         --native-script "$CASE/native-committed.sh" >/dev/null
     cp "$CASE/codex-committed/source/pin.json" "$FIXTURE_ROOT/images/tools/codex/"
@@ -348,8 +348,8 @@ write_codex_assets() { # $1 release, [$2 native body file]
         codex_native_body_file "$release" "$CASE/codex-native.sh"
         body="$CASE/codex-native.sh"
     fi
-    python3 "$REPO_ROOT/script/test/codex-pins.py" --write-installer-fixture "$dir" \
-        --release "$release" --target x86_64-unknown-linux-musl \
+    bash "$REPO_ROOT/script/dev/avm-test.sh" write-installer-fixture --tool codex \
+        --dir "$dir" --release "$release" --target x86_64-unknown-linux-musl \
         --native-script "$body" >/dev/null
     rm -rf "$CASE/codex-upstream"
     cp -R "$dir/upstream" "$CASE/codex-upstream"
