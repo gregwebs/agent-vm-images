@@ -110,6 +110,20 @@ synthetic closure, because a fixture's evidence cannot come from a real cosign
 run) and `write-installer-fixture --tool codex`, which its hook and
 vendored-installer suites mount and `script/test/agent-versions.sh` serves from.
 
+**The pnpm bootstrap is Go.** `recipe-contract pnpm-bootstrap|pnpm-verify|
+pnpm-pin-version` replace `images/pnpm/{bootstrap,verify,read-pin-version}.py`,
+which are deleted; `images/install-pnpm.sh` and `images/pnpm/verify-pnpm.sh` stay
+as the entry points the base image mounts, and `images/pnpm/` keeps reviewed
+inputs only (the pin, the launcher, the version check). The download goes through
+`internal/fetch`, so the hermetic suite cannot shim a downloader onto PATH any
+more: `pnpm-bootstrap --fixture-archive ABSOLUTE_PATH` names the bytes it would
+have fetched, and an unreadable fixture archive stands in for a transport
+failure. The certification the shell entry point used to spell out (the exact
+report, the exec-target access audit, the five policy defaults) is
+`pnpm-verify --certify`, because its `pnpm: …` diagnostics are quoted in
+documentation and read in build logs; bare `pnpm-verify` is the distribution
+audit the dsh hook re-runs around its own health gate.
+
 ## Considered options
 
 - **Keep ADR 0004's byte parity.** Rejected: it cost a 213-vector differential
