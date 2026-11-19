@@ -65,61 +65,49 @@ for new ports.
 
 **Conventions for new commands.** Arguments are parsed with go-arg and logs go
 through slog, vendored like `yaml/v3`. Every HTTP client goes through
-failsafe-go behind one internal package that checks status codes.
+failsafe-go behind one internal package that checks status codes; a readiness
+probe talking to its own loopback server is not a client of that package.
 
-**Build egress.** This section is a rule for the programs this port moves to
-Go, not a description of the repository today; the order list below is the
-schedule for the rest. A Go program that acquires bytes does so through
-`internal/fetch`, which owns the retry and status policy and the redirect
-allowlist. It fetches only the URLs its pin names — never a URL composed from a
-version, a mirror or a dist-tag — and a program that acquires nothing fetches
-nothing. The pnpm bootstrap and `pnpm-extract` are named here because they are
-the two that acquire today: the bootstrap fetches the one archive its pin names
-during the base build, and `pnpm-extract` either fetches that same URL
-(`--download`) or authenticates bytes a caller already holds (`--archive`),
-comparing the SHA-512 against the pin on both paths. "Build helper" and "pin
-writer" mean what [`CONTEXT.md`](../../CONTEXT.md) says; "network request" there
-means something else entirely — a TLS destination the finished image contacts at
-runtime — and this section is not about those.
+**Build egress.** A `recipe-contract` subcommand that acquires bytes, whoever
+invokes it, does so through `internal/fetch`, which owns the retry, status and
+redirect policy, and fetches only the URLs its pin names — never a URL composed
+from a version, a mirror or a dist-tag. A subcommand that acquires nothing
+fetches nothing. That describes `install-artifact`, `pnpm-bootstrap` and
+`pnpm-extract` today, and it is what a newly ported program follows.
 
-Four kinds of build traffic are deliberately outside that rule, and naming them
-is the point:
+The rest of the build's egress is one of four things, each decided by its own
+ticket rather than by this sentence, and named here so that a reader does not go
+looking for a violation:
 
-- **A package manager resolving its own graph** is its own transport, and the
-  lockfile is the pin. `pnpm install --frozen-lockfile`, `npm install -g
-  <pkg>@<version>`, `apt-get` (a [Floating distro
-  input](../../CONTEXT.md)) and a `FROM` pull are the pinning mechanisms for
-  those inputs; routing them through `internal/fetch` would defeat what the
-  lockfile proves.
-- **A build-time lock or project preparation** that must ask the registry what a
-  dist-tag resolves to before it writes a lock is the one place a version
-  becomes a URL; `prepare-lock.sh` and `prepare-project.py` do this, and they
-  belong to the install they prepare.
-- **A readiness probe** speaks HTTP to a server the program itself started on
-  the loopback interface. That is not a fetch and has no pin: the token in the
-  URL is what proves the identity of the child, so the probe for dsh and the
-  probe for OpenCode keep doing it.
-- **The example layers** are self-contained by decision (see below) and cannot
-  import `./internal`, so their `install-*.sh` use `download.sh` and `curl`.
+- **A package manager resolving its own graph.** `pnpm install
+  --frozen-lockfile`, `npm install -g <pkg>@<version>`, `apt-get` (a [Floating
+  distro input](../../CONTEXT.md)) and a `FROM` pull use the tool's own
+  transport. Whether that input is pinned is a question about that tool's
+  mechanism — a lockfile where there is one, a digest where there is one — and
+  not something `internal/fetch` can supply. Where none exists yet, as with
+  `install-copilot.sh`, that is a pinning gap tracked on its own.
+- **A build step from before this port** that still downloads with
+  `download.sh` or `curl`: the vendored Claude, Codex and OpenCode installers,
+  Pi, `install-zellij.sh`, and the example layers. The order list replaces what
+  can be replaced. A vendored upstream script stays vendored, and the example
+  layers stay self-contained, so not all of these become Go.
+- **A readiness probe** speaking HTTP to a server the program itself started on
+  the loopback interface. That is not a fetch and has no pin.
+- **A maintainer program.** A *pin writer* fetches the upstream bytes it is
+  pinning — that is its subject, not a side effect — and the bump scripts
+  resolve dist-tags with `curl`, `npm view` and `pnpm view`. They do not all use
+  `internal/fetch`: `avm-pin` shells to `gh attestation download` and `cosign
+  verify-blob`, which carry their own transports. What bounds them is review of
+  their diff, not this rule. `avm-test` is offline by construction — it writes
+  fixture files from file trees and publishes nothing remotely — and
+  `avm-release` and `avm-ci` do not exist yet (order step 5).
 
-**What still predates the rule.** Most recipe installers do not fetch through
-`internal/fetch` yet, and the port replaces them one ticket at a time: the
-vendored Claude, Codex and OpenCode installers and Pi download through
-`download.sh`, `install-zellij.sh` calls `curl` directly, `install-copilot.sh`
-runs `npm install -g`, and the pnpm consumers fetch their locked graphs with
-`pnpm install --frozen-lockfile`. `download.sh` therefore remains the path for
-the shell recipes that have not been ported; when a recipe becomes Go, its
-fetch moves to `internal/fetch` and its `download.sh` call goes away.
-
-**Maintainer programs are out of scope, on purpose.** A *pin writer* fetches the
-upstream bytes it is pinning — that is its subject, not a side effect — and the
-bump scripts resolve dist-tags with `curl`, `npm view` and `pnpm view`. They do
-not all use `internal/fetch` today: `avm-pin` shells to `gh attestation
-download` and `cosign verify-blob`, which carry their own transports. What
-bounds a maintainer program's access is review of its diff, not this rule.
-`avm-test` is offline by construction — it writes fixtures from file trees and
-publishes nothing — and `avm-release` and `avm-ci` do not exist yet (order step
-5).
+**Known gap.** `install-artifact` runs `gh attestation verify --bundle` without
+`--custom-trusted-root`, so `gh` refreshes the Sigstore trusted root over its own
+transport: a build-time fetch from URLs no pin names, outside `internal/fetch`.
+The build is therefore not hermetic in that step, and `install.go`'s comment that
+`--bundle` reads only the committed bytes is wrong. Pinning a trusted root and
+passing it explicitly is [#215](https://github.com/gregwebs/agent-vm-images/issues/215).
 
 **Order.**
 
@@ -149,7 +137,7 @@ because the wrappers `cd` to their own checkout first.
 
 A suite that needs synthetic release bytes shares its builder with the suites
 above it through `avm-test`, which the shell suites reach at
-`script/dev/avm-test.sh`. `write-fixture --tool agy` publishes one release with the
+`script/dev/avm-test.sh`. `write-fixture --tool agy` writes one staged release through the
 real writer and copies the closure out; `write-fixture --tool claude` synthesizes a
 committed-shape closure instead, because a fixture closure is signed by a throwaway
 key the review has never seen. `script/test/agent-versions.sh` feeds its bumper
@@ -189,7 +177,7 @@ the distribution audit the dsh hook re-runs around its own health gate, and the
 same verb over `--prefix/--commands/--node/--source/--fixture-root` is what the
 host manager authenticates with, so host maintenance has no second copy of the
 pin, digest, member or package rules. `pnpm-extract` is that host acquisition
-boundary, and it is an installer for the purpose above: with `--download` it
+boundary, and it is in scope of build egress above: with `--download` it
 fetches the pin's own URL through `internal/fetch`, and with `--archive` it
 authenticates bytes the caller already holds. Neither path skips the pin.
 
