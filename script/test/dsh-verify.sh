@@ -640,6 +640,29 @@ leftover=$(find "$CASE/home/scratch" -mindepth 1 | sed -n '1p')
 
 [[ -z "$(find "$CASE/exec-temp" -mindepth 1 -print -quit)" ]] || fail 'interrupt leaked private exec TMPDIR'
 
+# A signal that lands while the group is being emptied is an interruption too. The
+# child ignores TERM, so the driver sits in its escalation with nothing to do but wait;
+# a SIGTERM then must be reported (143) and must still leave no scratch behind. Without
+# the poll the driver would finish the escalation and report the run as a pass.
+new_case probe-interrupt-teardown
+stage_prefix
+probe_argv 10 5
+probe_env ignore-term
+set +e
+env -i "${PROBE_ENV[@]}" "$PROBE_HELPER" dsh-probe --source "$SOURCE_DIR" \
+    --fixture-exec-tmpdir "$CASE/exec-temp" "${PROBE_CHILD_ENV[@]}" "${PROBE_ARGS[@]}" \
+    >"$CASE/probe.log" 2>&1 &
+probe_pid=$!
+sleep 1
+kill -TERM "$probe_pid" 2>/dev/null || true
+wait "$probe_pid"
+PROBE_STATUS=$?
+set -e
+[[ $PROBE_STATUS -eq 143 ]] || fail "a signal during teardown must exit 143 (got $PROBE_STATUS: $(cat "$CASE/probe.log"))"
+leftover=$(find "$CASE/home/scratch" -mindepth 1 | sed -n '1p')
+[[ -z "$leftover" ]] || fail "an interrupted teardown leaked scratch: $leftover"
+[[ -z "$(find "$CASE/exec-temp" -mindepth 1 -print -quit)" ]] || fail 'an interrupted teardown leaked the exec TMPDIR'
+
 new_case probe-temp-escape
 stage_prefix
 probe_argv 10 ''

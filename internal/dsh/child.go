@@ -9,32 +9,41 @@ import (
 	"syscall"
 )
 
-// fileExists reports presence only. A dangling symlink is present, which is what
-// `[ -f ]`/`[ -e ]` in the retired shells distinguished per site.
-func fileExists(path string) bool {
-	_, err := os.Lstat(path)
+// pathExists is `[ -e ]`: it follows a symlink, so a dangling link is absent.
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
 	return err == nil
 }
 
-// executableFile is the `[ -x ]` test: a regular file the caller may execute.
+// regularFile is `[ -f ]`: a regular file, reached through any symlink chain.
+func regularFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+// executableFile is `[ -x ]` for the one shape every call site means: a regular
+// file some uid may execute. It follows symlinks, and it is stricter than the shell
+// test in exactly one way -- `[ -x ]` is also true for a directory, which no call
+// site here could use.
 func executableFile(path string) bool {
-	info, err := os.Lstat(path)
+	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() {
 		return false
 	}
 	return info.Mode().Perm()&0o111 != 0
 }
 
-// pathCandidate is the first PATH entry that holds name, with the lstat semantics
-// `command -v` and `run-report.sh` use: a present-but-unusable candidate is the
-// one found, never skipped in favour of a later executable.
+// pathCandidate is the first PATH entry `command -v` would accept: the file exists
+// once symlinks are followed and someone may execute it. `run-report.sh` resolves
+// with lstat semantics of its own because it must report a present-but-unusable
+// candidate instead of skipping to a later one; that rule stays in the shell.
 func pathCandidate(name string) (string, bool) {
 	for _, directory := range filepath.SplitList(os.Getenv("PATH")) {
 		if directory == "" {
 			directory = "."
 		}
 		candidate := filepath.Join(directory, name)
-		if fileExists(candidate) {
+		if executableFile(candidate) {
 			return candidate, true
 		}
 	}
@@ -51,12 +60,7 @@ func hasDotComponent(value string) bool {
 }
 
 // signalNumber reads the terminating signal out of a wait status.
-func signalNumber(status any) int {
-	if wait, ok := status.(syscall.WaitStatus); ok {
-		return int(wait.Signal())
-	}
-	return 0
-}
+func signalNumber(wait syscall.WaitStatus) int { return int(wait.Signal()) }
 
 // firstLine is `sed -n 1p`.
 func firstLine(text string) string {
@@ -64,6 +68,18 @@ func firstLine(text string) string {
 		return text[:index]
 	}
 	return text
+}
+
+// refuseRuntimeInjection rejects a Node preload or an injected module path, which
+// would make every later check untrustworthy, before any Node process starts. The
+// prefix is the caller's own header: the gate indents its lines under `dsh: `.
+func refuseRuntimeInjection(prefix string) error {
+	for _, key := range []string{"NODE_OPTIONS", "NODE_PATH", "BUN_OPTIONS"} {
+		if os.Getenv(key) != "" {
+			return refusal(prefix + key + " is not supported")
+		}
+	}
+	return nil
 }
 
 // say writes one progress or diagnostic line. A write failure on the caller's own

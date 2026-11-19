@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"math"
 	"strconv"
 	"strings"
 	"syscall"
@@ -266,7 +267,7 @@ func (p *process) runDshProbe(args []string) int {
 		if usage.Source != "" || usage.Prefix != "" || usage.Command != "" || usage.ScratchRoot != "" ||
 			usage.ReadinessSeconds != "" || usage.EscalationSeconds != "" ||
 			len(usage.FixtureChildEnv) > 0 || usage.FixtureExecTmp != "" {
-			return p.stderrStatus(2, dshProbeUsageText)
+			return p.stderrStatus(2, dshProbeDiagnostics.Usage+dshProbeUsageText+"\n")
 		}
 		if err := dsh.SelfTest(); err != nil {
 			return p.dshFailure(dshProbeDiagnostics, err)
@@ -274,7 +275,7 @@ func (p *process) runDshProbe(args []string) int {
 		return p.stdoutStatus("probe-dsh: ownership degradation self-test PASS\n")
 	}
 	if usage.Source == "" || usage.Prefix == "" || usage.Command == "" || usage.ScratchRoot == "" {
-		return p.stderrStatus(2, dshProbeUsageText)
+		return p.stderrStatus(2, dshProbeDiagnostics.Usage+dshProbeUsageText+"\n")
 	}
 	options := dsh.ProbeOptions{
 		Source:            usage.Source,
@@ -297,6 +298,8 @@ func (p *process) runDshProbe(args []string) int {
 	return p.stdoutStatus(string(report))
 }
 
+const probeBoundText = "probe bounds must be positive and at most the production deadline"
+
 // probeBound parses one optional seconds bound. Nil means "keep the production
 // value"; a named bound must be positive and no longer than the production
 // deadline, so a caller cannot buy a slower gate.
@@ -305,19 +308,22 @@ func probeBound(text string) (*time.Duration, error) {
 		return nil, nil
 	}
 	seconds, err := strconv.ParseFloat(text, 64)
-	if err != nil {
-		return nil, &dsh.Usage{Text: "probe bounds must be positive and at most the production deadline"}
+	// NaN and both infinities parse, and every comparison against NaN is false, so a
+	// finiteness test is what keeps a bound the deadline arithmetic cannot express from
+	// passing as "positive and small enough".
+	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return nil, &dsh.Usage{Text: probeBoundText}
 	}
 	bound := time.Duration(seconds * float64(time.Second))
 	if seconds <= 0 || bound > dsh.DefaultReadiness {
-		return nil, &dsh.Usage{Text: "probe bounds must be positive and at most the production deadline"}
+		return nil, &dsh.Usage{Text: probeBoundText}
 	}
 	return &bound, nil
 }
 
-const dshProbeUsageText = "dsh-probe: usage: recipe-contract dsh-probe --source DIR --prefix PREFIX" +
+const dshProbeUsageText = "usage: recipe-contract dsh-probe --source DIR --prefix PREFIX" +
 	" --command COMMAND --scratch-root OWNED_ROOT [--readiness-seconds N]" +
-	" [--escalation-seconds N] [--fixture-exec-tmpdir DIR] [--fixture-child-env NAME=VALUE]...\n"
+	" [--escalation-seconds N] [--fixture-exec-tmpdir DIR] [--fixture-child-env NAME=VALUE]..."
 
 // dshPaths are the flags every dsh hook shares: the sources it reads and the
 // authorized composed directory it executes from.

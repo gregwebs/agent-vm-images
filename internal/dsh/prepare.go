@@ -62,24 +62,38 @@ func ParsePrepareArguments(args []string) (prepareRequest, error) {
 // how the graph was produced. One rule for the image build, the CI changed leg and
 // every developer upgrade.
 func PrepareLock(ctx context.Context, options PrepareOptions) (failure error) {
+	// The environment guard runs before the argv grammar, as the predecessor's did: a
+	// hostile environment is a refusal whatever the arguments look like, and the shell
+	// entry point only guards its own `$1`.
+	if err := refuseRuntimeInjection(""); err != nil {
+		return err
+	}
 	request, err := ParsePrepareArguments(options.Arguments)
 	if err != nil {
 		return err
 	}
-	if err := refuseRuntimeInjection(); err != nil {
-		return err
-	}
+	watcher, stopWatching := watchInterrupts()
+	defer stopWatching()
+	abort, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		<-watcher.done
+		cancel()
+	}()
+	// A signal outranks whatever the run was about to report, and it is applied after
+	// the cleanup defer below, exactly as the shell's EXIT trap reported 130/143/129.
+	defer func() { failure = interruptedOr(watcher, failure) }()
 	for _, slot := range []string{request.dshVersion, request.pnpmVersion} {
 		if err := dshVersionSlot(slot); err != nil {
 			return err
 		}
 	}
 	project := Project{Source: options.Source}
-	facts, err := project.Authorize(ctx, request.prefix, "", "")
+	facts, err := project.Authorize(abort, request.prefix, "", "")
 	if err != nil {
 		return err
 	}
-	if err := project.Guard(ctx, request.prefix); err != nil {
+	if err := project.Guard(abort, request.prefix); err != nil {
 		return err
 	}
 	if !executableFile(filepath.Join(options.Contract, "recipe-contract")) {
@@ -129,7 +143,7 @@ func PrepareLock(ctx context.Context, options PrepareOptions) (failure error) {
 		return nil
 	}
 
-	work, err := project.Scratch(ctx, request.prefix, "")
+	work, err := project.Scratch(abort, request.prefix, "")
 	if err != nil {
 		return err
 	}
@@ -141,7 +155,7 @@ func PrepareLock(ctx context.Context, options PrepareOptions) (failure error) {
 		if retain {
 			return
 		}
-		if cleanupErr := project.Cleanup(context.WithoutCancel(ctx), work, ""); cleanupErr != nil {
+		if cleanupErr := project.Cleanup(context.WithoutCancel(abort), work, ""); cleanupErr != nil {
 			say(options.Err, "%s\n", `prepare-lock.sh: invocation scratch cleanup failed`)
 			if failure == nil {
 				failure = &Silent{Status: 1}
@@ -165,11 +179,11 @@ func PrepareLock(ctx context.Context, options PrepareOptions) (failure error) {
 	if err := privateState(work); err != nil {
 		return refusal(err.Error())
 	}
-	manager, err := project.Manager(ctx, request.prefix)
+	manager, err := project.Manager(abort, request.prefix)
 	if err != nil {
 		return err
 	}
-	identity, err := managerIdentity(ctx, work, manager)
+	identity, err := managerIdentity(abort, work, manager)
 	if err != nil {
 		return refusal("manager version check failed")
 	}
@@ -178,23 +192,26 @@ func PrepareLock(ctx context.Context, options PrepareOptions) (failure error) {
 	}
 	say(options.Out, "prepare-lock.sh: dsh %s -> %s via %s\n",
 		committed, effective, strings.Join(manager, " "))
-	if err := runPnpm(ctx, options.Contract, filepath.Join(work, "resolve.ndjson"), stage,
+	if err := runPnpm(abort, options.Contract, filepath.Join(work, "resolve.ndjson"), stage,
 		processEnvironment(work), manager, withStore(stagedResolution, work)); err != nil {
+		// The manager's own line and the envelope's hard-failure line are the evidence;
+		// this driver only adds its verdict.
+		reportChildFailure(options.Err, err)
 		return refusal("staged resolution failed")
 	}
 	// Lock-only generation must not create an installed tree in the staged project.
-	if fileExists(filepath.Join(stage, "node_modules")) {
+	if pathExists(filepath.Join(stage, "node_modules")) {
 		return refusal("lock-only generation created node_modules")
 	}
 	// Pins are written only after the staged structure and every effective exact peer
-	// validate; the following check re-reads them as reviewed bytes.
+	// validate, and writing them is that validation: `WritePins` reads the staged graph,
+	// checks its structure and peers, and publishes `pnpm-inputs.sha256` from the bytes
+	// it just wrote. The comparison below then re-reads both sides, so a prepared graph
+	// is validated again on its way out rather than by a second call to the same reader
+	// on the same path in this process.
 	if err := pnpmlock.WritePins(pnpmlock.Prefix(stage), pnpmlock.KindDsh); err != nil {
 		say(options.Err, "pnpm lock: %s\n", err)
 		return refusal("staged graph failed structural validation")
-	}
-	if _, err := pnpmlock.ReadProject(pnpmlock.Prefix(stage), pnpmlock.KindDsh); err != nil {
-		say(options.Err, "pnpm lock: %s\n", err)
-		return refusal("staged graph failed pinned-input validation")
 	}
 	// The comparison matches how the graph was produced: an unseeded resolution is
 	// free to move a retained snapshot, and only a refresh comparison says so.
@@ -218,6 +235,7 @@ func PrepareLock(ctx context.Context, options PrepareOptions) (failure error) {
 			}
 			return &Silent{Status: 3}
 		}
+		reportChildFailure(options.Err, err)
 		return refusal("publication failed; committed inputs were restored and staged graph discarded")
 	}
 	say(options.Out, "prepare-lock.sh: published four dsh inputs for %s\n", effective)

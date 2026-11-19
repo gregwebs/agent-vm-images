@@ -645,10 +645,12 @@ existing owners. No executable maintenance helper ships in the image.
 dsh is now an image-owned pnpm project. Its owning sources are:
 
 - Reviewed inputs: `images/tools/dsh/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,pnpm-inputs.sha256}`.
-- Preparation, installation and verification: `images/tools/dsh/{prepare-lock.sh,install-dsh.sh,verify-dsh.sh}`
-  are entry points only. The policy is `recipe-contract dsh-prepare-lock`,
-  `dsh-install` and `dsh-verify` in `./internal/dsh` (ADR 0017, #184). The one
-  exception is the developer upgrade below.
+- Preparation, installation and verification:
+  `images/tools/dsh/{prepare-lock.sh,install-dsh.sh,verify-dsh.sh}` are entry
+  points only; the policy is `recipe-contract dsh-prepare-lock`, `dsh-install` and
+  `dsh-verify` in `./internal/dsh` (ADR 0017, #184). `upgrade-dsh.sh` is the one
+  dsh hook that keeps its policy, because its publication transaction is shared
+  with the Pi and bridge upgrades.
 - Shared build-only boundary: `images/tools/pnpm-project.py` and
   `images/tools/pnpm-host-manager.py`. The filesystem/manager/publication
   implementation moved here when Pi and its bridge began sharing it, so one
@@ -668,12 +670,15 @@ dsh is now an image-owned pnpm project. Its owning sources are:
   it can only stage — never install, publish to the live prefix or write status.
 - dsh adapters: `images/tools/dsh/{project.py,host-manager.py}` load the shared
   module through `sys.modules` (one instance, so capability types keep one
-  identity), re-export it unchanged and supply the dsh consumer. dsh's scripts,
-  its imports and its Docker mounts keep naming the old paths; the
-  install and verify RUNs add one read-only mount of
-  `tools/pnpm-project.py` at `/tmp/pnpm-project.py`, which is where the adapter's
-  `../pnpm-project.py` resolves. The shared CLI requires
-  `--consumer dsh|pi|bridge|antigravity`; the adapters reject the flag.
+  identity), re-export it unchanged and supply the dsh consumer. Every dsh entry
+  point and every Go helper subcommand asks this adapter for the rules it needs
+  (`authorize`, `authorize-runtime`, `guard`, `contract-dir`, `scratch`,
+  `cleanup`, `manager`, `publish`, `command-identity`, `remove-install`), so the
+  layer still needs `python3` at install time until #62 moves the module; the
+  install and verify RUNs keep the one read-only mount of `tools/pnpm-project.py`
+  at `/tmp/pnpm-project.py`, which is where the adapter's `../pnpm-project.py`
+  resolves. The shared CLI requires `--consumer dsh|pi|bridge|antigravity`; the
+  adapters reject the flag.
 - Other build-only dsh helpers: `images/tools/dsh/check-runtime.mjs` stays Node
   because it exists to exercise Node. The bounded web readiness driver is
   `recipe-contract dsh-probe`, which owns the deadlines, the private process group,

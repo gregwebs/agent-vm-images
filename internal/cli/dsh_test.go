@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -90,12 +91,11 @@ func TestProbeBound(t *testing.T) {
 	if err != nil || bound == nil || *bound != 500*time.Millisecond {
 		t.Fatalf("0.5 = %v, %v", bound, err)
 	}
-	for _, rejected := range []string{"0", "-1", "60.5", "80", "abc", ""} {
-		if rejected == "" {
-			continue
-		}
-		if _, err := probeBound(rejected); err == nil {
-			t.Errorf("probeBound(%q) accepted an out-of-range bound", rejected)
+	for _, rejected := range []string{"0", "-1", "60.5", "80", "abc", "NaN", "Inf", "-Inf", "Infinity"} {
+		var usage *dsh.Usage
+		err := func() error { _, err := probeBound(rejected); return err }()
+		if err == nil || !errors.As(err, &usage) {
+			t.Errorf("probeBound(%q) = %v, want a usage refusal", rejected, err)
 		}
 	}
 	if _, err := probeBound("60"); err != nil {

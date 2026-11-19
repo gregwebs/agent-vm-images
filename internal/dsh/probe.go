@@ -203,14 +203,10 @@ func probe(ctx context.Context, options ProbeOptions, interrupts <-chan int, env
 	if options.Escalation != nil {
 		escalation = *options.Escalation
 	}
-	overrides := options.Readiness != nil || options.Escalation != nil
-	if capability.Production && overrides {
-		return nil, &Usage{Text: "production readiness and escalation bounds are fixed"}
+	if err := probeSeam(capability.Production, options); err != nil {
+		return nil, err
 	}
-	if capability.Production && (len(options.FixtureChildEnv) > 0 || options.FixtureExecTmpdir != "") {
-		return nil, &Usage{Text: "production runtime does not accept a fixture seam"}
-	}
-	work, err := os.MkdirTemp(options.ScratchRoot, "dsh-")
+	work, err := os.MkdirTemp(options.ScratchRoot, scratchToken)
 	if err != nil {
 		return nil, refusal(err.Error())
 	}
@@ -220,7 +216,7 @@ func probe(ctx context.Context, options ProbeOptions, interrupts <-chan int, env
 	// parent and the fixture root only, so it cannot describe a runtime scratch; the
 	// removal therefore happens here, where the creator is known.
 	defer func() { _ = os.RemoveAll(work) }()
-	execParent, err := execTempParent(options, capability)
+	execParent, err := execTempParent(options, capability, callerOwns)
 	if err != nil {
 		return nil, err
 	}
@@ -250,11 +246,75 @@ func probe(ctx context.Context, options ProbeOptions, interrupts <-chan int, env
 	if err := os.RemoveAll(execTmp); err != nil {
 		return nil, refusal("private exec TMPDIR could not be removed: " + err.Error())
 	}
-	if fileExists(execTmp) {
+	if pathExists(execTmp) {
 		return nil, &Refusal{Text: "private exec TMPDIR survived cleanup"}
 	}
 	report.Cleanup.ExecTmpGCD = true
 	return report.appendJSON(nil), nil
+}
+
+// scratchToken is the shared project module's own scratch token for the dsh
+// consumer (`Consumer('dsh', …, 'dsh-', …)` in `images/tools/pnpm-project.py`). The
+// probe cannot use the module's `cleanup` verb for a runtime scratch, so the name is
+// the only thing tying a leftover to the consumer that made it; a test reads the
+// module and fails if this literal drifts.
+const scratchToken = "dsh-"
+
+// reservedChildEnv are the names the probe sets itself. A fixture entry may not
+// shadow one: the redirect is the whole point of the child environment, and an
+// injected PATH, HOME, TMPDIR or Node preload would make every later check
+// untrustworthy. The three injection names would otherwise be refused for the child
+// by the same rule the hooks apply to themselves.
+var reservedChildEnv = map[string]bool{
+	"PATH": true, "LANG": true, "LC_ALL": true, "TZ": true,
+	"HOME": true, "DSH_HOME": true,
+	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
+	"TMPDIR": true, "TMP": true, "TEMP": true,
+	"NODE_OPTIONS": true, "NODE_PATH": true, "BUN_OPTIONS": true,
+}
+
+// probeSeam validates the fixture inputs. Production refuses them, and the refusal
+// of a stray `DSH_WEB_FIXTURE_` entry is a refusal (1), not a usage mistake: the
+// request is well formed and the capability cannot honour it, which is what the
+// predecessor's meaning was even though its argparse reported it as usage.
+func probeSeam(production bool, options ProbeOptions) error {
+	if production && len(options.FixtureChildEnv) > 0 {
+		return &Refusal{Text: "production runtime does not accept a fixture child environment"}
+	}
+	if production && options.FixtureExecTmpdir != "" {
+		return &Usage{Text: "production exec temp parent is fixed"}
+	}
+	if production && (options.Readiness != nil || options.Escalation != nil) {
+		return &Usage{Text: "production readiness and escalation bounds are fixed"}
+	}
+	for _, entry := range options.FixtureChildEnv {
+		name, _, found := strings.Cut(entry, "=")
+		if !found || !environmentName(name) {
+			return &Usage{Text: "fixture child environment takes NAME=VALUE: " + bounded(entry, 80)}
+		}
+		if reservedChildEnv[name] {
+			return &Refusal{Text: "fixture child environment may not set " + name}
+		}
+	}
+	return nil
+}
+
+// environmentName is the POSIX name grammar the child environment can carry.
+func environmentName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for index, character := range name {
+		switch {
+		case character == '_':
+		case character >= 'A' && character <= 'Z':
+		case character >= 'a' && character <= 'z':
+		case index > 0 && character >= '0' && character <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // execTempParent is the system writable layer: the product dlopens its native
@@ -262,7 +322,7 @@ func probe(ctx context.Context, options ProbeOptions, interrupts <-chan int, env
 // is unsupported by `dsh web`. A fixture may name the parent, but only inside the
 // root runtime authorization proved, so the seam cannot move the exec directory out
 // of the invocation.
-func execTempParent(options ProbeOptions, capability RuntimeCapability) (string, error) {
+func execTempParent(options ProbeOptions, capability RuntimeCapability, owns func(os.FileInfo) bool) (string, error) {
 	if options.FixtureExecTmpdir == "" {
 		return "/tmp", nil
 	}
@@ -277,7 +337,7 @@ func execTempParent(options ProbeOptions, capability RuntimeCapability) (string,
 	if err != nil || !info.IsDir() {
 		return "", &Refusal{Text: "fixture exec temp parent must be a directory: " + parent}
 	}
-	if ownerOf(info) != os.Getuid() {
+	if !owns(info) {
 		return "", &Refusal{Text: "fixture exec temp parent must be caller-owned"}
 	}
 	return parent, nil
@@ -285,8 +345,15 @@ func execTempParent(options ProbeOptions, capability RuntimeCapability) (string,
 
 // containedBy is the shared module's `below` plus its symlink-waypoint refusal,
 // restated for the one input the module has no verb for: the fixture exec temp
-// parent. It is deliberately narrow -- absolute, no `.`/`..`, no symlink anywhere on
-// the way down, and a strict child of the authorized root.
+// parent. It is absolute, free of `.`/`..`, a strict child of the authorized root,
+// and refuses a symlink at any component from the path down to (but not including)
+// the root.
+//
+// One clause of `no_redirect` is deliberately not reproduced: `no_redirect` also
+// refuses when `path.resolve()` is outside the root, and this does not re-resolve.
+// With every component on the way down refused as a link, the resolved path can only
+// leave the root through the root itself, which `no_redirect` does not check either,
+// and which `authorize-runtime` has already refused for the probe's own root.
 func containedBy(path, root string) bool {
 	if path == root || !strings.HasPrefix(path, root+string(filepath.Separator)) {
 		return false
@@ -368,9 +435,13 @@ func (run probeRun) attempt(number int, cwd string) (probeReport, error) {
 		child.proof = proof
 		return readyFacts, nil
 	}()
-	teardownErr := child.teardown(run.escalation)
+	child.pending = func() (int, bool) { return interrupted(run.interrupts) }
+	signal, teardownErr := child.teardown(run.escalation, run.ctx)
 	if teardownErr != nil {
 		return probeReport{}, teardownErr
+	}
+	if signal != 0 {
+		return probeReport{}, &Interrupted{Status: signal}
 	}
 	if readyErr != nil {
 		return probeReport{}, readyErr
@@ -386,6 +457,11 @@ func (run probeRun) attempt(number int, cwd string) (probeReport, error) {
 	}
 	if !portFree(port) {
 		return probeReport{}, refusalf("reserved port %d still has a listener after cleanup", port)
+	}
+	// A signal that landed after teardown is still an interruption, not a pass: the
+	// outcome the caller asked for was never reported.
+	if status, ok := interrupted(run.interrupts); ok {
+		return probeReport{}, &Interrupted{Status: status}
 	}
 	cleanup := child.cleanupFacts
 	cleanup.PortReleased = true
@@ -436,7 +512,8 @@ func startWeb(run probeRun, cwd string, port int) (*webChild, error) {
 	// The parent's copies must go, or the readers never see EOF once the child exits.
 	_ = stdoutWrite.Close()
 	_ = stderrWrite.Close()
-	child := &webChild{command: command, pgid: command.Process.Pid, stdout: stdoutRead, stderr: stderrRead}
+	child := &webChild{command: command, pgid: command.Process.Pid, stdout: stdoutRead, stderr: stderrRead,
+		alive: groupAlive}
 	child.capture = newCapture(stdoutRead, stderrRead)
 	child.done = make(chan int, 1)
 	go func() { child.done <- replayStatus(command.Wait()) }()
@@ -483,6 +560,32 @@ type webChild struct {
 	exited       bool
 	proof        ownershipFacts
 	cleanupFacts cleanupFacts
+	// alive is the group-liveness probe. It is a field so the refusal branch -- a
+	// group that will not empty -- is reachable from a test; production always uses
+	// killpg.
+	alive func(pgid int) bool
+	// pending reports a signal that arrived, so the bounded waits stop escalating
+	// gracefully and the interruption is not swallowed.
+	pending func() (int, bool)
+	// observed latches the first signal. The escalation wait and the teardown both read
+	// it, and the wait is usually the reader: without the latch the signal would be
+	// consumed there and the run would report a pass.
+	observed int
+}
+
+// signalled reports a signal that arrived, if one did.
+func (c *webChild) signalled() (int, bool) {
+	if c.observed != 0 {
+		return c.observed, true
+	}
+	if c.pending == nil {
+		return 0, false
+	}
+	status, ok := c.pending()
+	if ok {
+		c.observed = status
+	}
+	return status, ok
 }
 
 type pollResult struct {
@@ -523,19 +626,28 @@ func replayStatus(err error) int {
 
 // teardown kills the whole session, not the leader: a descendant that ignored the
 // parent's death is a leaking process, and the port it holds is the proof.
-func (c *webChild) teardown(escalation time.Duration) error {
+//
+// It returns the signal status if a signal interrupted the teardown. The signal is
+// reported, never swallowed, and the group is still emptied first: an interruption
+// must not leave a resolver running against the payload.
+func (c *webChild) teardown(escalation time.Duration, ctx context.Context) (int, error) {
+	interruption, interrupted := c.signalled()
+	if interrupted || ctx.Err() != nil {
+		// No time for a graceful TERM: the caller is already giving up on this run.
+		escalation = 0
+	}
 	signalled := []string{}
 	for _, step := range []struct {
 		name string
 		sig  syscall.Signal
 	}{{"SIGTERM", syscall.SIGTERM}, {"SIGKILL", syscall.SIGKILL}} {
-		if c.poll().exited && !groupAlive(c.pgid) {
+		if c.poll().exited && !c.alive(c.pgid) {
 			break
 		}
 		if err := syscall.Kill(-c.pgid, step.sig); err == nil || errors.Is(err, syscall.ESRCH) {
 			signalled = append(signalled, step.name)
 		}
-		if c.waitGroupEmpty(escalation) {
+		if c.waitGroupEmpty(escalation, true) {
 			break
 		}
 	}
@@ -548,10 +660,20 @@ func (c *webChild) teardown(escalation time.Duration) error {
 		_ = syscall.Kill(-c.pgid, syscall.SIGKILL)
 		_ = c.waitExited(settle)
 	}
-	if groupAlive(c.pgid) {
-		return &Refusal{Text: "process group still has members after the leader was reaped: " + pythonIntList(groupMembers("/proc", c.pgid))}
+	// The group gets one settle window to disappear after the last signal: a KILLed
+	// member is still a member until the kernel has run it, and a signal the caller sent
+	// is not a reason to call the leak a failure.
+	c.waitGroupEmpty(groupSettle, false)
+	if c.alive(c.pgid) {
+		return interruption, &Refusal{Text: "process group still has members after the leader was reaped: " + pythonIntList(groupMembers("/proc", c.pgid))}
 	}
-	return nil
+	if !interrupted {
+		interruption, interrupted = c.signalled()
+	}
+	if !interrupted {
+		interruption = 0
+	}
+	return interruption, nil
 }
 
 // waitExited waits for the leader to be reaped.
@@ -573,10 +695,18 @@ func (c *webChild) waitExited(limit time.Duration) bool {
 // waitGroupEmpty waits until no member of the group is left. An exited-but-unreaped
 // leader is itself a group member, so it is reaped while waiting; otherwise the
 // group could never look empty.
-func (c *webChild) waitGroupEmpty(seconds time.Duration) bool {
+func (c *webChild) waitGroupEmpty(seconds time.Duration, stopOnSignal bool) bool {
 	until := time.Now().Add(seconds)
-	for groupAlive(c.pgid) {
+	for c.alive(c.pgid) {
 		c.poll()
+		// During the graceful escalation a signal shortens the wait: the caller is
+		// already giving up, so the KILL step is next. The settle wait after the last
+		// signal must not be shortened, or a KILLed member would be reported as a leak.
+		if stopOnSignal {
+			if _, signalled := c.signalled(); signalled {
+				return false
+			}
+		}
 		if !time.Now().Before(until) {
 			return false
 		}
@@ -604,6 +734,11 @@ func awaitReady(run probeRun, child *webChild, port int) (string, *webFacts, err
 	for {
 		if status, interrupted := interrupted(run.interrupts); interrupted {
 			return "", nil, &Interrupted{Status: status}
+		}
+		// The caller's own bound (the gate allows 70 s around a 60 s readiness
+		// deadline) is real: a probe that overruns it fails instead of running on.
+		if run.ctx.Err() != nil {
+			return "", nil, &Refusal{Text: "probe exceeded its caller's deadline"}
 		}
 		stdout, stderr := child.capture.text("stdout"), child.capture.text("stderr")
 		if child.capture.overflowed() {

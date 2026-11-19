@@ -1,11 +1,13 @@
 package dsh
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -202,8 +204,8 @@ func newProberWithoutTables(t *testing.T) prober {
 func TestTeardownEscalatesAndProvesNoSurvivors(t *testing.T) {
 	child, descendant := startIgnoringChild(t)
 	started := time.Now()
-	if err := child.teardown(300 * time.Millisecond); err != nil {
-		t.Fatalf("teardown = %v", err)
+	if signal, err := child.teardown(300*time.Millisecond, context.Background()); err != nil || signal != 0 {
+		t.Fatalf("teardown = %v, %v", signal, err)
 	}
 	if elapsed := time.Since(started); elapsed > 10*time.Second {
 		t.Fatalf("teardown did not bound itself: %s", elapsed)
@@ -226,8 +228,8 @@ func TestTeardownEscalatesAndProvesNoSurvivors(t *testing.T) {
 // the leader is not emptying the group, and the descendant is what keeps the port.
 func TestTeardownReachesTheDescendant(t *testing.T) {
 	child, descendant := startIgnoringChild(t)
-	if err := child.teardown(200 * time.Millisecond); err != nil {
-		t.Fatalf("teardown = %v", err)
+	if signal, err := child.teardown(200*time.Millisecond, context.Background()); err != nil || signal != 0 {
+		t.Fatalf("teardown = %v, %v", signal, err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for stillAlive(descendant) {
@@ -250,7 +252,7 @@ func startIgnoringChild(t *testing.T) (*webChild, int) {
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	child := &webChild{command: command, pgid: command.Process.Pid, done: make(chan int, 1)}
+	child := &webChild{command: command, pgid: command.Process.Pid, done: make(chan int, 1), alive: groupAlive}
 	go func() { child.done <- replayStatus(command.Wait()) }()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -480,5 +482,251 @@ func TestExactVersionGrammar(t *testing.T) {
 		if exactVersion(rejected) {
 			t.Errorf("exactVersion(%q) = true", rejected)
 		}
+	}
+}
+
+// TestTeardownRefusesAGroupThatWillNotEmpty is the refusal branch itself: when the
+// group still has members after the leader is reaped, the teardown must report it
+// rather than claiming a clean end. The liveness probe is injected because no
+// surviving member of a KILLed group is reachable from a test on either host.
+func TestTeardownRefusesAGroupThatWillNotEmpty(t *testing.T) {
+	started := time.Now()
+	command := exec.Command("sh", "-c", "sleep 60")
+	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	child := &webChild{command: command, pgid: command.Process.Pid, done: make(chan int, 1),
+		alive: func(int) bool { return true }}
+	go func() { child.done <- replayStatus(command.Wait()) }()
+	t.Cleanup(func() {
+		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		_ = command.Wait()
+	})
+	_, err := child.teardown(50*time.Millisecond, context.Background())
+	if err == nil || !strings.Contains(err.Error(), "still has members after the leader was reaped") {
+		t.Fatalf("teardown = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("the refusal did not bound itself: %s", elapsed)
+	}
+}
+
+// TestTeardownReportsASignalInsteadOfSwallowingIt covers the window the readiness
+// poll misses: a signal that lands while the group is being emptied must be reported,
+// so a caller cannot read the run as a pass.
+func TestTeardownReportsASignalInsteadOfSwallowingIt(t *testing.T) {
+	child, _ := startIgnoringChild(t)
+	// The signal arrives after the teardown has begun, and only once: the escalation
+	// wait is its first reader, so the latch is what carries it to the result. A
+	// `pending` that kept answering would hide the rule this case exists to pin.
+	calls := 0
+	child.pending = func() (int, bool) {
+		calls++
+		if calls == 3 {
+			return 143, true
+		}
+		return 0, false
+	}
+	signal, err := child.teardown(time.Second, context.Background())
+	if err != nil {
+		t.Fatalf("teardown = %v", err)
+	}
+	if signal != 143 {
+		t.Fatalf("signal = %d, want the interruption it observed", signal)
+	}
+	if groupAlive(child.pgid) {
+		t.Fatalf("group %d survived an interrupted teardown", child.pgid)
+	}
+}
+
+// TestTeardownHonoursTheCallerDeadline covers the outer bound: a cancelled context
+// skips the graceful wait but still empties the group, so the constant the gate
+// passes is a real bound rather than a comment.
+func TestTeardownHonoursTheCallerDeadline(t *testing.T) {
+	child, _ := startIgnoringChild(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	if _, err := child.teardown(30*time.Second, ctx); err != nil {
+		t.Fatalf("teardown = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("a cancelled context did not shorten the escalation: %s", elapsed)
+	}
+	if groupAlive(child.pgid) {
+		t.Fatalf("group %d survived", child.pgid)
+	}
+}
+
+// TestContainedByRefusesASymlinkWaypoint is the clause of `no_redirect` the probe
+// restates, because the shared module exposes no verb for it: a parent that reaches
+// the authorized root through a link is refused even though its lexical path is
+// inside the root.
+func TestContainedByRefusesASymlinkWaypoint(t *testing.T) {
+	root := t.TempDir()
+	inside := filepath.Join(root, "exec-temp")
+	mustMkdir(t, inside)
+	if !containedBy(inside, root) {
+		t.Fatal("a real child of the root was refused")
+	}
+	// Same bytes, one waypoint: `root/link` is a symlink to a directory outside the
+	// root, and `root/link/temp` is lexically below the root.
+	outside := t.TempDir()
+	mustMkdir(t, filepath.Join(outside, "temp"))
+	waypoint := filepath.Join(root, "link")
+	if err := os.Symlink(outside, waypoint); err != nil {
+		t.Fatal(err)
+	}
+	if containedBy(filepath.Join(waypoint, "temp"), root) {
+		t.Fatal("a symlink waypoint was accepted")
+	}
+	// The path as a symlink itself is refused too, which is `no_redirect`'s
+	// leaf-link rule.
+	leaf := filepath.Join(root, "leaf")
+	if err := os.Symlink(inside, leaf); err != nil {
+		t.Fatal(err)
+	}
+	if containedBy(leaf, root) {
+		t.Fatal("a symlinked parent was accepted")
+	}
+	if containedBy(root, root) {
+		t.Fatal("the root itself was accepted as a strict child")
+	}
+	if containedBy(filepath.Join(root, "..", "elsewhere"), root) {
+		t.Fatal("a sibling of the root was accepted")
+	}
+}
+
+// TestExecTempParentRefusals pins each clause of the one containment rule the probe
+// owns: absolute, no dot components, inside the root, a directory, caller-owned.
+func TestExecTempParentRefusals(t *testing.T) {
+	root := t.TempDir()
+	inside := filepath.Join(root, "exec-temp")
+	mustMkdir(t, inside)
+	capability := RuntimeCapability{Root: root}
+	owns := func(os.FileInfo) bool { return true }
+	parent, err := execTempParent(ProbeOptions{FixtureExecTmpdir: inside}, capability, owns)
+	if err != nil || parent != inside {
+		t.Fatalf("parent = %q, %v", parent, err)
+	}
+	cases := []struct {
+		name    string
+		options ProbeOptions
+		owns    func(os.FileInfo) bool
+		want    string
+		status  int
+	}{
+		{"relative", ProbeOptions{FixtureExecTmpdir: "tmp"}, owns, "absolute lexical path required", 2},
+		{"dot", ProbeOptions{FixtureExecTmpdir: root + "/./x"}, owns, "absolute lexical path required", 2},
+		{"outside", ProbeOptions{FixtureExecTmpdir: t.TempDir()}, owns,
+			"path must be a strict child of authorized root", 1},
+		{"the root", ProbeOptions{FixtureExecTmpdir: root}, owns,
+			"path must be a strict child of authorized root", 1},
+		{"missing", ProbeOptions{FixtureExecTmpdir: filepath.Join(root, "absent")}, owns,
+			"must be a directory", 1},
+		{"file", ProbeOptions{FixtureExecTmpdir: filepath.Join(root, "file")}, owns, "must be a directory", 1},
+		{"not caller-owned", ProbeOptions{FixtureExecTmpdir: inside}, func(os.FileInfo) bool { return false },
+			"must be caller-owned", 1},
+	}
+	if err := os.WriteFile(filepath.Join(root, "file"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, testCase := range cases {
+		_, err := execTempParent(testCase.options, capability, testCase.owns)
+		if err == nil || !strings.Contains(err.Error(), testCase.want) {
+			t.Errorf("%s: error = %v", testCase.name, err)
+			continue
+		}
+		if status := statusOf(err); status != testCase.status {
+			t.Errorf("%s: status = %d, want %d", testCase.name, status, testCase.status)
+		}
+	}
+	// No flag means the system writable layer, never a caller value.
+	if parent, err := execTempParent(ProbeOptions{}, capability, owns); err != nil || parent != "/tmp" {
+		t.Fatalf("default parent = %q, %v", parent, err)
+	}
+}
+
+// statusOf is the refusal classification the CLI maps onto an exit status.
+func statusOf(err error) int {
+	var usage *Usage
+	if errors.As(err, &usage) {
+		return 2
+	}
+	return 1
+}
+
+// TestProbeSeamRefusals keeps production free of fixture inputs, and keeps the
+// distinction the predecessors made: a well-formed request the capability cannot
+// honour is a refusal (1), a malformed one is usage (2).
+func TestProbeSeamRefusals(t *testing.T) {
+	bound := time.Second
+	cases := []struct {
+		name       string
+		production bool
+		options    ProbeOptions
+		want       string
+		status     int
+	}{
+		{"production child env", true, ProbeOptions{FixtureChildEnv: []string{"DSH_WEB_FIXTURE_CASE=valid"}},
+			"does not accept a fixture child environment", 1},
+		{"production exec temp", true, ProbeOptions{FixtureExecTmpdir: "/tmp"}, "exec temp parent is fixed", 2},
+		{"production bound", true, ProbeOptions{Readiness: &bound}, "bounds are fixed", 2},
+		{"malformed entry", false, ProbeOptions{FixtureChildEnv: []string{"NOT_AN_ASSIGNMENT"}},
+			"takes NAME=VALUE", 2},
+		{"bad name", false, ProbeOptions{FixtureChildEnv: []string{"1BAD=value"}}, "takes NAME=VALUE", 2},
+		{"shadowing PATH", false, ProbeOptions{FixtureChildEnv: []string{"PATH=/evil"}},
+			"may not set PATH", 1},
+		{"injected preload", false, ProbeOptions{FixtureChildEnv: []string{"NODE_OPTIONS=--require=x"}},
+			"may not set NODE_OPTIONS", 1},
+		{"redirect", false, ProbeOptions{FixtureChildEnv: []string{"TMPDIR=/evil"}}, "may not set TMPDIR", 1},
+	}
+	for _, testCase := range cases {
+		err := probeSeam(testCase.production, testCase.options)
+		if err == nil || !strings.Contains(err.Error(), testCase.want) {
+			t.Errorf("%s: error = %v", testCase.name, err)
+			continue
+		}
+		if status := statusOf(err); status != testCase.status {
+			t.Errorf("%s: status = %d, want %d", testCase.name, status, testCase.status)
+		}
+	}
+	if err := probeSeam(false, ProbeOptions{FixtureChildEnv: []string{"DSH_WEB_FIXTURE_CASE=valid"}}); err != nil {
+		t.Fatalf("a fixture entry was refused in a fixture: %v", err)
+	}
+}
+
+// TestBoundedKeepsTheTail pins the direction: the tail is what a crash publishes, so
+// a failure that kept the head would hide the cause.
+func TestBoundedKeepsTheTail(t *testing.T) {
+	if got := bounded("short", 10); got != "short" {
+		t.Fatalf("bounded(short) = %q", got)
+	}
+	if got := bounded("0123456789", 4); got != "6789" {
+		t.Fatalf("bounded = %q, want the tail", got)
+	}
+	// A cut that lands inside a multi-byte rune backs off to the rune boundary
+	// rather than publishing a broken sequence.
+	if got := bounded("aé", 2); got != "é" {
+		t.Fatalf("bounded = %q", got)
+	}
+}
+
+// TestScratchTokenMatchesTheSharedModule keeps the one literal this package owns in
+// step with the consumer table: the token names the directory a leftover belongs to,
+// and no verb exposes it.
+func TestScratchTokenMatchesTheSharedModule(t *testing.T) {
+	source, err := os.ReadFile(filepath.Join("..", "..", "images", "tools", "pnpm-project.py"))
+	if err != nil {
+		t.Skipf("the shared module is not beside this package: %v", err)
+	}
+	row := regexp.MustCompile(`Consumer\('dsh',\s*Path\('([^']*)'\),\s*Path\('([^']*)'\),\s*'([^']*)'`).
+		FindStringSubmatch(string(source))
+	if row == nil {
+		t.Fatal("the shared module's dsh consumer row is not recognisable")
+	}
+	if row[3] != scratchToken {
+		t.Fatalf("scratchToken = %q, the module says %q", scratchToken, row[3])
 	}
 }

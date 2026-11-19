@@ -43,7 +43,7 @@ type InstallOptions struct {
 // reviewed-input validation and the native layout check is the payload published and
 // the slot recorded.
 func Install(ctx context.Context, options InstallOptions) (failure error) {
-	if err := refuseRuntimeInjection(); err != nil {
+	if err := refuseRuntimeInjection(""); err != nil {
 		return err
 	}
 	for _, helper := range []struct{ path, message string }{
@@ -51,14 +51,14 @@ func Install(ctx context.Context, options InstallOptions) (failure error) {
 		{filepath.Join(options.Source, "prepare-lock.sh"), "prepare-lock.sh is missing at "},
 		{filepath.Join(options.Source, "check-runtime.mjs"), "layout checker is missing at "},
 	} {
-		if !fileExists(helper.path) {
+		if !regularFile(helper.path) {
 			return refusal(helper.message + helper.path)
 		}
 	}
 	if !executableFile(filepath.Join(options.Contract, "recipe-contract")) {
 		return refusal("no executable recipe-contract in " + options.Contract)
 	}
-	if !fileExists(filepath.Join(options.Contract, "run-pnpm.sh")) {
+	if !regularFile(filepath.Join(options.Contract, "run-pnpm.sh")) {
 		return refusal("hard runner is missing in " + options.Contract)
 	}
 	project := Project{Source: options.Source}
@@ -98,12 +98,15 @@ func Install(ctx context.Context, options InstallOptions) (failure error) {
 	}()
 	preparation := []string{"sh", filepath.Join(options.Source, "prepare-lock.sh"),
 		options.Prefix, options.DshVersion, options.PnpmVersion}
-	if status, ok := runInherited(abort, "", preparation...); !ok {
+	if _, ok := runInherited(abort, "", preparation...); !ok {
 		if signal, interrupted := installer.exited(); interrupted {
 			return &Interrupted{Status: signal}
 		}
-		// The preparation driver reported its own refusal; a signal keeps its status.
-		return &Silent{Status: status}
+		// The predecessor collapsed every preparation failure to 1 (`*) exit 1`), so a
+		// usage refusal or an incomplete rollback inside the preparation driver does
+		// not escape an install hook's own contract. It keeps 3 alone, because 3 is the
+		// one status that means the recovery material must be kept by the caller.
+		return &Silent{Status: 1}
 	}
 
 	committed, err := readManifest(manifestPath)
@@ -158,6 +161,9 @@ func Install(ctx context.Context, options InstallOptions) (failure error) {
 	installErr := runPnpm(abort, options.Contract, filepath.Join(work, "install.ndjson"),
 		options.Prefix, processEnvironment(work), manager, withStore(frozenInstall, work))
 	if installErr != nil {
+		// The envelope's own diagnostics -- the manager's line and run-pnpm.sh's hard
+		// failure -- are what a reader needs; the owning hook only adds its verdict.
+		reportChildFailure(options.Err, installErr)
 		return interruptedOr(installer, refusal("frozen install failed"))
 	}
 	layout, err := checkLayout(abort, options.Source, options.Prefix)
@@ -176,17 +182,6 @@ func Install(ctx context.Context, options InstallOptions) (failure error) {
 	}
 	published = true
 	say(options.Out, "install-dsh.sh: installed dsh %s from the reviewed inputs\n", selection)
-	return nil
-}
-
-// refuseRuntimeInjection rejects a Node preload before any Node process starts: a
-// preload would make every later check untrustworthy.
-func refuseRuntimeInjection() error {
-	for _, key := range []string{"NODE_OPTIONS", "NODE_PATH", "BUN_OPTIONS"} {
-		if os.Getenv(key) != "" {
-			return refusal(key + " is not supported")
-		}
-	}
 	return nil
 }
 

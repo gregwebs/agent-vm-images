@@ -99,6 +99,11 @@ case $verb in
         printf '%s\n' "${STUB_VERSION:-11.11.0}"
         ;;
     lock)
+        if [ -n "${STUB_SLEEP_LOCK:-}" ]; then
+            [ -z "${STUB_PID_FILE:-}" ] || printf '%s' "$$" >"$STUB_PID_FILE"
+            printf 'stub pnpm: resolving\n' >&2
+            sleep "$STUB_SLEEP_LOCK"
+        fi
         if [ "${STUB_FAIL_LOCK:-0}" = 1 ]; then
             echo 'stub pnpm: resolution failed' >&2
             exit 7
@@ -620,6 +625,10 @@ before=$(hash_prefix)
 run_prepare 0.1.5-rc.1 ''
 assert_failure
 assert_contains 'staged resolution failed'
+# The manager's own line and the envelope's hard-failure line are the evidence a
+# reader acts on; a port that swallowed them left the build log with only the verdict.
+assert_contains 'stub pnpm: resolution failed'
+assert_contains 'run-pnpm.sh: hard failure (status 7); no transport classification'
 assert_prefix_unchanged "$before"
 assert_no_scratch
 
@@ -890,6 +899,63 @@ assert_failure
 assert_contains 'no executable recipe-contract'
 
 # A signal must exit 143 and still remove the partial tree created before it.
+new_case prepare-signal
+write_result tiny-dsh-previous
+STUB_SLEEP_LOCK=5
+before=$(hash_prefix)
+mkdir -p "$CASE/tmp"
+env -i "PATH=$TEST_ROOT/bin:$PATH" "HOME=$CALLER_HOME" "TMPDIR=$CASE/tmp" \
+    "AGENT_VM_FIXTURE_ROOT=$ROOT" "AGENT_VM_FIXTURE_PNPM=$ROOT/pnpm-fake" \
+    "AGENT_VM_CONTRACT_DIR=$ROOT/recipe-contract" "AGENT_VM_DSH_SOURCE_DIR=$SOURCE" \
+    "STUB_LOG=$CASE/manager.log" "STUB_ENV_LOG=$CASE/manager-env.log" \
+    "STUB_STAGE_LOG=$CASE/stage.log" "STUB_RESULT=$STUB_RESULT" \
+    "STUB_SLEEP_LOCK=$STUB_SLEEP_LOCK" "STUB_PID_FILE=$CASE/manager.pid" "STUB_PREFIX=$PREFIX" \
+    sh "$PREPARE" "$PREFIX" 0.1.5-rc.1 '' >"$CASE/signal.log" 2>&1 &
+pid=$!
+# The envelope buffers the manager's stderr until it exits, so the manager's pid file is
+# the only live evidence that the resolution is running and the scratch exists.
+for _ in $(seq 1 100); do
+    [ -s "$CASE/manager.pid" ] && break
+    sleep 0.1
+done
+[ -s "$CASE/manager.pid" ] || fail 'the signal case never reached the resolution'
+kill -TERM "$pid"
+set +e
+wait "$pid"
+STATUS=$?
+set -e
+[[ $STATUS -eq 143 ]] || fail "a signal during resolution must exit 143, got $STATUS: $(cat "$CASE/signal.log")"
+assert_prefix_unchanged "$before"
+assert_no_scratch
+STUB_SLEEP_LOCK=''
+# The manager must be gone: a resolver that outlives the hook would rewrite the staged
+# graph after the caller removed it, which is why the envelope runs in its own session
+# and is killed as a group.
+[ -s "$CASE/manager.pid" ] || fail 'the manager recorded no pid'
+sleep 1
+if kill -0 "$(cat "$CASE/manager.pid")" 2>/dev/null; then
+    kill -KILL "$(cat "$CASE/manager.pid")" 2>/dev/null || true
+    fail 'the resolver survived the signal'
+fi
+
+# A preparation refusal is the install hook's failure, and it collapses to 1: the
+# predecessor's `*) exit 1` meant an install hook reported one status, so a
+# preparation status (2, or 3 with material retained) cannot escape as its own.
+new_case install-preparation-rollback
+write_result tiny-dsh-previous
+RUN_DSH_VERSION=0.1.5-rc.1
+before=$(hash_prefix)
+chmod 0555 "$PREFIX"
+run_install
+chmod 0755 "$PREFIX"
+RUN_DSH_VERSION=''
+assert_failure
+[[ $STATUS -eq 1 ]] || fail "an incomplete preparation rollback must collapse to 1 in the install hook, got $STATUS"
+find "$ROOT" -maxdepth 1 -name 'dsh-*' -exec chmod -R u+w {} + 2>/dev/null || true
+find "$ROOT" -maxdepth 1 -name 'dsh-*' -exec rm -rf {} + 2>/dev/null || true
+[[ ! -e "$PREFIX/node_modules" ]] || fail 'a failed preparation created node_modules'
+assert_prefix_unchanged "$before"
+
 new_case install-signal
 STUB_SLEEP=3
 before=$(hash_prefix)

@@ -51,19 +51,30 @@ const (
 // every failure here is hard regardless of AGENT_INSTALL_SOFT_FAIL (this program
 // deliberately never consults it).
 func Verify(ctx context.Context, options VerifyOptions) (failure error) {
-	if err := rejectRuntimeInjection("dsh: "); err != nil {
+	if err := refuseRuntimeInjection("dsh: "); err != nil {
 		return err
 	}
+	watcher, stopWatching := watchInterrupts()
+	defer stopWatching()
+	abort, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		<-watcher.done
+		cancel()
+	}()
+	// The status a signal carries outranks the run's own verdict and is applied after
+	// the scratch cleanup below, as the retired EXIT trap reported 130/143/129.
+	defer func() { failure = interruptedOr(watcher, failure) }()
 	for _, helper := range []string{
 		filepath.Join(options.Source, "project.py"),
 		filepath.Join(options.Source, "check-runtime.mjs"),
 	} {
-		if !fileExists(helper) {
+		if !regularFile(helper) {
 			return refusal("dsh: build helper is missing at " + helper)
 		}
 	}
 	project := Project{Source: options.Source}
-	if err := project.Guard(ctx, options.Prefix); err != nil {
+	if err := project.Guard(abort, options.Prefix); err != nil {
 		reportChildFailure(options.Err, err)
 		return refusal("dsh: the environment guard rejected this invocation")
 	}
@@ -74,7 +85,7 @@ func Verify(ctx context.Context, options VerifyOptions) (failure error) {
 		return refusalf("dsh: no executable recipe-contract in %s (set AGENT_VM_CONTRACT_DIR"+
 			" to a composed helper directory; a source checkout carries no binary)", options.Contract)
 	}
-	facts, err := project.Authorize(ctx, options.Prefix, options.Command, options.StatusDir)
+	facts, err := project.Authorize(abort, options.Prefix, options.Command, options.StatusDir)
 	if err != nil {
 		reportChildFailure(options.Err, err)
 		return refusal("dsh: prefix, command or status destination is not authorized")
@@ -123,7 +134,7 @@ func Verify(ctx context.Context, options VerifyOptions) (failure error) {
 	// The first lexical PATH candidate must be the installed file itself: a
 	// same-version copy is a different program, while a symlink to the same file is
 	// the normal image layout and passes.
-	if err := project.CommandIdentity(ctx, "dsh", options.Command); err != nil {
+	if err := project.CommandIdentity(abort, "dsh", options.Command); err != nil {
 		reportChildFailure(options.Err, err)
 		return refusal("dsh: the first PATH candidate is not the installed command")
 	}
@@ -132,12 +143,12 @@ func Verify(ctx context.Context, options VerifyOptions) (failure error) {
 		return refusal("pnpm: base launcher/distribution identity failed")
 	}
 
-	work, err := project.Scratch(ctx, options.Prefix, "")
+	work, err := project.Scratch(abort, options.Prefix, "")
 	if err != nil {
 		return refusal("dsh: cannot create invocation scratch")
 	}
 	defer func() {
-		if cleanupErr := project.Cleanup(context.WithoutCancel(ctx), work, options.Prefix); cleanupErr != nil {
+		if cleanupErr := project.Cleanup(context.WithoutCancel(abort), work, options.Prefix); cleanupErr != nil {
 			say(options.Err, "%s\n", `  dsh: invocation scratch cleanup failed`)
 			if failure == nil {
 				failure = &Silent{Status: 1}
@@ -148,14 +159,14 @@ func Verify(ctx context.Context, options VerifyOptions) (failure error) {
 		return refusal(err.Error())
 	}
 	defer redirectHome(work)()
-	gotDsh, err := versionReport(ctx, options, work, "dsh", "dsh")
+	gotDsh, err := versionReport(abort, options, work, "dsh", "dsh")
 	if err != nil {
 		return err
 	}
 	if gotDsh != want {
 		return refusalf("dsh: installed %s but the manifest pins %s", gotDsh, want)
 	}
-	gotPnpm, err := versionReport(ctx, options, work, "pnpm", "pnpm")
+	gotPnpm, err := versionReport(abort, options, work, "pnpm", "pnpm")
 	if err != nil {
 		return err
 	}
@@ -168,16 +179,16 @@ func Verify(ctx context.Context, options VerifyOptions) (failure error) {
 	// internally; the outer bound is belt-and-braces.
 	runtimeFile := filepath.Join(work, "runtime.json")
 	runtimeErr := filepath.Join(work, "runtime.err")
-	if err := runRuntimeProbes(ctx, options, runtimeFile, runtimeErr); err != nil {
+	if err := runRuntimeProbes(abort, options, runtimeFile, runtimeErr); err != nil {
 		reportPrefix(options.Err, runtimeErr, 20)
 		return refusal("dsh: installed runtime probes failed")
 	}
-	if err := runWebProbe(ctx, options, work); err != nil {
+	if err := runWebProbe(abort, options, work); err != nil {
 		return refusal("dsh: credential-free web readiness failed")
 	}
 
 	// Health must not have rewritten the identity assumptions it just proved.
-	if err := project.CommandIdentity(ctx, "dsh", options.Command); err != nil {
+	if err := project.CommandIdentity(abort, "dsh", options.Command); err != nil {
 		reportChildFailure(options.Err, err)
 		return refusal("dsh: PATH identity changed during the health gate")
 	}
@@ -207,17 +218,6 @@ func Verify(ctx context.Context, options VerifyOptions) (failure error) {
 		}
 	}
 	return writeFile(record, recordInstalled)
-}
-
-// rejectRuntimeInjection refuses a Node preload or injected module path, which would
-// make every later check untrustworthy, before any Node process starts.
-func rejectRuntimeInjection(prefix string) error {
-	for _, key := range []string{"NODE_OPTIONS", "NODE_PATH", "BUN_OPTIONS"} {
-		if os.Getenv(key) != "" {
-			return refusal(prefix + key + " is not supported")
-		}
-	}
-	return nil
 }
 
 // verifyDistribution runs the distribution audit the base image owns. It is the same
@@ -311,7 +311,13 @@ func runWebProbe(ctx context.Context, options VerifyOptions, work string) error 
 		return writeErr
 	}
 	if err != nil {
-		reportChildFailure(options.Err, err)
+		// The gate prints the driver's own diagnostics once, exactly as the retired
+		// `sed -n 1,20p web.err` did: the delegated child's stderr is the diagnostic, so
+		// its summary line is not printed on top of it.
+		if child, ok := err.(*ChildFailure); ok && child.Stderr != "" {
+			say(options.Err, "%s\n", firstLines(child.Stderr, 20))
+			return err
+		}
 		say(options.Err, "%s\n", firstLines(err.Error(), 20))
 		return err
 	}

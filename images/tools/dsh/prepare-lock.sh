@@ -19,8 +19,10 @@ usage() {
     echo 'usage: prepare-lock.sh PREFIX DSH_VERSION PNPM_VERSION [--refresh-lock]' >&2
 }
 
-# The arity guard exists only so `$1` can be named: the full grammar, including a
-# duplicate or unknown option, belongs to the driver.
+# The arity guard exists only so `$1` can be named before the helper is resolved. It
+# is not the grammar: the driver checks the package-manager environment first, then the
+# slots, then the options, and it is the only place a duplicate or unknown option is
+# refused.
 if [ "$#" -lt 1 ]; then
     usage
     exit 2

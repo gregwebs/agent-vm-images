@@ -75,7 +75,7 @@ type Facts struct {
 // printed.
 func (p Project) verb(ctx context.Context, args ...string) (string, error) {
 	script := p.script()
-	if !fileExists(script) {
+	if !regularFile(script) {
 		return "", refusal("dsh project helper is missing at " + script)
 	}
 	command := exec.CommandContext(ctx, "python3", append([]string{script}, args...)...)

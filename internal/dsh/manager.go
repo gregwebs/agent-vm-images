@@ -3,6 +3,7 @@ package dsh
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -85,7 +86,8 @@ func runBounded(ctx context.Context, limit time.Duration, directory string, envi
 	command.Stdout = stdout
 	command.Stderr = stderr
 	command.WaitDelay = killAfter
-	command.Cancel = func() error { return command.Process.Kill() }
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error { return endSession(command) }
 	return command.Run()
 }
 
@@ -157,7 +159,7 @@ func runPnpm(ctx context.Context, contract, resultFile, directory string, enviro
 	// its own TERM trap, and a manager that outlives its envelope would rebuild the
 	// payload after the caller removed it.
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	command.Cancel = func() error { return killGroup(command) }
+	command.Cancel = func() error { return endSession(command) }
 	if err := command.Run(); err != nil {
 		return &ChildFailure{Status: exitStatusOf(err), Stderr: stderr.String()}
 	}
@@ -174,19 +176,35 @@ func childCommand(ctx context.Context, directory string, argv []string) *exec.Cm
 	command.Stdin = os.Stdin
 	command.WaitDelay = killAfter
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	command.Cancel = func() error { return killGroup(command) }
+	command.Cancel = func() error { return endSession(command) }
 	return command
 }
 
-// killGroup ends the child's session rather than only its leader.
-func killGroup(command *exec.Cmd) error {
+// cancelGrace is how long a cancelled child's session gets to unwind on TERM before it
+// is killed.
+const cancelGrace = 3 * time.Second
+
+// endSession stops a child and everything it started.
+//
+// TERM comes first, and that order is load-bearing. The envelope runs the manager
+// through `timeout`, which puts the manager in a group of its own, so a KILL of the
+// envelope's group alone leaves a resolver running against the payload with nobody to
+// stop it. TERM reaches `timeout`, which forwards it to the manager's group; the KILL
+// is only the backstop for a child that ignores it.
+func endSession(command *exec.Cmd) error {
 	if command.Process == nil {
 		return nil
 	}
-	if err := syscall.Kill(-command.Process.Pid, syscall.SIGKILL); err != nil {
-		return command.Process.Kill()
+	pgid := command.Process.Pid
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	until := time.Now().Add(cancelGrace)
+	for time.Now().Before(until) {
+		if err := syscall.Kill(-pgid, 0); err != nil && errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		time.Sleep(pollInterval)
 	}
-	return nil
+	return syscall.Kill(-pgid, syscall.SIGKILL)
 }
 
 // dshManifest is the reviewed input's own assertions: the manager selection and the

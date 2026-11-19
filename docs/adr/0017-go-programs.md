@@ -150,8 +150,11 @@ bounded concurrent capture of both pipes, the token handshake, the TERM-to-KILL
 teardown that proves nothing survived, and the Linux listener-ownership proof
 through procfs. The ownership proof still fails closed on Linux or in
 production, and only an explicit non-Linux fixture host records a skip. Its
-fixture seam is command-line only (`--fixture-child-env`, `--fixture-exec-tmpdir`);
-it reads no environment variable of its own. `check-runtime.mjs` stays Node.
+fixture inputs are flags (`--fixture-child-env NAME=VALUE`, `--fixture-exec-tmpdir`)
+and it reads no environment variable of its own; the gate above it still names the
+existing `DSH_WEB_FIXTURE_` boundary from its own environment and hands it down as
+those flags, and a production capability refuses that input instead of ignoring it.
+`check-runtime.mjs` stays Node.
 
 `recipe-contract dsh-install`, `dsh-prepare-lock` and `dsh-verify` replace the
 policy in `images/tools/dsh/{install-dsh.sh,prepare-lock.sh,verify-dsh.sh}`, which
@@ -160,9 +163,12 @@ project module's `contract-dir` verb and pass their caller's argv. That is a
 deliberate divergence from `install-pnpm.sh`, which falls back to the fixed
 build mount: `dsh-verify.sh` must never execute a helper from a fixed mount, and
 its suite proves a decoy there is never reached. Exit status and diagnostics are
-the predecessors': usage is 2, a refusal is 1 on stderr, and a child keeps its
-own status. `dsh` still needs `python3` at install time, because
-`project.py` is Python until #62.
+the predecessors': usage is 2, a refusal is 1 on stderr, and a child keeps its own
+status and its own bytes. Two differences are deliberate and tested: an install
+hook collapses a preparation failure to 1, as its `*) exit 1` did, and a fixture
+input in a production probe is a refusal (1), because the request is well formed
+and the capability cannot honour it. `dsh` still needs `python3` at install time,
+because `project.py` is Python until #62.
 
 `images/tools/dsh/upgrade-dsh.sh` is **not** ported. Its load-bearing surface is
 the five-file publication transaction with signal-inclusive rollback, which lives
