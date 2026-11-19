@@ -1,7 +1,7 @@
 # 0017: Programs are Go; shell is for entry points and automation
 
 Status: accepted. Amends [ADR 0004](0004-go-build-helpers.md) (layout, delivery,
-parity bar). Being implemented; the order list records what has landed.
+parity bar). Being implemented.
 
 ## Context
 
@@ -72,12 +72,9 @@ probe talking to its own loopback server is not a client of that package.
 invokes it, does so through `internal/fetch`, which owns the retry, status and
 redirect policy, and fetches only the URLs its pin names — never a URL composed
 from a version, a mirror or a dist-tag. A subcommand that acquires nothing
-fetches nothing. That describes `install-artifact`, `pnpm-bootstrap` and
-`pnpm-extract` today, and it is what a newly ported program follows.
+fetches nothing.
 
-The rest of the build's egress is one of four things, each decided by its own
-ticket rather than by this sentence, and named here so that a reader does not go
-looking for a violation:
+Egress this rule does not govern includes:
 
 - **A package manager resolving its own graph.** `pnpm install
   --frozen-lockfile`, `npm install -g <pkg>@<version>`, `apt-get` (a [Floating
@@ -85,12 +82,14 @@ looking for a violation:
   transport. Whether that input is pinned is a question about that tool's
   mechanism — a lockfile where there is one, a digest where there is one — and
   not something `internal/fetch` can supply. Where none exists yet, as with
-  `install-copilot.sh`, that is a pinning gap tracked on its own.
-- **A build step from before this port** that still downloads with
-  `download.sh` or `curl`: the vendored Claude, Codex and OpenCode installers,
-  Pi, `install-zellij.sh`, and the example layers. The order list replaces what
-  can be replaced. A vendored upstream script stays vendored, and the example
-  layers stay self-contained, so not all of these become Go.
+  `install-copilot.sh`, that is the pinning gap [#42](https://github.com/gregwebs/agent-vm-images/issues/42)
+  already tracks.
+- **A build step from before this port**, which still downloads with whatever
+  it always did — `download.sh`, `curl`, a package manager, an interpreter's
+  own HTTP client — for example the vendored Claude, Codex and OpenCode
+  installers, Pi, `install-zellij.sh`, and the example layers. The order list
+  replaces what can be replaced. A vendored upstream script stays vendored, and
+  the example layers stay self-contained, so not all of these become Go.
 - **A readiness probe** speaking HTTP to a server the program itself started on
   the loopback interface. That is not a fetch and has no pin.
 - **A maintainer program.** A *pin writer* fetches the upstream bytes it is
@@ -98,9 +97,7 @@ looking for a violation:
   resolve dist-tags with `curl`, `npm view` and `pnpm view`. They do not all use
   `internal/fetch`: `avm-pin` shells to `gh attestation download` and `cosign
   verify-blob`, which carry their own transports. What bounds them is review of
-  their diff, not this rule. `avm-test` is offline by construction — it writes
-  fixture files from file trees and publishes nothing remotely — and
-  `avm-release` and `avm-ci` do not exist yet (order step 5).
+  their diff, not this rule.
 
 **Known gap.** `install-artifact` runs `gh attestation verify --bundle` without
 `--custom-trusted-root`, so `gh` refreshes the Sigstore trusted root over its own
