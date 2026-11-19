@@ -22,7 +22,8 @@ ACL = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *entry) for entry in A
 
 
 def command(args, **kwargs):
-    environment = dict(os.environ, PNPM_SOURCE_DIR='/source/images/pnpm', AGENT_VM_CONTRACT_DIR='/contract', PYTHONDONTWRITEBYTECODE='1')
+    environment = dict(os.environ, PNPM_SOURCE_DIR='/source/images/pnpm', AGENT_VM_CONTRACT_DIR='/contract',
+                       RECIPE_CONTRACT_HELPER=CHECKER, PYTHONDONTWRITEBYTECODE='1')
     result = subprocess.run(args, capture_output=True, text=True, timeout=170, env=environment, **kwargs)
     if result.returncode:
         raise RuntimeError(f'{args}: status {result.returncode}: {result.stderr}')
