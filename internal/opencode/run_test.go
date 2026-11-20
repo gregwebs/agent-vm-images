@@ -180,69 +180,60 @@ func TestReportMapsClassifiedTransportStatus(t *testing.T) {
 // envelope did not have: `timeout` puts its own child in a new process group, so a
 // signal to the envelope's group left that child running with nobody to forward
 // anything. Here the leader *and* its descendant ignore TERM, so the 137 proves the
-// KILL reached both.
+// KILL reached both, and the descendant's own heartbeat proves nothing kept
+// executing.
+//
+// The heartbeat is the observable on purpose: a killed descendant is re-parented to
+// init and can stay visible as a zombie, so "the pid is gone" is not the property
+// and would fail on a host whose init does not reap. A process that is still running
+// writes; a zombie cannot.
 func TestCancelledSessionLeavesNothingAlive(t *testing.T) {
 	shrinkBounds(t, 100*time.Millisecond)
 	work := t.TempDir()
-	leaderFile := filepath.Join(work, "leader.pid")
-	childFile := filepath.Join(work, "child.pid")
-	t.Setenv("LEADER_PID_FILE", leaderFile)
-	t.Setenv("CHILD_PID_FILE", childFile)
+	beat := filepath.Join(work, "beat")
+	t.Setenv("BEAT_FILE", beat)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan reportOutcome, 1)
 	go func() {
 		done <- runReport(ctx, reportSpec{
 			argv: []string{"sh", "-c", `trap '' TERM
-printf '%s' $$ >"$LEADER_PID_FILE"
-sh -c 'trap "" TERM; printf "%s" $$ >"$CHILD_PID_FILE"; while :; do sleep 0.05; done' &
+sh -c 'trap "" TERM; while :; do printf x >> "$BEAT_FILE"; sleep 0.05; done' &
 wait`},
 			stdoutFile: filepath.Join(work, "out"),
 			stderrFile: filepath.Join(work, "err"),
 		})
 	}()
-	waitForFile(t, leaderFile)
-	waitForFile(t, childFile)
+	waitForProgress(t, beat)
 	cancel()
 	outcome := <-done
 	if outcome.status != 128+9 {
-		t.Fatalf("status = %d, want the KILL (137)", outcome.status)
+		t.Fatalf("status = %d, want the KILL (137): TERM alone would have been 143", outcome.status)
 	}
-	for _, path := range []string{leaderFile, childFile} {
-		pid := readPID(t, path)
-		if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
-			t.Fatalf("pid %d from %s survived the cancellation (%v)", pid, filepath.Base(path), err)
-		}
+	before := fileSize(t, beat)
+	time.Sleep(300 * time.Millisecond)
+	if after := fileSize(t, beat); after != before {
+		t.Fatalf("the session kept writing after cancellation (%d → %d bytes)", before, after)
 	}
 }
 
-func waitForFile(t *testing.T, path string) {
+func waitForProgress(t *testing.T, path string) {
 	t.Helper()
 	until := time.Now().Add(10 * time.Second)
 	for time.Now().Before(until) {
-		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+		if fileSize(t, path) > 0 {
 			return
 		}
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatalf("%s never appeared", filepath.Base(path))
+	t.Fatal("the fixture never started writing")
 }
 
-func readPID(t *testing.T, path string) int {
+func fileSize(t *testing.T, path string) int64 {
 	t.Helper()
-	data, err := os.ReadFile(path)
+	info, err := os.Stat(path)
 	if err != nil {
-		t.Fatalf("%s: %v", path, err)
+		return 0
 	}
-	pid := 0
-	for _, digit := range strings.TrimSpace(string(data)) {
-		if digit < '0' || digit > '9' {
-			t.Fatalf("%s = %q", path, data)
-		}
-		pid = pid*10 + int(digit-'0')
-	}
-	if pid == 0 {
-		t.Fatalf("%s = %q", path, data)
-	}
-	return pid
+	return info.Size()
 }
