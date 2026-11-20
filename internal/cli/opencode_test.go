@@ -15,21 +15,15 @@ func runOpencode(t *testing.T, args ...string) (int, string, string) {
 	return status, stdout.String(), stderr.String()
 }
 
-// TestOpencodeUsageIsStatusTwo pins the ported status contract: a missing flag or
-// positional slot is usage (2), and the preparation driver's documented interface
+// TestOpencodeUsageIsStatusTwo pins the ported status contract: a missing
+// positional slot is usage (2) and the preparation driver's documented interface
 // line is the shell's, unchanged.
+//
+// A *missing flag* is the flag parser's own refusal, and its Fail calls os.Exit(2)
+// directly: an in-process test cannot observe that, and the shell harnesses run the
+// real binary for it.
 func TestOpencodeUsageIsStatusTwo(t *testing.T) {
-	// The preparation driver parses its own flags, so its refusals are observable
-	// here. The two gates use the flag parser, whose Fail calls os.Exit(2) directly:
-	// an in-process test cannot see that, and the shell harnesses run the real
-	// binary for it.
-	status, stdout, stderr := runOpencode(t, "opencode-prepare-lock")
-	if status != 2 || stdout != "" || stderr != opencodePrepareFlagsUsage+"\n" {
-		t.Fatalf("missing flags = %d, %q, %q, want 2 and the driver's own usage line", status, stdout, stderr)
-	}
-	// The preparation driver owns its positional grammar, so the documented
-	// interface line is the retired script's and reaches the caller's stderr.
-	status, stdout, stderr = runOpencode(t,
+	status, stdout, stderr := runOpencode(t,
 		"opencode-prepare-lock", "--contract", "/c", "--check", "/k", "--pin", "/p")
 	if status != 2 {
 		t.Fatalf("status = %d, want 2 (%s)", status, stderr)
@@ -43,10 +37,11 @@ func TestOpencodeUsageIsStatusTwo(t *testing.T) {
 }
 
 // TestOpencodeUnknownOptionIsSilentUsage keeps the one usage refusal the
-// predecessor printed nothing for.
+// predecessor printed nothing for. The words after `--` are positional, so this is
+// the driver's grammar refusing a third positional word.
 func TestOpencodeUnknownOptionIsSilentUsage(t *testing.T) {
 	status, stdout, stderr := runOpencode(t,
-		"opencode-prepare-lock", "--contract", "/c", "--check", "/k", "--pin", "/p", "/prefix", "1.4.1", "--repin")
+		"opencode-prepare-lock", "--contract", "/c", "--check", "/k", "--pin", "/p", "--", "/prefix", "1.4.1", "--repin")
 	if status != 2 {
 		t.Fatalf("status = %d, want 2", status)
 	}
@@ -55,22 +50,50 @@ func TestOpencodeUnknownOptionIsSilentUsage(t *testing.T) {
 	}
 }
 
+// TestOpencodeCallerWordsCannotBecomeFlags is the seam `--` closes: a caller that
+// writes `PREFIX VERSION --check other.mjs` must not replace the reviewed checker.
+// It is a usage refusal, and the run never starts.
+func TestOpencodeCallerWordsCannotBecomeFlags(t *testing.T) {
+	status, stdout, stderr := runOpencode(t,
+		"opencode-prepare-lock", "--contract", "/c", "--check", "/k", "--pin", "/p", "--",
+		"/prefix", "1.4.1", "--check", "/evil.mjs")
+	if status != 2 {
+		t.Fatalf("status = %d, want the driver's usage refusal (%q %q)", status, stdout, stderr)
+	}
+	if want := "usage: prepare-lock.sh PREFIX PLUGIN_VERSION [--refresh-lock]\n"; stderr != want {
+		t.Fatalf("stderr = %q, want %q", stderr, want)
+	}
+}
+
 // TestOpencodePrepareLockPassesTheDriversOwnOptions is the regression test for a
-// flag parser swallowing `--refresh-lock`: the driver's grammar owns the words
-// after its flags, so the option reaches it and the refusal is the driver's (1),
-// never a usage refusal (2).
+// flag parser swallowing `--refresh-lock`: the entry point ends its flags with
+// `--`, so the option reaches the driver's grammar and the refusal is the driver's
+// (1), never a usage refusal (2).
 func TestOpencodePrepareLockPassesTheDriversOwnOptions(t *testing.T) {
-	for _, extra := range [][]string{{"--refresh-lock"}, {""}, {"--repin"}} {
+	for _, extra := range [][]string{{"--refresh-lock"}, {""}} {
 		status, _, stderr := runOpencode(t, append([]string{
-			"opencode-prepare-lock", "--contract", "/c", "--check", "/k", "--pin", "/p",
+			"opencode-prepare-lock", "--contract", "/c", "--check", "/k", "--pin", "/p", "--",
 			"/nonexistent-prefix", "1.4.1"}, extra...)...)
-		want := 1
-		if extra[0] == "--repin" {
-			want = 2
+		if status != 1 {
+			t.Fatalf("%q: status = %d, want 1 (%s)", extra[0], status, stderr)
 		}
-		if status != want {
-			t.Fatalf("%q: status = %d, want %d (%s)", extra[0], status, want, stderr)
-		}
+	}
+}
+
+// TestOpencodeEmptyFixtureRootIsAValue is the boundary the image build cannot do
+// without: the entry point passes `--fixture-root "$AGENT_VM_FIXTURE_ROOT"` whether
+// or not that variable is set, so an empty value must reach the driver as "no
+// fixture root" rather than being refused as a missing flag. A mutant that refuses
+// it breaks every product build and no other local gate notices.
+func TestOpencodeEmptyFixtureRootIsAValue(t *testing.T) {
+	status, stdout, stderr := runOpencode(t, "opencode-prepare-lock",
+		"--contract", "/c", "--check", "/k", "--pin", "/p", "--fixture-root", "", "--",
+		"/nonexistent-prefix", "1.4.1")
+	if status != 1 {
+		t.Fatalf("status = %d, want the prefix refusal (1), not a usage refusal (%q %q)", status, stdout, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want the silent prefix refusal", stderr)
 	}
 }
 
@@ -111,18 +134,18 @@ func TestOpencodeFailureStatuses(t *testing.T) {
 }
 
 // TestOpencodeVerifyRefusesAnEmptySlot is the seam's status: the entry point's
-// `${:?}` refused an unset slot at status 1, and a direct caller gets the same
-// status rather than a usage refusal.
+// `${:?}` is a missing required argument, which the predecessor's dash reported at
+// status 2, and a direct caller gets the same.
 func TestOpencodeVerifyRefusesAnEmptySlot(t *testing.T) {
 	status, stdout, stderr := runOpencode(t,
-		"opencode-verify", "--contract", "/c", "--prefix", "/p", "--status-dir", "/s")
-	if status != 1 {
-		t.Fatalf("status = %d, want 1 (%s)", status, stderr)
+		"opencode-verify", "--prefix", "/p", "--status-dir", "/s")
+	if status != 2 {
+		t.Fatalf("status = %d, want 2 (%s)", status, stderr)
 	}
 	if stdout != "" {
 		t.Fatalf("stdout = %q", stdout)
 	}
-	if stderr != "  opencode: AGENT_VM_VERSION_OPENCODE is required\n" {
+	if stderr != "verify-opencode.sh needs AGENT_VM_VERSION_OPENCODE\n" {
 		t.Fatalf("stderr = %q", stderr)
 	}
 }

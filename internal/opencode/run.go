@@ -17,20 +17,31 @@ import (
 	"github.com/gregwebs/agent-vm-images/internal/toolaccess"
 )
 
-// The reviewed shell bounded the manager identity check with
-// `timeout --kill-after=5 20`; every other child was bounded by its own composed
-// envelope (`run-report.sh`, `run-pnpm.sh`), which is why most calls here pass no
-// bound of their own.
 const (
-	identityBound = 20 * time.Second
-	killGrace     = 5 * time.Second
-	pollInterval  = 20 * time.Millisecond
+	pollInterval = 20 * time.Millisecond
 
-	// notFoundStatus and cannotExecuteStatus are the shell's statuses for a child
-	// it could not start, kept because `set -eu` propagated them verbatim.
+	// notFoundStatus and cannotExecuteStatus are what the shell reported for a
+	// program it could not find or could not execute; `set -eu` propagated them.
 	notFoundStatus      = 127
 	cannotExecuteStatus = 126
 	genericFailure      = 1
+
+	// classifiedTransportStatus is the one status `run-report.sh` remapped. It is
+	// kept because the reviewed envelope's rule was that a tool which happens to
+	// exit 75 can never look like a classified download failure.
+	classifiedTransportStatus = 75
+)
+
+// The reviewed bounds. They are variables only so a test can drive them; nothing
+// outside this package can set one, so no caller can lengthen a gate.
+var (
+	// identityBound is `timeout --kill-after=5 20` around the manager identity
+	// check, which is the one manager call the reviewed shell bounded itself: the
+	// composed `run-pnpm.sh` does not run it.
+	identityBound = 20 * time.Second
+	// killGrace is the reviewed `--kill-after=5`: the grace a TERMed child gets
+	// before it is killed.
+	killGrace = 5 * time.Second
 )
 
 // childSpec is one program this driver runs and the streams the predecessor gave
@@ -46,8 +57,8 @@ type childSpec struct {
 	// captured. Nil discards them, which is what `>/dev/null` did.
 	stdout io.Writer
 	stderr io.Writer
-	// bound is the child's own deadline. Zero leaves the bound to the child's
-	// composed envelope, exactly as the reviewed hooks relied on it.
+	// bound is the child's own deadline. Zero leaves the bound to the composed
+	// envelope the child runs under.
 	bound time.Duration
 }
 
@@ -101,24 +112,25 @@ func childStatus(err error) int {
 }
 
 // cancelGrace is how long a cancelled child's session gets to unwind on TERM
-// before it is killed. It is derived from the envelope's own backstop rather than
+// before it is killed. It is derived from the reviewed backstop rather than
 // chosen: `run-pnpm.sh` runs the manager under `timeout --kill-after=5`, so the
 // envelope's TERM handling fires five seconds after the TERM it forwards. Waiting
 // less would return while a resolver was still running, and the caller's cleanup
 // would remove the scratch underneath it.
-const cancelGrace = killGrace + time.Second
+func cancelGrace() time.Duration { return killGrace + time.Second }
 
-// endSession stops a child and everything it started. TERM comes first: the
-// composed envelopes run their own children through `timeout`, which puts them in
-// a group of their own, so a KILL of the envelope's group alone would leave a
-// resolver running with nobody to stop it.
+// endSession stops a child and everything it started: TERM to the session, then
+// KILL once the grace is spent. That order is load-bearing for `run-pnpm.sh`,
+// whose own TERM trap has to run before the caller removes the scratch the
+// resolver is using. For this program's own children the session is all there is,
+// so nothing can outlive the call.
 func endSession(command *exec.Cmd) error {
 	if command.Process == nil {
 		return nil
 	}
 	pgid := command.Process.Pid
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	until := time.Now().Add(cancelGrace)
+	until := time.Now().Add(cancelGrace())
 	for time.Now().Before(until) {
 		if err := syscall.Kill(-pgid, 0); err != nil && errors.Is(err, syscall.ESRCH) {
 			return nil
@@ -126,6 +138,118 @@ func endSession(command *exec.Cmd) error {
 		time.Sleep(pollInterval)
 	}
 	return syscall.Kill(-pgid, syscall.SIGKILL)
+}
+
+// reportSpec is one bounded child whose two streams are published to files.
+type reportSpec struct {
+	argv       []string
+	bound      time.Duration
+	stdoutFile string
+	stderrFile string
+}
+
+// reportOutcome is a finished report run: the status the caller saw, or the
+// reason it never started.
+type reportOutcome struct {
+	status int
+	// start is set when the program could not be started at all. An absent
+	// interpreter is a broken image, and the caller reports it at status 1.
+	start error
+}
+
+// runReport runs one bounded child with a private HOME and both streams captured
+// in the caller's files, which is what the composed `run-report.sh` did.
+//
+// This program owns the run instead of execing that envelope. The envelope runs
+// its child through `timeout`, and GNU timeout puts the managed command in a
+// process group of its own, so a TERM to the envelope's group kills `timeout` and
+// leaves the managed child running with nobody left to forward anything -- which
+// is exactly what this port's signal test observed. Owning the run keeps the child
+// in this session, so `endSession` reaches it and KILL follows when TERM is
+// ignored. The rest of the envelope's contract is kept: both files always exist,
+// the child gets a private HOME and XDG tree, and 75 becomes 1.
+func runReport(ctx context.Context, spec reportSpec) reportOutcome {
+	stdout, err := os.Create(spec.stdoutFile)
+	if err != nil {
+		return reportOutcome{start: err}
+	}
+	defer func() { _ = stdout.Close() }()
+	stderr, err := os.Create(spec.stderrFile)
+	if err != nil {
+		return reportOutcome{start: err}
+	}
+	defer func() { _ = stderr.Close() }()
+	home, err := os.MkdirTemp("", "opencode-report-")
+	if err != nil {
+		return reportOutcome{start: err}
+	}
+	defer func() { _ = os.RemoveAll(home) }()
+	if err := createReportState(home); err != nil {
+		return reportOutcome{start: err}
+	}
+
+	run := ctx
+	if spec.bound > 0 {
+		var cancel context.CancelFunc
+		run, cancel = context.WithTimeout(ctx, spec.bound)
+		defer cancel()
+	}
+	command := exec.CommandContext(run, spec.argv[0], spec.argv[1:]...) //nolint:gosec // the argv is this program's own reviewed call.
+	command.Env = reportEnvironment(home)
+	command.Stdout = stdout
+	command.Stderr = stderr
+	command.WaitDelay = killGrace
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.Cancel = func() error { return endSession(command) }
+	if err := command.Start(); err != nil {
+		return reportOutcome{start: err}
+	}
+	if err := command.Wait(); err != nil {
+		status := childStatus(err)
+		if status == classifiedTransportStatus {
+			status = genericFailure
+		}
+		return reportOutcome{status: status}
+	}
+	return reportOutcome{}
+}
+
+// createReportState is the envelope's `mkdir -p` of the private HOME and the four
+// XDG roots.
+func createReportState(home string) error {
+	for _, directory := range []string{
+		home,
+		filepath.Join(home, ".config"),
+		filepath.Join(home, ".cache"),
+		filepath.Join(home, ".local", "share"),
+		filepath.Join(home, ".local", "state"),
+	} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reportEnvironment is this process's environment with the report's own HOME and
+// XDG roots applied, as the envelope exported them.
+func reportEnvironment(home string) []string {
+	environment := []string{}
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME":
+			continue
+		}
+		environment = append(environment, entry)
+	}
+	return append(environment,
+		"HOME="+home,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"XDG_CACHE_HOME="+filepath.Join(home, ".cache"),
+		"XDG_DATA_HOME="+filepath.Join(home, ".local", "share"),
+		"XDG_STATE_HOME="+filepath.Join(home, ".local", "state"),
+	)
 }
 
 // interruption turns a signal into the status the owning shell exited with, so a

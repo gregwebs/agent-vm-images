@@ -4,7 +4,9 @@
 # The policy is the `opencode-verify` subcommand of the composed helper (ADR 0017,
 # #218): the lstat path state, the absence record, the bounded status-checked
 # `--version`, the exact report, the stderr contradiction and the access audit all
-# live there. This file is only the entry point the recipe runs.
+# live there. This file is only the entry point the recipe runs, and $CONTRACT is
+# how it finds that program: the driver runs nothing from the composed directory
+# itself, so it is not told about one.
 #
 # Reached after install-opencode.sh: a hard failure already aborted the build, and
 # a softened transport failure exited 0 having left an `absent-transport CODE`
@@ -21,7 +23,6 @@ slot="${AGENT_VM_VERSION_OPENCODE:?verify-opencode.sh needs AGENT_VM_VERSION_OPE
 status_dir="${AGENT_VM_INSTALL_STATUS_DIR:-/opt/agent-vm/install-status}"
 
 exec "$CONTRACT/recipe-contract" opencode-verify \
-    --contract "$CONTRACT" \
     --prefix "$prefix" \
     --opencode-version "$slot" \
     --status-dir "$status_dir"

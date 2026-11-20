@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The plugin gate runs programs that are not this repository's Go code: the `.mjs`
@@ -38,6 +39,7 @@ case "$script" in
         esac
         ;;
     check-claude-runtime.mjs)
+        if [ -n "${RUNTIME_HANG:-}" ]; then exec sleep 20; fi
         if [ -n "${RUNTIME_FAIL:-}" ]; then
             echo 'fixture runtime failure' >&2
             exit 1
@@ -56,6 +58,7 @@ case "$script" in
     probe-opencode.py)
         case "$1" in
             capture)
+                if [ -n "${CAPTURE_HANG:-}" ]; then exec sleep 20; fi
                 if [ -n "${CAPTURE_FAIL:-}" ]; then echo 'fixture capture failure' >&2; exit 1; fi
                 printf '{"schema":1}\n'
                 ;;
@@ -72,7 +75,6 @@ exit 0
 // pluginsFixture is one installed-plugin gate case.
 type pluginsFixture struct {
 	*fixture
-	contract  string
 	source    string
 	statusDir string
 	claude    string
@@ -84,22 +86,17 @@ type pluginsFixture struct {
 func newPluginsFixture(t *testing.T) *pluginsFixture {
 	t.Helper()
 	tree := newFixture(t)
-	contract := filepath.Join(tree.root, "contract")
 	source := filepath.Join(tree.root, "source")
-	for _, directory := range []string{contract, source, filepath.Join(source, "plugins")} {
+	for _, directory := range []string{source, filepath.Join(source, "plugins")} {
 		if err := os.MkdirAll(directory, 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", directory, err)
 		}
-	}
-	if err := os.WriteFile(filepath.Join(contract, "run-report.sh"), []byte(fakeEnvelopeReport), 0o755); err != nil {
-		t.Fatalf("write envelope: %v", err)
 	}
 	tree.program(t, "node", fakePayloadNode)
 	tree.program(t, "python3", fakeProbePython)
 
 	gate := &pluginsFixture{
 		fixture:   tree,
-		contract:  contract,
 		source:    source,
 		statusDir: filepath.Join(tree.root, "status"),
 		claude:    filepath.Join(tree.root, "native", ".local", "bin", "claude"),
@@ -128,7 +125,6 @@ func newPluginsFixture(t *testing.T) *pluginsFixture {
 func (g *pluginsFixture) options() PluginsOptions {
 	return PluginsOptions{
 		Source:         g.source,
-		Contract:       g.contract,
 		Prefix:         g.prefix,
 		Claude:         g.claude,
 		Opencode:       g.opencode,
@@ -171,10 +167,8 @@ func TestPluginsHealthy(t *testing.T) {
 	tree.expectInvocations(t,
 		"node|",
 		"check-claude-payload.mjs config",
-		"run-report|20 ",
 		"check-claude-runtime.mjs",
 		"check-claude-payload.mjs report",
-		"run-report|90 ",
 		"probe-opencode.py capture",
 		"probe-opencode.py check",
 		"check-claude-payload.mjs files",
@@ -183,17 +177,17 @@ func TestPluginsHealthy(t *testing.T) {
 	if !strings.Contains(invocations[0], "plugins/check-lock.mjs "+tree.prefix) {
 		t.Fatalf("the checker did not receive the installed prefix: %q", invocations[0])
 	}
-	if !strings.Contains(invocations[4], "report ") || !strings.Contains(invocations[4], " 1.4.1") {
-		t.Fatalf("the runtime report was checked against the wrong selection: %q", invocations[4])
+	if !strings.Contains(invocations[3], "report ") || !strings.Contains(invocations[3], " 1.4.1") {
+		t.Fatalf("the runtime report was checked against the wrong selection: %q", invocations[3])
 	}
-	if !strings.Contains(invocations[6], "--timeout 60") {
-		t.Fatalf("the probe lost its deadline: %q", invocations[6])
+	if !strings.Contains(invocations[4], "--timeout 60") {
+		t.Fatalf("the probe lost its deadline: %q", invocations[4])
 	}
-	if !strings.Contains(invocations[7], "--plugin-entry "+filepath.Join(tree.prefix, "index.js")) {
-		t.Fatalf("the probe check lost its plugin entry: %q", invocations[7])
+	if !strings.Contains(invocations[5], "--plugin-entry "+filepath.Join(tree.prefix, "index.js")) {
+		t.Fatalf("the probe check lost its plugin entry: %q", invocations[5])
 	}
-	if !strings.Contains(invocations[8], "files "+tree.prefix) {
-		t.Fatalf("the inventory did not walk the installed prefix: %q", invocations[8])
+	if !strings.Contains(invocations[6], "files "+tree.prefix) {
+		t.Fatalf("the inventory did not walk the installed prefix: %q", invocations[6])
 	}
 	// The payload inventory is audited quietly; the config and the two commands are
 	// loud, so the build log names what was certified.
@@ -331,6 +325,42 @@ func TestPluginsAccessAudits(t *testing.T) {
 	})
 }
 
+// TestPluginsReportBounds keeps both of the gate's deadlines: a runtime or a probe
+// that never answers must fail the gate instead of holding the build open.
+func TestPluginsReportBounds(t *testing.T) {
+	for name, environment := range map[string][2]string{
+		"runtime": {"RUNTIME_HANG", "1"},
+		"probe":   {"CAPTURE_HANG", "1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree := newPluginsFixture(t)
+			t.Setenv(environment[0], environment[1])
+			shrinkBounds(t, 100*time.Millisecond)
+			started := time.Now()
+			_, _, err := tree.run(t)
+			mustSilent(t, err, 1)
+			if elapsed := time.Since(started); elapsed > 10*time.Second {
+				t.Fatalf("the gate ran for %s, want its own deadline to fire", elapsed)
+			}
+		})
+	}
+}
+
+// TestPluginsScratchFailure reports a scratch that cannot be created instead of
+// running the probes in an unrelated directory.
+func TestPluginsScratchFailure(t *testing.T) {
+	tree := newPluginsFixture(t)
+	t.Setenv("TMPDIR", filepath.Join(tree.root, "absent-tmp"))
+	_, _, err := tree.run(t)
+	if err == nil {
+		t.Fatal("an unusable scratch was reported as success")
+	}
+	if _, ok := refusalText(err); !ok {
+		t.Fatalf("error = %v (%T), want a refusal", err, err)
+	}
+	tree.expectNoChild(t)
+}
+
 // TestPluginsAuditsRunLast pins the order the predecessor documented: nothing is
 // certified before the runtime and the probe have run.
 func TestPluginsAuditsRunLast(t *testing.T) {
@@ -341,15 +371,18 @@ func TestPluginsAuditsRunLast(t *testing.T) {
 	_, _, err := tree.run(t)
 	mustSilent(t, err, 1)
 	// Every child ran: the access audit is the last gate, not an early one.
-	tree.expectInvocations(t, "node|", "config", "run-report|20 ", "check-claude-runtime.mjs",
-		"report", "run-report|90 ", "probe-opencode.py capture", "probe-opencode.py check", "files")
+	tree.expectInvocations(t, "node|", "config", "check-claude-runtime.mjs",
+		"report", "probe-opencode.py capture", "probe-opencode.py check", "files")
 }
 
-// TestPluginsEmptyInventory documents the one case the port changed: the
-// predecessor's `xargs -0` refused an empty inventory, and this driver audits
-// nothing. It is unreachable for a real prefix -- `check-claude-payload.mjs config`
-// asserts `index.js` -- so the difference cannot certify an empty payload.
-func TestPluginsEmptyInventory(t *testing.T) {
+// TestPluginsRefusesAnEmptyInventory keeps the refusal the predecessor had: its
+// `xargs -0` batch ran the audit with no targets, which failed, so an empty payload
+// was never certified. The status is this program's 1 rather than xargs's 123.
+//
+// "Unreachable because `check-claude-payload.mjs config` asserts `index.js`" would
+// be a dependency on another program's present behaviour, not a guarantee, so the
+// rule is kept rather than argued away.
+func TestPluginsRefusesAnEmptyInventory(t *testing.T) {
 	tree := newPluginsFixture(t)
 	empty := filepath.Join(tree.root, "empty-prefix")
 	if err := os.MkdirAll(empty, 0o755); err != nil {
@@ -357,10 +390,11 @@ func TestPluginsEmptyInventory(t *testing.T) {
 	}
 	options := tree.options()
 	options.Prefix = empty
-	options.Claude, options.Opencode = tree.claude, tree.opencode
 	var out, errOut strings.Builder
 	options.Out, options.Err = &out, &errOut
-	if err := VerifyPlugins(context.Background(), options); err != nil {
-		t.Fatalf("gate = %v (%s)", err, errOut.String())
+	mustRefusal(t, VerifyPlugins(context.Background(), options),
+		"opencode-claude: the plugin payload holds no files to audit")
+	if _, found := tree.record(t); found {
+		t.Fatal("an empty payload was certified")
 	}
 }

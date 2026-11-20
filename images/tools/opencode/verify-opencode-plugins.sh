@@ -19,7 +19,6 @@ status_dir="${AGENT_VM_INSTALL_STATUS_DIR:-/opt/agent-vm/install-status}"
 
 exec "$CONTRACT/recipe-contract" opencode-verify-plugins \
     --source "$SOURCE" \
-    --contract "$CONTRACT" \
     --prefix "$PREFIX" \
     --claude "$CLAUDE" \
     --opencode "$OPENCODE" \

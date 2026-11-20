@@ -41,74 +41,40 @@ func (p *process) opencodeFailure(err error) int {
 	return p.stderrStatus(1, err.Error()+"\n")
 }
 
-// opencodePrepareFlags are the driver's own inputs, separated from the caller's
-// argv.
+// opencodePrepareUsage is the preparation driver.
 //
-// They are parsed by hand rather than with go-arg because the positional words
-// belong to the driver's grammar: `--refresh-lock` is one of them, and a flag
-// parser refuses an option it does not declare before the driver ever sees it.
-// Everything after these four reaches the driver unchanged, so a duplicate or a
-// typo is that grammar's usage refusal -- which is the status and the silence the
-// retired script produced.
-type opencodePrepareFlags struct {
-	Contract    string
-	Check       string
-	Pin         string
-	FixtureRoot string
-	Arguments   []string
+// `Arguments` carries the caller's positional words, which include
+// `--refresh-lock`: that word belongs to the driver's grammar, not to this flag
+// set. The entry point therefore ends its own flags with `--`, so nothing a caller
+// writes can be read as a flag here -- which is what stops `PREFIX VERSION --check
+// other.mjs` from replacing the reviewed checker.
+type opencodePrepareUsage struct {
+	Contract    string   `arg:"--contract,required" placeholder:"DIR" help:"the composed helper directory run-pnpm.sh runs from"`
+	Check       string   `arg:"--check,required" placeholder:"PATH" help:"the reviewed-bytes checker"`
+	Pin         string   `arg:"--pin,required" placeholder:"PATH" help:"the developer-only pin writer"`
+	FixtureRoot string   `arg:"--fixture-root" placeholder:"DIR" help:"authorize a non-production prefix"`
+	Arguments   []string `arg:"positional" help:"-- PREFIX PLUGIN_VERSION [--refresh-lock]"`
 }
 
-const opencodePrepareFlagsUsage = "opencode-prepare-lock: usage: recipe-contract opencode-prepare-lock" +
-	" --contract DIR --check PATH --pin PATH [--fixture-root DIR] PREFIX PLUGIN_VERSION [--refresh-lock]"
-
-func parsePrepareFlags(args []string) (opencodePrepareFlags, error) {
-	var flags opencodePrepareFlags
-	for index := 0; index < len(args); index++ {
-		name := args[index]
-		switch name {
-		case "--contract", "--check", "--pin", "--fixture-root":
-			if index+1 >= len(args) {
-				return opencodePrepareFlags{}, &opencode.Usage{Text: opencodePrepareFlagsUsage}
-			}
-			value := args[index+1]
-			index++
-			// An empty fixture root is a value, not a missing one: the entry point
-			// passes the variable whether or not it is set, and unset means
-			// "production only".
-			if value == "" && name != "--fixture-root" {
-				return opencodePrepareFlags{}, &opencode.Usage{Text: opencodePrepareFlagsUsage}
-			}
-			switch name {
-			case "--contract":
-				flags.Contract = value
-			case "--check":
-				flags.Check = value
-			case "--pin":
-				flags.Pin = value
-			case "--fixture-root":
-				flags.FixtureRoot = value
-			}
-		default:
-			flags.Arguments = append(flags.Arguments, name)
-		}
-	}
-	if flags.Contract == "" || flags.Check == "" || flags.Pin == "" {
-		return opencodePrepareFlags{}, &opencode.Usage{Text: opencodePrepareFlagsUsage}
-	}
-	return flags, nil
+func (opencodePrepareUsage) Description() string {
+	return "Re-pin the reviewed OpenCode plugin inputs after a changed selection."
 }
 
 func (p *process) runOpencodePrepareLock(args []string) int {
-	flags, err := parsePrepareFlags(args)
+	var usage opencodePrepareUsage
+	parser, err := arg.NewParser(arg.Config{Program: "recipe-contract opencode-prepare-lock"}, &usage)
 	if err != nil {
-		return p.opencodeFailure(err)
+		return p.reportSynchronousFailure(err)
+	}
+	if err := parser.Parse(args); err != nil {
+		return p.argFailure(parser, err)
 	}
 	options := opencode.PrepareOptions{
-		Contract:    flags.Contract,
-		Check:       flags.Check,
-		Pin:         flags.Pin,
-		FixtureRoot: flags.FixtureRoot,
-		Arguments:   flags.Arguments,
+		Contract:    usage.Contract,
+		Check:       usage.Check,
+		Pin:         usage.Pin,
+		FixtureRoot: usage.FixtureRoot,
+		Arguments:   usage.Arguments,
 		Out:         p.streams.Out,
 		Err:         p.streams.Err,
 	}
@@ -120,7 +86,6 @@ func (p *process) runOpencodePrepareLock(args []string) int {
 
 // opencodeVerifyUsage is the installed-command gate for the opencode layer.
 type opencodeVerifyUsage struct {
-	Contract        string `arg:"--contract,required" placeholder:"DIR" help:"the authorized composed helper directory"`
 	Prefix          string `arg:"--prefix,required" placeholder:"DIR" help:"the installer's HOME holding .opencode"`
 	OpencodeVersion string `arg:"--opencode-version" placeholder:"vEXACT" help:"the layer's requested opencode slot"`
 	StatusDir       string `arg:"--status-dir,required" placeholder:"DIR" help:"the install-status directory"`
@@ -140,7 +105,6 @@ func (p *process) runOpencodeVerify(args []string) int {
 		return p.argFailure(parser, err)
 	}
 	options := opencode.VerifyOptions{
-		Contract:  usage.Contract,
 		Prefix:    usage.Prefix,
 		Slot:      usage.OpencodeVersion,
 		StatusDir: usage.StatusDir,
@@ -159,7 +123,6 @@ func (p *process) runOpencodeVerify(args []string) int {
 // read.
 type opencodePluginsUsage struct {
 	Source         string `arg:"--source,required" placeholder:"DIR" help:"the OpenCode build mount"`
-	Contract       string `arg:"--contract,required" placeholder:"DIR" help:"the authorized composed helper directory"`
 	Prefix         string `arg:"--prefix,required" placeholder:"DIR" help:"the installed plugin prefix"`
 	Claude         string `arg:"--claude,required" placeholder:"PATH" help:"the Claude command the plugin hands work to"`
 	Opencode       string `arg:"--opencode,required" placeholder:"PATH" help:"the installed opencode command"`
@@ -184,7 +147,6 @@ func (p *process) runOpencodeVerifyPlugins(args []string) int {
 	}
 	options := opencode.PluginsOptions{
 		Source:         usage.Source,
-		Contract:       usage.Contract,
 		Prefix:         usage.Prefix,
 		Claude:         usage.Claude,
 		Opencode:       usage.Opencode,

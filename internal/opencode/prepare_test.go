@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The committed manifest, byte for byte: the staging rewrite is compared with the
@@ -233,17 +234,17 @@ func TestPrepareAcceptsCanonicalSelection(t *testing.T) {
 	}
 }
 
-// TestPrepareGuardOrder is the ordering invariant. The fixture-root
-// authorization runs before anything from the composed directory is executed, and
-// the preload rejection runs before any Node or pnpm process starts. Neither may
-// move: the authorization is what stops an unauthorized prefix reaching a program
-// mounted there, and a preloaded module can patch node:crypto.
+// TestPrepareGuardOrder is the ordering invariant, stated as what it proves: the
+// fixture-root authorization runs before the first child (the checker), and the
+// preload rejection runs before any Node or pnpm process starts. Neither may move:
+// the authorization is what stops an unauthorized prefix reaching the checker or
+// the resolution envelope, and a preloaded module can patch node:crypto.
 func TestPrepareGuardOrder(t *testing.T) {
-	t.Run("fixture root before the composed directory", func(t *testing.T) {
+	t.Run("fixture root before the first child", func(t *testing.T) {
 		tree := newPrepareFixture(t)
 		t.Setenv("AGENT_VM_FIXTURE_ROOT", "")
 		_, _, err := tree.run(t, tree.prefix, "1.4.1")
-		mustRefusal(t, err, "non-production prefix requires fixture root")
+		mustUsage(t, err, "non-production prefix requires fixture root")
 		tree.expectNoChild(t)
 	})
 	t.Run("preload before the checker", func(t *testing.T) {
@@ -286,11 +287,61 @@ func TestPreparePrefixAuthorization(t *testing.T) {
 		mustSilent(t, err, 1)
 	}
 	tree.expectNoChild(t)
-	// A root that cannot be resolved is the predecessor's failed `cd`.
-	t.Setenv("AGENT_VM_FIXTURE_ROOT", filepath.Join(tree.root, "absent"))
+	// A root that cannot be resolved is the predecessor's failed `cd` under
+	// `set -e`: usage, with a diagnostic naming the root.
+	absent := filepath.Join(tree.root, "absent")
+	t.Setenv("AGENT_VM_FIXTURE_ROOT", absent)
 	_, _, err := tree.run(t, tree.prefix, "1.4.1")
+	mustUsage(t, err, "cd: can't cd to "+absent)
+	tree.expectNoChild(t)
+}
+
+// TestPreparePrefixSiblings keeps the containment rule from being a string prefix
+// test: a sibling of the authorized root shares its name and is not inside it.
+func TestPreparePrefixSiblings(t *testing.T) {
+	tree := newPrepareFixture(t)
+	sibling := tree.root + "-sibling"
+	if err := os.MkdirAll(filepath.Join(sibling, "prefix"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sibling) })
+	_, _, err := tree.run(t, filepath.Join(sibling, "prefix"), "1.4.1")
 	mustSilent(t, err, 1)
 	tree.expectNoChild(t)
+}
+
+// TestPrepareRelativePrefixIsAuthorized is the `cd "$PREFIX" && pwd -P` rule: a
+// relative prefix resolves against the caller's directory and then has to be inside
+// the root like any other. `EvalSymlinks` alone would return a relative path that no
+// absolute root can contain.
+func TestPrepareRelativePrefixIsAuthorized(t *testing.T) {
+	// "" means "this one is absolute": only the relative one is named relatively.
+	for _, testCase := range []struct{ name, prefix, root string }{
+		{"relative prefix", "prefix", ""},
+		{"relative root", "", "."},
+		{"both relative", "prefix", "."},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			tree := newPrepareFixture(t)
+			t.Chdir(tree.root)
+			prefix := tree.prefix
+			if testCase.prefix != "" {
+				prefix = testCase.prefix
+			}
+			root := tree.root
+			if testCase.root != "" {
+				root = testCase.root
+			}
+			t.Setenv("AGENT_VM_FIXTURE_ROOT", root)
+			stdout, _, err := tree.run(t, prefix, "1.4.1")
+			if err != nil {
+				t.Fatalf("a relative prefix inside the root was refused: %v", err)
+			}
+			if !strings.Contains(stdout, "committed inputs reused") {
+				t.Fatalf("stdout = %q, want the no-op line", stdout)
+			}
+		})
+	}
 }
 
 // TestPrepareEnvironmentGuard keeps the environment policy in the composed rule
@@ -362,16 +413,57 @@ func TestPrepareChangedSelectionRequiresRefresh(t *testing.T) {
 // TestPrepareRefusesAnotherManager keeps the reviewed lock a reviewed artefact: a
 // manager that reports another version, or fails, is refused and never installs.
 func TestPrepareRefusesAnotherManager(t *testing.T) {
-	for _, environment := range [][2]string{{"MANAGER_VERSION", "12.9.1"}, {"MANAGER_STATUS", "1"}} {
-		tree := newPrepareFixture(t)
-		t.Setenv(environment[0], environment[1])
-		_, _, err := tree.run(t, tree.prefix, "1.4.2", "--refresh-lock")
-		mustRefusal(t, err, "prepare-lock: pnpm 11.11.0 is required; refusing another manager version")
-		for _, invocation := range tree.invocations(t) {
-			if strings.HasPrefix(invocation, "run-pnpm|") {
-				t.Fatalf("%s: the manager ran anyway: %q", environment[0], invocation)
+	for name, testCase := range map[string]struct{ key, value string }{
+		"wrong version":   {"MANAGER_VERSION", "12.9.1"},
+		"nothing printed": {"SILENT_MANAGER", "1"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tree := newPrepareFixture(t)
+			t.Setenv(testCase.key, testCase.value)
+			if testCase.key == "SILENT_MANAGER" {
+				// A manager that answers nothing, which is also what a bound that fires
+				// leaves behind.
+				tree.program(t, "pnpm", "#!/bin/sh\nexit 1\n")
 			}
-		}
+			_, _, err := tree.run(t, tree.prefix, "1.4.2", "--refresh-lock")
+			mustRefusal(t, err, "prepare-lock: pnpm 11.11.0 is required; refusing another manager version")
+			for _, invocation := range tree.invocations(t) {
+				if strings.HasPrefix(invocation, "run-pnpm|") {
+					t.Fatalf("%s: the manager ran anyway: %q", testCase.key, invocation)
+				}
+			}
+		})
+	}
+}
+
+// TestPrepareAcceptsAManagerThatStumbled keeps the reviewed comparison: it was the
+// manager's own report and nothing else, so a failed `--version` that still printed
+// the pin continues, and the resolution behind it is where a real failure surfaces.
+func TestPrepareAcceptsAManagerThatStumbled(t *testing.T) {
+	tree := newPrepareFixture(t)
+	tree.program(t, "pnpm", `#!/bin/sh
+if [ "$1" = --version ]; then
+    printf '11.11.0\n'
+    exit 1
+fi
+printf 'fixture lock\n' >pnpm-lock.yaml
+`)
+	if _, stderr, err := tree.run(t, tree.prefix, "1.4.2", "--refresh-lock"); err != nil {
+		t.Fatalf("a manager that printed the pin was refused: %v (%s)", err, stderr)
+	}
+}
+
+// TestPrepareIdentityBound keeps the manager identity check bounded: a manager that
+// answers nothing must not hold a build open, and the session must not survive.
+func TestPrepareIdentityBound(t *testing.T) {
+	tree := newPrepareFixture(t)
+	tree.program(t, "pnpm", "#!/bin/sh\ntrap '' TERM\nexec sleep 300\n")
+	shrinkBounds(t, 100*time.Millisecond)
+	started := time.Now()
+	_, _, err := tree.run(t, tree.prefix, "1.4.2", "--refresh-lock")
+	mustRefusal(t, err, "prepare-lock: pnpm 11.11.0 is required; refusing another manager version")
+	if elapsed := time.Since(started); elapsed > 20*time.Second {
+		t.Fatalf("the identity check ran for %s", elapsed)
 	}
 }
 
@@ -566,5 +658,28 @@ func TestAuthorizePrefix(t *testing.T) {
 	// `"$root"/*` only.
 	mustSilent(t, errOf(authorizePrefix(root, root)), 1)
 	mustSilent(t, errOf(authorizePrefix(escaping, root)), 1)
-	mustRefusal(t, errOf(authorizePrefix(inside, "")), "non-production prefix requires fixture root")
+	mustUsage(t, errOf(authorizePrefix(inside, "")), "non-production prefix requires fixture root")
+	mustUsage(t, errOf(authorizePrefix(inside, filepath.Join(root, "absent"))), "cd: can't cd to "+filepath.Join(root, "absent"))
+}
+
+// TestIsProductionPrefix is the exemption's whole decision. The production path is
+// the one input a host test cannot create, so the decision is a pure function and
+// this is its table: a sibling that merely starts with the production name is not
+// the image's directory, and neither is a child of it.
+func TestIsProductionPrefix(t *testing.T) {
+	for _, testCase := range []struct {
+		path string
+		want bool
+	}{
+		{"/opt/agent-vm/opencode-plugins", true},
+		{"/opt/agent-vm/opencode-plugins-x", false},
+		{"/opt/agent-vm/opencode-plugins/nested", false},
+		{"/opt/agent-vm", false},
+		{"/opt/agent-vm/opencode-plugins/", false},
+		{"", false},
+	} {
+		if got := isProductionPrefix(testCase.path); got != testCase.want {
+			t.Errorf("isProductionPrefix(%q) = %v, want %v", testCase.path, got, testCase.want)
+		}
+	}
 }

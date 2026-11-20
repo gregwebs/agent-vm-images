@@ -34,9 +34,7 @@ const (
 	// prepareUsage is the documented interface, quoted by callers.
 	prepareUsage = "usage: prepare-lock.sh PREFIX PLUGIN_VERSION [--refresh-lock]"
 	// productionPrefix is the only prefix a build may prepare without a fixture
-	// root: it is the image's own plugin directory. It is also the one branch no
-	// host test reaches, because it needs that absolute directory to exist; the
-	// containment rule below has its own table.
+	// root: it is the image's own plugin directory.
 	productionPrefix = "/opt/agent-vm/opencode-plugins"
 	// pluginName is the one selection the reviewed manifest carries.
 	pluginName = "@openchamber/opencode-claude"
@@ -100,11 +98,12 @@ func PrepareLock(ctx context.Context, options PrepareOptions) (failure error) {
 	}
 	// Two guards, in the predecessor's order, and both are load-bearing.
 	//
-	// The fixture-root authorization above runs before anything from the composed
-	// directory is executed: an unauthorized prefix must not reach a single program
-	// mounted there. This preload guard runs before any Node or pnpm process starts:
-	// a preloaded module can patch node:crypto and subvert the digest comparison the
-	// checker below performs. TestPrepareGuardOrder fails if either moves.
+	// The fixture-root authorization above runs before the first child, so an
+	// unauthorized prefix never reaches the checker or the resolution envelope
+	// mounted in the composed directory. This preload guard runs before any Node or
+	// pnpm process starts: a preloaded module can patch node:crypto and subvert the
+	// digest comparison the checker below performs. TestPrepareGuardOrder fails if
+	// either moves.
 	if err := refuseRuntimeInjection(); err != nil {
 		return err
 	}
@@ -170,7 +169,13 @@ func rePin(ctx context.Context, options PrepareOptions, prefix string, request p
 	}
 	defer redirectHome(work)()
 
-	identity, status := runChild(abort, childSpec{
+	// The reviewed comparison was the manager's own report and nothing else: a
+	// failed `--version` that still printed the pin was accepted, and the resolution
+	// behind it is what a real failure surfaces in. Keeping that comparison is what
+	// makes the refusal mean "another manager", not "a manager that stumbled". A
+	// manager that prints nothing -- which is what a bound that fires produces -- is
+	// refused here.
+	identity, _ := runChild(abort, childSpec{
 		argv: []string{"pnpm", "--version", "--pm-on-fail=error", "--config.update-notifier=false"},
 		// The identity check is the one manager call the reviewed shell bounded
 		// itself, because run-pnpm.sh does not run it.
@@ -178,7 +183,7 @@ func rePin(ctx context.Context, options PrepareOptions, prefix string, request p
 		capture: true,
 		stderr:  options.Err,
 	})
-	if status != 0 || trimCommandSubstitution(identity) != requiredManager {
+	if trimCommandSubstitution(identity) != requiredManager {
 		return refusalf("prepare-lock: pnpm %s is required; refusing another manager version", requiredManager)
 	}
 
@@ -241,39 +246,65 @@ func rePin(ctx context.Context, options PrepareOptions, prefix string, request p
 	return nil
 }
 
+// isProductionPrefix is the exemption's whole decision, and it is equality.
+//
+// A sibling named `/opt/agent-vm/opencode-plugins-x` or a child of the production
+// directory is not the image's plugin directory and has to bring a fixture root
+// like any other prefix, so a prefix test would exempt a directory no build owns.
+// It is a separate function because the production path is the one input a host
+// test cannot create.
+func isProductionPrefix(physical string) bool { return physical == productionPrefix }
+
 // authorizePrefix resolves the prefix physically and requires it to be the
 // production one or to live inside the authorized fixture root.
 //
 // The physical path is what the rest of the run uses, exactly as
 // `cd "$PREFIX" && pwd -P` did, so a fixture cannot be prepared through a symlink
-// whose lexical name merely looks authorized.
+// whose lexical name merely looks authorized. `filepath.Abs` first is that `cd`:
+// `EvalSymlinks` on its own returns a relative path for a relative argument, and
+// a relative path can never be shown to sit under an absolute root.
 func authorizePrefix(prefix, fixtureRoot string) (string, error) {
 	if !directoryExists(prefix) {
+		// The predecessor's `[ -d "$PREFIX" ] || exit 1`: a refusal with no text.
 		return "", &Silent{Status: 1}
 	}
-	physical, err := filepath.EvalSymlinks(prefix)
+	physical, err := physicalPath(prefix)
 	if err != nil {
-		// `cd` failed, and `set -eu` left with its status and its message.
-		return "", &Silent{Status: 1}
+		// `cd` failing under `set -e` is a usage error: the shell exited 2 with its
+		// own `cd: can't cd to …` line.
+		return "", &Usage{Text: "cd: can't cd to " + prefix}
 	}
-	physical = filepath.Clean(physical)
-	if physical == productionPrefix {
+	if isProductionPrefix(physical) {
 		return physical, nil
 	}
 	if fixtureRoot == "" {
-		return "", refusal("non-production prefix requires fixture root")
+		// `${AGENT_VM_FIXTURE_ROOT:?…}` is a missing required variable, which the
+		// predecessor's shell reported at status 2.
+		return "", &Usage{Text: "non-production prefix requires fixture root"}
 	}
-	root, err := filepath.EvalSymlinks(fixtureRoot)
+	root, err := physicalPath(fixtureRoot)
 	if err != nil {
-		return "", &Silent{Status: 1}
+		return "", &Usage{Text: "cd: can't cd to " + fixtureRoot}
 	}
-	root = filepath.Clean(root)
 	// The predecessor's `case "$prefix_phys" in "$root_phys"/*)`: the root itself is
 	// not an authorized prefix, only something beneath it.
 	if !strings.HasPrefix(physical, root+string(filepath.Separator)) {
 		return "", &Silent{Status: 1}
 	}
 	return physical, nil
+}
+
+// physicalPath is `cd PATH && pwd -P`.
+func physicalPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
 }
 
 // stageManifest writes the committed manifest with one dependency replaced, keeping

@@ -185,6 +185,21 @@ func mustRefusal(t *testing.T, err error, want string) {
 	}
 }
 
+// mustUsage asserts a usage refusal and the one line it carries.
+func mustUsage(t *testing.T, err error, want string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("status = success, want the usage refusal %q", want)
+	}
+	var usage *Usage
+	if !errors.As(err, &usage) {
+		t.Fatalf("error = %v (%T), want a Usage", err, err)
+	}
+	if usage.Text != want {
+		t.Fatalf("usage = %q, want %q", usage.Text, want)
+	}
+}
+
 func mustSilent(t *testing.T, err error, want int) {
 	t.Helper()
 	if err == nil {

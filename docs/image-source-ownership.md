@@ -637,6 +637,9 @@ with #42 (dsh moved in #51, below). Ownership covers:
   (developer-only, never copied into an image) is the only writer. The manifest is pinned so the
   reported selection cannot disagree with the pinned lockfile.
 - Tests: `script/test/{opencode-pnpm-prepare-lock.sh,opencode-pnpm-install.sh,opencode-pnpm-upgrade.sh,opencode-plugins-verify.sh,opencode-plugins-verify.py,opencode-probe.py,opencode-egress.py,pnpm-inputs.mjs,run-pnpm.sh}`.
+  The Go unit and fixture tables are `internal/opencode` (one test file per
+  subcommand plus the child-runner and order tables); the shell and Python suites
+  above stay the black-box oracle.
 - Independent audit/runtime/release helpers:
   `script/test/{opencode-audit.py,opencode-audit-tests.py,opencode-access-files.py,opencode-input-audit.py,opencode-guest-audit.sh,opencode-runtime.sh,opencode-runtime-mutations.py,opencode-pnpm-policy.py,render-released-agent-probe.py}`.
 - Fixtures: `script/test/fixtures/{opencode-server.py,opencode-query.js,opencode-compose.sh}` and

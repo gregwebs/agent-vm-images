@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"time"
 
 	"github.com/gregwebs/agent-vm-images/internal/installstatus"
 	"github.com/gregwebs/agent-vm-images/internal/toolaccess"
@@ -13,8 +14,6 @@ import (
 
 // VerifyOptions is one installed-command gate invocation.
 type VerifyOptions struct {
-	// Contract is the composed helper directory the report envelope runs from.
-	Contract string
 	// Prefix is the installer's $HOME; the command lives beneath it.
 	Prefix string
 	// Slot is the layer's requested `v` version. It is the assertion, not the exit
@@ -25,10 +24,11 @@ type VerifyOptions struct {
 	Out, Err  io.Writer
 }
 
+// versionBound is the reviewed `opencode --version` bound. A variable only so a
+// test can drive it.
+var versionBound = 60 * time.Second
+
 const (
-	// reportBound is the reviewed `--version` bound, in seconds, handed to the
-	// report envelope.
-	reportSeconds = "60"
 	// reportLines is how much of the child's stderr the gate reprinted.
 	reportLines = 10
 	// recordName is the record this gate owns.
@@ -36,6 +36,9 @@ const (
 	// recordInstalled is written only after every check passed, so a failed rerun
 	// cannot leave a stale success behind.
 	recordInstalled = "installed\n"
+	// slotRefusal is the predecessor's `${AGENT_VM_VERSION_OPENCODE:?…}` text. An
+	// unset slot is a missing required argument: usage, status 2.
+	slotRefusal = "verify-opencode.sh needs AGENT_VM_VERSION_OPENCODE"
 )
 
 // stderrVersionPattern is the report form that may not also appear on stderr:
@@ -56,10 +59,10 @@ var stderrVersionPattern = regexp.MustCompile(`(?m)^(opencode v|v)?[0-9]+\.[0-9]
 // health.
 func Verify(ctx context.Context, options VerifyOptions) (failure error) {
 	if options.Slot == "" {
-		// The entry point refuses an unset slot with the shell's `${:?}` at status 1
-		// before this program runs; a direct caller gets the same status here rather
-		// than the flag parser's usage 2, because the request is well formed.
-		return refusal("  opencode: AGENT_VM_VERSION_OPENCODE is required")
+		// The entry point's `${:?}` refuses this before the program runs; a direct
+		// caller gets the same status and the same text, because an unset required
+		// variable is a usage error under the shell that ran the predecessor.
+		return &Usage{Text: slotRefusal}
 	}
 	command := filepath.Join(options.Prefix, ".opencode", "bin", "opencode")
 	// Path state via lstat: only a genuinely nonexistent command may be waved away
@@ -99,13 +102,17 @@ func Verify(ctx context.Context, options VerifyOptions) (failure error) {
 	stdoutFile := filepath.Join(work, "out")
 	stderrFile := filepath.Join(work, "err")
 
-	// The report envelope owns the bound, the private HOME and the 75-to-1 mapping,
-	// so it is executed rather than reimplemented.
-	if _, status := runChild(abort, childSpec{
-		argv:   []string{"sh", filepath.Join(options.Contract, "run-report.sh"), reportSeconds, stdoutFile, stderrFile, command, "--version"},
-		stderr: options.Err,
-	}); status != 0 {
-		say(options.Err, "  opencode: --version exited %d; refusing to accept the report\n", status)
+	outcome := runReport(abort, reportSpec{
+		argv:       []string{command, "--version"},
+		bound:      versionBound,
+		stdoutFile: stdoutFile,
+		stderrFile: stderrFile,
+	})
+	if outcome.start != nil {
+		return refusal("  opencode: cannot run " + command + ": " + outcome.start.Error())
+	}
+	if outcome.status != 0 {
+		say(options.Err, "  opencode: --version exited %d; refusing to accept the report\n", outcome.status)
 		printFilePrefix(options.Err, stderrFile, reportLines)
 		return &Silent{Status: 1}
 	}
@@ -125,8 +132,9 @@ func Verify(ctx context.Context, options VerifyOptions) (failure error) {
 	}
 	say(options.Out, "  opencode: %s (pinned)\n", options.Slot)
 
-	// Tree audit of the one command the image links to. A command label is not a
-	// usable executable for the read-only runtime uids.
+	// The audit target is the bare command name, not the path this gate derived:
+	// what the runtime runs is the first `opencode` on PATH, and a same-version copy
+	// there is a different program.
 	if err := audit(gateStreams{Access: options.Access, Out: options.Out, Err: options.Err},
 		"opencode", toolaccess.Executable, false); err != nil {
 		return err

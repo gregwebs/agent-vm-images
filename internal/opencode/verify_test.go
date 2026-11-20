@@ -8,28 +8,10 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/gregwebs/agent-vm-images/internal/toolaccess"
 )
-
-// fakeEnvelopeReport is the composed run-report.sh for a gate case: the same
-// argument shape, the same capture files and the same status the child produced.
-const fakeEnvelopeReport = `#!/bin/sh
-printf 'run-report|%s\n' "$*" >>"$CALLS"
-seconds=$1
-out=$2
-err=$3
-shift 3
-: >"$out"
-: >"$err"
-scratch=$(mktemp -d)
-HOME=$scratch
-export HOME
-status=0
-"$@" >"$out" 2>"$err" || status=$?
-rm -rf "$scratch"
-exit "$status"
-`
 
 // accessEnvironment is the process view the CLI hands every audit.
 func accessEnvironment() toolaccess.Environment {
@@ -45,7 +27,6 @@ func accessEnvironment() toolaccess.Environment {
 // verifyFixture is one installed-command gate case.
 type verifyFixture struct {
 	*fixture
-	contract  string
 	statusDir string
 	command   string
 }
@@ -53,13 +34,6 @@ type verifyFixture struct {
 func newVerifyFixture(t *testing.T) *verifyFixture {
 	t.Helper()
 	tree := newFixture(t)
-	contract := filepath.Join(tree.root, "contract")
-	if err := os.MkdirAll(contract, 0o755); err != nil {
-		t.Fatalf("mkdir contract: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(contract, "run-report.sh"), []byte(fakeEnvelopeReport), 0o755); err != nil {
-		t.Fatalf("write envelope: %v", err)
-	}
 	command := filepath.Join(tree.prefix, ".opencode", "bin", "opencode")
 	if err := os.MkdirAll(filepath.Dir(command), 0o755); err != nil {
 		t.Fatalf("mkdir command: %v", err)
@@ -70,12 +44,11 @@ func newVerifyFixture(t *testing.T) *verifyFixture {
 	}
 	// The image links the bare name onto PATH; the audit resolves it there.
 	t.Setenv("PATH", filepath.Dir(command)+string(os.PathListSeparator)+tree.bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return &verifyFixture{fixture: tree, contract: contract, statusDir: statusDir, command: command}
+	return &verifyFixture{fixture: tree, statusDir: statusDir, command: command}
 }
 
 func (v *verifyFixture) options(slot string) VerifyOptions {
 	return VerifyOptions{
-		Contract:  v.contract,
 		Prefix:    v.prefix,
 		Slot:      slot,
 		StatusDir: v.statusDir,
@@ -238,11 +211,6 @@ func TestVerifyExactReport(t *testing.T) {
 	if got, found := tree.record(t); !found || got != "installed\n" {
 		t.Fatalf("record = %q, %v, want installed", got, found)
 	}
-	// The report envelope owns the bound: 60 seconds is the reviewed one, and the
-	// gate must not choose its own.
-	if invocations := tree.invocations(t); len(invocations) != 1 || !strings.HasPrefix(invocations[0], "run-report|60 ") {
-		t.Fatalf("invocations = %q, want one envelope bounded at 60 seconds", invocations)
-	}
 }
 
 // TestVerifyStderrContradiction is the B1 rule: a version report on stderr
@@ -308,10 +276,64 @@ func TestVerifyAccessAudit(t *testing.T) {
 	}
 }
 
-// TestVerifySlotIsRequired is the empty-slot refusal: a direct caller gets the
-// same status the entry point's `${:?}` gave.
+// TestVerifyReportBound keeps the gate's own deadline: a command that never answers
+// must fail the gate instead of holding the build open.
+func TestVerifyReportBound(t *testing.T) {
+	tree := newVerifyFixture(t)
+	tree.installCommand(t, "exec sleep 20\n")
+	shrinkBounds(t, 100*time.Millisecond)
+	started := time.Now()
+	_, _, err := tree.run(t, "v2.0.29")
+	mustSilent(t, err, 1)
+	if elapsed := time.Since(started); elapsed > 10*time.Second {
+		t.Fatalf("the gate ran for %s, want its own deadline to fire", elapsed)
+	}
+}
+
+// TestVerifyScratchFailure reports a scratch that cannot be created instead of
+// running the report in an unrelated directory.
+func TestVerifyScratchFailure(t *testing.T) {
+	tree := newVerifyFixture(t)
+	t.Setenv("TMPDIR", filepath.Join(tree.root, "absent-tmp"))
+	_, _, err := tree.run(t, "v2.0.29")
+	if err == nil {
+		t.Fatal("an unusable scratch was reported as success")
+	}
+	if _, ok := refusalText(err); !ok {
+		t.Fatalf("error = %v (%T), want a refusal", err, err)
+	}
+	tree.expectNoChild(t)
+}
+
+// TestVerifySlotIsRequired is the empty-slot refusal: a missing required argument
+// is usage (2), which is what the predecessor's dash exited with.
 func TestVerifySlotIsRequired(t *testing.T) {
 	tree := newVerifyFixture(t)
 	_, _, err := tree.run(t, "")
-	mustRefusal(t, err, "  opencode: AGENT_VM_VERSION_OPENCODE is required")
+	var usage *Usage
+	if !errors.As(err, &usage) || usage.Text != slotRefusal {
+		t.Fatalf("error = %v (%T), want a usage refusal carrying the predecessor's text", err, err)
+	}
+	tree.expectNoChild(t)
+}
+
+// TestVerifyAuditsThePathName keeps the audit target the bare command name. The
+// runtime runs whatever `opencode` PATH resolves to, so an unusable candidate there
+// is a broken image even when the file this gate derived is fine.
+func TestVerifyAuditsThePathName(t *testing.T) {
+	tree := newVerifyFixture(t)
+	tree.installCommand(t, "printf 'opencode v2.0.29\\n'\n")
+	decoy := filepath.Join(tree.root, "decoy")
+	if err := os.MkdirAll(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(decoy, "opencode"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", decoy+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, stderr, err := tree.run(t, "v2.0.29")
+	mustSilent(t, err, 1)
+	if !strings.HasPrefix(stderr, "tool-access: ") {
+		t.Fatalf("stderr = %q, want the audit to refuse the first PATH candidate", stderr)
+	}
 }
