@@ -175,6 +175,10 @@ func rePin(ctx context.Context, options PrepareOptions, prefix string, request p
 	// makes the refusal mean "another manager", not "a manager that stumbled". A
 	// manager that prints nothing -- which is what a bound that fires produces -- is
 	// refused here.
+	//
+	// The nonzero status is accepted on purpose: the differential measured the
+	// predecessor doing exactly that (`manager exits after printing the pin`, 0 to
+	// 0), so refusing it here would be an invented refusal with no oracle behind it.
 	identity, _ := runChild(abort, childSpec{
 		argv: []string{"pnpm", "--version", "--pm-on-fail=error", "--config.update-notifier=false"},
 		// The identity check is the one manager call the reviewed shell bounded
