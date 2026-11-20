@@ -370,40 +370,31 @@ func (p *process) runDshInstall(args []string) int {
 	return 0
 }
 
-// dshPrepareUsage is the preparation driver: three positional slots and at most one
-// option, which is why the argv grammar belongs to the driver rather than to the
-// flag parser. `--refresh-lock` is the driver's own word, so it reaches it unchanged
-// and an unknown one is that grammar's usage refusal.
+// dshPrepareUsage is the preparation driver.
+//
+// `Arguments` carries the caller's positional words, which include
+// `--refresh-lock`: that word belongs to the driver's grammar, not to this flag
+// set. The entry point therefore ends its own flags with `--`, so nothing a caller
+// writes can name the source or the authorized composed directory here -- neither
+// `PREFIX VERSION --contract other` nor a `--help` that the flag parser would
+// answer.
 type dshPrepareUsage struct {
-	Source    string
-	Contract  string
-	Arguments []string
+	dshPaths
+	Arguments []string `arg:"positional" help:"-- PREFIX DSH_VERSION PNPM_VERSION [--refresh-lock]"`
+}
+
+func (dshPrepareUsage) Description() string {
+	return "Prepare the reviewed dsh inputs after a changed selection."
 }
 
 func (p *process) runDshPrepareLock(args []string) int {
 	var usage dshPrepareUsage
-	for index := 0; index < len(args); index++ {
-		switch args[index] {
-		case "--source", "--contract":
-			value := ""
-			if index+1 < len(args) {
-				value = args[index+1]
-				index++
-			}
-			if value == "" {
-				return p.stderrStatus(2, dshPrepareUsageText)
-			}
-			if args[index-1] == "--source" {
-				usage.Source = value
-			} else {
-				usage.Contract = value
-			}
-		default:
-			usage.Arguments = append(usage.Arguments, args[index])
-		}
+	parser, err := arg.NewParser(arg.Config{Program: "recipe-contract dsh-prepare-lock"}, &usage)
+	if err != nil {
+		return p.reportSynchronousFailure(err)
 	}
-	if usage.Source == "" || usage.Contract == "" {
-		return p.stderrStatus(2, dshPrepareUsageText)
+	if err := parser.Parse(args); err != nil {
+		return p.argFailure(parser, err)
 	}
 	options := dsh.PrepareOptions{
 		Source:    usage.Source,
@@ -417,9 +408,6 @@ func (p *process) runDshPrepareLock(args []string) int {
 	}
 	return 0
 }
-
-const dshPrepareUsageText = "dsh-prepare-lock: usage: recipe-contract dsh-prepare-lock --source DIR" +
-	" --contract DIR PREFIX DSH_VERSION PNPM_VERSION [--refresh-lock]\n"
 
 // dshVerifyUsage is the installed-payload gate.
 type dshVerifyUsage struct {

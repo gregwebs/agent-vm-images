@@ -20,13 +20,19 @@ func runDsh(t *testing.T, args []string) (int, string, string) {
 	return status, stdout.String(), stderr.String()
 }
 
+// TestDshUsageIsStatusTwo pins the ported status contract. A *missing required flag*
+// is the flag parser's own refusal, and its Fail calls os.Exit(2) directly, so nothing
+// here can observe it. That path is documented and uncovered: the entry point always
+// names both flags, so a missing one is only reachable from a hand-written argv.
 func TestDshUsageIsStatusTwo(t *testing.T) {
 	for _, args := range [][]string{
 		{"dsh-probe"},
 		{"dsh-probe", "--prefix", "/opt/agent-vm/dsh"},
 		{"dsh-probe", "--source", "/s", "--prefix", "/p", "--command", "/c", "--scratch-root", "/r", "--readiness-seconds", "soon"},
 		{"dsh-probe", "--self-test", "--prefix", "/opt/agent-vm/dsh"},
-		{"dsh-prepare-lock"},
+		// The words after `--` are the driver's own grammar, so a short slot is its
+		// bare usage line rather than this flag parser's.
+		{"dsh-prepare-lock", "--source", "/s", "--contract", "/c", "--", "/prefix", "0.1.5-rc.2"},
 	} {
 		status, stdout, stderr := runDsh(t, args)
 		if status != 2 {

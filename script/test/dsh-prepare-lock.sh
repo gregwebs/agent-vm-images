@@ -439,6 +439,62 @@ run_prepare '' '' --refresh-lock --refresh-lock
 [[ $STATUS -eq 2 ]] || fail "duplicate flag must exit 2, got $STATUS"
 assert_manager_calls ''
 
+# --- a caller's words cannot become this program's flags --------------------
+# The entry point names `--source` and `--contract` and then ends its flags with
+# `--`, so every caller word is a driver slot. The first three rows were differences on
+# the hand parser, which read either flag at any position with the last occurrence
+# winning: a caller's `--contract` replaced the directory `project.py contract-dir`
+# had just authorized. The last two are the other half of the same boundary: the
+# driver's own `--refresh-lock` still arrives, and `--help` is nobody's flag.
+new_case argv-contract
+before=$(hash_prefix)
+run_prepare '' '' --contract "$TEST_ROOT/outside"
+assert_failure
+[[ $STATUS -eq 2 ]] || fail "a caller --contract must be the driver's usage refusal (2), got $STATUS: $OUTPUT"
+assert_contains 'usage: prepare-lock.sh PREFIX DSH_VERSION PNPM_VERSION [--refresh-lock]'
+assert_manager_calls ''
+assert_prefix_unchanged "$before"
+
+new_case argv-source
+before=$(hash_prefix)
+run_prepare '' '' --source "$CASE/absent-source"
+assert_failure
+[[ $STATUS -eq 2 ]] || fail "a caller --source must be the driver's usage refusal (2), got $STATUS: $OUTPUT"
+assert_contains 'usage: prepare-lock.sh PREFIX DSH_VERSION PNPM_VERSION [--refresh-lock]'
+assert_manager_calls ''
+assert_prefix_unchanged "$before"
+
+# A word in the version slot is a slot, not a flag: the hand parser ate this
+# `--source` with the next word as its value and reported one slot short (2).
+new_case argv-version-slot
+run_prepare --source 0.1.5-rc.1
+assert_failure
+[[ $STATUS -eq 1 ]] || fail "a caller word in the version slot must be the version refusal (1), got $STATUS: $OUTPUT"
+assert_contains "not an exact version: '--source'"
+assert_manager_calls ''
+
+# `--help` is the caller's word here, not this program's: without the entry point's
+# `--`, go-arg answers it with help text and status 0 and the driver never runs.
+new_case argv-help
+run_prepare '' '' --help
+assert_failure
+[[ $STATUS -eq 2 ]] || fail "a caller --help must stay the driver's usage refusal (2), got $STATUS: $OUTPUT"
+assert_contains 'usage: prepare-lock.sh PREFIX DSH_VERSION PNPM_VERSION [--refresh-lock]'
+[[ "$OUTPUT" != *'Usage: recipe-contract dsh-prepare-lock'* ]] || fail 'go-arg help answered a caller word'
+assert_manager_calls ''
+
+# The driver's own option is the other half of that boundary: `--` makes the word
+# positional, so the driver's grammar accepts it and its reviewed resolution runs.
+new_case argv-refresh-lock
+write_result tiny-dsh '.packages["leaf@1.0.0"] = {"resolution":{"integrity":"sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="}}
+    | .snapshots["leaf@1.0.0"] = {}
+    | .snapshots["@deepseek-ai/dsh@0.1.5-rc.2"].dependencies.leaf = "1.0.0"'
+run_prepare '' '' --refresh-lock
+assert_success
+assert_contains 'refresh 0.1.5-rc.2 -> 0.1.5-rc.2'
+assert_seed 'seed=none'
+assert_resolution_flags
+
 new_case bad-version
 for bad in latest next '^1.2.3' '1.2' 'https://x' '1.2.3 beta' \
     "$(printf '1.2.4\n||\n>=1.2.3')" '01.2.3' '1.02.3' '1.2.03' '1.2.3-01'; do
