@@ -696,13 +696,13 @@ func (c *webChild) teardown(escalation time.Duration, ctx context.Context) (int,
 		name string
 		sig  syscall.Signal
 	}{{"SIGTERM", syscall.SIGTERM}, {"SIGKILL", syscall.SIGKILL}} {
-		if c.poll().exited && groupEmpty(c.pgid) {
+		if c.poll().exited && askGroup(c.pgid).empty() {
 			break
 		}
 		if err := signalGroup(c.pgid, step.sig); err == nil || errors.Is(err, syscall.ESRCH) {
 			signalled = append(signalled, step.name)
 		}
-		if c.waitGroupEmpty(escalation, true) {
+		if c.waitGroupEmpty(escalation, true).empty() {
 			break
 		}
 	}
@@ -717,10 +717,10 @@ func (c *webChild) teardown(escalation time.Duration, ctx context.Context) (int,
 	}
 	// The group gets one settle window to disappear after the last signal: a KILLed
 	// member is still a member until the kernel has run it, and a signal the caller sent
-	// is not a reason to call the leak a failure.
-	c.waitGroupEmpty(groupSettle, false)
-	if !groupEmpty(c.pgid) {
-		return interruption, &Refusal{Text: c.unprovenGroup()}
+	// is not a reason to call the leak a failure. The answer that refuses is this probe's
+	// own: re-asking would let the diagnostic describe a group the verdict never saw.
+	if answer := c.waitGroupEmpty(groupSettle, false); !answer.empty() {
+		return interruption, &Refusal{Text: answer.verdict(c.pgid)}
 	}
 	if !interrupted {
 		interruption, interrupted = c.signalled()
@@ -751,35 +751,30 @@ func (c *webChild) waitExited(limit time.Duration) bool {
 // member that exists and a kernel that refuses to answer keep the wait going. An
 // exited-but-unreaped leader is a member too, which is why the leader's Wait runs
 // concurrently (reapInBackground): without it the group could never look empty.
-func (c *webChild) waitGroupEmpty(seconds time.Duration, stopOnSignal bool) bool {
+//
+// It returns the last answer it got, so a caller that has to refuse reports the probe it
+// acted on instead of asking a second time.
+func (c *webChild) waitGroupEmpty(seconds time.Duration, stopOnSignal bool) groupAnswer {
 	until := time.Now().Add(seconds)
-	for !groupEmpty(c.pgid) {
+	for {
+		answer := askGroup(c.pgid)
+		if answer.empty() {
+			return answer
+		}
 		c.poll()
 		// During the graceful escalation a signal shortens the wait: the caller is
 		// already giving up, so the KILL step is next. The settle wait after the last
 		// signal must not be shortened, or a KILLed member would be reported as a leak.
 		if stopOnSignal {
 			if _, signalled := c.signalled(); signalled {
-				return false
+				return answer.explained(c.pgid)
 			}
 		}
 		if !time.Now().Before(until) {
-			return false
+			return answer.explained(c.pgid)
 		}
 		time.Sleep(pollInterval)
 	}
-	return true
-}
-
-// unprovenGroup names why the last probe did not prove the group empty. The kernel's
-// own answer is part of it: a refusal is a different failure from a listed survivor,
-// and only the second one names a process a human can kill.
-func (c *webChild) unprovenGroup() string {
-	verdict := "members remain: " + pythonIntList(groupMembers("/proc", c.pgid))
-	if err := signalGroup(c.pgid, 0); err != nil && !errors.Is(err, syscall.ESRCH) {
-		verdict = "the kernel refused to answer: " + err.Error()
-	}
-	return fmt.Sprintf("process group %d is not provably gone after TERM and KILL (%s)", c.pgid, verdict)
 }
 
 // signalGroup sends one signal to a process group. It is a variable so the teardown
@@ -789,20 +784,53 @@ var signalGroup = func(pgid int, signal syscall.Signal) error {
 	return syscall.Kill(-pgid, signal)
 }
 
-// groupEmpty reports whether `killpg(pgid, 0)` proved that no member of the group is
-// left. ESRCH is the only proof. EPERM is the kernel refusing to answer, not an empty
-// group, and nil is a member that exists; both are "not proven empty" and the
-// teardown escalates instead of passing.
+// groupAnswer is one `killpg(pgid, 0)` and, when a member is what the kernel reported,
+// the scan behind it.
+type groupAnswer struct {
+	err     error
+	members []int
+}
+
+// askGroup asks the kernel whether any member of the group is left. ESRCH is the only
+// proof that there is none. EPERM is the kernel refusing to answer, not an empty group,
+// and nil is a member that exists; both are "not proven empty", so the teardown
+// escalates instead of passing.
 //
-// Darwin answers EPERM for a group whose only member is an unwaited zombie of ours,
-// so the fix for that case is to reap the leader (reapInBackground) and get an honest
+// Darwin answers EPERM for a group whose only member is an unwaited zombie of ours, so
+// the fix for that case is to reap the leader (reapInBackground) and get an honest
 // ESRCH, never to read the refusal as an answer. What is provable: a session whose
 // leader this process reaped, plus descendants that exited and were reaped by whoever
-// inherited them. On Linux a descendant re-parented to a PID 1 that does not reap
-// stays a zombie, kill -0 still counts it, and no reading proves that group empty;
-// #220 recorded the same limit for internal/opencode.
-func groupEmpty(pgid int) bool {
-	return errors.Is(signalGroup(pgid, 0), syscall.ESRCH)
+// inherited them. On Linux a descendant re-parented to a PID 1 that does not reap stays
+// a zombie, kill -0 still counts it, and no reading proves that group empty; #220
+// recorded the same limit for internal/opencode.
+func askGroup(pgid int) groupAnswer {
+	return groupAnswer{err: signalGroup(pgid, 0)}
+}
+
+// empty reports whether the probe proved the group has no members left.
+func (a groupAnswer) empty() bool { return errors.Is(a.err, syscall.ESRCH) }
+
+// explained fills in the member scan for an answer that will refuse. The scan reads all
+// of procfs, so it runs once when a wait gives up rather than on every poll.
+func (a groupAnswer) explained(pgid int) groupAnswer {
+	if a.err == nil {
+		a.members = groupMembers("/proc", pgid)
+	}
+	return a
+}
+
+// verdict names what this answer saw, in the terms a human needs to decide what to kill.
+// No procfs means no names -- Darwin has none -- so an unexplained member says so
+// instead of printing an empty list.
+func (a groupAnswer) verdict(pgid int) string {
+	reason := "members remain but no procfs scan could name them"
+	switch {
+	case a.err != nil:
+		reason = "the kernel refused to answer: " + a.err.Error()
+	case len(a.members) > 0:
+		reason = "members remain: " + pythonIntList(a.members)
+	}
+	return fmt.Sprintf("process group %d is not provably gone after TERM and KILL (%s)", pgid, reason)
 }
 
 // awaitReady polls the child's streams and the advertised URL until the frontend

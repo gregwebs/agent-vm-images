@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -211,7 +212,7 @@ func TestTeardownEscalatesAndProvesNoSurvivors(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 10*time.Second {
 		t.Fatalf("teardown did not bound itself: %s", elapsed)
 	}
-	if !groupEmpty(child.pgid) {
+	if !askGroup(child.pgid).empty() {
 		t.Fatalf("the process group %d survived teardown", child.pgid)
 	}
 	if _, ok := child.doneStatus(); !ok {
@@ -586,15 +587,25 @@ func TestTeardownProvesEmptinessOnlyAfterTheLeaderIsReaped(t *testing.T) {
 		if signal, err := child.teardown(500*time.Millisecond, context.Background()); err != nil || signal != 0 {
 			t.Fatalf("teardown = %v, %v", signal, err)
 		}
-		if !groupEmpty(child.pgid) {
+		if !askGroup(child.pgid).empty() {
 			t.Fatalf("group %d was not proved empty after the leader was reaped", child.pgid)
 		}
 	})
 
 	t.Run("an unreaped leader is not provable", func(t *testing.T) {
 		child := startExitingOnTerm(t)
-		if _, err := child.teardown(100*time.Millisecond, context.Background()); err == nil {
+		_, err := child.teardown(100*time.Millisecond, context.Background())
+		if err == nil {
 			t.Fatal("an unreaped leader counted as an empty group")
+		}
+		// The kernel answers differently: Darwin refuses to say anything about a group of
+		// our own unwaited zombies, Linux counts the zombie as a member.
+		want := "members remain"
+		if runtime.GOOS == "darwin" {
+			want = "the kernel refused to answer"
+		}
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("teardown = %v, want %q in it", err, want)
 		}
 	})
 }
@@ -640,7 +651,7 @@ func TestTeardownReportsASignalInsteadOfSwallowingIt(t *testing.T) {
 	if signal != 143 {
 		t.Fatalf("signal = %d, want the interruption it observed", signal)
 	}
-	if !groupEmpty(child.pgid) {
+	if !askGroup(child.pgid).empty() {
 		t.Fatalf("group %d survived an interrupted teardown", child.pgid)
 	}
 }
@@ -659,7 +670,7 @@ func TestTeardownHonoursTheCallerDeadline(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 5*time.Second {
 		t.Fatalf("a cancelled context did not shorten the escalation: %s", elapsed)
 	}
-	if !groupEmpty(child.pgid) {
+	if !askGroup(child.pgid).empty() {
 		t.Fatalf("group %d survived", child.pgid)
 	}
 }
