@@ -377,7 +377,8 @@ func (p *process) runDshInstall(args []string) int {
 // set. The entry point therefore ends its own flags with `--`, so nothing a caller
 // writes can name the source or the authorized composed directory here -- neither
 // `PREFIX VERSION --contract other` nor a `--help` that the flag parser would
-// answer.
+// answer. Both paths are executed, so `required` is not enough either: the empty
+// check below owns their emptiness.
 type dshPrepareUsage struct {
 	dshPaths
 	Arguments []string `arg:"positional" help:"-- PREFIX DSH_VERSION PNPM_VERSION [--refresh-lock]"`
@@ -389,12 +390,18 @@ func (dshPrepareUsage) Description() string {
 
 func (p *process) runDshPrepareLock(args []string) int {
 	var usage dshPrepareUsage
-	parser, err := arg.NewParser(arg.Config{Program: "recipe-contract dsh-prepare-lock"}, &usage)
+	parser, err := p.argParser("recipe-contract dsh-prepare-lock", &usage)
 	if err != nil {
 		return p.reportSynchronousFailure(err)
 	}
 	if err := parser.Parse(args); err != nil {
 		return p.argFailure(parser, err)
+	}
+	if emptyRequiredPath(
+		requiredPath{"--source", usage.Source},
+		requiredPath{"--contract", usage.Contract},
+	) != "" {
+		return p.stderrStatus(2, dshPrepareUsageText)
 	}
 	options := dsh.PrepareOptions{
 		Source:    usage.Source,
@@ -408,6 +415,11 @@ func (p *process) runDshPrepareLock(args []string) int {
 	}
 	return 0
 }
+
+// dshPrepareUsageText is the adapter's own line for a flag it cannot act on. The
+// entry point never prints it, because it never names a flag without a value.
+const dshPrepareUsageText = "dsh-prepare-lock: usage: recipe-contract dsh-prepare-lock --source DIR" +
+	" --contract DIR PREFIX DSH_VERSION PNPM_VERSION [--refresh-lock]\n"
 
 // dshVerifyUsage is the installed-payload gate.
 type dshVerifyUsage struct {

@@ -2,6 +2,9 @@ package cli
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,16 +23,17 @@ func runDsh(t *testing.T, args []string) (int, string, string) {
 	return status, stdout.String(), stderr.String()
 }
 
-// TestDshUsageIsStatusTwo pins the ported status contract. A *missing required flag*
-// is the flag parser's own refusal, and its Fail calls os.Exit(2) directly, so nothing
-// here can observe it. That path is documented and uncovered: the entry point always
-// names both flags, so a missing one is only reachable from a hand-written argv.
+// TestDshUsageIsStatusTwo pins the ported status contract: usage is 2, on stderr, and
+// the flag parser's own refusal is one of those usages. `dsh-prepare-lock` with no
+// flag is go-arg's Fail, which the parser hands to this process's stderr and a
+// recorded exit rather than os.Exit, so it is observable here like the rest.
 func TestDshUsageIsStatusTwo(t *testing.T) {
 	for _, args := range [][]string{
 		{"dsh-probe"},
 		{"dsh-probe", "--prefix", "/opt/agent-vm/dsh"},
 		{"dsh-probe", "--source", "/s", "--prefix", "/p", "--command", "/c", "--scratch-root", "/r", "--readiness-seconds", "soon"},
 		{"dsh-probe", "--self-test", "--prefix", "/opt/agent-vm/dsh"},
+		{"dsh-prepare-lock"},
 		// The words after `--` are the driver's own grammar, so a short slot is its
 		// bare usage line rather than this flag parser's.
 		{"dsh-prepare-lock", "--source", "/s", "--contract", "/c", "--", "/prefix", "0.1.5-rc.2"},
@@ -44,6 +48,69 @@ func TestDshUsageIsStatusTwo(t *testing.T) {
 		if stderr == "" {
 			t.Errorf("%v: a usage refusal wrote nothing to stderr", args)
 		}
+	}
+}
+
+// TestDshPrepareMissingFlagIsTheParsersOwnRefusal is the witness for `required`: a
+// flag the caller never named is refused by go-arg, with its `PLACEHOLDER is
+// required` line, before the empty check and the driver. Deleting `required` from
+// either path leaves an empty value behind, so this asserts the parser's text and not
+// only the status.
+func TestDshPrepareMissingFlagIsTheParsersOwnRefusal(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		args []string
+	}{
+		{"source", []string{"dsh-prepare-lock", "--contract", "/c", "--", "/prefix", "", ""}},
+		{"contract", []string{"dsh-prepare-lock", "--source", "/s", "--", "/prefix", "", ""}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			status, stdout, stderr := runDsh(t, testCase.args)
+			if status != 2 {
+				t.Fatalf("status = %d, want 2 (%q)", status, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("the refusal wrote %q to stdout", stdout)
+			}
+			if !strings.Contains(stderr, "error: DIR is required") {
+				t.Fatalf("stderr = %q, want the flag parser's missing-flag line", stderr)
+			}
+		})
+	}
+}
+
+// TestDshPrepareRefusesAnEmptyPath is the seam `required` does not close: it records
+// that the flag appeared, not that it carries a value. An empty `--source` makes the
+// driver run `project.py` out of the caller's working directory, so the refusal has to
+// happen here, at status 2, with the adapter's own line -- and nothing may run.
+func TestDshPrepareRefusesAnEmptyPath(t *testing.T) {
+	working := t.TempDir()
+	marker := filepath.Join(working, "ran")
+	// The unreviewed helper: if an empty source reaches the driver, this runs.
+	script := "import pathlib, sys\npathlib.Path(" + strconv.Quote(marker) + ").write_text('ran')\nsys.exit(7)\n"
+	if err := os.WriteFile(filepath.Join(working, "project.py"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(working)
+	for _, testCase := range []struct {
+		name string
+		args []string
+	}{
+		{"source", []string{"dsh-prepare-lock", "--source", "", "--contract", "/c", "--", "/prefix", "", ""}},
+		{"contract", []string{"dsh-prepare-lock", "--source", "/s", "--contract", "", "--", "/prefix", "", ""}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			status, stdout, stderr := runDsh(t, testCase.args)
+			if status != 2 {
+				t.Fatalf("status = %d, want 2 (%q)", status, stderr)
+			}
+			if stdout != "" || stderr != dshPrepareUsageText {
+				t.Fatalf("wrote %q / %q, want the adapter's usage line on stderr", stdout, stderr)
+			}
+		})
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the working directory's project.py ran (stat err %v)", err)
 	}
 }
 

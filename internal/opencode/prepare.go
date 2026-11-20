@@ -30,6 +30,15 @@ type PrepareOptions struct {
 	Out, Err  io.Writer
 }
 
+// EmptyPathUsage is the refusal for a required path flag that carried no value. The
+// flag parser's `required` records only that the flag appeared, so `--contract ""`
+// parses and would compose `run-pnpm.sh` relative to the caller's working directory;
+// the caller cannot tell which flag was empty from the bare usage line, so this one
+// names it. It is usage (2), not a refusal of a well-formed request.
+func EmptyPathUsage(flag string) string {
+	return prepareUsage + " (" + flag + " must not be empty)"
+}
+
 // productionPrefix is the only prefix a build may prepare without a fixture root:
 // it is the image's own plugin directory. It is a variable so a test can point the
 // exemption at a directory it can create; no caller can set it, and
