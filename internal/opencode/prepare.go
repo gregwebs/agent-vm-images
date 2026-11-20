@@ -30,12 +30,16 @@ type PrepareOptions struct {
 	Out, Err  io.Writer
 }
 
+// productionPrefix is the only prefix a build may prepare without a fixture root:
+// it is the image's own plugin directory. It is a variable so a test can point the
+// exemption at a directory it can create; no caller can set it, and
+// isProductionPrefix is the decision whatever path it is given.
+var productionPrefix = "/opt/agent-vm/opencode-plugins"
+
 const (
 	// prepareUsage is the documented interface, quoted by callers.
 	prepareUsage = "usage: prepare-lock.sh PREFIX PLUGIN_VERSION [--refresh-lock]"
-	// productionPrefix is the only prefix a build may prepare without a fixture
-	// root: it is the image's own plugin directory.
-	productionPrefix = "/opt/agent-vm/opencode-plugins"
+
 	// pluginName is the one selection the reviewed manifest carries.
 	pluginName = "@openchamber/opencode-claude"
 	// requiredManager is the only manager that may resolve this lock: the reviewed

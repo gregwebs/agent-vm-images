@@ -19,9 +19,10 @@ func runOpencode(t *testing.T, args ...string) (int, string, string) {
 // positional slot is usage (2) and the preparation driver's documented interface
 // line is the shell's, unchanged.
 //
-// A *missing flag* is the flag parser's own refusal, and its Fail calls os.Exit(2)
-// directly: an in-process test cannot observe that, and the shell harnesses run the
-// real binary for it.
+// A *missing required flag* is the flag parser's own refusal, and its Fail calls
+// os.Exit(2) directly, so nothing here can observe it. That path is documented and
+// uncovered: no test in this repository, in-process or in shell, drives a missing
+// flag through any of these three verbs.
 func TestOpencodeUsageIsStatusTwo(t *testing.T) {
 	status, stdout, stderr := runOpencode(t,
 		"opencode-prepare-lock", "--contract", "/c", "--check", "/k", "--pin", "/p")

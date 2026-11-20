@@ -230,6 +230,19 @@ network and no mounts and cannot carry the composed helper, so porting it would
 create a second implementation of one protocol rather than remove one (#185,
 closed on that ground).
 
+Unlike the dsh hooks, the two OpenCode gates do not execute
+`images/recipe-contract/run-report.sh`: each runs its own report child. The
+envelope's `timeout` puts the managed command in a second process group, which a
+cancelled session cannot reach, so a hung `--version` left that child running with
+nobody left to forward the signal — the dsh path is safe only because
+`run-pnpm.sh` TERMs `timeout` while it is still alive to forward. Two consequences
+are deliberate. The envelope's own resolution rule is reimplemented there: the
+first PATH candidate that exists is the one run, so a present-but-unusable
+`node` is refused rather than skipped for a later, working one. And
+`AGENT_VM_CONTRACT_DIR` still locates the helper for all three entry points, but it
+is a subcommand flag only for `opencode-prepare-lock`, the one verb that still runs
+a shared envelope (`run-pnpm.sh`).
+
 `images/tools/dsh/upgrade-dsh.sh` is **not** ported. Its load-bearing surface is
 the five-file publication transaction with signal-inclusive rollback, which lives
 in `script/build/transactional-publish.sh` and is shared with the Pi and bridge

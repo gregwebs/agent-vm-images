@@ -662,6 +662,44 @@ func TestAuthorizePrefix(t *testing.T) {
 	mustUsage(t, errOf(authorizePrefix(inside, filepath.Join(root, "absent"))), "cd: can't cd to "+filepath.Join(root, "absent"))
 }
 
+// TestAuthorizePrefixProductionDispatch drives the exemption itself, not only the
+// decision: a prefix that a build may prepare with no fixture root must be accepted,
+// and a sibling of it must not. The production path is the one directory a host test
+// cannot create, so this test points the variable at one it can.
+func TestAuthorizePrefixProductionDispatch(t *testing.T) {
+	root := t.TempDir()
+	production := filepath.Join(root, "plugins")
+	if err := os.MkdirAll(production, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	physical, err := filepath.EvalSymlinks(production)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := productionPrefix
+	productionPrefix = physical
+	t.Cleanup(func() { productionPrefix = saved })
+
+	// No fixture root: the exemption is what authorizes this.
+	got, err := authorizePrefix(production, "")
+	if err != nil || got != physical {
+		t.Fatalf("authorizePrefix(production, no fixture root) = %q, %v, want %q and no error", got, err, physical)
+	}
+	// A sibling that merely starts with the production path is not exempt.
+	sibling := filepath.Join(root, "plugins-x")
+	if err := os.MkdirAll(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	siblingPhysical, err := filepath.EvalSymlinks(sibling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustUsage(t, errOf(authorizePrefix(sibling, "")), "non-production prefix requires fixture root")
+	if siblingPhysical == physical {
+		t.Fatal("the fixture is broken: the sibling resolved to the production path")
+	}
+}
+
 // TestIsProductionPrefix is the exemption's whole decision. The production path is
 // the one input a host test cannot create, so the decision is a pure function and
 // this is its table: a sibling that merely starts with the production name is not

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -157,9 +158,67 @@ func TestReportBound(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 20*time.Second {
 		t.Fatalf("the bound did not fire: %s", elapsed)
 	}
-	if outcome.status == 0 || outcome.start != nil {
-		t.Fatalf("report = %+v, want a killed child", outcome)
+	// The child dies from the TERM this program sends, so the status is the signal's
+	// and not `timeout`'s 124.
+	if outcome.status != 128+int(syscall.SIGTERM) || outcome.start != nil {
+		t.Fatalf("report = %+v, want status 143", outcome)
 	}
+}
+
+// TestReportRefusesAnUnusableFirstCandidate keeps the envelope's resolution rule:
+// the first PATH candidate that exists is the one run, so a present-but-unusable
+// `node` is refused rather than silently skipped for a later, working one. Go's
+// `exec.LookPath` skips it, which would let a gate certify a command the runtime
+// cannot start.
+func TestReportRefusesAnUnusableFirstCandidate(t *testing.T) {
+	work := t.TempDir()
+	bad := filepath.Join(work, "bad")
+	good := filepath.Join(work, "good")
+	for directory, mode := range map[string]os.FileMode{bad: 0o644, good: 0o755} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "node"), []byte("#!/bin/sh\nexit 0\n"), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A dangling symlink is a candidate too: lstat says it is there.
+	dangling := filepath.Join(work, "dangling")
+	if err := os.MkdirAll(dangling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(work, "nowhere"), filepath.Join(dangling, "node")); err != nil {
+		t.Fatal(err)
+	}
+	for name, first := range map[string]string{"not executable": bad, "dangling symlink": dangling} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("PATH", first+string(os.PathListSeparator)+good)
+			outcome := runReport(context.Background(), reportSpec{
+				argv:       []string{"node", "--version"},
+				stdoutFile: filepath.Join(work, "out"),
+				stderrFile: filepath.Join(work, "err"),
+			})
+			if outcome.start == nil {
+				t.Fatalf("the unusable first candidate was skipped: %+v", outcome)
+			}
+			if outcome.status != 0 {
+				t.Fatalf("status = %d, want the start failure to be reported on its own", outcome.status)
+			}
+		})
+	}
+	// A name that no PATH entry carries is the same refusal, not a 127: the
+	// envelope reported it and exited 1.
+	t.Run("absent from PATH", func(t *testing.T) {
+		t.Setenv("PATH", work)
+		outcome := runReport(context.Background(), reportSpec{
+			argv:       []string{"opencode-fixture-absent-program"},
+			stdoutFile: filepath.Join(work, "out"),
+			stderrFile: filepath.Join(work, "err"),
+		})
+		if outcome.start == nil {
+			t.Fatalf("an absent program was reported as started: %+v", outcome)
+		}
+	})
 }
 
 // TestReportMapsClassifiedTransportStatus keeps the envelope's one remapping: a
@@ -173,6 +232,40 @@ func TestReportMapsClassifiedTransportStatus(t *testing.T) {
 	})
 	if outcome.status != genericFailure {
 		t.Fatalf("status = %d, want 1", outcome.status)
+	}
+}
+
+// TestEndSessionTermsBeforeItKills keeps the order the comment in endSession calls
+// load-bearing: the child's own TERM trap has to run before it is killed, which is
+// what lets `run-pnpm.sh` forward the TERM to its manager. A KILL-only teardown
+// would never reach the trap, so the file the trap writes is the evidence.
+func TestEndSessionTermsBeforeItKills(t *testing.T) {
+	shrinkBounds(t, 100*time.Millisecond)
+	work := t.TempDir()
+	trapped := filepath.Join(work, "trapped")
+	ready := filepath.Join(work, "ready")
+	t.Setenv("TRAPPED_FILE", trapped)
+	t.Setenv("READY_FILE", ready)
+
+	command := exec.Command("sh", "-c", `trap 'printf termed >"$TRAPPED_FILE"; exit 0' TERM
+printf ready >"$READY_FILE"
+while :; do sleep 0.02; done`)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := command.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL) })
+	waitForProgress(t, ready)
+	if err := endSession(command); err != nil {
+		t.Fatalf("endSession: %v", err)
+	}
+	err := command.Wait()
+	// The trap ran, which means TERM arrived while the child could still handle it.
+	if _, statErr := os.Stat(trapped); statErr != nil {
+		t.Fatalf("the child's TERM trap never ran: %v", statErr)
+	}
+	if err != nil {
+		t.Fatalf("the TERMed child exited with %v, want its trap's 0", err)
 	}
 }
 
@@ -195,9 +288,32 @@ func TestCancelledSessionLeavesNothingAlive(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan reportOutcome, 1)
+	collected := false
+	// The session is killed outright at the end, whatever happened above: a driver
+	// that lost its own teardown -- which is what this test's mutant does -- must not
+	// leave a loop running on the host.
+	leaderFile := filepath.Join(work, "leader.pid")
+	t.Setenv("LEADER_PID_FILE", leaderFile)
+	t.Cleanup(func() {
+		if pid := readPIDFile(leaderFile); pid > 0 {
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+		}
+	})
+	t.Cleanup(func() {
+		cancel()
+		if collected {
+			return
+		}
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Errorf("the report run did not return after cancellation")
+		}
+	})
 	go func() {
 		done <- runReport(ctx, reportSpec{
 			argv: []string{"sh", "-c", `trap '' TERM
+printf '%s' $$ >"$LEADER_PID_FILE"
 sh -c 'trap "" TERM; while :; do printf x >> "$BEAT_FILE"; sleep 0.05; done' &
 wait`},
 			stdoutFile: filepath.Join(work, "out"),
@@ -207,6 +323,7 @@ wait`},
 	waitForProgress(t, beat)
 	cancel()
 	outcome := <-done
+	collected = true
 	if outcome.status != 128+9 {
 		t.Fatalf("status = %d, want the KILL (137): TERM alone would have been 143", outcome.status)
 	}
@@ -215,6 +332,22 @@ wait`},
 	if after := fileSize(t, beat); after != before {
 		t.Fatalf("the session kept writing after cancellation (%d → %d bytes)", before, after)
 	}
+}
+
+// readPIDFile returns the pid a fixture wrote, or 0 when it has not written it.
+func readPIDFile(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	pid := 0
+	for _, digit := range strings.TrimSpace(string(data)) {
+		if digit < '0' || digit > '9' {
+			return 0
+		}
+		pid = pid*10 + int(digit-'0')
+	}
+	return pid
 }
 
 func waitForProgress(t *testing.T, path string) {

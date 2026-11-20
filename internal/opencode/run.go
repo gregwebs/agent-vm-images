@@ -132,12 +132,48 @@ func endSession(command *exec.Cmd) error {
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 	until := time.Now().Add(cancelGrace())
 	for time.Now().Before(until) {
-		if err := syscall.Kill(-pgid, 0); err != nil && errors.Is(err, syscall.ESRCH) {
+		if gone(syscall.Kill(-pgid, 0)) {
 			return nil
 		}
 		time.Sleep(pollInterval)
 	}
-	return syscall.Kill(-pgid, syscall.SIGKILL)
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); !gone(err) {
+		return err
+	}
+	return nil
+}
+
+// gone reports that a signal to a process group has nothing left to reach. Darwin
+// answers EPERM rather than ESRCH once every member is an unwaited zombie, so both
+// mean "the group is empty": this program only ever signals a group it created, and
+// a fast TERM trap -- the normal path for `run-pnpm.sh` -- empties it immediately.
+func gone(err error) bool {
+	return errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM)
+}
+
+// resolveCommand is the composed envelope's own program resolution, kept because
+// what it does *not* do is the rule: the first PATH candidate that exists is the one
+// run, whether or not it can be executed. Go's `exec.LookPath` would skip a
+// present-but-unusable candidate and run a later one instead, so a gate could
+// certify a command whose first PATH entry the runtime cannot start. `run-report.sh`
+// refused that case and so does this, with the same status: the child never starts.
+func resolveCommand(name string) (string, error) {
+	if strings.ContainsRune(name, os.PathSeparator) {
+		return name, nil
+	}
+	for _, directory := range filepath.SplitList(os.Getenv("PATH")) {
+		if directory == "" {
+			directory = "."
+		}
+		candidate := filepath.Join(directory, name)
+		// lstat, not stat: a symlink whose target is gone is still a candidate, and
+		// the envelope reported it rather than searching on.
+		if _, err := os.Lstat(candidate); err != nil {
+			continue
+		}
+		return candidate, nil
+	}
+	return "", fmt.Errorf("%s not found on PATH", name)
 }
 
 // reportSpec is one bounded child whose two streams are published to files.
@@ -188,13 +224,17 @@ func runReport(ctx context.Context, spec reportSpec) reportOutcome {
 		return reportOutcome{start: err}
 	}
 
+	program, err := resolveCommand(spec.argv[0])
+	if err != nil {
+		return reportOutcome{start: err}
+	}
 	run := ctx
 	if spec.bound > 0 {
 		var cancel context.CancelFunc
 		run, cancel = context.WithTimeout(ctx, spec.bound)
 		defer cancel()
 	}
-	command := exec.CommandContext(run, spec.argv[0], spec.argv[1:]...) //nolint:gosec // the argv is this program's own reviewed call.
+	command := exec.CommandContext(run, program, spec.argv[1:]...) //nolint:gosec // the argv is this program's own reviewed call.
 	command.Env = reportEnvironment(home)
 	command.Stdout = stdout
 	command.Stderr = stderr
