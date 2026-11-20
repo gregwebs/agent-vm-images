@@ -7,7 +7,7 @@ parity bar). Being implemented.
 
 ADR 0004 and its #75 amendment moved the recipe-contract build helpers to Go.
 About 6.4k lines of Python still run as build helpers (pin verifiers, the pnpm
-project module, the Pi helpers, the dsh and OpenCode probes). Another 3.5k run
+project module, the Pi helpers, the OpenCode probe). Another 3.5k run
 in the example layers, 7.5k are maintainer programs (pin writers among them,
 some importing build helper modules), 4k are release and CI code, and 75k make
 up the test harness. Much of the shell does parsing and policy as well as
@@ -112,7 +112,9 @@ passing it explicitly is [#215](https://github.com/gregwebs/agent-vm-images/issu
    behaviour change.
 1. Pin pairs, each verifier together with its pin writer: artifact, Claude,
    Codex, agy.
-2. dsh, OpenCode and the pnpm bootstrap.
+2. dsh, OpenCode and the pnpm bootstrap. What is left of this item is OpenCode's
+   two install entry points ([#219](https://github.com/gregwebs/agent-vm-images/issues/219));
+   `probe-opencode.py` is not part of it, for the reason recorded below.
 3. The pnpm project module and Pi. This rescopes #62–#65 to Go instead of
    writing Python that would be deleted.
 4. Example layers.
@@ -214,6 +216,32 @@ guard, because the entry point has to locate the helper before it can exec it, a
 still authorizes the composed directory itself (it runs `pnpm-environment` from it)
 and refuses the same environment, so the only change is that a hostile variable is
 reported one process later than it used to be.
+
+**The OpenCode build hooks are Go (#218).** `recipe-contract
+opencode-prepare-lock`, `opencode-verify` and `opencode-verify-plugins` replace the
+policy in `images/tools/opencode/plugins/prepare-lock.sh`,
+`images/tools/opencode/verify-opencode.sh` and
+`images/tools/opencode/verify-opencode-plugins.sh`, which remain as entry points
+that name the container's environment as flags. The `.mjs` programs stay Node
+because they are the plugin's own runtime, and
+`images/tools/opencode/probe-opencode.py` stays Python deliberately: its bytes are
+rendered into the released image's own self-certification, which runs with no
+network and no mounts and cannot carry the composed helper, so porting it would
+create a second implementation of one protocol rather than remove one (#185,
+closed on that ground).
+
+Unlike the dsh hooks, the two OpenCode gates do not execute
+`images/recipe-contract/run-report.sh`: each runs its own report child. The
+envelope's `timeout` puts the managed command in a second process group, which a
+cancelled session cannot reach, so a hung `--version` left that child running with
+nobody left to forward the signal — the dsh path is safe only because
+`run-pnpm.sh` TERMs `timeout` while it is still alive to forward. Two consequences
+are deliberate. The envelope's own resolution rule is reimplemented there: the
+first PATH candidate that exists is the one run, so a present-but-unusable
+`node` is refused rather than skipped for a later, working one. And
+`AGENT_VM_CONTRACT_DIR` still locates the helper for all three entry points, but it
+is a subcommand flag only for `opencode-prepare-lock`, the one verb that still runs
+a shared envelope (`run-pnpm.sh`).
 
 `images/tools/dsh/upgrade-dsh.sh` is **not** ported. Its load-bearing surface is
 the five-file publication transaction with signal-inclusive rollback, which lives
