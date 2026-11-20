@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -211,7 +212,7 @@ func TestTeardownEscalatesAndProvesNoSurvivors(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 10*time.Second {
 		t.Fatalf("teardown did not bound itself: %s", elapsed)
 	}
-	if groupAlive(child.pgid) {
+	if !askGroup(child.pgid).empty() {
 		t.Fatalf("the process group %d survived teardown", child.pgid)
 	}
 	if _, ok := child.doneStatus(); !ok {
@@ -253,9 +254,9 @@ func startIgnoringChild(t *testing.T) (*webChild, int) {
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	child := &webChild{command: command, pgid: command.Process.Pid, done: make(chan int, 1), alive: groupAlive,
+	child := &webChild{command: command, pgid: command.Process.Pid, done: make(chan int, 1),
 		capture: newIdleCapture(t)}
-	go func() { child.done <- replayStatus(command.Wait()) }()
+	child.reapInBackground()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		source, err := os.ReadFile(record)
@@ -487,31 +488,144 @@ func TestExactVersionGrammar(t *testing.T) {
 	}
 }
 
-// TestTeardownRefusesAGroupThatWillNotEmpty is the refusal branch itself: when the
-// group still has members after the leader is reaped, the teardown must report it
-// rather than claiming a clean end. The liveness probe is injected because no
-// surviving member of a KILLed group is reachable from a test on either host.
-func TestTeardownRefusesAGroupThatWillNotEmpty(t *testing.T) {
-	started := time.Now()
-	command := exec.Command("sh", "-c", "sleep 60")
+// TestTeardownProvesEmptinessOrRefuses is the teardown's honesty table. The signal is
+// injected because the answers that matter -- a kernel refusing to say and a member
+// that stays -- are not reachable from a test on either host.
+//
+// ESRCH is the only answer that proves the group empty. EPERM escalates to KILL, and a
+// group that the last probe still cannot prove empty is a Refusal rather than a pass.
+func TestTeardownProvesEmptinessOrRefuses(t *testing.T) {
+	saved := signalGroup
+	t.Cleanup(func() { signalGroup = saved })
+	// The leader is already reaped, so the only question left is the group probe.
+	child := func() *webChild {
+		done := make(chan int, 1)
+		done <- 0
+		return &webChild{pgid: 4321, done: done}
+	}
+
+	t.Run("an empty group is proved immediately", func(t *testing.T) {
+		var signals []syscall.Signal
+		signalGroup = func(_ int, signal syscall.Signal) error {
+			signals = append(signals, signal)
+			return syscall.ESRCH
+		}
+		if _, err := child().teardown(50*time.Millisecond, context.Background()); err != nil {
+			t.Fatalf("teardown = %v, want success", err)
+		}
+		for _, signal := range signals {
+			if signal != 0 {
+				t.Fatalf("signals = %v, want no signal to an empty group", signals)
+			}
+		}
+	})
+
+	t.Run("a refused probe escalates to KILL and is proved", func(t *testing.T) {
+		killed := false
+		signalGroup = func(_ int, signal syscall.Signal) error {
+			switch signal {
+			case syscall.SIGTERM:
+				return nil
+			case syscall.SIGKILL:
+				killed = true
+				return nil
+			}
+			if killed {
+				return syscall.ESRCH
+			}
+			// A member exists, but the kernel will not say anything about it.
+			return syscall.EPERM
+		}
+		if _, err := child().teardown(50*time.Millisecond, context.Background()); err != nil {
+			t.Fatalf("teardown = %v, want success once the KILL proved it", err)
+		}
+		if !killed {
+			t.Fatal("an unproven group was accepted without escalating to KILL")
+		}
+	})
+
+	t.Run("a group that never proves itself is refused", func(t *testing.T) {
+		started := time.Now()
+		signalGroup = func(_ int, _ syscall.Signal) error { return syscall.EPERM }
+		_, err := child().teardown(50*time.Millisecond, context.Background())
+		if err == nil {
+			t.Fatal("a group the kernel would not answer for was reported as torn down")
+		}
+		for _, want := range []string{"not provably gone", "refused to answer"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %v, want %q in it", err, want)
+			}
+		}
+		if elapsed := time.Since(started); elapsed > 10*time.Second {
+			t.Fatalf("the refusal did not bound itself: %s", elapsed)
+		}
+	})
+
+	t.Run("a member that exists is not empty", func(t *testing.T) {
+		// kill -0 succeeding means a member is there: neither the poll nor the final
+		// phase may read that as success.
+		signalGroup = func(_ int, _ syscall.Signal) error { return nil }
+		_, err := child().teardown(50*time.Millisecond, context.Background())
+		if err == nil {
+			t.Fatal("a group with a live member was reported as torn down")
+		}
+		if !strings.Contains(err.Error(), "members remain") {
+			t.Fatalf("error = %v, want the surviving members named", err)
+		}
+	})
+}
+
+// TestTeardownProvesEmptinessOnlyAfterTheLeaderIsReaped is the real-process
+// convergence: the leader exits on TERM and stays a group member until its Wait has
+// reaped it, so the same child is provable with that Wait running and unprovable
+// without it. Deleting the reap breaks the first case; reading the second case's
+// EPERM as gone breaks it on the host that answers EPERM (Darwin).
+func TestTeardownProvesEmptinessOnlyAfterTheLeaderIsReaped(t *testing.T) {
+	t.Run("a reaped leader converges to ESRCH", func(t *testing.T) {
+		child := startExitingOnTerm(t)
+		child.reapInBackground()
+		if signal, err := child.teardown(500*time.Millisecond, context.Background()); err != nil || signal != 0 {
+			t.Fatalf("teardown = %v, %v", signal, err)
+		}
+		if !askGroup(child.pgid).empty() {
+			t.Fatalf("group %d was not proved empty after the leader was reaped", child.pgid)
+		}
+	})
+
+	t.Run("an unreaped leader is not provable", func(t *testing.T) {
+		child := startExitingOnTerm(t)
+		_, err := child.teardown(100*time.Millisecond, context.Background())
+		if err == nil {
+			t.Fatal("an unreaped leader counted as an empty group")
+		}
+		// The kernel answers differently: Darwin refuses to say anything about a group of
+		// our own unwaited zombies, Linux counts the zombie as a member.
+		want := "members remain"
+		if runtime.GOOS == "darwin" {
+			want = "the kernel refused to answer"
+		}
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("teardown = %v, want %q in it", err, want)
+		}
+	})
+}
+
+// startExitingOnTerm starts one session whose leader leaves on TERM, so what is left of
+// the group is exactly the leader's own unreaped exit.
+func startExitingOnTerm(t *testing.T) *webChild {
+	t.Helper()
+	command := exec.Command("sh", "-c", `trap 'exit 0' TERM; while :; do sleep 0.02; done`)
 	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
 	child := &webChild{command: command, pgid: command.Process.Pid, done: make(chan int, 1),
-		alive: func(int) bool { return true }}
-	go func() { child.done <- replayStatus(command.Wait()) }()
+		capture: newIdleCapture(t)}
 	t.Cleanup(func() {
-		_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
+		_ = syscall.Kill(-child.pgid, syscall.SIGKILL)
 		_ = command.Wait()
 	})
-	_, err := child.teardown(50*time.Millisecond, context.Background())
-	if err == nil || !strings.Contains(err.Error(), "still has members after the leader was reaped") {
-		t.Fatalf("teardown = %v", err)
-	}
-	if elapsed := time.Since(started); elapsed > 10*time.Second {
-		t.Fatalf("the refusal did not bound itself: %s", elapsed)
-	}
+	return child
 }
 
 // TestTeardownReportsASignalInsteadOfSwallowingIt covers the window the readiness
@@ -537,7 +651,7 @@ func TestTeardownReportsASignalInsteadOfSwallowingIt(t *testing.T) {
 	if signal != 143 {
 		t.Fatalf("signal = %d, want the interruption it observed", signal)
 	}
-	if groupAlive(child.pgid) {
+	if !askGroup(child.pgid).empty() {
 		t.Fatalf("group %d survived an interrupted teardown", child.pgid)
 	}
 }
@@ -556,7 +670,7 @@ func TestTeardownHonoursTheCallerDeadline(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 5*time.Second {
 		t.Fatalf("a cancelled context did not shorten the escalation: %s", elapsed)
 	}
-	if groupAlive(child.pgid) {
+	if !askGroup(child.pgid).empty() {
 		t.Fatalf("group %d survived", child.pgid)
 	}
 }
@@ -844,11 +958,12 @@ func newIdleCapture(t *testing.T) *capture {
 	return newCapture(stdoutRead, stderrRead)
 }
 
-// newIdleChild is a child whose pipes are already closed and whose group is empty: the
-// survey's inputs are all that matter.
+// newIdleChild is a child whose pipes are already closed: the survey's inputs are all
+// that matter. Its pgid is one no group can hold, so a probe that is never supposed to
+// happen answers ESRCH instead of signalling this process's own group.
 func newIdleChild(t *testing.T) *webChild {
 	t.Helper()
-	return &webChild{capture: newIdleCapture(t), alive: func(int) bool { return false }}
+	return &webChild{capture: newIdleCapture(t), pgid: 1 << 30}
 }
 
 // TestInterruptedReportIsTheLastWord covers the decision `Probe` makes after its work
