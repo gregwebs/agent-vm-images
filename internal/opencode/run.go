@@ -119,36 +119,59 @@ func childStatus(err error) int {
 // would remove the scratch underneath it.
 func cancelGrace() time.Duration { return killGrace + time.Second }
 
+// signalGroup sends one signal to a process group. It is a variable so the teardown
+// table can drive a refusal the kernel will not produce on demand.
+var signalGroup = func(pgid int, signal syscall.Signal) error {
+	return syscall.Kill(-pgid, signal)
+}
+
 // endSession stops a child and everything it started: TERM to the session, then
-// KILL once the grace is spent. That order is load-bearing for `run-pnpm.sh`,
-// whose own TERM trap has to run before the caller removes the scratch the
-// resolver is using. For this program's own children the session is all there is,
-// so nothing can outlive the call.
+// KILL once the grace is spent, and only then does it report success.
+//
+// The TERM-first order is load-bearing for `run-pnpm.sh`, whose own TERM trap has to
+// run before the caller removes the scratch the resolver is using.
+//
+// Success is only ever *proof*: `kill -0` on the group answered ESRCH. Anything else
+// -- a member that exists, or EPERM, which is the kernel refusing to say -- is "not
+// proven empty" and escalates, and if the KILL cannot prove it either the call
+// returns the error. A teardown that cannot show the session is gone must fail
+// loudly: passing there is how a resolver outlives the removal of the tree it is
+// writing to.
+//
+// The caller has to be reaping the leader while this runs. Go's `CommandContext`
+// does exactly that -- `Wait` is reaping while `Cancel` runs -- and a reaped leader
+// stops being a group member, which is what turns the common case into an honest
+// ESRCH. A caller that only blocks on endSession leaves the leader a zombie and gets
+// the refusal it deserves. `TestEndSessionTermsBeforeItKills` is that difference on
+// the platform that showed it (Darwin answers EPERM for a group of unwaited
+// zombies).
 func endSession(command *exec.Cmd) error {
 	if command.Process == nil {
 		return nil
 	}
 	pgid := command.Process.Pid
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	_ = signalGroup(pgid, syscall.SIGTERM)
+	if empty := waitForEmptyGroup(pgid); empty {
+		return nil
+	}
+	_ = signalGroup(pgid, syscall.SIGKILL)
+	if empty := waitForEmptyGroup(pgid); empty {
+		return nil
+	}
+	return fmt.Errorf("process group %d is not provably gone after TERM and KILL", pgid)
+}
+
+// waitForEmptyGroup polls until the group has no members left, and reports whether
+// it proved that before the grace ran out.
+func waitForEmptyGroup(pgid int) bool {
 	until := time.Now().Add(cancelGrace())
 	for time.Now().Before(until) {
-		if gone(syscall.Kill(-pgid, 0)) {
-			return nil
+		if errors.Is(signalGroup(pgid, 0), syscall.ESRCH) {
+			return true
 		}
 		time.Sleep(pollInterval)
 	}
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); !gone(err) {
-		return err
-	}
-	return nil
-}
-
-// gone reports that a signal to a process group has nothing left to reach. Darwin
-// answers EPERM rather than ESRCH once every member is an unwaited zombie, so both
-// mean "the group is empty": this program only ever signals a group it created, and
-// a fast TERM trap -- the normal path for `run-pnpm.sh` -- empties it immediately.
-func gone(err error) bool {
-	return errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM)
+	return false
 }
 
 // resolveCommand is the composed envelope's own program resolution, kept because

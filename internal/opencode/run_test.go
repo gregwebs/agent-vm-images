@@ -254,19 +254,105 @@ while :; do sleep 0.02; done`)
 	if err := command.Start(); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	t.Cleanup(func() { _ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL) })
+	t.Cleanup(func() { _ = signalGroup(command.Process.Pid, syscall.SIGKILL) })
+	// The reaping has to run while the teardown does: a reaped leader stops being a
+	// group member, so the teardown can prove the group is empty. Blocking here
+	// instead leaves a zombie and the call refuses -- which is the difference the
+	// Darwin EPERM finding turned on.
+	waited := make(chan error, 1)
+	go func() { waited <- command.Wait() }()
 	waitForProgress(t, ready)
 	if err := endSession(command); err != nil {
 		t.Fatalf("endSession: %v", err)
 	}
-	err := command.Wait()
 	// The trap ran, which means TERM arrived while the child could still handle it.
 	if _, statErr := os.Stat(trapped); statErr != nil {
 		t.Fatalf("the child's TERM trap never ran: %v", statErr)
 	}
-	if err != nil {
+	if err := <-waited; err != nil {
 		t.Fatalf("the TERMed child exited with %v, want its trap's 0", err)
 	}
+}
+
+// TestEndSessionProvesEmptinessOrRefuses is the teardown's honesty table, driven by
+// an injected signal so the kernel's own refusals can be spelled without one.
+//
+// ESRCH is the only answer that means "the group is empty". EPERM is the kernel
+// refusing to say, so it escalates to KILL, and when KILL cannot prove it either the
+// call returns an error instead of reporting success.
+func TestEndSessionProvesEmptinessOrRefuses(t *testing.T) {
+	shrinkBounds(t, 50*time.Millisecond)
+	saved := signalGroup
+	t.Cleanup(func() { signalGroup = saved })
+	process := func() *exec.Cmd { return &exec.Cmd{Process: &os.Process{Pid: 4321}} }
+
+	t.Run("an empty group is proved immediately", func(t *testing.T) {
+		var signals []syscall.Signal
+		signalGroup = func(_ int, signal syscall.Signal) error {
+			signals = append(signals, signal)
+			return syscall.ESRCH
+		}
+		if err := endSession(process()); err != nil {
+			t.Fatalf("endSession = %v, want success", err)
+		}
+		if len(signals) != 2 || signals[0] != syscall.SIGTERM || signals[1] != 0 {
+			t.Fatalf("signals = %v, want TERM then the ESRCH poll", signals)
+		}
+	})
+
+	t.Run("a refusal in the poll escalates to KILL", func(t *testing.T) {
+		killed := false
+		signalGroup = func(_ int, signal syscall.Signal) error {
+			switch signal {
+			case syscall.SIGTERM:
+				return nil
+			case syscall.SIGKILL:
+				killed = true
+				return nil
+			}
+			if killed {
+				return syscall.ESRCH
+			}
+			// Present, but the kernel will not say anything about it.
+			return syscall.EPERM
+		}
+		if err := endSession(process()); err != nil {
+			t.Fatalf("endSession = %v, want success once the KILL proved it", err)
+		}
+		if !killed {
+			t.Fatal("an unproven group was accepted without escalating to KILL")
+		}
+	})
+
+	t.Run("a group that never proves itself is a failure", func(t *testing.T) {
+		signalGroup = func(_ int, _ syscall.Signal) error { return syscall.EPERM }
+		err := endSession(process())
+		if err == nil {
+			t.Fatal("an unprovable group was reported as torn down")
+		}
+		if !strings.Contains(err.Error(), "not provably gone") {
+			t.Fatalf("error = %v, want the refusal to name what it could not prove", err)
+		}
+	})
+
+	t.Run("a member that exists is not empty", func(t *testing.T) {
+		// kill -0 succeeding means a member is there: the poll must not read that as
+		// success either.
+		killed := false
+		signalGroup = func(_ int, signal syscall.Signal) error {
+			if signal == syscall.SIGKILL {
+				killed = true
+				return nil
+			}
+			if killed {
+				return syscall.ESRCH
+			}
+			return nil
+		}
+		if err := endSession(process()); err != nil {
+			t.Fatalf("endSession = %v, want success only after the KILL", err)
+		}
+	})
 }
 
 // TestCancelledSessionLeavesNothingAlive is the termination property the composed
