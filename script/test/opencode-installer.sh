@@ -8,9 +8,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VENDOR_SRC="$REPO_ROOT/images/tools/opencode/vendor"
 INSTALL="$REPO_ROOT/images/tools/opencode/install-opencode.sh"
 VERIFY="$REPO_ROOT/images/tools/opencode/verify-opencode.sh"
-# The converted verifiers execute `recipe-contract` from the contract directory,
-# so build the native composed directory once before any restricted env -i or
-# fixture PATH replaces the tooling.
+# The converted hooks and verifiers execute `recipe-contract` from the contract
+# directory, so build the native composed directory once before any restricted env -i
+# or fixture PATH replaces the tooling. Every case names this directory explicitly: a
+# hook that searched for a helper would be deciding which binary to test, and on a host
+# with a stale fixed mount it would test that one instead of the build above.
 CONTRACT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)/out"
 
 TEST_ROOT="$(mktemp -d /tmp/opencode-installer.XXXXXX)"
@@ -73,6 +75,7 @@ run_install() {
     RUN_OUTPUT="$(
         env -i \
             "PATH=/usr/bin:/bin" \
+            "AGENT_VM_CONTRACT_DIR=$CONTRACT" \
             "AGENT_VM_VENDOR_DIR=$CASE/vendor" \
             "AGENT_VM_OPENCODE_PREFIX=$CASE/prefix" \
             "AGENT_VM_OPENCODE_LINK=$CASE/link/opencode" \

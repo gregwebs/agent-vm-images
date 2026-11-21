@@ -112,9 +112,9 @@ passing it explicitly is [#215](https://github.com/gregwebs/agent-vm-images/issu
    behaviour change.
 1. Pin pairs, each verifier together with its pin writer: artifact, Claude,
    Codex, agy.
-2. dsh, OpenCode and the pnpm bootstrap. What is left of this item is OpenCode's
-   two install entry points ([#219](https://github.com/gregwebs/agent-vm-images/issues/219));
-   `probe-opencode.py` is not part of it, for the reason recorded below.
+2. dsh, OpenCode and the pnpm bootstrap. OpenCode's two install entry points
+   ([#219](https://github.com/gregwebs/agent-vm-images/issues/219)) complete the
+   item; `probe-opencode.py` is not part of it, for the reason recorded below.
 3. The pnpm project module and Pi. This rescopes #62–#65 to Go instead of
    writing Python that would be deleted.
 4. Example layers.
@@ -242,6 +242,32 @@ first PATH candidate that exists is the one run, so a present-but-unusable
 `AGENT_VM_CONTRACT_DIR` still locates the helper for all three entry points, but it
 is a subcommand flag only for `opencode-prepare-lock`, the one verb that still runs
 a shared envelope (`run-pnpm.sh`).
+
+**The OpenCode install hooks are Go (#219).** `recipe-contract opencode-install` and
+`opencode-install-plugins` replace the policy in
+`images/tools/opencode/{install-opencode.sh,install-opencode-plugins.sh}`, which remain
+as entry points. Neither addresses the network itself: the vendored installer keeps
+OpenCode's own transport, and the plugins hook runs the manager through the composed
+`run-pnpm.sh`, so build egress still has one owner for the download and the manager's
+own for its graph.
+
+Both entry points take the helper from `AGENT_VM_CONTRACT_DIR`, then the fixed build
+mount, and refuse otherwise. There is no third step: a directory the caller names is
+used as it stands, so a checkout names the composed directory its own adapter
+published and a stale mount cannot decide which binary a gate tested. The OpenCode
+black-box harness consequently names `AGENT_VM_CONTRACT_DIR` for the install hook the
+way it already did for the gate.
+
+Two rules were deleted rather than ported, because they could not decide anything: an
+empty receipt path was already unreadable, so it already failed classification, and a
+child environment that strips `AGENT_INSTALL_SOFT_FAIL` has nothing to clear by
+setting it to empty.
+
+One diagnostic changes, deliberately: a receipt with more than one classified
+`transport download` line used to join the third field of every line into the absence
+record, and now the first classified line names the code. `download.sh` truncates the
+receipt and writes exactly one line, so no build can reach the difference; where the
+predecessor joined `$3`, this takes the first matching line.
 
 `images/tools/dsh/upgrade-dsh.sh` is **not** ported. Its load-bearing surface is
 the five-file publication transaction with signal-inclusive rollback, which lives

@@ -36,6 +36,17 @@ func refusalf(format string, args ...any) error {
 	return &Refusal{Text: fmt.Sprintf(format, args...)}
 }
 
+// EmptyFlagUsage is the refusal for a required flag that carried no value. go-arg's
+// `required` records only that the flag appeared, so `--prefix ""` parses and every
+// path composed from it addresses the caller's working directory. The parser's own
+// line cannot say which flag was empty, so this one names it.
+//
+// `prepare-lock.sh` keeps its frozen spelling (EmptyPathUsage) instead: that line is
+// a predecessor's documented interface, which a developer already quotes.
+func EmptyFlagUsage(program, flag string) string {
+	return "usage: " + program + " (" + flag + " must not be empty)"
+}
+
 // Usage is a malformed invocation: status 2, not a refused request. Text is the
 // documented interface line, or empty when the predecessor exited 2 with no
 // diagnostic at all.

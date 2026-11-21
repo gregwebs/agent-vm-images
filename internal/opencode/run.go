@@ -57,6 +57,12 @@ type childSpec struct {
 	// captured. Nil discards them, which is what `>/dev/null` did.
 	stdout io.Writer
 	stderr io.Writer
+	// stdin is the child's input. Nil leaves it closed, which is what the captured
+	// and redirected spellings had; an inherited stream is the shell's own default.
+	stdin io.Reader
+	// environment replaces the inherited environment when non-nil. The install hooks
+	// set it because they export a value for one child, not for themselves.
+	environment []string
 	// bound is the child's own deadline. Zero leaves the bound to the composed
 	// envelope the child runs under.
 	bound time.Duration
@@ -79,8 +85,12 @@ func runChild(ctx context.Context, spec childSpec) (string, int) {
 	}
 	command := exec.CommandContext(run, spec.argv[0], spec.argv[1:]...)
 	command.Dir = spec.directory
+	command.Stdin = spec.stdin
 	command.Stdout = stdout
 	command.Stderr = spec.stderr
+	if spec.environment != nil {
+		command.Env = spec.environment
+	}
 	command.WaitDelay = killGrace
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Go's default cancellation is SIGKILL. The reviewed envelopes give the child
