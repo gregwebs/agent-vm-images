@@ -9,10 +9,13 @@
 # transaction all live there, because one rule has to serve the image build, the CI
 # changed leg and every developer upgrade.
 #
-# This file only resolves the helper and passes the caller's argv through unchanged, so
-# the option words stay the driver's own grammar. The helper is located through the
-# shared project module, whose `contract-dir` authorizes the directory this invocation
-# may execute before anything from it runs.
+# This file resolves the helper, names the sources it reads as flags and then ends
+# its own flags with `--`, so the caller's words stay the driver's own grammar.
+# Without the `--` a caller's `PREFIX 1.2.3 '' --contract /tmp/evil` would be read as
+# this program's authorized composed directory, and the developer `--refresh-lock`
+# would be refused as an unknown flag. The helper is located through the shared
+# project module, whose `contract-dir` authorizes the directory this invocation may
+# execute before anything from it runs.
 set -eu
 
 usage() {
@@ -38,4 +41,4 @@ PROJECT=$SOURCE/project.py
 CONTRACT=$(python3 "$PROJECT" contract-dir "$PREFIX") || exit 1
 
 exec "$CONTRACT/recipe-contract" dsh-prepare-lock \
-    --source "$SOURCE" --contract "$CONTRACT" "$@"
+    --source "$SOURCE" --contract "$CONTRACT" -- "$@"

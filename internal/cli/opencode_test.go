@@ -19,10 +19,12 @@ func runOpencode(t *testing.T, args ...string) (int, string, string) {
 // positional slot is usage (2) and the preparation driver's documented interface
 // line is the shell's, unchanged.
 //
-// A *missing required flag* is the flag parser's own refusal, and its Fail calls
-// os.Exit(2) directly, so nothing here can observe it. That path is documented and
-// uncovered: no test in this repository, in-process or in shell, drives a missing
-// flag through any of these three verbs.
+// A *missing required flag* is the flag parser's own refusal. For
+// `opencode-prepare-lock` the parser is this process's own (`argParser`), so the path
+// is observable and `TestOpencodePrepareMissingFlagIsTheParsersOwnRefusal` drives it.
+// `opencode-verify` and `opencode-verify-plugins` still build go-arg's default parser,
+// whose Fail calls os.Exit(2) directly: that path is documented and uncovered, and no
+// test here drives a missing flag through either of those two verbs.
 func TestOpencodeUsageIsStatusTwo(t *testing.T) {
 	status, stdout, stderr := runOpencode(t,
 		"opencode-prepare-lock", "--contract", "/c", "--check", "/k", "--pin", "/p")
@@ -34,6 +36,62 @@ func TestOpencodeUsageIsStatusTwo(t *testing.T) {
 	}
 	if want := "usage: prepare-lock.sh PREFIX PLUGIN_VERSION [--refresh-lock]\n"; stderr != want {
 		t.Fatalf("stderr = %q, want %q", stderr, want)
+	}
+}
+
+// TestOpencodePrepareMissingFlagIsTheParsersOwnRefusal is the witness for `required`
+// on the three executed paths: a flag the caller never named is refused by go-arg
+// before the empty check and the driver. Deleting `required` leaves an empty value
+// behind, so this asserts the parser's text and not only the status.
+func TestOpencodePrepareMissingFlagIsTheParsersOwnRefusal(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		args []string
+	}{
+		{"contract", []string{"opencode-prepare-lock", "--check", "/k", "--pin", "/p", "--", "/prefix", "1.4.1"}},
+		{"check", []string{"opencode-prepare-lock", "--contract", "/c", "--pin", "/p", "--", "/prefix", "1.4.1"}},
+		{"pin", []string{"opencode-prepare-lock", "--contract", "/c", "--check", "/k", "--", "/prefix", "1.4.1"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			status, stdout, stderr := runOpencode(t, testCase.args...)
+			if status != 2 {
+				t.Fatalf("status = %d, want 2 (%q)", status, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("the refusal wrote %q to stdout", stdout)
+			}
+			if !strings.Contains(stderr, "error: ") || !strings.Contains(stderr, " is required") {
+				t.Fatalf("stderr = %q, want the flag parser's missing-flag line", stderr)
+			}
+		})
+	}
+}
+
+// TestOpencodePrepareRefusesAnEmptyPath is the same hole #221 closed in dsh, shipped
+// in #220: `required` records that the flag appeared, not that it carries a value. An
+// empty `--contract` composes `run-pnpm.sh` relative to the caller's working
+// directory, so the refusal has to happen before the driver and it names the flag.
+func TestOpencodePrepareRefusesAnEmptyPath(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		args []string
+	}{
+		{"--contract", []string{"opencode-prepare-lock", "--contract", "", "--check", "/k", "--pin", "/p", "--", "/prefix", "1.4.1"}},
+		{"--check", []string{"opencode-prepare-lock", "--contract", "/c", "--check", "", "--pin", "/p", "--", "/prefix", "1.4.1"}},
+		{"--pin", []string{"opencode-prepare-lock", "--contract", "/c", "--check", "/k", "--pin", "", "--", "/prefix", "1.4.1"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			status, stdout, stderr := runOpencode(t, testCase.args...)
+			if status != 2 {
+				t.Fatalf("status = %d, want 2 (%q)", status, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("the refusal wrote %q to stdout", stdout)
+			}
+			if want := opencode.EmptyPathUsage(testCase.name) + "\n"; stderr != want {
+				t.Fatalf("stderr = %q, want %q", stderr, want)
+			}
+		})
 	}
 }
 

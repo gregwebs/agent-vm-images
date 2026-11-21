@@ -47,7 +47,8 @@ func (p *process) opencodeFailure(err error) int {
 // `--refresh-lock`: that word belongs to the driver's grammar, not to this flag
 // set. The entry point therefore ends its own flags with `--`, so nothing a caller
 // writes can be read as a flag here -- which is what stops `PREFIX VERSION --check
-// other.mjs` from replacing the reviewed checker.
+// other.mjs` from replacing the reviewed checker. The three paths are executed, so
+// `required` is not enough and the empty check below owns their emptiness.
 type opencodePrepareUsage struct {
 	Contract    string   `arg:"--contract,required" placeholder:"DIR" help:"the composed helper directory run-pnpm.sh runs from"`
 	Check       string   `arg:"--check,required" placeholder:"PATH" help:"the reviewed-bytes checker"`
@@ -62,12 +63,22 @@ func (opencodePrepareUsage) Description() string {
 
 func (p *process) runOpencodePrepareLock(args []string) int {
 	var usage opencodePrepareUsage
-	parser, err := arg.NewParser(arg.Config{Program: "recipe-contract opencode-prepare-lock"}, &usage)
+	parser, err := p.argParser("recipe-contract opencode-prepare-lock", &usage)
 	if err != nil {
 		return p.reportSynchronousFailure(err)
 	}
 	if err := parser.Parse(args); err != nil {
 		return p.argFailure(parser, err)
+	}
+	// The three reviewed inputs are paths the driver executes, so presence is not
+	// enough: an empty --contract runs `run-pnpm.sh` from the caller's working
+	// directory and an empty --check runs whatever `node` resolves from there.
+	if flag := emptyRequiredPath(
+		requiredPath{"--contract", usage.Contract},
+		requiredPath{"--check", usage.Check},
+		requiredPath{"--pin", usage.Pin},
+	); flag != "" {
+		return p.opencodeFailure(&opencode.Usage{Text: opencode.EmptyPathUsage(flag)})
 	}
 	options := opencode.PrepareOptions{
 		Contract:    usage.Contract,
