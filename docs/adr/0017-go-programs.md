@@ -50,13 +50,64 @@ image `docker.io/library/recipe-contract-bin`. The first consuming `RUN` fails
 with a message naming `images/build.sh`.
 
 **Example layers stay self-contained.** Users build them with
-`agent-vm build examples/layers/X`, and agent-vm has no `--build-context`
-flag. So each example's helper is its own Go module in its directory, built by
-the example's own pinned `golang:` stage. A guard ties that image to the root
-`go.mod` toolchain. Logic shared with `./internal` (OpenPGP, archive hashes)
-is duplicated deliberately. When agent-vm accepts named build contexts
+`agent-vm image build examples/layers/X`, and agent-vm has no
+`--build-context` flag. So each example's helper is its own Go module in its
+directory, built by the example's own pinned `golang:` stage. The stage is the
+recipe's first `FROM`, compiles with `--network=none`, `GOFLAGS=-mod=vendor` and
+`GOTOOLCHAIN=local`, and its binary is mounted read-only into the consuming
+`RUN`s rather than copied. The committed vendor tree is the build's dependency
+closure; `-mod=vendor` is policy, because Go selects vendor mode by default when
+`vendor/modules.txt` exists. What authenticates those bytes is the module's own
+regeneration-and-diff gate, `script/test/example-helper-vendor.sh`, which runs in
+the default contracts mode and not in `--guard-only`. Deleting `vendor/` is a
+missing-closure witness, not a proof of vendoring. A guard ties that image to the root `go.mod`
+toolchain, in five links. It binds a compiler version and the recipe/inventory
+relationship — **not source bytes**: a comment-only edit under `helper/` changes
+nothing any gate sees, and binding source bytes for a product image is
+[#233](https://github.com/gregwebs/agent-vm-images/issues/233)'s separate question.
+
+1. the stage's own `RUN`: the image compiler must be the helper `go.mod`'s
+   `toolchain` line, or the build fails;
+2. `script/test/example-layers.sh`: the helper `go.mod`'s `go` and `toolchain`
+   lines must equal the root `go.mod`'s;
+3. `script/test/example-layers.sh`: the builder `FROM` must be exactly
+   `golang:<root toolchain>-trixie` at the digest `images/parent-pins.json`
+   records for `.pins["golang-builder"]`;
+4. `script/test/image-sources` (`check_recipe_parents`): the same `FROM` must be
+   the reference the parent inventory binds to the stage;
+5. from #187 slice 4: every requirement the two `go.mod` files share is at the
+   same version, so MVS cannot raise a version in the root and make `avm-pin`
+   link a different decoder than the image compiles.
+
+The compiler pin is a parent image like the base: `images/parent-pins.json`
+carries its digest, its platform manifests and their reviewed provenance, and
+`script/dev/refresh-parent-pins.sh golang-builder` refreshes it. Its *version* is
+not a selection: the refresher derives the tag from the **root `go.mod`
+toolchain**, so a compiler bump is a coordinated edit of `go.mod`, the inventory
+and the recipe, and link 3 fails until all three agree. The build reads only those
+committed bytes — the recipe's digest and the pinned `FROM` — and resolves nothing
+at build time.
+
+Logic shared with `./internal` (OpenPGP, archive hashes) is duplicated
+deliberately. When agent-vm accepts named build contexts
 ([agent-vm#627](https://github.com/gregwebs/agent-vm/issues/627)), examples can
 move to the host cross-compile.
+
+**Fixture seams in a shipped binary are a build tag, not a flag.** A ported
+example helper must expose suite-only inputs — the reviewed trust it checks
+against, the upstream it fetches from, the program it runs a bootstrap with —
+without letting the binary an image ships honour any of them. So those inputs
+live behind `//go:build example_fixture`: the fixture grammar, the seam values
+and the code that reads them are compiled only into a build that says so on the
+command line (`script/build/example-helper.sh --fixture`). A seam that exists
+only in a differently built binary is stronger than a flag a build argument
+could reach, and the layer's builder stage passes no tags at all, which
+`script/test/example-layers.sh` asserts. The shipped binary's own test builds
+both variants and requires every seam name to be absent from the shipped bytes
+and from its grammar, so a seam that leaked is caught even if nothing calls it;
+the test fails if the fixture build stops carrying the names, so the absence
+check cannot pass vacuously. `avm-pin`'s plain "suites only" flags remain
+acceptable only because `avm-pin` never ships.
 
 **Parity bar.** A port keeps exit status and meaning. The existing harness runs
 against the Go program and is the oracle. Output text is frozen only where a
@@ -84,6 +135,17 @@ Egress this rule does not govern includes:
   not something `internal/fetch` can supply. Where none exists yet, as with
   `install-copilot.sh`, that is the pinning gap [#42](https://github.com/gregwebs/agent-vm-images/issues/42)
   already tracks.
+- **An example layer's install step.** An example layer is the image's own
+  content, not a build helper: `agent-vm image build examples/layers/X` assembles
+  a user's image from a recipe that fetches what that image installs, so its
+  install step may download. #187's slice 3 moves that fetch into the example's
+  own `internal/fetch`, keeping one attempt, Python's bounds and no redirects;
+  slice 1 changes nothing about it. Its bounds are the pin's: seven canonical
+  rust-lang.org URLs recorded in `data/rust-toolchain/pin.json`, one digest and
+  one OpenPGP signature per archive, a 300 s per-request deadline, a 30 s
+  inactivity bound, size caps per kind and status 200 only, all verified before
+  anything is extracted or executed. The recipe's *build* steps acquire nothing:
+  the helper module is vendored and compiles under `--network=none`.
 - **A build step from before this port**, which still downloads with whatever
   it always did — `download.sh`, `curl`, a package manager, an interpreter's
   own HTTP client — for example the vendored Claude, Codex and OpenCode
@@ -286,7 +348,8 @@ rollback contract. The transaction moves once, when all three upgrades do.
 - **Go source as a second named context.** This needs a composed staging
   directory on every build, with no benefit over passing the compiled binary.
 - **Building examples from the repository root (`-f examples/layers/X/…`).**
-  Rejected: it breaks the documented one-command `agent-vm build`.
+  Rejected: it breaks the documented one-command `agent-vm image build` of an
+  example directory.
 - **A ratchet guard on remaining `.py` files.** Not adopted; review is enough.
 
 ## Consequences

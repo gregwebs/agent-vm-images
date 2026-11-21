@@ -3,10 +3,14 @@
 # Build it, import it, and select it to build, test, lint and navigate a Go
 # code base inside the microVM (there is no launcher-side layering, #259):
 #
-#   agent-vm build --builder native-oci \
+#   agent-vm image build --builder NAME \
 #     --build-arg BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de \
 #     --tag agent-vm-go-dev:dev examples/layers/go-dev
 #   agent-vm claude --image agent-vm-go-dev:dev
+#
+# NAME is any host daemon-backed buildx builder that supports an OCI export: this
+# recipe is one `FROM ${BASE_IMAGE}` stage. This repository selects no builder, so
+# the name is the caller's.
 #
 # It provides the pinned Go toolchain (go, gofmt, go vet, ...) plus the two
 # tools a Go project's edit/CI loop expects beyond it: golangci-lint and the

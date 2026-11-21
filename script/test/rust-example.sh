@@ -9,7 +9,9 @@
 # legs with real tools on the host's native architecture.
 #
 # Prerequisites: a native Linux daemon of the requested platform, a
-# daemon-backed builder, python3, git and host-watchdog.py. The amd64 row must
+# daemon-backed builder, go (the layer's helper module is compiled for the
+# platform), python3 (rust_toolchain.py still verifies and installs the pin) git
+# and host-watchdog.py. The amd64 row must
 # come from a native amd64 host; QEMU is not acceptance.
 #
 # Usage: bash script/test/rust-example.sh [--platform linux/amd64|linux/arm64]
@@ -1129,7 +1131,12 @@ fi
 # --- phase 2: verifier bundle, no network ------------------------------------
 PHASE=verifier
 mkdir -p "$BUNDLE"
-cp "$ROOT/$EXAMPLE/verify-toolchain.sh" "$ROOT/$EXAMPLE/kache_probe.py" "$ROOT/$EXAMPLE/rust_toolchain.py" "$BUNDLE/"
+cp "$ROOT/$EXAMPLE/verify-toolchain.sh" "$ROOT/$EXAMPLE/rust_toolchain.py" "$BUNDLE/"
+# The verifier runs the layer's own binary for the kache report; it is compiled by
+# script/build/example-helper.sh with the flags the Dockerfile stage uses, for the
+# platform under test, so the container's architecture never matters to the host.
+cp "$(bash "$ROOT/script/build/example-helper.sh" rust-dev --root "$ROOT" \
+    --os linux --arch "${PLATFORM#linux/}")" "$BUNDLE/rust-dev-helper"
 cp -R "$ROOT/$EXAMPLE/data/rust-toolchain" "$BUNDLE/rust-toolchain"
 if ! run_bounded pin-check "$RUN_SECONDS" "$LOG_DIR/pin-check.log" \
         env PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/$EXAMPLE/rust_toolchain.py" \

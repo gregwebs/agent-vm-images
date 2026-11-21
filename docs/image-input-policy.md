@@ -798,7 +798,7 @@ never in CI and never during a build:
 
 ```bash
 bash script/dev/refresh-parent-pins.sh debian
-bash script/dev/refresh-parent-pins.sh golang-builder [golang:VERSION-trixie]
+bash script/dev/refresh-parent-pins.sh golang-builder
 bash script/dev/refresh-parent-pins.sh standard-release X.Y.Z
 ```
 
@@ -844,8 +844,11 @@ bash images/build.sh base && bash images/build.sh standard
 bash script/test/parent-identity.sh agent-vm-base:local --platform linux/arm64
 ```
 
-`golang-builder` selection must equal the `go.mod` toolchain; a Go toolchain
-change is a coordinated change, not a side effect of a refresh. Changing the
+`golang-builder` takes no selection: the refresher resolves
+`golang:<root go.mod toolchain>-trixie`, and `script/test/example-layers.sh`
+fails when the example layer's builder `FROM` is not that tag at the recorded
+digest. A Go toolchain change is a coordinated change of `go.mod`, this
+inventory and the recipes, not a side effect of a refresh. Changing the
 Debian release in `script/dev/parent_pins.py` is likewise a reviewed source
 change.
 

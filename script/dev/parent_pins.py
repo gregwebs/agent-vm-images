@@ -60,14 +60,24 @@ KEYRINGS = 'images/apt-policy/keyrings.sha256'
 POLICY_FILES = (DEBIAN_SOURCES, KEYRINGS)
 
 DEBIAN_PIN = 'debian'
+# The build-only compiler of the example layers' own helper modules (ADR 0017,
+# "Example layers stay self-contained"). #193 removed it with the product images'
+# builder stages, because nothing consumed it any more; an example layer's builder
+# stage is a consumer again, so it comes back with everything that authenticates
+# it. Its *version* is bound separately, to the root go.mod toolchain, by
+# script/test/example-layers.sh.
+GO_PIN = 'golang-builder'
 RELEASE_PIN = 'standard-release'
-PINS = (DEBIAN_PIN, RELEASE_PIN)
+PINS = (DEBIAN_PIN, GO_PIN, RELEASE_PIN)
 
-# The maintained candidates. Selecting a different Debian release is a reviewed
-# source change of this file and the coordinated recipes, never a silent effect of
-# running the refresher.
+# The maintained candidates. Selecting a different Debian release or Go compiler is
+# a reviewed source change of this file and the coordinated recipes, never a silent
+# effect of running the refresher.
 DEBIAN_TAG = 'debian:13-slim'
 DEBIAN_SOURCE = 'https://github.com/debuerreotype/docker-debian-artifacts.git'
+GO_SOURCE = 'https://github.com/docker-library/golang.git'
+GO_TAG = re.compile(r'golang:(?P<version>[0-9]+\.[0-9]+\.[0-9]+)-trixie')
+GO_FRAGMENT = re.compile(r'(?P<revision>[0-9a-f]{40}):(?P<major_minor>[0-9]+\.[0-9]+)/trixie')
 STANDARD_REPOSITORY = 'ghcr.io/gregwebs/agent-vm-standard'
 STANDARD_VERSION = '0.1.3'
 # The released index the four example layers address today. Bootstrap must
@@ -111,6 +121,11 @@ HASH_ONLY_REASSESS = 'Stop refresh if a supported verifiable signing scheme is p
 # derived from the registry so a new digest cannot silently inherit a waiver;
 # the reviewer re-dates `reviewed_on` before a refresh is merged.
 HASH_ONLY_REASONS = {
+    GO_PIN: ('Docker Official Image for Go, used only as the build-only compiler of the example '
+             'layers\' own helper modules. Same retired Docker Content Trust channel as the Debian '
+             'parent and no published replacement signing scheme for this image; the reviewed '
+             'choice is the registry digest plus the recorded source revision, which the build '
+             'additionally cross-checks against the helper go.mod\'s toolchain line.'),
     DEBIAN_PIN: ('Docker Official Image for Debian. Docker Content Trust, the scheme that signed '
                  'official images, is retired and its DOI certificates expire; Docker points base '
                  'image consumers at signed Docker Hardened Images and no supported replacement '
@@ -375,6 +390,7 @@ class OfficialPolicy:
     name: str
     tag: str
     expected_source: str
+    revision_fragment: bool
 
     def verification(self, reviewed_on: Date) -> HashOnly:
         return HashOnly(reviewed_on, HASH_ONLY_REASONS[self.name], HASH_ONLY_EVIDENCE,
@@ -678,7 +694,27 @@ def walk_recipes(root: Path) -> dict[str, str]:
     return recipes
 
 
-REPOSITORY_PINS = ((DEBIAN_PIN, 'debian'), (RELEASE_PIN, STANDARD_REPOSITORY))
+REPOSITORY_PINS = ((DEBIAN_PIN, 'debian'), (GO_PIN, 'golang'),
+                   (RELEASE_PIN, STANDARD_REPOSITORY))
+
+
+def go_mod_toolchain(root: Path) -> str:
+    """The compiler the root module selects, as `go.mod` states it.
+
+    The compiler pin has one owner: the `toolchain` line. `script/test/
+    example-layers.sh` holds every example recipe to it, so a refresh that
+    resolved anything else would publish bytes the recipes may not name.
+    """
+    lines = (root / 'go.mod').read_text().splitlines()
+    values = [line.split()[1] for line in lines
+              if line.split()[:1] == ['toolchain']]
+    if len(values) != 1 or not re.fullmatch(r'go[0-9]+\.[0-9]+\.[0-9]+', values[0]):
+        raise Refusal('go.mod must carry exactly one `toolchain goX.Y.Z` line')
+    return values[0]
+
+
+def go_tag_default(root: Path) -> str:
+    return 'golang:' + go_mod_toolchain(root)[len('go'):] + '-trixie'
 
 
 def image_repository(image: str) -> str:
@@ -879,8 +915,21 @@ def check_source(raw: str, policy: OfficialPolicy, revision: str) -> None:
              expected.path[:-4] if expected.path.endswith('.git') else expected.path}
     if parsed.path not in names:
         raise Refusal(f'{policy.name}: source is not the reviewed repository: {raw}')
-    if parsed.fragment:
+    if not parsed.fragment:
+        return
+    if not policy.revision_fragment:
         raise Refusal(f'{policy.name}: unexpected source fragment: {raw}')
+    match = GO_FRAGMENT.fullmatch(parsed.fragment)
+    if match is None:
+        raise Refusal(f'{policy.name}: unexpected source fragment: {raw}')
+    if match.group('revision') != revision:
+        raise Refusal(f'{policy.name}: source fragment revision differs from the image revision')
+    tag = GO_TAG.fullmatch(policy.tag)
+    if tag is None:
+        raise Refusal(f'{policy.name}: a Go tag must be golang:<version>-trixie')
+    major, minor = tag.group('version').split('.')[:2]
+    if match.group('major_minor') != f'{major}.{minor}':
+        raise Refusal(f'{policy.name}: source fragment directory differs from the selected tag')
 
 
 def resolve_official(policy: OfficialPolicy, resolved_on: Date) -> tuple[OfficialPin, str]:
@@ -1197,6 +1246,13 @@ def parse_selection(pin: str | None, selection: str | None, bootstrap: bool) -> 
         if selection is not None:
             raise Refusal('debian takes no selection; the reviewed candidate is ' + DEBIAN_TAG)
         return Request((DEBIAN_PIN,), False, None)
+    if pin == GO_PIN:
+        # The compiler's version is not a selection: it is the root go.mod's
+        # toolchain, which the example layers' guard chain binds their recipe to.
+        if selection is not None:
+            raise Refusal('golang-builder takes no selection; the candidate is the root go.mod '
+                          'toolchain')
+        return Request((GO_PIN,), False, None)
     if selection is None:
         raise Refusal('standard-release requires an explicit X.Y.Z version')
     parse_release_version(selection, 'standard-release')
@@ -1449,9 +1505,15 @@ def stage(request: Request, root: Path, out: Path) -> list[Destination]:
     resolved: dict = {}
     notes: list[str] = []
     if DEBIAN_PIN in request.pins:
-        pin, note = resolve_official(OfficialPolicy(DEBIAN_PIN, DEBIAN_TAG, DEBIAN_SOURCE), today)
+        pin, note = resolve_official(OfficialPolicy(DEBIAN_PIN, DEBIAN_TAG, DEBIAN_SOURCE, False),
+                                     today)
         resolved[DEBIAN_PIN] = pin
         notes.append(f'{DEBIAN_PIN}: {note}')
+    if GO_PIN in request.pins:
+        pin, note = resolve_official(
+            OfficialPolicy(GO_PIN, go_tag_default(root), GO_SOURCE, True), today)
+        resolved[GO_PIN] = pin
+        notes.append(f'{GO_PIN}: {note}')
     if RELEASE_PIN in request.pins:
         expected = None
         if request.bootstrap:

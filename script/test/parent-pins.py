@@ -52,6 +52,9 @@ RELEASE_DESTINATIONS = sorted([
 # A disposable checkout is assembled from exactly the tracked files the tooling
 # reads; it is not a copy of the maintained tree, so a test can never write into it.
 STAGED = {
+    # The root module's go.mod is an input: the compiler pin's candidate tag is the
+    # toolchain line it states (`golang-builder` takes no selection).
+    '': ['go.mod'],
     # `images/apt-policy/` is deliberately absent: bootstrap is the only refresh
     # that creates it, and T8c/T12 start from that state.
     'images': ['Dockerfile', 'standard/Dockerfile', '.dockerignore', 'install-artifact.sh',
@@ -121,9 +124,10 @@ class Case:
         self.cwd.mkdir()
         for directory, entries in STAGED.items():
             for entry in entries:
-                destination = self.repo / directory / entry
+                destination = self.repo / directory / entry if directory else self.repo / entry
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(ROOT / directory / entry, destination)
+                source = ROOT / directory / entry if directory else ROOT / entry
+                shutil.copyfile(source, destination)
         shutil.copytree(ROOT / 'script/release', self.repo / 'script/release',
                         ignore=shutil.ignore_patterns('__pycache__'))
         # Every case starts from the pre-adoption recipe shape: the committed
@@ -147,12 +151,27 @@ class Case:
                        'children': {'amd64': 'registry/debian-amd64.json',
                                     'arm64': 'registry/debian-arm64.json'},
                        'apt': {'amd64': 'apt', 'arm64': 'apt'}},
+            'golang': {'tag': 'golang:1.27.3-trixie', 'repository': 'golang',
+                       'index': 'registry/golang-index.json',
+                       'children': {'amd64': 'registry/golang-amd64.json',
+                                    'arm64': 'registry/golang-arm64.json'}},
             'standard': {'tag': RELEASED, 'repository': RELEASED,
                          'index': 'registry/standard-index.json',
                          'children': {'amd64': 'registry/standard-amd64.json',
                                       'arm64': 'registry/standard-arm64.json'}},
         }
         self.override = {}
+        # The registry serves a digest reference from content-addressed storage
+        # regardless of the tag, so keep the committed Go index available by its
+        # own digest even when a case mutates the bytes the tag resolves to.
+        self.go_committed = re.search(r'golang:[^ ]+@sha256:[0-9a-f]{64}',
+                                      (self.repo / 'examples/layers/rust-dev/Dockerfile')
+                                      .read_text()).group(0)
+        self.go_committed_digest = 'golang@sha256:' + self.go_committed.rsplit('@sha256:', 1)[1]
+        self.go_pristine = self.root / 'registry-committed'
+        self.go_pristine.mkdir()
+        shutil.copyfile(self.fixtures / 'registry/golang-index.json',
+                        self.go_pristine / 'golang-index.json')
         self.release_json = self.fixtures / RELEASE_FIXTURE
         self.attest = {
             'repository': 'gregwebs/agent-vm-images',
@@ -203,6 +222,8 @@ class Case:
                         '/usr/share/keyrings': str(self.fixture(spec['apt'][architecture]
                                                               + '/usr/share/keyrings'))}
         registry.update(self.override)
+        registry.setdefault(self.go_committed_digest,
+                            str(self.go_pristine / 'golang-index.json'))
         (self.root / 'state.json').write_text(json.dumps({
             'registry': registry, 'images': images,
             'downloads': str(self.fixtures / 'release'), 'attest': self.attest,
@@ -655,8 +676,27 @@ def t5(root):
     """Source identity is repository equality, not a URL prefix."""
     source = module()
     debian = source.OfficialPolicy('debian', 'debian:13-slim',
-                                   'https://github.com/debuerreotype/docker-debian-artifacts.git')
+                                   'https://github.com/debuerreotype/docker-debian-artifacts.git',
+                                   False)
+    golang = source.OfficialPolicy('golang-builder', 'golang:1.27.3-trixie',
+                                   'https://github.com/docker-library/golang.git', True)
+    go_revision = '41d9b4da70324ae7b6461ac2cc401b06719ff57d'
     debian_revision = 'cee78df586385250331cacba8fd1140133c054e5'
+    # docker-library publishes its build context in the source annotation, so the
+    # compiler pin reads the fragment; a Debian annotation carries none.
+    for good in ('https://github.com/docker-library/golang.git',
+                 'https://github.com/docker-library/golang',
+                 'https://github.com/docker-library/golang.git#' + go_revision + ':1.27/trixie'):
+        source.check_source(good, golang, go_revision)
+    for bad in ('https://github.com/docker-library/golang.git#' + go_revision + ':1.26/trixie',
+                'https://github.com/docker-library/golang.git#' + go_revision + ':1.27/trixie/x',
+                'https://github.com/docker-library/golang.git#' + '0' * 40 + ':1.27/trixie',
+                'https://github.com/docker-library/golang.git#1.27/trixie'):
+        try:
+            source.check_source(bad, golang, go_revision)
+        except source.Refusal:
+            continue
+        raise AssertionError('accepted a Go source fragment: ' + bad)
     for good in ('https://github.com/debuerreotype/docker-debian-artifacts.git',
                  'https://github.com/debuerreotype/docker-debian-artifacts'):
         source.check_source(good, debian, debian_revision)
@@ -675,7 +715,7 @@ def t5(root):
         except source.Refusal:
             continue
         raise AssertionError('accepted a source lookalike: ' + bad)
-    # A fragment is not a reviewable channel for the one remaining official pin.
+    # The Debian annotation carries no fragment, so its pin refuses one.
     try:
         source.check_source('https://github.com/debuerreotype/docker-debian-artifacts.git#'
                             + debian_revision, debian, debian_revision)
@@ -695,7 +735,7 @@ def t6(root):
     assert not case.live_containers(), 'an extraction container was left behind'
     inventory = case.inventory()
     assert inventory['schema'] == 1
-    assert sorted(inventory['pins']) == ['debian', 'standard-release']
+    assert sorted(inventory['pins']) == ['debian', 'golang-builder', 'standard-release']
     debian = inventory['pins']['debian']
     assert debian['reference'] == 'debian:13-slim@' + digest(FIXTURES / 'registry/debian-index.json')
     assert sorted(debian['platforms']) == ['linux/amd64', 'linux/arm64']
@@ -722,6 +762,12 @@ def t6(root):
     assert verification['source_sha'] == SOURCE_SHA
     assert verification['invocation_url'] == INVOCATION
     assert verification['release_json_sha256'] == 'sha256:' + case.attest['release_json_sha256']
+    golang = inventory['pins']['golang-builder']
+    assert golang['reference'] == 'golang:1.27.3-trixie@' + digest(
+        FIXTURES / 'registry/golang-index.json')
+    assert ':1.27/trixie' in golang['platforms']['linux/amd64']['source']
+    assert inventory['recipes']['examples/layers/rust-dev/Dockerfile'][0] == {
+        'stage': 'rust-dev-helper', 'pin': 'golang-builder'}
     assert inventory['recipes']['images/Dockerfile'] == [{'stage': None, 'pin': 'debian'}]
     assert inventory['recipes']['images/standard/Dockerfile'][-1] == {
         'stage': None, 'local_base': 'standard'}
@@ -749,7 +795,7 @@ def t6(root):
     case.no_work()
     case.commit('adopt')
     case.unchanged()
-    for arguments in (['debian'], ['standard-release', '0.1.3']):
+    for arguments in (['debian'], ['golang-builder'], ['standard-release', '0.1.3']):
         assert case.run(arguments) == 0, case.output
         assert 'unchanged' in case.output, case.output
         case.unchanged()

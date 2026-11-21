@@ -57,9 +57,20 @@ formatter="$selected_goroot/bin/gofmt"
 # construction rather than by an exclusion list that can rot.
 go_packages=(./internal/... ./images/... ./cmd/...)
 harness_packages=(./script/test/pinsuite/...)
+# An example layer's own helper is a module of its own (ADR 0017), so the root
+# module's package patterns cannot cross into it: it is formatted, vetted, linted,
+# tested and vendor-checked as the separate module it is. The Dockerfile stage
+# compiles it with `-mod=vendor` under `--network=none`, so its gates run the same
+# way instead of reaching a proxy.
+helper_module="$contract_module/examples/layers/rust-dev/helper"
 if package_dirs=$(cd "$contract_module" && GOTOOLCHAIN=auto go list -f '{{.Dir}}' "${go_packages[@]}" "${harness_packages[@]}"); then :; else
     status=$?; echo 'cannot list the module packages' >&2; exit "$status"
 fi
+if helper_dirs=$(cd "$helper_module" && GOTOOLCHAIN=auto GOFLAGS=-mod=vendor go list -f '{{.Dir}}' ./...); then :; else
+    status=$?; echo 'cannot list the example helper module packages' >&2; exit "$status"
+fi
+package_dirs="$package_dirs
+$helper_dirs"
 format_files=()
 while IFS= read -r format_dir; do
     [ -n "$format_dir" ] || continue
@@ -76,6 +87,8 @@ fi
 # proxy. A missing vendor tree fails here instead of downloading.
 (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go vet "${go_packages[@]}" "${harness_packages[@]}")
 (cd "$contract_module" && golangci-lint run "${go_packages[@]}" "${harness_packages[@]}")
+(cd "$helper_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go vet ./...)
+(cd "$helper_module" && golangci-lint run ./...)
 # The composed helper is shared by every suite below and by the Rust graph guard,
 # so it is built once here: after the lint gates, because the formatter suite
 # replaces `go` and must stop at vet.
@@ -94,10 +107,16 @@ else posix_sh='sh'; echo 'note: dash not on PATH; #!/bin/sh syntax checked with 
 fi
 if [ "$guard_only" = false ]; then
     (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test "${go_packages[@]}")
+    # The example helper's own tests, in its own module. The two that matter here
+    # are the fixture-seam absence test (it builds the shipped and the
+    # `example_fixture` binary and holds the shipped one to carrying no seam) and
+    # the kache-probe cases.
+    (cd "$helper_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test ./...)
     # Regeneration-plus-diff is the vendor drift gate: `go mod vendor` does not
     # authenticate edits to the committed tree and `go mod verify` never reads it.
     # It downloads through GOPROXY/GOSUMDB, so it is default-mode only.
     bash script/test/recipe-contract-vendor.sh
+    bash script/test/example-helper-vendor.sh examples/layers/rust-dev/helper
     python3 script/test/recipe-contract-oracle.py
     node script/test/recipe-contract-oracle.mjs
     python3 script/test/recipe-contract-adapters.py

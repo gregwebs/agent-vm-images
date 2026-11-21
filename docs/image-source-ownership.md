@@ -442,7 +442,8 @@ binary, kache's `.kache-shims` marker, and the six canonical C/C++ names, with
 `cargo` and `rustdoc` deliberately left out — and refuses a farm of any other
 shape, so a release that adds, drops or retargets a link fails the build instead
 of changing the compiler a guest runs. Nothing resolves `latest`, and a refused
-download installs nothing. `kache_probe.py` then decides the `kache doctor
+download installs nothing. The layer's own `rust-dev-helper kache-probe`, built by
+the recipe's first `FROM`, then decides the `kache doctor
 --probe --json` report in the `--network=none` verifier, because `doctor` exits 0
 with findings, and requires the report to call the shims active and the store's
 filesystem host-local.

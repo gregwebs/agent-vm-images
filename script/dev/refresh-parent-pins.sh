@@ -39,6 +39,7 @@ done < <(bash "$ROOT/script/build/base-inputs.sh" inputs)
 usage() {
     cat >&2 <<'USAGE'
 usage: refresh-parent-pins.sh debian
+       refresh-parent-pins.sh golang-builder
        refresh-parent-pins.sh standard-release X.Y.Z
        refresh-parent-pins.sh --bootstrap
 
@@ -148,6 +149,7 @@ selection=( "$@" )
 case "${1:-}" in
     --bootstrap) [ "$#" -eq 1 ] || usage ;;
     debian) [ "$#" -eq 1 ] || usage ;;
+    golang-builder) [ "$#" -eq 1 ] || usage ;;
     standard-release) [ "$#" -eq 2 ] || usage ;;
     *) usage ;;
 esac

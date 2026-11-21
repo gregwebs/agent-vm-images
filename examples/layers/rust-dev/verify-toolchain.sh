@@ -105,10 +105,11 @@ HOME="$kache_scratch" TMPDIR="$kache_scratch" \
 HOME="$kache_scratch" "$kache_scratch/c/smoke"
 # `doctor` reports findings and still exits 0, so the JSON is what decides: no
 # non-optional check may fail, the compile/store/restore probe must pass, and the
-# shims the image installs must be reported active (kache_probe.py).
+# shims the image installs must be reported active (the layer's own
+# `rust-dev-helper kache-probe`, built by the helper stage in the Dockerfile).
 HOME="$kache_scratch" TMPDIR="$kache_scratch" "$KACHE_DIR/bin/kache" doctor --probe --json \
     >"$kache_scratch/doctor.json"
-/usr/bin/python3 "$VERIFY_DIR/kache_probe.py" "$kache_scratch/doctor.json"
+"$VERIFY_DIR/rust-dev-helper" kache-probe "$kache_scratch/doctor.json"
 # Explicitly, not through the EXIT trap: the Verus branch below installs its own.
 rm -rf "$kache_scratch"
 
