@@ -4,7 +4,7 @@
 # agent-vm's Rust code inside the microVM (there is no launcher-side layering,
 # #259):
 #
-#   agent-vm build --builder native-oci \
+#   agent-vm image build --builder <host buildx builder> \
 #     --build-arg BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de \
 #     --tag agent-vm-rust-dev:dev examples/layers/rust-dev
 #   agent-vm claude --image agent-vm-rust-dev:dev
@@ -27,6 +27,41 @@
 # (`PATH=<new>:${PATH}`) so the base's directories are never dropped.
 
 ARG BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de
+
+# rust-dev-helper: this layer's own program (ADR 0017, "Example layers stay
+# self-contained"). An example build has no `--build-context`, so the module under
+# helper/ is compiled by this stage and mounted read-only into the one RUN that
+# needs it; nothing is copied into the image. The stage is the first FROM and the
+# image's own is the last, which `script/test/example-layers.sh` holds, and
+# `images/parent-pins.json` registers both stages as parents.
+#
+# The binding to the repository's Go toolchain is a chain, one link per gate:
+#
+#   1. here: the compiler in the image must be the `toolchain` line of
+#      helper/go.mod, so a builder whose patch release drifted cannot compile;
+#   2. script/test/example-layers.sh: helper/go.mod's `go` and `toolchain` lines
+#      must equal the root go.mod's, so the two modules cannot disagree;
+#   3. script/test/example-layers.sh: the FROM below must be exactly
+#      `golang:<root toolchain>-trixie` at the digest images/parent-pins.json
+#      records for `.pins["golang-builder"]`, so the image is the reviewed bytes;
+#   4. script/test/image-sources/image_sources.rs: the FROM must also be the
+#      reference the parent inventory binds to this stage.
+#
+# The stage is network-free by construction, not by assumption: the module is
+# vendored, the RUN passes `--network=none`, and GOPROXY=off with
+# GOTOOLCHAIN=local are set explicitly. No ARG is visible here, so `--build-arg`
+# cannot inject GOFLAGS. The only egress is the FROM pull, which ADR 0017's
+# build-egress rule exempts. There is no `--platform=$BUILDPLATFORM`: the stage
+# compiles for the target platform natively, so the build does not depend on the
+# builder resolving BUILDPLATFORM.
+FROM golang:1.27.3-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4 AS rust-dev-helper
+RUN --network=none --mount=type=bind,source=helper,target=/src,ro \
+    cd /src \
+ && { [ "$(GOTOOLCHAIN=local go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)" ] \
+      || { echo "rust-dev-helper: the image compiler is not go.mod's toolchain" >&2; exit 1; }; } \
+ && GOTOOLCHAIN=local GOWORK=off GOENV=off GOFLAGS=-mod=vendor GOPROXY=off CGO_ENABLED=0 \
+    go build -trimpath -buildvcs=false -o /out/rust-dev-helper .
+
 FROM ${BASE_IMAGE}
 
 # Runtime network requests (ADR 0014; examples/layers/README.md#declaring-network-requests):
@@ -151,7 +186,7 @@ ENV PATH=/opt/kache/shims:/opt/kache/bin:/opt/cargo/bin:/opt/verus/verus-x86-lin
 # read-only for this step and nothing is copied into the image.
 RUN --network=none \
     --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro \
-    --mount=type=bind,source=kache_probe.py,target=/run/rust-verify/kache_probe.py,ro \
+    --mount=type=bind,from=rust-dev-helper,source=/out/rust-dev-helper,target=/run/rust-verify/rust-dev-helper,ro \
     --mount=type=bind,source=rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro \
     --mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro \
     RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus PYTHONDONTWRITEBYTECODE=1 \
@@ -161,8 +196,9 @@ RUN --network=none \
 #
 # This deliberately comes after the verifier, and the ordering is a contract,
 # not an accident. The verifier is specified to exercise kache with *no* remote
-# configured: kache_probe.py decides a `doctor --probe` report taken against an
-# isolated local cache, and configuring a remote changes what that report says —
+# configured: `rust-dev-helper kache-probe` decides a `doctor --probe` report
+# taken against an isolated local cache, and configuring a remote changes what
+# that report says —
 # kache then requires its daemon, because the daemon performs remote fetches, so
 # the daemon checks stop being optional and the report can no longer pass in a
 # build where no daemon was ever started. Installing the policy afterwards keeps

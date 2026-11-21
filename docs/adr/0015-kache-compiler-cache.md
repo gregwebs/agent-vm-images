@@ -68,8 +68,9 @@ Three constraints shape the decision:
    verifier re-checks both versions behind `RUSTC_WRAPPER`, compiles one C file
    through the shim, and runs `kache doctor --probe --json`, which compiles,
    stores and restores a small crate in an isolated cache. `kache doctor` exits 0
-   with findings, so `kache_probe.py` decides the report: a non-optional failure,
-   a failed probe or shims that are not active fails the build.
+   with findings, so the layer's `rust-dev-helper kache-probe` decides the
+   report: a non-optional failure, a failed probe or shims that are not active
+   fails the build.
    `layer-build.sh` also proves that a 404 or wrong bytes leaves nothing
    installed.
 
@@ -157,8 +158,8 @@ exactly the marker and the six C/C++ names, each a symlink to the pinned binary 
 so a release that adds, drops or retargets a link fails the build instead of
 changing which compiler a guest runs. The `--network=none` verifier then compiles
 and runs one C file through the shim and makes `kache doctor`'s *C/C++ shims*
-finding a required check in `kache_probe.py`: kache grades it optional because a
-Rust-only setup may skip the farm, but this image installs it, so "not active" is
+finding a required check in `rust-dev-helper kache-probe`: kache grades it
+optional because a Rust-only setup may skip the farm, but this image installs it, so "not active" is
 a regression here. `script/test/rust-example.sh` asserts the same from the guest
 side, as an arbitrary uid: `PATH` leads with the farm, `cc` is the shim, and a C
 file compiles through it with no network.
@@ -225,7 +226,7 @@ requires both `ENV`s and the five file values (self-test cases 115–116 fail on
 store moved back to the default or an `ENV` removed), and
 `script/test/rust-example.sh` asserts from a guest that `kache config get
 cache.local_store` is `/var/tmp/kache` and that the index is at
-`/var/tmp/kache/index.db` and not under `$HOME`. `kache_probe.py` also requires
-the `Cache FS` finding: it is kache's own verdict on the filesystem under the
+`/var/tmp/kache/index.db` and not under `$HOME`. `rust-dev-helper kache-probe`
+also requires the `Cache FS` finding: it is kache's own verdict on the filesystem under the
 store, so a future layout that lands it on a network or FUSE mount fails the
 build instead of a sandbox.

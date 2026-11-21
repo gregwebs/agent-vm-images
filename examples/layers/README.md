@@ -484,10 +484,12 @@ architectures proves the kache pins through the installer and the
 
 The layer's build steps are committed as standalone scripts beside the
 Dockerfile — `install-rust.sh`, `install-kache.sh`, `install-verus.sh`,
-`verify-toolchain.sh` and the build-only `rust_toolchain.py` and
-`kache_probe.py` — and bind-mounted
-in at build time, so each can be read, reviewed and run on its own. They are
-guarded by `script/test/example-layers.sh`, which `script/test/contracts.sh`
+`verify-toolchain.sh` and the build-only `rust_toolchain.py` — and bind-mounted
+in at build time, so each can be read, reviewed and run on its own. The layer's
+own program, `rust-dev-helper`, is a Go module under `helper/` compiled by the
+recipe's first `FROM` from a pinned `golang:` image and mounted the same way; the
+verifier runs `rust-dev-helper kache-probe` on the `kache doctor` report. All of
+it is guarded by `script/test/example-layers.sh`, which `script/test/contracts.sh`
 runs.
 
 ## Go development

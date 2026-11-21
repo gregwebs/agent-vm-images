@@ -12,7 +12,19 @@ LAYERS=examples/layers
 EXAMPLES='chrome-devtools go-dev rust-dev wirenboard-cpp'
 # Known space-free paths, explicitly moved from agent-vm's ci-contracts.sh:
 # deletion/rename must fail rather than silently leave lint coverage.
-GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp.sh go-dev/gopls_closure.py go-dev/install-go.sh go-dev/install-golangci-lint.sh go-dev/install-gopls.sh go-dev/verify-toolchain.sh rust-dev/install-kache.sh rust-dev/kache_probe.py rust-dev/install-rust.sh rust-dev/install-verus.sh rust-dev/rust_toolchain.py rust-dev/verify-toolchain.sh'
+GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp.sh go-dev/gopls_closure.py go-dev/install-go.sh go-dev/install-golangci-lint.sh go-dev/install-gopls.sh go-dev/verify-toolchain.sh rust-dev/install-kache.sh rust-dev/install-rust.sh rust-dev/install-verus.sh rust-dev/rust_toolchain.py rust-dev/verify-toolchain.sh'
+# A layer may also carry its own Go module under `helper/` (ADR 0017, example
+# layers stay self-contained). Its non-vendor files are named here one entry per
+# file, like GUARDED_DATA: a reviewer of a new source file sees it in the diff, a
+# listed file that vanishes fails as `guarded script missing`, and a `.go` file
+# nobody listed fails as `unreviewed helper file`. The vendor tree is deliberately
+# out of this list: its bytes belong to the module's vendor drift gate.
+GUARDED_GO='rust-dev/helper/go.mod rust-dev/helper/go.sum rust-dev/helper/main.go rust-dev/helper/seams_fixture.go rust-dev/helper/seams_shipped.go rust-dev/helper/kacheprobe/probe.go rust-dev/helper/kacheprobe/probe_test.go rust-dev/helper/seams_test.go rust-dev/helper/toolchain/toolchain.go'
+# The rust-dev helper's builder stage. It is a reviewed parent:
+# `images/parent-pins.json` records its digest, and its tag is the root go.mod's
+# toolchain. Both are named by the literals below rather than by a variable, so a
+# reviewed line reads as one string.
+
 # The other half of the same contract, with the same weight: every committed
 # input that is not a script is a file under its layer's `data/` directory and is
 # named here. One entry is one file, so a reviewer of a new pin sees it in the
@@ -23,7 +35,7 @@ GUARDED_DATA='chrome-devtools/data/chrome-devtools-mcp.sigstore.json chrome-devt
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=119
+SELF_TEST_CASES=132
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -111,7 +123,7 @@ check() {
     # own message and not a shell or grep error from an assertion that reads it.
     # The data list is consulted at the end instead: the layer helpers read those
     # files first and report a deletion as their own `missing input: ...`.
-    for rel in $GUARDED; do
+    for rel in $GUARDED $GUARDED_GO; do
         [ -f "$LAYERS/$rel" ] || fail "guarded script missing: $rel"
     done
     for example in $EXAMPLES; do
@@ -128,7 +140,21 @@ check() {
             }
             END { print count+0 }
         ')" -eq 1 ] || fail "parent pin: ARG shape: $example redefinition"
-        printf '%s\n' "$instructions" | awk 'toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { found=1; if ($0 != "FROM ${BASE_IMAGE}") bad=1 } END { exit (!found || bad) }' || fail "parent pin: FROM shape: $example"
+        if [ "$example" = rust-dev ]; then
+            # The one example whose helper module is compiled in-image: its first
+            # FROM is the pinned compiler stage and its last is the parent. The
+            # exact builder line is asserted with the rest of the rust-dev recipe
+            # below; here only the shape and the order are held, for every layer,
+            # so a builder stage cannot appear in a layer that has no module.
+            [ "$(printf '%s\n' "$instructions" | awk 'toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/' | wc -l)" -eq 2 ] ||
+                fail "parent pin: FROM shape: $example must carry exactly the helper stage and the parent"
+            printf '%s\n' "$instructions" |
+                awk 'toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { count++; line[count] = $0 }
+                     END { exit !(count == 2 && line[count] == "FROM ${BASE_IMAGE}") }' ||
+                fail "parent pin: FROM shape: $example must end on FROM \${BASE_IMAGE}"
+        else
+            printf '%s\n' "$instructions" | awk 'toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { found=1; if ($0 != "FROM ${BASE_IMAGE}") bad=1 } END { exit (!found || bad) }' || fail "parent pin: FROM shape: $example"
+        fi
     done
     refs=$(grep -rhoE 'ghcr\.io/gregwebs/agent-vm-standard[^[:space:]`"]*' "$LAYERS" | sort -u)
     [[ "$refs" =~ ^ghcr\.io/gregwebs/agent-vm-standard@sha256:[0-9a-f]{64}$ ]] || fail 'parent pin: references disagree'
@@ -204,8 +230,85 @@ check() {
     # Normalized for comparison: `logical_instructions` keeps a continuation's
 # spacing, so runs of blanks are collapsed before the exact shape comparison.
 normalize_instruction() { printf '%s' "$1" | tr -s ' \t' ' ' | sed -e 's/^ //' -e 's/ $//'; }
+    # --- rust-dev: the helper module and the compiler guard chain (#187) -----
+    # The layer's own program is a Go module under helper/, compiled by the first
+    # FROM and mounted into the verifier. Four links bind that compiler to the
+    # repository, each with the check that fails when it is deleted:
+    #
+    #   1. the stage's own RUN: the image compiler must be helper/go.mod's
+    #      `toolchain` line (asserted by the exact shape below, and it fails a
+    #      build, not only a gate);
+    #   2. helper/go.mod's `go` and `toolchain` lines must be the root go.mod's,
+    #      so the two modules cannot select different compilers;
+    #   3. the builder FROM must be exactly `golang:<root toolchain>-trixie` at the
+    #      digest images/parent-pins.json records for `.pins["golang-builder"]`,
+    #      so the reviewed version and the reviewed bytes move together;
+    #   4. script/test/image-sources binds the same FROM to the same inventory
+    #      reference.
+    #
+    # Link 5 -- every requirement the two go.mod files share is at one version, so
+    # MVS cannot raise a version in the root -- arrives with slice 4, when the root
+    # module imports this one.
+    helperdir=$rustdir/helper
+    [ -f "$helperdir/vendor/modules.txt" ] ||
+        fail 'rust-dev: helper/vendor is the build closure; it must stay committed'
+    [ -f "$ROOT/go.mod" ] || fail 'rust-dev: missing the root go.mod the helper is bound to'
+    root_go=$(awk '$1 == "go" { print $2 }' "$ROOT/go.mod")
+    root_toolchain=$(awk '$1 == "toolchain" { print $2 }' "$ROOT/go.mod")
+    [ -n "$root_go" ] && [ -n "$root_toolchain" ] ||
+        fail 'rust-dev: the root go.mod must state a go and a toolchain line'
+    helper_go=$(awk '$1 == "go" { print $2 }' "$helperdir/go.mod")
+    helper_toolchain=$(awk '$1 == "toolchain" { print $2 }' "$helperdir/go.mod")
+    [ "$helper_go" = "$root_go" ] ||
+        fail "rust-dev: helper/go.mod's go line ($helper_go) must equal the root go.mod's ($root_go)"
+    [ "$helper_toolchain" = "$root_toolchain" ] ||
+        fail "rust-dev: helper/go.mod's toolchain ($helper_toolchain) must equal the root go.mod's ($root_toolchain)"
+    [ -f "$ROOT/images/parent-pins.json" ] || fail 'rust-dev: missing images/parent-pins.json'
+    builder_ref=$(jq -er '.pins["golang-builder"].reference' "$ROOT/images/parent-pins.json") ||
+        fail 'rust-dev: images/parent-pins.json carries no golang-builder pin'
+    case "$builder_ref" in
+        "golang:${root_toolchain#go}-trixie@sha256:"*) ;;
+        *)
+            fail "rust-dev: the golang-builder pin ($builder_ref) must be golang:${root_toolchain#go}-trixie at the digest of the reviewed image"
+            ;;
+    esac
+    first_from=$(printf '%s\n' "$instructions" |
+        awk 'toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { print; exit }')
+    last_from=$(printf '%s\n' "$instructions" |
+        awk 'toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { line = $0 } END { print line }')
+    reviewed_builder="FROM $builder_ref AS rust-dev-helper"
+    [ "$(normalize_instruction "$last_from")" = 'FROM ${BASE_IMAGE}' ] ||
+        fail "rust-dev: the helper stage must precede the parent: the last FROM must be FROM \${BASE_IMAGE} (got: $(normalize_instruction "$last_from"))"
+    [ "$(normalize_instruction "$first_from")" = "$reviewed_builder" ] ||
+        fail "rust-dev: the first FROM must be exactly: $reviewed_builder (got: $(normalize_instruction "$first_from"))"
+    builder_runs=$(printf '%s\n' "$instructions" | awk -v stage=rust-dev-helper '
+        toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { inside = ($NF == stage); next }
+        inside && toupper($0) ~ /^[[:space:]]*RUN([[:space:]]|$)/ { count++ }
+        END { print count + 0 }')
+    [ "$builder_runs" -eq 1 ] ||
+        fail "rust-dev: the helper stage must carry exactly one RUN (found $builder_runs)"
+    builder_line=$(printf '%s\n' "$instructions" |
+        awk 'toupper($0) ~ /^[[:space:]]*RUN([[:space:]]|$)/ && /rust-dev-helper/ { print; exit }')
+    for token in '--network=none' 'source=helper,target=/src,ro' 'GOTOOLCHAIN=local go env GOVERSION' \
+        'GOFLAGS=-mod=vendor' 'GOPROXY=off' 'CGO_ENABLED=0' '-trimpath' '-buildvcs=false' \
+        'go build'; do
+        case "$builder_line" in
+            *"$token"*) ;;
+            *) fail "rust-dev: the helper stage lacks the reviewed compile token: $token" ;;
+        esac
+    done
+    # A tag would compile the fixture seams in, and a second build flags assignment
+    # after the reviewed one would let a later line win over this text.
+    if printf '%s\n' "$builder_line" | grep -qE '(^|[[:space:]])-tags([[:space:]=]|$)'; then
+        fail 'rust-dev: the helper stage must not pass -tags: the shipped binary honours no fixture seam'
+    fi
+    read -r -d '' reviewed_helper_builder <<'HELPER_BUILDER' || true
+RUN --network=none --mount=type=bind,source=helper,target=/src,ro cd /src && { [ "$(GOTOOLCHAIN=local go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)" ] || { echo "rust-dev-helper: the image compiler is not go.mod's toolchain" >&2; exit 1; }; } && GOTOOLCHAIN=local GOWORK=off GOENV=off GOFLAGS=-mod=vendor GOPROXY=off CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/rust-dev-helper .
+HELPER_BUILDER
+    [ "$(normalize_instruction "$builder_line")" = "$reviewed_helper_builder" ] ||
+        fail "rust-dev: the helper stage RUN must be exactly: $reviewed_helper_builder (got: $(normalize_instruction "$builder_line"))"
 reviewed_installer='RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro --mount=type=bind,source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro --mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro bash /tmp/install-rust.sh'
-reviewed_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro --mount=type=bind,source=kache_probe.py,target=/run/rust-verify/kache_probe.py,ro --mount=type=bind,source=rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro --mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/rust-verify/verify-toolchain.sh'
+reviewed_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro --mount=type=bind,from=rust-dev-helper,source=/out/rust-dev-helper,target=/run/rust-verify/rust-dev-helper,ro --mount=type=bind,source=rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro --mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/rust-verify/verify-toolchain.sh'
 installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || true)
     [ "$installer_runs" -eq 1 ] || fail 'rust-dev: installer RUN must appear exactly once'
     installer_line=$(printf '%s\n' "$instructions" | grep -F 'install-rust.sh')
@@ -228,7 +331,7 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         *) fail 'rust-dev: verifier must run with --network=none' ;;
     esac
     for token in 'verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro' \
-        'kache_probe.py,target=/run/rust-verify/kache_probe.py,ro' \
+        'from=rust-dev-helper,source=/out/rust-dev-helper,target=/run/rust-verify/rust-dev-helper,ro' \
         'rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro' \
         'data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro' \
         'RUST_TOOLCHAIN=$RUST_TOOLCHAIN' 'KACHE_VERSION=$KACHE_VERSION' 'VERUS_DIR=/opt/verus' \
@@ -326,8 +429,10 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         fail 'rust-dev: the kache installer RUN must create the shim farm'
     # No presence guard: a missing probe is already the sweep's message, checked
     # before any layer assertion runs.
-    grep -qF -- 'C/C++ shims' "$rustdir/kache_probe.py" ||
-        fail 'rust-dev: kache_probe.py must require the C/C++ shims to be active'
+    # The probe is the layer's own binary now; the requirement is the same string
+    # in the same place, and #156 owns turning it into a behaviour test.
+    grep -qF -- 'C/C++ shims' "$rustdir/helper/kacheprobe/probe.go" ||
+        fail 'rust-dev: the kache-probe must require the C/C++ shims to be active'
     # --- rust-dev: the cache layout and the shared remote, which are
     # --- configuration state -------------------------------------------------
     # The policy is an image input like the pins: the reviewed RUN that installs
@@ -454,9 +559,10 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     for rel in $GUARDED_DATA; do
         [ -f "$LAYERS/$rel" ] || fail "guarded script missing: $rel"
     done
-    # Every regular file under a layer is classified here, and only these three
+    # Every regular file under a layer is classified here, and only these four
     # classes exist: a shebang script in GUARDED, any other input under the
-    # layer's data/ in GUARDED_DATA, and the layer's own Dockerfile and README.md.
+    # layer's data/ in GUARDED_DATA, the layer's own Go module under helper/ in
+    # GUARDED_GO, and the layer's own Dockerfile and README.md.
     # That makes coverage exhaustive without parsing mounts: a bind source is a
     # file in the layer, so a mounted file listed nowhere is caught as an
     # unclassified file, and a stray file at a layer root fails by name.
@@ -470,6 +576,28 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         rest=${rel#*/}
         case "$rest" in
             Dockerfile | README.md) continue ;;
+        esac
+        # A layer's own Go module (ADR 0017): source, the module files, the vendor
+        # tree and testdata live here and nothing else. Vendor bytes are the drift
+        # gate's to authenticate, so they are the one class this list skips.
+        case "$rest" in
+            helper | helper/*)
+                if [ "$(head -c 2 "$file")" = '#!' ]; then
+                    fail "unguarded example script: $rel"
+                fi
+                case "$rest" in
+                    helper/go.mod | helper/go.sum | helper/vendor/*) ;;
+                    helper/*.go | helper/*/*) ;;
+                    *) fail "unclassified example file: $rel" ;;
+                esac
+                case "$rest" in
+                    helper/vendor/*) continue ;;
+                esac
+                case " $GUARDED_GO " in
+                    *" $rel "*) continue ;;
+                    *) fail "unreviewed helper file: $rel" ;;
+                esac
+                ;;
         esac
         if [ "$(head -c 2 "$file")" = '#!' ]; then
             case " $GUARDED " in *" $rel "*) continue ;; esac
@@ -604,7 +732,9 @@ self_test() {
         tree="$SCRATCH/case-$n"
         mkdir -p "$tree/examples" "$tree/images/standard"
         cp -R "$ROOT/$LAYERS" "$tree/examples/"
+        cp "$ROOT/go.mod" "$tree/go.mod"
         cp "$ROOT/images/Dockerfile" "$tree/images/"
+        cp "$ROOT/images/parent-pins.json" "$tree/images/parent-pins.json"
         cp "$ROOT/images/standard/Dockerfile" "$tree/images/standard/"
         chrome="$tree/$LAYERS/chrome-devtools/Dockerfile"
         wrapper="$tree/$LAYERS/chrome-devtools/agent-vm-chrome-mcp"
@@ -810,7 +940,13 @@ self_test() {
                 echo 'ENV RUSTUP_TOOLCHAIN=1.98.1' >> "$rustdocker"
                 expected='RUSTUP_TOOLCHAIN must not be forced' ;;
             71)
-                rewrite "$rustdocker" 's|RUN --network=none|RUN|'
+                # The verifier is the only RUN whose first line is exactly
+                # `RUN --network=none \`: the helper stage's carries its bind mount
+                # on the same line, and its own assertion is a different message.
+                awk '!stripped && /^RUN --network=none \\$/ {
+                        sub(/RUN --network=none/, "RUN"); stripped = 1
+                     } { print }' "$rustdocker" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$rustdocker"
                 expected='verifier must run with --network=none' ;;
             72) printf 'unexpected' > "$rusttool/.extra"; expected='unreviewed input: .extra' ;;
             73)
@@ -948,16 +1084,16 @@ self_test() {
                 expected='the kache installer RUN must be exactly' ;;
             109) cp "$rusttool/rust-release-key.asc" "$tree/$LAYERS/rust-dev/data/kache/release-key.asc"
                 expected='does not hash to the KACHE_RELEASE_CERT_SHA256 pin' ;;
-            110) rm "$tree/$LAYERS/rust-dev/kache_probe.py"
-                expected='guarded script missing: rust-dev/kache_probe.py' ;;
+            110) rm "$tree/$LAYERS/rust-dev/helper/kacheprobe/probe.go"
+                expected='guarded script missing: rust-dev/helper/kacheprobe/probe.go' ;;
             # 111-113: the C/C++ shims, which the image installs instead of
             # leaving to a guest's `kache init`.
             111) rewrite "$tree/$LAYERS/rust-dev/Dockerfile" 's|ENV PATH=/opt/kache/shims:|ENV PATH=|'
                 expected='PATH must stay additive and lead with the kache shims' ;;
             112) rewrite "$tree/$LAYERS/rust-dev/install-kache.sh" 's|--canonical-only||'
                 expected='install-kache.sh lacks the shim farm: --canonical-only' ;;
-            113) rewrite "$tree/$LAYERS/rust-dev/kache_probe.py" 's|C/C++ shims|shims|'
-                expected='kache_probe.py must require the C/C++ shims to be active' ;;
+            113) rewrite "$tree/$LAYERS/rust-dev/helper/kacheprobe/probe.go" 's|C/C++ shims|shims|'
+                expected='the kache-probe must require the C/C++ shims to be active' ;;
             # 114: the shared remote's policy is an input, not a preference.
             114) rewrite "$tree/$LAYERS/rust-dev/data/kache-config.toml" 's|"4G"|"20G"|'
                 expected='kache-config.toml must keep: local_max_size = "4G"' ;;
@@ -980,6 +1116,68 @@ self_test() {
                 expected='unreviewed layer input: rust-dev/data/notes.txt' ;;
             119) rm "$tree/$LAYERS/rust-dev/data/kache/README.md"
                 expected='guarded script missing: rust-dev/data/kache/README.md' ;;
+            # 120-132: the helper module and its compiler guard chain (#187). Each
+            # case changes one thing, so the link under test is the one that fires:
+            # the module's file classes, its two go.mod lines, the builder's tag and
+            # digest, the stage order and count, the compile tokens, and the
+            # verifier's mount of the binary instead of the Python probe.
+            120) printf 'a note\n' > "$tree/$LAYERS/rust-dev/helper/notes.txt"
+                expected='unclassified example file: rust-dev/helper/notes.txt' ;;
+            121) printf '#!/bin/sh\n' > "$tree/$LAYERS/rust-dev/helper/run.sh"
+                expected='unguarded example script: rust-dev/helper/run.sh' ;;
+            122)
+                rewrite "$tree/$LAYERS/rust-dev/helper/go.mod" \
+                    's|^toolchain go1\.27\.3$|toolchain go1.27.4|'
+                expected="helper/go.mod's toolchain (go1.27.4) must equal the root go.mod's (go1.27.3)" ;;
+            123)
+                rewrite "$tree/$LAYERS/rust-dev/helper/go.mod" 's|^go 1\.27\.0$|go 1.27.1|'
+                expected="helper/go.mod's go line (1.27.1) must equal the root go.mod's (1.27.0)" ;;
+            124)
+                rewrite "$tree/$LAYERS/rust-dev/Dockerfile" \
+                    's|^FROM golang:1\.27\.3-trixie@|FROM golang:1.27.2-trixie@|'
+                expected='the first FROM must be exactly' ;;
+            125)
+                rewrite "$tree/$LAYERS/rust-dev/Dockerfile" \
+                    's|^FROM golang:1\.27\.3-trixie@sha256:[0-9a-f]*|FROM golang:1.27.3-trixie|'
+                expected='the first FROM must be exactly' ;;
+            126)
+                # The other direction of the same binding: the reviewed digest in
+                # the inventory moves, and the recipe that names it must fail.
+                awk '!placed && /"reference": "golang:/ {
+                        sub(/sha256:[0-9a-f]{64}/, "sha256:'"$(printf '0%.0s' $(seq 64))"'"); placed = 1
+                     } { print }' "$tree/images/parent-pins.json" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$tree/images/parent-pins.json"
+                expected='the first FROM must be exactly' ;;
+            127)
+                printf 'FROM golang:1.27.3-trixie AS second-builder\n' \
+                    >> "$tree/$LAYERS/rust-dev/Dockerfile"
+                expected='must carry exactly the helper stage and the parent' ;;
+            128)
+                # The helper stage moved after the parent: the compiler is not the
+                # first FROM any more, and the last FROM is not the image.
+                awk '!/^FROM golang:/ && !/^RUN --network=none --mount=type=bind,source=helper/ &&
+                     !/^    cd \/src/ && !/^      \|\|/ && !/^ &&/ && !/^    go build -trimpath/ { print }
+                     END { print "FROM golang:1.27.3-trixie AS rust-dev-helper" }' \
+                    "$tree/$LAYERS/rust-dev/Dockerfile" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$tree/$LAYERS/rust-dev/Dockerfile"
+                expected='parent pin: FROM shape: rust-dev must end on FROM ${BASE_IMAGE}' ;;
+            129)
+                awk '!/^RUN --network=none --mount=type=bind,source=helper/ { print }
+                     /^RUN --network=none --mount=type=bind,source=helper/ {
+                        sub(/RUN --network=none/, "RUN"); print }' \
+                    "$tree/$LAYERS/rust-dev/Dockerfile" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$tree/$LAYERS/rust-dev/Dockerfile"
+                expected='the helper stage lacks the reviewed compile token: --network=none' ;;
+            130)
+                rewrite "$tree/$LAYERS/rust-dev/Dockerfile" \
+                    's|-buildvcs=false -o /out/rust-dev-helper|-buildvcs=false -tags example_fixture -o /out/rust-dev-helper|'
+                expected='the helper stage must not pass -tags' ;;
+            131)
+                rewrite "$tree/$LAYERS/rust-dev/Dockerfile" \
+                    's|from=rust-dev-helper,source=/out/rust-dev-helper,target=/run/rust-verify/rust-dev-helper,ro|source=kache_probe.py,target=/run/rust-verify/kache_probe.py,ro|'
+                expected='verifier RUN lacks the reviewed delivery' ;;
+            132) rm "$tree/$LAYERS/rust-dev/helper/vendor/modules.txt"
+                expected='helper/vendor is the build closure' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac

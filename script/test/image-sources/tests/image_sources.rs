@@ -2866,6 +2866,11 @@ const RETIRED_HELPERS: [&str; 2] = ["install-status.py", "check-tool-access.py"]
 
 const PARENT_INVENTORY: &str = "images/parent-pins.json";
 const DEBIAN_PIN: &str = "debian";
+/// The build-only compiler of the example layers' own helper modules. It is the
+/// one parent an example recipe names before the released base, and it is a
+/// parent like any other: a reviewed digest in the inventory, bound to the stage
+/// that uses it (ADR 0017, "Example layers stay self-contained").
+const GO_PIN: &str = "golang-builder";
 const RELEASE_PIN: &str = "standard-release";
 const LOCAL_BASE: &str = "agent-vm-base:local";
 /// The trusted release identity, tied to `script/release/attestations.py`
@@ -3542,12 +3547,12 @@ fn parse_parent_inventory(text_source: &str) -> Result<ParentInventory, String> 
     let pin_values = object(&members["pins"], "pins")?;
     if let Some(unknown) = pin_values
         .keys()
-        .find(|name| !matches!(name.as_str(), DEBIAN_PIN | RELEASE_PIN))
+        .find(|name| !matches!(name.as_str(), DEBIAN_PIN | GO_PIN | RELEASE_PIN))
     {
         return Err(format!("unknown pin: {unknown}"));
     }
     let mut pins = BTreeMap::new();
-    for name in [DEBIAN_PIN, RELEASE_PIN] {
+    for name in [DEBIAN_PIN, GO_PIN, RELEASE_PIN] {
         let value = pin_values
             .get(name)
             .ok_or_else(|| format!("pin inventory is incomplete: {name}"))?;
@@ -3712,6 +3717,7 @@ fn pin_for_image(image: &str) -> Option<&'static str> {
     };
     match repository {
         "debian" => Some(DEBIAN_PIN),
+        "golang" => Some(GO_PIN),
         "ghcr.io/gregwebs/agent-vm-standard" => Some(RELEASE_PIN),
         _ => None,
     }
@@ -5288,6 +5294,110 @@ fn the_parent_inventory_pins_every_maintained_recipe() {
         read_json(PARENT_INVENTORY)["apt_open_gaps"],
         Value::Array(vec![]),
         "both recorded third-party apt instructions are gone with their installers (#96)"
+    );
+}
+
+/// The example helper's compiler is a parent, not an unrecorded build step.
+///
+/// The rust-dev recipe names two FROMs: the pinned `golang:` stage that compiles
+/// the layer's own helper module, and the released base. Both are bound here to
+/// the inventory, so a digest, a stage name, an order or an entry is a reviewed
+/// change. The compiler's *version* is a different binding, held to the root
+/// go.mod's `toolchain` line by script/test/example-layers.sh; this gate holds
+/// the bytes.
+#[test]
+fn the_rust_dev_recipe_binds_its_helper_builder() {
+    let inventory = parse_parent_inventory(&read_text(PARENT_INVENTORY)).unwrap();
+    let go = match &inventory.pins[GO_PIN] {
+        Pin::Official(pin) => pin,
+        Pin::Release(_) => panic!("the Go builder is a Docker Official Image"),
+    };
+    assert_eq!(go.reference.repository.value(), "golang");
+    assert_eq!(
+        go.expected_source,
+        "https://github.com/docker-library/golang.git"
+    );
+    assert!(
+        matches!(go.verification, Verification::HashOnly { .. }),
+        "the Go builder carries a reviewed hash-only exception like the Debian parent"
+    );
+    assert_eq!(
+        go.platforms.keys().collect::<Vec<_>>(),
+        vec!["linux/amd64", "linux/arm64"]
+    );
+    let path = "examples/layers/rust-dev/Dockerfile";
+    assert_eq!(
+        inventory.recipes[path],
+        vec![
+            ParentSpec {
+                stage: Some("rust-dev-helper".to_owned()),
+                binding: Binding::Pin(GO_PIN.to_owned()),
+            },
+            ParentSpec {
+                stage: None,
+                binding: Binding::Pin(RELEASE_PIN.to_owned()),
+            },
+        ],
+        "the builder stage and the base are the recipe's two registered parents"
+    );
+    let source = read_text(path);
+    let froms = parse_froms(&source).unwrap();
+    assert_eq!(
+        froms.len(),
+        2,
+        "the recipe has exactly two FROM instructions"
+    );
+    assert_eq!(froms[0].raw_image, go.reference.text());
+    assert_eq!(froms[0].stage.as_deref(), Some("rust-dev-helper"));
+    assert_eq!(
+        froms[1].resolved_image,
+        inventory.pins[RELEASE_PIN].reference().text()
+    );
+    assert_eq!(froms[1].stage, None);
+
+    let recipes = maintained_recipes();
+    assert!(
+        check_recipe_parents(&inventory, &recipes).is_ok(),
+        "the committed recipe must be bound to the committed inventory"
+    );
+    let renamed = source.replacen(" AS rust-dev-helper", " AS helper", 1);
+    let swapped = source.replacen(
+        &go.reference.text(),
+        &format!("golang:1.27.3-trixie@sha256:{}", "1".repeat(64)),
+        1,
+    );
+    let removed = source.replace(
+        &format!("FROM {} AS rust-dev-helper", go.reference.text()),
+        "FROM scratch AS rust-dev-helper",
+    );
+    let second = format!("{source}\nFROM {} AS second-builder\n", go.reference.text());
+    for (label, changed) in [
+        ("a renamed builder stage", renamed),
+        ("a different builder digest", swapped),
+        ("a builder that is not the pinned image", removed),
+        ("a second builder stage", second),
+    ] {
+        assert_ne!(changed, source, "{label}: mutation did not apply");
+        let mut edited = recipes.clone();
+        edited.insert(path.to_owned(), changed);
+        assert!(
+            check_recipe_parents(&inventory, &edited).is_err(),
+            "accepted a rust-dev recipe mutation: {label}"
+        );
+    }
+    // The inventory side of the same binding: dropping the builder entry leaves a
+    // FROM the inventory does not describe.
+    let mut dropped = inventory.clone();
+    dropped.recipes.insert(
+        path.to_owned(),
+        vec![ParentSpec {
+            stage: None,
+            binding: Binding::Pin(RELEASE_PIN.to_owned()),
+        }],
+    );
+    assert!(
+        check_recipe_parents(&dropped, &recipes).is_err(),
+        "accepted an inventory that leaves the builder stage unbound"
     );
 }
 

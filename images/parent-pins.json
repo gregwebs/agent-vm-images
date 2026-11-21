@@ -33,6 +33,38 @@
       },
       "resolved_on": "2026-10-24"
     },
+    "golang-builder": {
+      "kind": "docker-official-image",
+      "reference": "golang:1.27.3-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4",
+      "expected_source": "https://github.com/docker-library/golang.git",
+      "platforms": {
+        "linux/amd64": {
+          "manifest": "sha256:8aa2821993207ae840ce09e4223217efcd14e01f71525db734faf4232bd59999",
+          "revision": "41d9b4da70324ae7b6461ac2cc401b06719ff57d",
+          "source": "https://github.com/docker-library/golang.git#41d9b4da70324ae7b6461ac2cc401b06719ff57d:1.27/trixie",
+          "created": "2026-10-21T02:16:06Z"
+        },
+        "linux/arm64": {
+          "manifest": "sha256:288557fbc328e4ef9a78bae2eb44f24447029ff08667be883d79eeaa9029cf0c",
+          "revision": "41d9b4da70324ae7b6461ac2cc401b06719ff57d",
+          "source": "https://github.com/docker-library/golang.git#41d9b4da70324ae7b6461ac2cc401b06719ff57d:1.27/trixie",
+          "created": "2026-10-21T02:15:40Z"
+        }
+      },
+      "verification": {
+        "method": "hash-only",
+        "reviewed_on": "2026-10-24",
+        "reason": "Docker Official Image for Go, used only as the build-only helper compiler. Same retired Docker Content Trust channel as the Debian parent and no published replacement signing scheme for this image; the reviewed choice is the registry digest plus the recorded source revision, which the build additionally cross-checks against go.mod.",
+        "evidence": [
+          "https://docs.docker.com/engine/security/trust/",
+          "https://www.docker.com/blog/docker-content-trust-retirement-and-migration-guidance/",
+          "https://docs.docker.com/docker-hub/image-library/trusted-content/",
+          "https://www.docker.com/blog/retiring-docker-content-trust/"
+        ],
+        "reassess": "Stop refresh if a supported verifiable signing scheme is published for this image"
+      },
+      "resolved_on": "2026-10-24"
+    },
     "standard-release": {
       "kind": "repository-release",
       "reference": "ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de",
@@ -77,6 +109,10 @@
       }
     ],
     "examples/layers/rust-dev/Dockerfile": [
+      {
+        "stage": "rust-dev-helper",
+        "pin": "golang-builder"
+      },
       {
         "stage": null,
         "pin": "standard-release"

@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 2,
+  "mediaType": "application/vnd.oci.image.manifest.v1+json",
+  "config": {
+    "mediaType": "application/vnd.oci.image.config.v1+json",
+    "digest": "sha256:8f320504681311625326bbcea73247b25857f43e74098ddcb4a589192c024e5d",
+    "size": 3039
+  },
+  "layers": [
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:8d0037029946d2c6dabce18eceda79c533c5797ed1ee86f94084cb8cddaeea91",
+      "size": 49393622
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:63040bd9752a74c5b1082903de92d441d30121f994018576b4a2f4cf8bb3bca4",
+      "size": 25635564
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:7046f4e749f0e32d9fc67f654ad5e33cc555534f82a9971e45a00dbdb899e309",
+      "size": 67818834
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:f218a6f1819c3da32b6186c7b269e01900311ded961ad0c3aeac465886ec2f2b",
+      "size": 102445069
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:82e0bb27ae78502103ed383ed33346f88a83943fb7bd93977850d5890ee8fb3b",
+      "size": 71150395
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:e436409a7823d65d1789487c782441b0727711d5da06a4a0dd7ad682afcd468c",
+      "size": 126
+    },
+    {
+      "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+      "digest": "sha256:4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1",
+      "size": 32
+    }
+  ],
+  "annotations": {
+    "com.docker.official-images.bashbrew.arch": "amd64",
+    "org.opencontainers.image.base.digest": "sha256:57c2de9a151180bf9ba8eea8bbebf8c546ccaa629f4fec8ea9b18330226af31b",
+    "org.opencontainers.image.base.name": "buildpack-deps:trixie-scm",
+    "org.opencontainers.image.created": "2026-10-21T02:16:06Z",
+    "org.opencontainers.image.revision": "41d9b4da70324ae7b6461ac2cc401b06719ff57d",
+    "org.opencontainers.image.source": "https://github.com/docker-library/golang.git#41d9b4da70324ae7b6461ac2cc401b06719ff57d:1.27/trixie",
+    "org.opencontainers.image.url": "https://hub.docker.com/_/golang",
+    "org.opencontainers.image.version": "1.27.3-trixie"
+  }
+}
