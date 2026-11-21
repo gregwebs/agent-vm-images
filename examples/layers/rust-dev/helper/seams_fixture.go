@@ -9,9 +9,10 @@ package main
 //   - It is a compile-time boundary, so the code that honours a fixture is not in
 //     the shipped binary. A seam that exists only in a differently built binary is
 //     stronger than a flag a build argument could reach.
-//   - It is not an ARG. A build file input can only choose a tag it already names,
-//     and the layer's builder stage passes none, so an example image build cannot
-//     produce this binary.
+//   - The layer's builder stage is a closed instruction set — its pinned FROM and
+//     its one reviewed RUN — which script/test/example-layers.sh enforces per
+//     instruction class. Nothing in it can add a tag, so an example image build
+//     cannot produce this binary.
 //   - The host wrapper that does build it, `script/build/example-helper.sh
 //     --fixture`, says so on its command line, so a fixture binary is always a
 //     deliberate act by a suite.

@@ -55,8 +55,16 @@ with a message naming `images/build.sh`.
 directory, built by the example's own pinned `golang:` stage. The stage is the
 recipe's first `FROM`, compiles with `--network=none`, `GOFLAGS=-mod=vendor` and
 `GOTOOLCHAIN=local`, and its binary is mounted read-only into the consuming
-`RUN`s rather than copied. A guard ties that image to the root `go.mod`
-toolchain, in five links:
+`RUN`s rather than copied. The committed vendor tree is the build's dependency
+closure; `-mod=vendor` is policy, because Go selects vendor mode by default when
+`vendor/modules.txt` exists. What authenticates those bytes is the module's own
+regeneration-and-diff gate, `script/test/example-helper-vendor.sh`, which runs in
+the default contracts mode and not in `--guard-only`. Deleting `vendor/` is a
+missing-closure witness, not a proof of vendoring. A guard ties that image to the root `go.mod`
+toolchain, in five links. It binds a compiler version and the recipe/inventory
+relationship — **not source bytes**: a comment-only edit under `helper/` changes
+nothing any gate sees, and binding source bytes for a product image is
+[#233](https://github.com/gregwebs/agent-vm-images/issues/233)'s separate question.
 
 1. the stage's own `RUN`: the image compiler must be the helper `go.mod`'s
    `toolchain` line, or the build fails;

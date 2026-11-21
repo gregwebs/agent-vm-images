@@ -3,8 +3,9 @@
 These directories are worked examples of building a **custom boot image** with
 ordinary Docker. Each is a `Dockerfile` that starts `FROM ${BASE_IMAGE}` and
 adds tools the default image does not carry — compilers, cross-toolchains,
-Chromium, and so on. The explicit `agent-vm build` operation builds and imports one; launches never
-build or compose these directories. Select the finished result separately. See
+Chromium, and so on. The explicit `agent-vm image build` operation builds and
+imports one; launches never build or compose these directories. Select the
+finished result separately. See
 [Selecting the boot image](https://github.com/gregwebs/agent-vm/blob/main/USAGE.md#selecting-the-boot-image) and
 [ADR-0035](https://github.com/gregwebs/agent-vm/blob/main/docs/adr/0035-consume-user-owned-boot-images.md).
 
@@ -31,17 +32,21 @@ docker build --builder "$BUILDER" --platform linux/arm64 \
 ```
 
 Substitute `go-dev`, `rust-dev` or `wirenboard-cpp`; use `linux/amd64` on x86-64.
-`agent-vm build` (below) builds the same context and also imports the result for
-launching.
+`agent-vm image build` (below) builds the same context and also imports the
+result for launching.
 
 From this repository's root, build an example and select its finished result:
 
 ```sh
-agent-vm build --builder native-oci \
+agent-vm image build --builder "$(docker context show)" \
   --build-arg BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de \
   --tag my-image:dev examples/layers/rust-dev
 agent-vm shell --image my-image:dev                # or: image = "my-image:dev"
 ```
+
+`--builder` names the caller's own daemon-backed buildx builder; this repository
+selects none. `rust-dev` needs one that also supports multi-stage Dockerfiles and
+`RUN --network=none`, because its first stage compiles the layer's helper module.
 
 Every example needs the two lines below; the `ARG` is what
 `--build-arg BASE_IMAGE=…` overrides:
@@ -204,7 +209,7 @@ Apple Silicon note below).
 Build it on top of the default boot image and select it:
 
 ```sh
-agent-vm build --builder native-oci \
+agent-vm image build --builder "$(docker context show)" \
   --build-arg BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de \
   --tag agent-vm-rust-dev:dev examples/layers/rust-dev
 agent-vm claude --image agent-vm-rust-dev:dev
@@ -512,7 +517,7 @@ installs, under the world-readable `/opt`:
 Build it on top of the default boot image and select it:
 
 ```sh
-agent-vm build --builder native-oci \
+agent-vm image build --builder "$(docker context show)" \
   --build-arg BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de \
   --tag agent-vm-go-dev:dev examples/layers/go-dev
 agent-vm claude --image agent-vm-go-dev:dev
@@ -629,7 +634,7 @@ helper/ADR change and a renewed review — it is not a cosmetic edit.
 Build it on top of the default boot image and select it:
 
 ```sh
-agent-vm build --builder native-oci \
+agent-vm image build --builder "$(docker context show)" \
   --build-arg BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de \
   --tag agent-vm-chrome:dev examples/layers/chrome-devtools
 agent-vm claude --image agent-vm-chrome:dev

@@ -6,8 +6,10 @@ package main
 // suite-only input -- the reviewed trust it checks against, the upstream it
 // fetches from, the program it runs a bootstrap with -- is added by a
 // `//go:build example_fixture` file, never by a runtime flag or an environment
-// variable a build argument could reach. So the shipped binary cannot be talked
-// into honouring one: the grammar that would accept it is not compiled in.
+// variable. So the shipped binary cannot be talked into honouring one: the grammar
+// that would accept it is not compiled in. What keeps the tag off the image build
+// is the builder stage's instruction allowlist (no SHELL, ADD, ENV or ARG beside
+// its pinned FROM and reviewed RUN), asserted by script/test/example-layers.sh.
 //
 // fixtureSeams is the closed list this build honours: none. A test builds both
 // variants and requires every seam name to be absent from this one.

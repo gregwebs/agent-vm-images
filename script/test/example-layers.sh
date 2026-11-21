@@ -35,7 +35,7 @@ GUARDED_DATA='chrome-devtools/data/chrome-devtools-mcp.sigstore.json chrome-devt
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=132
+SELF_TEST_CASES=142
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -246,6 +246,11 @@ normalize_instruction() { printf '%s' "$1" | tr -s ' \t' ' ' | sed -e 's/^ //' -
     #   4. script/test/image-sources binds the same FROM to the same inventory
     #      reference.
     #
+    # The stage itself is a closed instruction set (see the allowlist below): the
+    # chain binds a compiler version and the recipe/inventory relationship, not
+    # source bytes, so a comment-only edit under helper/ changes nothing any gate
+    # sees.
+    #
     # Link 5 -- every requirement the two go.mod files share is at one version, so
     # MVS cannot raise a version in the root -- arrives with slice 4, when the root
     # module imports this one.
@@ -281,12 +286,6 @@ normalize_instruction() { printf '%s' "$1" | tr -s ' \t' ' ' | sed -e 's/^ //' -
         fail "rust-dev: the helper stage must precede the parent: the last FROM must be FROM \${BASE_IMAGE} (got: $(normalize_instruction "$last_from"))"
     [ "$(normalize_instruction "$first_from")" = "$reviewed_builder" ] ||
         fail "rust-dev: the first FROM must be exactly: $reviewed_builder (got: $(normalize_instruction "$first_from"))"
-    builder_runs=$(printf '%s\n' "$instructions" | awk -v stage=rust-dev-helper '
-        toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { inside = ($NF == stage); next }
-        inside && toupper($0) ~ /^[[:space:]]*RUN([[:space:]]|$)/ { count++ }
-        END { print count + 0 }')
-    [ "$builder_runs" -eq 1 ] ||
-        fail "rust-dev: the helper stage must carry exactly one RUN (found $builder_runs)"
     builder_line=$(printf '%s\n' "$instructions" |
         awk 'toupper($0) ~ /^[[:space:]]*RUN([[:space:]]|$)/ && /rust-dev-helper/ { print; exit }')
     for token in '--network=none' 'source=helper,target=/src,ro' 'GOTOOLCHAIN=local go env GOVERSION' \
@@ -302,11 +301,40 @@ normalize_instruction() { printf '%s' "$1" | tr -s ' \t' ' ' | sed -e 's/^ //' -
     if printf '%s\n' "$builder_line" | grep -qE '(^|[[:space:]])-tags([[:space:]=]|$)'; then
         fail 'rust-dev: the helper stage must not pass -tags: the shipped binary honours no fixture seam'
     fi
+    # --- the stage allowlist, which is what the guarantees above rest on ------
+    # The stage may hold exactly two instructions: the pinned FROM and this RUN.
+    # Every other instruction class reaches the compile without changing the line
+    # compared above, and two of them were proven against the real compiler:
+    #
+    #   * `SHELL ["/bin/sh","-c","eval \"$(printf %s \"$0\" | sed
+    #     's/go build /go build -tags=example_fixture /')\""]` keeps the RUN
+    #     byte-identical and compiles the fixture seams in - the binary then
+    #     answers `--fixture-seams` with all three names;
+    #   * `ADD https://example.com/ /out/fetched.html` downloads inside a stage
+    #     whose RUN has `--network=none`, so "the only egress is the FROM pull"
+    #     is only true while the instruction set is closed.
+    #
+    # `ARG GOFLAGS` and `ENV GOFLAGS=-tags=...` lose to the RUN's own explicit
+    # assignment today, but a gate that permits them is enforcing that this RUN
+    # happens to be written defensively rather than a compile-time boundary. So
+    # the classes are refused, not argued about: no SHELL, ADD, COPY, ENV, ARG,
+    # WORKDIR, USER, ONBUILD or VOLUME, and no second FROM (the per-example FROM
+    # shape check above refuses a third, whichever stage it declares).
+    builder_stage=$(printf '%s\n' "$instructions" | awk -v stage=rust-dev-helper '
+        toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { inside = ($NF == stage); next }
+        inside { print }')
+    stage_keywords=$(printf '%s\n' "$builder_stage" | awk 'NF { print toupper($1) }' |
+        LC_ALL=C sort -u | tr '\n' ' ')
+    [ "${stage_keywords% }" = RUN ] ||
+        fail "rust-dev: the helper stage may not carry these instructions: ${stage_keywords% } (only its reviewed RUN is allowed)"
+    builder_body=$(printf '%s\n' "$builder_stage" | grep -c . || true)
+    [ "$builder_body" -eq 1 ] ||
+        fail "rust-dev: the helper stage must carry exactly one RUN (found $builder_body)"
     read -r -d '' reviewed_helper_builder <<'HELPER_BUILDER' || true
 RUN --network=none --mount=type=bind,source=helper,target=/src,ro cd /src && { [ "$(GOTOOLCHAIN=local go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)" ] || { echo "rust-dev-helper: the image compiler is not go.mod's toolchain" >&2; exit 1; }; } && GOTOOLCHAIN=local GOWORK=off GOENV=off GOFLAGS=-mod=vendor GOPROXY=off CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/rust-dev-helper .
 HELPER_BUILDER
-    [ "$(normalize_instruction "$builder_line")" = "$reviewed_helper_builder" ] ||
-        fail "rust-dev: the helper stage RUN must be exactly: $reviewed_helper_builder (got: $(normalize_instruction "$builder_line"))"
+    [ "$(normalize_instruction "$builder_stage")" = "$reviewed_helper_builder" ] ||
+        fail "rust-dev: the helper stage RUN must be exactly: $reviewed_helper_builder (got: $(normalize_instruction "$builder_stage"))"
 reviewed_installer='RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro --mount=type=bind,source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro --mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro bash /tmp/install-rust.sh'
 reviewed_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro --mount=type=bind,from=rust-dev-helper,source=/out/rust-dev-helper,target=/run/rust-verify/rust-dev-helper,ro --mount=type=bind,source=rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro --mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/rust-verify/verify-toolchain.sh'
 installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || true)
@@ -623,6 +651,15 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         esac
     done
     echo 'example layers passed'
+}
+# Insert one instruction immediately after the helper stage's FROM. The cases below
+# use it to show which instruction classes the stage allowlist refuses: every one
+# of them can change what the reviewed RUN compiles without changing that RUN.
+insert_builder_instruction() { # FILE TEXT
+    awk -v text="$2" '!placed && /^FROM golang:.* AS rust-dev-helper$/ {
+            print; print text; placed = 1; next
+        } { print }' "$1" > "$SCRATCH/rewrite"
+    cat "$SCRATCH/rewrite" > "$1"
 }
 # Rewrites preserve copied file modes on both BSD and GNU hosts.
 rewrite() {
@@ -1192,6 +1229,38 @@ self_test() {
                 expected='verifier RUN lacks the reviewed delivery' ;;
             132) rm "$tree/$LAYERS/rust-dev/helper/vendor/modules.txt"
                 expected='helper/vendor is the build closure' ;;
+            # 133-142: the helper stage is a closed instruction set. Each case adds
+            # one instruction class the reviewed RUN cannot see, and every one of
+            # them was possible before the allowlist: `SHELL` rewrites the command
+            # while the RUN stays byte-identical (proven: the binary answered
+            # `--fixture-seams` with all three names), `ADD` fetches over the
+            # network in a stage whose RUN has `--network=none`, and the rest reach
+            # the compiler through the environment or the filesystem.
+            133)
+                read -r -d '' mutation <<'INSTRUCTION' || true
+SHELL ["/bin/sh", "-c", "eval \"$(printf '%s' \"$0\" | sed 's/go build /go build -tags=example_fixture /')\""]
+INSTRUCTION
+                insert_builder_instruction "$rustdocker" "$mutation"
+                expected='may not carry these instructions: RUN SHELL' ;;
+            134) insert_builder_instruction "$rustdocker" 'ADD https://example.com/ /out/fetched.html'
+                expected='may not carry these instructions: ADD RUN' ;;
+            135) insert_builder_instruction "$rustdocker" 'COPY go.mod /src/go.mod'
+                expected='may not carry these instructions: COPY RUN' ;;
+            136) insert_builder_instruction "$rustdocker" 'ENV GOFLAGS=-tags=example_fixture'
+                expected='may not carry these instructions: ENV RUN' ;;
+            137) insert_builder_instruction "$rustdocker" 'ARG GOFLAGS'
+                expected='may not carry these instructions: ARG RUN' ;;
+            138) insert_builder_instruction "$rustdocker" 'WORKDIR /src'
+                expected='may not carry these instructions: RUN WORKDIR' ;;
+            139) insert_builder_instruction "$rustdocker" 'USER nobody'
+                expected='may not carry these instructions: RUN USER' ;;
+            140) insert_builder_instruction "$rustdocker" 'ONBUILD RUN true'
+                expected='may not carry these instructions: ONBUILD RUN' ;;
+            141) insert_builder_instruction "$rustdocker" 'VOLUME /out'
+                expected='may not carry these instructions: RUN VOLUME' ;;
+            142) insert_builder_instruction "$rustdocker" \
+                    'FROM golang:1.27.3-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4 AS rust-dev-helper'
+                expected='parent pin: FROM shape: rust-dev must carry exactly the helper stage and the parent' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac
