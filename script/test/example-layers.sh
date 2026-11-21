@@ -940,12 +940,26 @@ self_test() {
                 echo 'ENV RUSTUP_TOOLCHAIN=1.98.1' >> "$rustdocker"
                 expected='RUSTUP_TOOLCHAIN must not be forced' ;;
             71)
-                # The verifier is the only RUN whose first line is exactly
-                # `RUN --network=none \`: the helper stage's carries its bind mount
-                # on the same line, and its own assertion is a different message.
-                awk '!stripped && /^RUN --network=none \\$/ {
-                        sub(/RUN --network=none/, "RUN"); stripped = 1
-                     } { print }' "$rustdocker" > "$SCRATCH/rewrite"
+                # Selected by the verifier's own bind, not by position or by the
+                # shape of its first line: a selector that could pick another RUN
+                # makes the verdict depend on what else the file contains.
+                awk -v bind='from=rust-dev-helper,source=/out/rust-dev-helper,target=/run/rust-verify/rust-dev-helper' '
+                    { lines[NR] = $0 }
+                    END {
+                        for (i = 1; i <= NR; i++) {
+                            if (lines[i] ~ /^RUN/) {
+                                start = i; j = i; instruction = lines[i]
+                                while (lines[j] ~ /\\$/ && j < NR) { j++; instruction = instruction "\n" lines[j] }
+                                if (index(instruction, bind) && !stripped) {
+                                    sub(/RUN --network=none/, "RUN", lines[start]); stripped = 1
+                                }
+                                for (k = start; k <= j; k++) print lines[k]
+                                i = j
+                            } else {
+                                print lines[i]
+                            }
+                        }
+                    }' "$rustdocker" > "$SCRATCH/rewrite"
                 cat "$SCRATCH/rewrite" > "$rustdocker"
                 expected='verifier must run with --network=none' ;;
             72) printf 'unexpected' > "$rusttool/.extra"; expected='unreviewed input: .extra' ;;

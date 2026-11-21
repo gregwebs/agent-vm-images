@@ -71,12 +71,14 @@ toolchain, in five links:
    same version, so MVS cannot raise a version in the root and make `avm-pin`
    link a different decoder than the image compiles.
 
-The compiler pin is a parent image like the base, so it is recorded in
-`images/parent-pins.json` and refreshed by
-`script/dev/refresh-parent-pins.sh golang-builder`. Its *version* is not a
-selection: the refresher resolves the tag the **root `go.mod` toolchain** names,
-so a compiler bump is a coordinated edit of `go.mod`, the inventory and the
-recipes, and link 3 fails until all three agree.
+The compiler pin is a parent image like the base: `images/parent-pins.json`
+carries its digest, its platform manifests and their reviewed provenance, and
+`script/dev/refresh-parent-pins.sh golang-builder` refreshes it. Its *version* is
+not a selection: the refresher derives the tag from the **root `go.mod`
+toolchain**, so a compiler bump is a coordinated edit of `go.mod`, the inventory
+and the recipe, and link 3 fails until all three agree. The build reads only those
+committed bytes — the recipe's digest and the pinned `FROM` — and resolves nothing
+at build time.
 
 Logic shared with `./internal` (OpenPGP, archive hashes) is duplicated
 deliberately. When agent-vm accepts named build contexts

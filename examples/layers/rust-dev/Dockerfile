@@ -4,10 +4,15 @@
 # agent-vm's Rust code inside the microVM (there is no launcher-side layering,
 # #259):
 #
-#   agent-vm image build --builder <host buildx builder> \
+#   agent-vm image build --builder NAME \
 #     --build-arg BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de \
 #     --tag agent-vm-rust-dev:dev examples/layers/rust-dev
 #   agent-vm claude --image agent-vm-rust-dev:dev
+#
+# NAME is any host daemon-backed buildx builder that supports multi-stage
+# Dockerfiles, `RUN --network=none` and an OCI export: the first stage compiles the
+# layer's own helper module. This repository selects no builder, so the name is the
+# caller's.
 #
 # It provides the toolchain agent-vm pins (its rust-toolchain.toml) with clippy and
 # rustfmt, the musl target a vendored agentd/msb build needs, the native libraries
