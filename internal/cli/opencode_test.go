@@ -208,3 +208,74 @@ func TestOpencodeVerifyRefusesAnEmptySlot(t *testing.T) {
 		t.Fatalf("stderr = %q", stderr)
 	}
 }
+
+// TestOpencodeInstallRefusesAnEmptyPath is the witness for `required` plus the empty
+// check on the two install verbs: every path they create or execute is named, and an
+// empty one would address the caller's working directory instead of the container's.
+func TestOpencodeInstallRefusesAnEmptyPath(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		flag string
+		args []string
+	}{
+		{"--vendor", "--vendor", []string{"opencode-install", "--vendor", "", "--prefix", "/p", "--link", "/l", "--opencode-version", "v2.0.29", "--status-dir", "/s"}},
+		{"--prefix", "--prefix", []string{"opencode-install", "--vendor", "/v", "--prefix", "", "--link", "/l", "--opencode-version", "v2.0.29", "--status-dir", "/s"}},
+		{"--link", "--link", []string{"opencode-install", "--vendor", "/v", "--prefix", "/p", "--link", "", "--opencode-version", "v2.0.29", "--status-dir", "/s"}},
+		{"--status-dir", "--status-dir", []string{"opencode-install", "--vendor", "/v", "--prefix", "/p", "--link", "/l", "--opencode-version", "v2.0.29", "--status-dir", ""}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			status, stdout, stderr := runOpencode(t, testCase.args...)
+			if status != 2 {
+				t.Fatalf("status = %d, want 2 (%q)", status, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("the refusal wrote %q to stdout", stdout)
+			}
+			if want := opencode.EmptyFlagUsage("opencode-install", testCase.flag) + "\n"; stderr != want {
+				t.Fatalf("stderr = %q, want %q", stderr, want)
+			}
+		})
+	}
+}
+
+func TestOpencodeInstallPluginsRefusesAnEmptyPath(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		flag string
+		args []string
+	}{
+		{"--contract", "--contract", []string{"opencode-install-plugins", "--contract", "", "--source", "/s", "--prefix", "/p"}},
+		{"--source", "--source", []string{"opencode-install-plugins", "--contract", "/c", "--source", "", "--prefix", "/p"}},
+		{"--prefix", "--prefix", []string{"opencode-install-plugins", "--contract", "/c", "--source", "/s", "--prefix", ""}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			status, stdout, stderr := runOpencode(t, testCase.args...)
+			if status != 2 {
+				t.Fatalf("status = %d, want 2 (%q)", status, stderr)
+			}
+			if stdout != "" {
+				t.Fatalf("the refusal wrote %q to stdout", stdout)
+			}
+			if want := opencode.EmptyFlagUsage("opencode-install-plugins", testCase.flag) + "\n"; stderr != want {
+				t.Fatalf("stderr = %q, want %q", stderr, want)
+			}
+		})
+	}
+}
+
+// TestOpencodeInstallNeedsTheSlot: the entry point's `${:?}` is the shell's status 2,
+// and a direct caller of the verb gets the same status and the same text.
+func TestOpencodeInstallNeedsTheSlot(t *testing.T) {
+	status, stdout, stderr := runOpencode(t,
+		"opencode-install", "--vendor", "/v", "--prefix", "/p", "--link", "/l",
+		"--opencode-version", "", "--status-dir", "/s")
+	if status != 2 {
+		t.Fatalf("status = %d, want 2 (%q)", status, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("the refusal wrote %q to stdout", stdout)
+	}
+	if want := "install-opencode.sh needs AGENT_VM_VERSION_OPENCODE\n"; stderr != want {
+		t.Fatalf("stderr = %q, want %q", stderr, want)
+	}
+}

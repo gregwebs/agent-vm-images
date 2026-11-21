@@ -617,14 +617,16 @@ with #42 (dsh moved in #51, below). Ownership covers:
 - Runtime payloads: `images/tools/opencode/opencode.json`,
   `images/tools/opencode/plugins/{package.json,pnpm-lock.yaml,pnpm-workspace.yaml,index.js}`.
 - OpenCode build/maintenance helpers:
-  `images/tools/opencode/{install-opencode.sh,install-opencode-plugins.sh}`,
+  `images/tools/opencode/{install-opencode.sh,install-opencode-plugins.sh}` as entry
+  points,
   `check-claude-runtime.mjs`, `probe-opencode.py`, `check-claude-payload.mjs`,
   `plugins/{check-lock.mjs,pin-pnpm-inputs.mjs,upgrade-plugins.sh}` and extended `README.md`.
   `verify-opencode.sh`, `verify-opencode-plugins.sh` and `plugins/prepare-lock.sh`
   are entry points only; the policy is `recipe-contract opencode-verify`,
   `opencode-verify-plugins` and `opencode-prepare-lock` in `./internal/opencode`
-  (ADR 0017, #218). The `.mjs` programs stay Node because they are the plugin's own
-  runtime. `probe-opencode.py` also stays, as Python: it is the program the released
+  (ADR 0017, #218). `install-opencode.sh` and `install-opencode-plugins.sh` are entry
+  points too, over `opencode-install` and `opencode-install-plugins` (#219). The
+  `.mjs` programs stay Node because they are the plugin's own runtime. `probe-opencode.py` also stays, as Python: it is the program the released
   image's self-certification renders, and that guest payload has no network, no
   mounts and no composed helper (ADR 0017, #185).
 - Shared build-only helpers: `images/recipe-contract/run-pnpm.sh` and the composed

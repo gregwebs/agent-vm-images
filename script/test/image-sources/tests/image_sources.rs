@@ -9391,16 +9391,28 @@ fn opencode_pnpm_inputs_are_pinned_bytes() {
         manifest["packageManager"],
         format!("pnpm@{}", pnpm["version"].as_str().unwrap())
     );
+    // The frozen install argv moved with the policy (#219): the entry point names the
+    // container's environment and the helper owns what the manager runs, so the two
+    // lists are now checked where each of them lives.
     let install = read_text("images/tools/opencode/install-opencode-plugins.sh");
     for required in [
-        "/usr/local/bin/pnpm",
-        "--frozen-lockfile --prod --no-optional",
-        "--ignore-scripts --ignore-pnpmfile --pm-on-fail=error",
-        "--package-import-method=copy",
-        "run-pnpm.sh",
-        "recipe-contract\" pnpm-environment",
+        "opencode-install-plugins",
+        "--contract",
+        "--source",
+        "--prefix",
     ] {
         assert!(install.contains(required), "missing {required}");
+    }
+    let install_policy = read_text("internal/opencode/install_plugins.go");
+    for required in [
+        "\"/usr/local/bin/pnpm\"",
+        "\"--frozen-lockfile\", \"--prod\", \"--no-optional\",",
+        "\"--ignore-scripts\", \"--ignore-pnpmfile\", \"--pm-on-fail=error\",",
+        "\"--package-import-method=copy\"",
+        "run-pnpm.sh",
+        "\"pnpm-environment\"",
+    ] {
+        assert!(install_policy.contains(required), "missing {required}");
     }
     for forbidden in [
         "npm ci",
@@ -9411,6 +9423,7 @@ fn opencode_pnpm_inputs_are_pinned_bytes() {
         "trust-policy=off",
     ] {
         assert!(!install.contains(forbidden), "forbidden {forbidden}");
+        assert!(!install_policy.contains(forbidden), "forbidden {forbidden}");
     }
     for file in [
         "images/tools/opencode/opencode.json",

@@ -26,9 +26,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONTRACT="$REPO_ROOT/images/recipe-contract"
 RUN_INSTALL="$CONTRACT/run-install.sh"
-# The codex installer and hook call `"$AGENT_VM_CONTRACT_DIR/recipe-contract"`
-# (ADR 0017), so those cases need the composed directory: the helper binary plus
-# the shell wrappers it ships with. Built once, before any restricted env -i.
+# The codex and opencode installers and their owning hooks call
+# `"$AGENT_VM_CONTRACT_DIR/{recipe-contract,download.sh}"` (ADR 0017, #219), so those
+# cases need the composed directory: the helper binary plus the shell wrappers it ships
+# with. Built once, before any restricted env -i.
 HOST_CONTRACT="$(bash "$REPO_ROOT/script/build/recipe-contract.sh" --native)/out"
 CODEX_VENDOR="$REPO_ROOT/images/tools/codex/vendor"
 OPENCODE_VENDOR="$REPO_ROOT/images/tools/opencode/vendor"
@@ -414,7 +415,7 @@ run_opencode() { # $1 slot, $2 vendor dir
         "PATH=$CASE/bin:/usr/bin:/bin"
         "HOME=$CASE"
         "TMPDIR=$CASE/tmp"
-        "AGENT_VM_CONTRACT_DIR=$CONTRACT"
+        "AGENT_VM_CONTRACT_DIR=$HOST_CONTRACT"
         "AGENT_VM_VENDOR_DIR=$2"
         "AGENT_VM_OPENCODE_PREFIX=$CASE/prefix"
         "AGENT_VM_OPENCODE_LINK=$CASE/link/opencode"

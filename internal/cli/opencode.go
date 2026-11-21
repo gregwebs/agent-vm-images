@@ -95,6 +95,109 @@ func (p *process) runOpencodePrepareLock(args []string) int {
 	return 0
 }
 
+// opencodeInstallUsage is the owning install hook for the opencode layer.
+type opencodeInstallUsage struct {
+	Vendor          string `arg:"--vendor,required" placeholder:"DIR" help:"the read-only vendor mount holding install.sh"`
+	Prefix          string `arg:"--prefix,required" placeholder:"DIR" help:"the installer's HOME"`
+	Link            string `arg:"--link,required" placeholder:"PATH" help:"the command link this layer publishes"`
+	OpencodeVersion string `arg:"--opencode-version,required" placeholder:"vEXACT" help:"the layer's requested opencode slot"`
+	Receipt         string `arg:"--receipt" placeholder:"PATH" help:"the transport receipt the vendored installer writes"`
+	SoftFail        string `arg:"--soft-fail" placeholder:"VALUE" help:"non-empty allows softening a classified transport failure"`
+	StatusDir       string `arg:"--status-dir,required" placeholder:"DIR" help:"the install-status directory"`
+}
+
+func (opencodeInstallUsage) Description() string {
+	return "Install the reviewed opencode command and publish the layer's link."
+}
+
+func (p *process) runOpencodeInstall(args []string) int {
+	var usage opencodeInstallUsage
+	parser, err := p.argParser("recipe-contract opencode-install", &usage)
+	if err != nil {
+		return p.reportSynchronousFailure(err)
+	}
+	if err := parser.Parse(args); err != nil {
+		return p.argFailure(parser, err)
+	}
+	// The prefix, the link and the record directory are created or written, so an
+	// empty one would address the caller's working directory instead of the
+	// container's. The entry point applies the container defaults and can never pass
+	// an empty value; a direct caller can.
+	if flag := emptyRequiredPath(
+		requiredPath{"--vendor", usage.Vendor},
+		requiredPath{"--prefix", usage.Prefix},
+		requiredPath{"--link", usage.Link},
+		requiredPath{"--status-dir", usage.StatusDir},
+	); flag != "" {
+		return p.opencodeFailure(&opencode.Usage{Text: opencode.EmptyFlagUsage("opencode-install", flag)})
+	}
+	options := opencode.InstallOptions{
+		Vendor:    usage.Vendor,
+		Prefix:    usage.Prefix,
+		Link:      usage.Link,
+		Slot:      usage.OpencodeVersion,
+		Receipt:   usage.Receipt,
+		SoftFail:  usage.SoftFail,
+		StatusDir: usage.StatusDir,
+		Out:       p.streams.Out,
+		Err:       p.streams.Err,
+	}
+	if err := opencode.Install(context.Background(), options); err != nil {
+		return p.opencodeFailure(err)
+	}
+	return 0
+}
+
+// opencodeInstallPluginsUsage is the installed-plugin install hook.
+type opencodeInstallPluginsUsage struct {
+	Contract      string `arg:"--contract,required" placeholder:"DIR" help:"the composed helper directory"`
+	Source        string `arg:"--source,required" placeholder:"DIR" help:"the OpenCode build mount holding plugins/prepare-lock.sh"`
+	Prefix        string `arg:"--prefix,required" placeholder:"DIR" help:"the installed plugin directory"`
+	FixtureRoot   string `arg:"--fixture-root" placeholder:"DIR" help:"authorize a non-production prefix"`
+	FixturePnpm   string `arg:"--fixture-pnpm" placeholder:"PATH" help:"the manager a fixture prefix runs"`
+	PluginVersion string `arg:"--plugin-version" placeholder:"EXACT" help:"the layer's requested plugin slot"`
+}
+
+func (opencodeInstallPluginsUsage) Description() string {
+	return "Install the reviewed OpenCode plugin inputs from the committed lock."
+}
+
+func (p *process) runOpencodeInstallPlugins(args []string) int {
+	var usage opencodeInstallPluginsUsage
+	parser, err := p.argParser("recipe-contract opencode-install-plugins", &usage)
+	if err != nil {
+		return p.reportSynchronousFailure(err)
+	}
+	if err := parser.Parse(args); err != nil {
+		return p.argFailure(parser, err)
+	}
+	// The contract and the source are executed, so presence is not enough: an empty
+	// --contract runs `recipe-contract pnpm-environment` from the caller's working
+	// directory, and an empty --source runs whatever `plugins/prepare-lock.sh`
+	// resolves there.
+	if flag := emptyRequiredPath(
+		requiredPath{"--contract", usage.Contract},
+		requiredPath{"--source", usage.Source},
+		requiredPath{"--prefix", usage.Prefix},
+	); flag != "" {
+		return p.opencodeFailure(&opencode.Usage{Text: opencode.EmptyFlagUsage("opencode-install-plugins", flag)})
+	}
+	options := opencode.InstallPluginsOptions{
+		Contract:      usage.Contract,
+		Source:        usage.Source,
+		Prefix:        usage.Prefix,
+		FixtureRoot:   usage.FixtureRoot,
+		FixturePnpm:   usage.FixturePnpm,
+		PluginVersion: usage.PluginVersion,
+		Out:           p.streams.Out,
+		Err:           p.streams.Err,
+	}
+	if err := opencode.InstallPlugins(context.Background(), options); err != nil {
+		return p.opencodeFailure(err)
+	}
+	return 0
+}
+
 // opencodeVerifyUsage is the installed-command gate for the opencode layer.
 type opencodeVerifyUsage struct {
 	Prefix          string `arg:"--prefix,required" placeholder:"DIR" help:"the installer's HOME holding .opencode"`

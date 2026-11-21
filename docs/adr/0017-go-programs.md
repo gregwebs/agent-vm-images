@@ -112,9 +112,9 @@ passing it explicitly is [#215](https://github.com/gregwebs/agent-vm-images/issu
    behaviour change.
 1. Pin pairs, each verifier together with its pin writer: artifact, Claude,
    Codex, agy.
-2. dsh, OpenCode and the pnpm bootstrap. What is left of this item is OpenCode's
-   two install entry points ([#219](https://github.com/gregwebs/agent-vm-images/issues/219));
-   `probe-opencode.py` is not part of it, for the reason recorded below.
+2. dsh, OpenCode and the pnpm bootstrap. OpenCode's two install entry points
+   ([#219](https://github.com/gregwebs/agent-vm-images/issues/219)) complete the
+   item; `probe-opencode.py` is not part of it, for the reason recorded below.
 3. The pnpm project module and Pi. This rescopes #62–#65 to Go instead of
    writing Python that would be deleted.
 4. Example layers.
@@ -242,6 +242,28 @@ first PATH candidate that exists is the one run, so a present-but-unusable
 `AGENT_VM_CONTRACT_DIR` still locates the helper for all three entry points, but it
 is a subcommand flag only for `opencode-prepare-lock`, the one verb that still runs
 a shared envelope (`run-pnpm.sh`).
+
+**The OpenCode install hooks are Go (#219).** `recipe-contract opencode-install` and
+`opencode-install-plugins` replace the policy in
+`images/tools/opencode/{install-opencode.sh,install-opencode-plugins.sh}`, which remain
+as entry points. Neither addresses the network itself: the vendored installer keeps
+OpenCode's own transport, and the plugins hook runs the manager through the composed
+`run-pnpm.sh`, so build egress still has one owner for the download and the manager's
+own for its graph.
+
+Two resolution differences are deliberate. `install-opencode-plugins.sh` names the
+helper through `AGENT_VM_CONTRACT_DIR`, like the three #218 entry points, because that
+is what the build and its fixtures export. `install-opencode.sh` cannot: its black-box
+harness runs it with a cleared environment, and an owning hook that no host checkout
+could locate would be untestable there. It therefore falls back, after
+`AGENT_VM_CONTRACT_DIR` and the fixed build mount, to the composed directory the
+native adapter publishes beside the checkout. Nothing is built at install time; a
+checkout without that build refuses.
+
+One diagnostic changes, deliberately: a receipt with more than one classified
+`transport download` line used to join the third field of every line into the absence
+record, and now the first classified line names the code. `download.sh` truncates the
+receipt and writes exactly one line, so no build can reach the difference.
 
 `images/tools/dsh/upgrade-dsh.sh` is **not** ported. Its load-bearing surface is
 the five-file publication transaction with signal-inclusive rollback, which lives

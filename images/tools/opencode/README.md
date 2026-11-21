@@ -1,16 +1,16 @@
 # OpenCode layer
 
-`vendor/` holds the reviewed installer snapshot and patch; `install-opencode.sh`
-is the owning hook and `verify-opencode.sh` the build gate. The
+`vendor/` holds the reviewed installer snapshot and patch. The
 [installer documentation](../README.md#trust-limits-and-reviewed-locks) is
 canonical for that contract. This file covers runtime shape.
 
-`verify-opencode.sh`, `verify-opencode-plugins.sh` and
-`plugins/prepare-lock.sh` are entry points: each names its environment as flags and
-execs `recipe-contract`, so the path state, the exact report, the reviewed bytes,
-the payload gates and the access audits live once, in `./internal/opencode`
-(ADR 0017, #218). `plugins/upgrade-plugins.sh` keeps its policy because its
-publication transaction is shared with the other upgrades.
+`install-opencode.sh`, `install-opencode-plugins.sh`, `verify-opencode.sh`,
+`verify-opencode-plugins.sh` and `plugins/prepare-lock.sh` are entry points: each
+resolves the composed helper and names its environment as flags, so the slot grammar,
+the softening rule, the fixture-root authorization, the reviewed bytes, the payload
+gates and the access audits live once, in `./internal/opencode` (ADR 0017, #218,
+#219). `plugins/upgrade-plugins.sh` keeps its policy because its publication
+transaction is shared with the other upgrades.
 
 ## One shared background server per HOME
 

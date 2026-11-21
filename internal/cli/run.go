@@ -102,6 +102,10 @@ func (p *process) dispatch(args []string, env Environment) int {
 		return p.runOpencodePrepareLock(args[1:])
 	case "opencode-verify":
 		return p.runOpencodeVerify(args[1:])
+	case "opencode-install":
+		return p.runOpencodeInstall(args[1:])
+	case "opencode-install-plugins":
+		return p.runOpencodeInstallPlugins(args[1:])
 	case "opencode-verify-plugins":
 		return p.runOpencodeVerifyPlugins(args[1:])
 	case "dsh-lock-update":
