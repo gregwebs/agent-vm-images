@@ -348,7 +348,8 @@ rollback contract. The transaction moves once, when all three upgrades do.
 - **Go source as a second named context.** This needs a composed staging
   directory on every build, with no benefit over passing the compiled binary.
 - **Building examples from the repository root (`-f examples/layers/X/…`).**
-  Rejected: it breaks the documented one-command `agent-vm build`.
+  Rejected: it breaks the documented one-command `agent-vm image build` of an
+  example directory.
 - **A ratchet guard on remaining `.py` files.** Not adopted; review is enough.
 
 ## Consequences
