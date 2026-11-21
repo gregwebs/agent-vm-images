@@ -61,9 +61,6 @@ func InstallPlugins(ctx context.Context, options InstallPluginsOptions) (failure
 	if err != nil {
 		return err
 	}
-	if err := refuseRuntimeInjection(); err != nil {
-		return err
-	}
 	manager := managerSelection(prefix, options.FixturePnpm)
 	// The empty name prefix is the predecessor's `mktemp -d`: the invocation's own
 	// scratch, named by the system and removed below.
@@ -95,6 +92,13 @@ func InstallPlugins(ctx context.Context, options InstallPluginsOptions) (failure
 	// A signal carries 130/143/129 out of this hook, and it is applied after the
 	// cleanup above, exactly as the EXIT trap reported it.
 	defer func() { failure = interruptedOr(watcher, failure) }()
+
+	// The preload guard is registered after the cleanup and before the first child, as
+	// the predecessor's trap was: an injected module refuses the run, and refusing with
+	// a partial install's node_modules left behind was the one difference.
+	if err := refuseRuntimeInjection(); err != nil {
+		return err
+	}
 
 	// The guard runs from the composed directory, which is why the entry point names
 	// it: the build, the CI leg and the developer path must refuse the same ambient
@@ -192,10 +196,9 @@ func installArgv(contract, work, manager string) []string {
 
 // childEnvironment is this process's environment as every child of this hook sees it.
 //
-// The two developer-only seams are removed rather than forwarded: only the developer
-// path may re-pin, and no image build can reach it. The build's own soft-fail mode is
-// cleared for the children the way `export AGENT_INSTALL_SOFT_FAIL=` did, because
-// nothing below this hook may decide to soften.
+// Three variables are removed rather than forwarded: the two developer-only seams,
+// because only the developer path may re-pin and no image build can reach it, and the
+// build's own soft-fail mode, because nothing below this hook may decide to soften.
 //
 // The private HOME and the four XDG roots are applied only once an invocation has
 // created them: the environment guard runs before that, so it sees the caller's HOME,
@@ -214,7 +217,6 @@ func childEnvironment(work string) []string {
 		}
 		environment = append(environment, entry)
 	}
-	environment = append(environment, "AGENT_INSTALL_SOFT_FAIL=")
 	if work == "" {
 		return environment
 	}

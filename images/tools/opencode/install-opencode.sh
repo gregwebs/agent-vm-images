@@ -9,29 +9,14 @@
 # flags.
 #
 # Resolving the helper is the entry point's own step, so it happens before the guards
-# the driver applies. A directory the caller names is used as it stands: the build's
-# mount is what the recipe passes, and a value that holds no helper is refused rather
-# than quietly replaced by this checkout's build. With nothing named, the fixed build
-# mount is the other base entry points' default, and a host checkout has no mount at
-# all -- so the composed directory its own adapter publishes is named last. Nothing is
-# built here: a checkout without that build refuses.
+# the driver applies. The build mounts the composed directory and names it in
+# AGENT_VM_CONTRACT_DIR; the fixed mount is the default the other base entry points
+# use. There is deliberately no third step: a directory the caller names is used as it
+# stands, so a value that holds no helper is refused rather than replaced by a guess,
+# and a host checkout names the directory its own adapter published.
 set -eu
 
-self_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
-contract="${AGENT_VM_CONTRACT_DIR:-}"
-if [ -z "$contract" ]; then
-    contract=/tmp/recipe-contract
-    if [ ! -x "$contract/recipe-contract" ]; then
-        case "$(uname -m)" in
-            x86_64 | amd64) arch=amd64 ;;
-            arm64 | aarch64) arch=arm64 ;;
-            *) arch=unsupported ;;
-        esac
-        os=$(uname -s | tr '[:upper:]' '[:lower:]')
-        contract="$self_dir/../../../target/recipe-contract/$os-$arch/out"
-    fi
-fi
-helper="$contract/recipe-contract"
+helper="${AGENT_VM_CONTRACT_DIR:-/tmp/recipe-contract}/recipe-contract"
 [ -x "$helper" ] || {
     echo "install-opencode.sh: no recipe-contract helper at $helper" >&2
     exit 1

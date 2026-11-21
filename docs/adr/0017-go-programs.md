@@ -251,19 +251,23 @@ OpenCode's own transport, and the plugins hook runs the manager through the comp
 `run-pnpm.sh`, so build egress still has one owner for the download and the manager's
 own for its graph.
 
-Two resolution differences are deliberate. `install-opencode-plugins.sh` names the
-helper through `AGENT_VM_CONTRACT_DIR`, like the three #218 entry points, because that
-is what the build and its fixtures export. `install-opencode.sh` cannot: its black-box
-harness runs it with a cleared environment, and an owning hook that no host checkout
-could locate would be untestable there. It therefore falls back, after
-`AGENT_VM_CONTRACT_DIR` and the fixed build mount, to the composed directory the
-native adapter publishes beside the checkout. Nothing is built at install time; a
-checkout without that build refuses.
+Both entry points take the helper from `AGENT_VM_CONTRACT_DIR`, then the fixed build
+mount, and refuse otherwise. There is no third step: a directory the caller names is
+used as it stands, so a checkout names the composed directory its own adapter
+published and a stale mount cannot decide which binary a gate tested. The OpenCode
+black-box harness consequently names `AGENT_VM_CONTRACT_DIR` for the install hook the
+way it already did for the gate.
+
+Two rules were deleted rather than ported, because they could not decide anything: an
+empty receipt path was already unreadable, so it already failed classification, and a
+child environment that strips `AGENT_INSTALL_SOFT_FAIL` has nothing to clear by
+setting it to empty.
 
 One diagnostic changes, deliberately: a receipt with more than one classified
 `transport download` line used to join the third field of every line into the absence
 record, and now the first classified line names the code. `download.sh` truncates the
-receipt and writes exactly one line, so no build can reach the difference.
+receipt and writes exactly one line, so no build can reach the difference; where the
+predecessor joined `$3`, this takes the first matching line.
 
 `images/tools/dsh/upgrade-dsh.sh` is **not** ported. Its load-bearing surface is
 the five-file publication transaction with signal-inclusive rollback, which lives

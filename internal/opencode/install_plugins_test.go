@@ -195,9 +195,21 @@ func TestInstallPluginsRefusesPreload(t *testing.T) {
 		t.Run(key, func(t *testing.T) {
 			tree := newPluginsInstallFixture(t)
 			t.Setenv(key, "/tmp/injected")
+			// A partial tree from an earlier attempt: the predecessor's EXIT trap was
+			// registered before this guard, so refusing still removed it.
+			partial := filepath.Join(tree.prefix, "node_modules", ".pnpm", "fixture")
+			if err := os.MkdirAll(filepath.Dir(partial), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(partial, []byte("partial\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			_, _, err := tree.run(t, tree.options())
 			mustRefusal(t, err, "manager runtime overrides are unsupported")
 			tree.expectNoChild(t)
+			if _, err := os.Stat(filepath.Join(tree.prefix, "node_modules")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("a refused run left a partial node_modules: %v", err)
+			}
 		})
 	}
 }

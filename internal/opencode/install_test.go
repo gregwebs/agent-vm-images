@@ -296,6 +296,47 @@ func TestInstallSoftenTakesAllThree(t *testing.T) {
 	})
 }
 
+// TestPublishPermissionsDoesNotFollowLinks is the `chmod -R a+rX` boundary: a symlink
+// inside the payload must not change the mode of what it points at. os.Chmod follows
+// one where `chmod -R` never did, so the skip is the rule and not a lint preference.
+func TestPublishPermissionsDoesNotFollowLinks(t *testing.T) {
+	outside := t.TempDir()
+	target := filepath.Join(outside, "secret")
+	if err := os.WriteFile(target, []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "payload")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(root, "readme")
+	if err := os.WriteFile(inside, []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishPermissions(root); err != nil {
+		t.Fatalf("publishPermissions = %v", err)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("a symlink changed the mode of %s (outside the payload) to %04o", target, info.Mode().Perm())
+	}
+	// The payload itself is still published, so the skip is not a no-op.
+	info, err = os.Stat(inside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Fatalf("payload file mode = %04o, want 0644", info.Mode().Perm())
+	}
+}
+
 // TestTransportCodeReadsTheClassifiedLine: the receipt's own grammar decides, and the
 // code is the third field of that line.
 func TestTransportCodeReadsTheClassifiedLine(t *testing.T) {

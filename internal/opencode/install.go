@@ -146,7 +146,7 @@ func installEnvironment(prefix, numeric string) []string {
 // receipt that classifies it, and a non-empty AGENT_INSTALL_SOFT_FAIL. Anything else
 // stays hard, whatever the receipt says.
 func softAbsence(status int, options InstallOptions) (string, bool) {
-	if status != classifiedTransportStatus || options.Receipt == "" || options.SoftFail == "" {
+	if status != classifiedTransportStatus || options.SoftFail == "" {
 		return "", false
 	}
 	return transportCode(options.Receipt)
@@ -220,13 +220,14 @@ func publishPermissions(root string) error {
 		if err != nil {
 			return err
 		}
-		mode := info.Mode().Perm()
-		mode |= 0o444
+		// `chmod -R` never changed a symlink's target, and os.Chmod follows one, so a
+		// link inside the payload would reach a path the recipe does not own.
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		mode := info.Mode().Perm() | 0o444
 		if info.IsDir() || mode&0o111 != 0 {
 			mode |= 0o111
-		}
-		if mode == info.Mode().Perm() {
-			return nil
 		}
 		return os.Chmod(path, mode)
 	})
