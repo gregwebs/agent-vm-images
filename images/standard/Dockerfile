@@ -44,6 +44,27 @@ RUN --mount=type=bind,source=base-inputs.sha256,target=/tmp/base-source/base-inp
     --mount=type=bind,source=verify-base-inputs.sh,target=/tmp/base-source/verify-base-inputs.sh,ro \
     sh /tmp/base-source/verify-base-inputs.sh /tmp/base-source verify /opt/agent-vm/base/source-identity
 
+# The guest's interactive shells are shared state: HOME is the caller's mount, so
+# the defaults every session should see live in the system rc files, and a
+# user-owned ~/.bashrc or ~/.zshrc still wins. zsh and bash-completion are
+# official Debian packages (floating distro input, no third-party source); the
+# reviewed blocks are appended rather than replacing the distro files, so their
+# key bindings and command-not-found helper survive. What a person gets is
+# certified by behavior, not by the presence of a file. Neither shell contacts a
+# host at runtime, so this component declares no network request (ADR 0014).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        zsh \
+        bash-completion \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=bind,source=standard/shell/bash.bashrc,target=/tmp/shell/bash.bashrc,ro \
+    --mount=type=bind,source=standard/shell/zshrc,target=/tmp/shell/zshrc,ro \
+    --mount=type=bind,source=standard/verify-shell.sh,target=/tmp/shell/verify-shell.sh,ro \
+    cat /tmp/shell/bash.bashrc >> /etc/bash.bashrc \
+ && cat /tmp/shell/zshrc >> /etc/zsh/zshrc \
+ && sh /tmp/shell/verify-shell.sh
+
 # dsh
 ARG AGENT_VERSION_DSH=
 # Compatibility assertion only; base owns the pnpm selection and launcher.
