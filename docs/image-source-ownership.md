@@ -650,6 +650,24 @@ suites, Rust source guards, egress addon/selections, release selection plumbing,
 rendered guest probe and explicitly enumerated contracts/native CI remain their
 existing owners. No executable maintenance helper ships in the image.
 
+## Guest shell defaults
+
+The standard image owns the interactive shell a person gets; the base building
+block and its committed input manifest are unchanged. zsh and bash-completion
+are official Debian packages (floating distro input), so no new pin or writer
+owns them.
+
+- Runtime payload: the reviewed blocks `images/standard/shell/{bash.bashrc,zshrc}`,
+  appended by `images/standard/Dockerfile` to `/etc/bash.bashrc` and
+  `/etc/zsh/zshrc`. The guest HOME is the caller's mount, so a user-level file
+  cannot be the image's. Appending keeps each distro file's key bindings and
+  command-not-found helper, and a user-owned `~/.bashrc`/`~/.zshrc` is still read
+  after the system file.
+- Build-only certification: `images/standard/verify-shell.sh`, bind-mounted, never
+  COPYed. It probes both shells interactively under a scratch HOME, so a block the
+  shell never reaches, a moved append, a lost completion or a replaced history
+  fails the build instead of shipping. `script/test/standard-image.sh` adds the
+  finished-image presence checks.
 
 ## dsh pnpm migration (#51, PR 2 of 4 for #42)
 

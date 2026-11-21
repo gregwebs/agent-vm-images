@@ -2390,7 +2390,7 @@ test "$(pnpm --version)" = 11.11.0
 for tool in dsh pi codex opencode claude copilot agy; do if command -v "$tool"; then exit 1; fi; done
 test ! -e /usr/local/bin/pi; test ! -e /opt/agent-vm/pi; test ! -e /opt/agent-vm/pi-extensions' || fail 'base coding-agent absence/pnpm checks failed'
 fi
-run_with_watchdog 180 docker_run --rm --platform "$platform" --network none "$STANDARD_IMAGE" bash -c 'set -euo pipefail; bash --version >/dev/null; node --version; python3 --version; zellij --version' || fail 'base facilities lost'
+run_with_watchdog 180 docker_run --rm --platform "$platform" --network none "$STANDARD_IMAGE" bash -c 'set -euo pipefail; bash --version >/dev/null; zsh --version >/dev/null; grep -q "agent-vm interactive defaults" /etc/bash.bashrc; grep -q "agent-vm interactive defaults" /etc/zsh/zshrc; node --version; python3 --version; zellij --version' || fail 'base facilities lost'
 for tool in codex opencode claude copilot agy dsh pi; do audit_image "$STANDARD_IMAGE" "$tool" 0; done
 check_locks "$STANDARD_IMAGE"
 audit_opencode_plugins "$STANDARD_IMAGE"

@@ -7,7 +7,8 @@ Editable Docker sources, independent of the agent-vm launcher:
   utilities, zellij and pinned pnpm. No coding-agent CLI or fixed guest account.
 - **Standard:** the base plus dsh, Pi, Codex, OpenCode, Claude, Copilot and agy;
   inherited base pnpm and Pi's two image-owned extension packages (the Claude
-  bridge and the Antigravity provider) are also mandatory.
+  bridge and the Antigravity provider) are also mandatory, as are zsh and the
+  image's own interactive shell defaults for Bash and zsh.
 - **Examples:** user-owned Dockerfiles built from the base or the released standard image; see [Examples](#examples).
 
 ```text
@@ -185,6 +186,10 @@ Ordinary user-owned Dockerfiles; each README is the canonical build guide.
 
 Scripts installed outside HOME survive HOME mounts. Use non-login `bash -c`
 for agent commands: `bash -lc` can reset the image PATH through `/etc/profile`.
+The interactive defaults for Bash and zsh are the reviewed blocks in
+`images/standard/shell/`, appended to `/etc/bash.bashrc` and `/etc/zsh/zshrc`
+because the guest HOME is the caller's mount. Non-interactive shells read
+neither file, and a user's own `~/.bashrc` or `~/.zshrc` is read after them.
 
 - [Pinned parent images and the apt exception](docs/image-input-policy.md)
 - [Committed base-input manifest decision](docs/adr/0005-repository-base-identity.md)

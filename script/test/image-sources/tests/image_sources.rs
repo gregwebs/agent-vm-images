@@ -8876,6 +8876,47 @@ fn check_pi_source_block(active: &str) -> Result<(), String> {
     Ok(())
 }
 
+// The shell defaults are a product behavior, so the recipe must install both
+// packages, append one reviewed block per shell and certify what a session reads.
+fn check_shell_defaults(active: &str) -> Result<(), String> {
+    let installs = active
+        .lines()
+        .filter(|line| line.contains("apt-get install"))
+        .collect::<Vec<_>>();
+    // Any apt step may carry the packages: the gate is about what gets installed,
+    // not about which instruction is first in the recipe.
+    for package in ["zsh", "bash-completion"] {
+        if !installs
+            .iter()
+            .any(|line| line.split_whitespace().any(|token| token == package))
+        {
+            return Err(format!("shell install misses {package}"));
+        }
+    }
+    // Both shells get one reviewed block appended to the distro file, and the
+    // blocks are build-only inputs: a COPY would ship the block as a second,
+    // never-read copy.
+    for (block, append) in [
+        ("bash.bashrc", ">> /etc/bash.bashrc"),
+        ("zshrc", ">> /etc/zsh/zshrc"),
+    ] {
+        if active.matches(append).count() != 1 {
+            return Err(format!("shell defaults must be appended once: {append}"));
+        }
+        let source = format!("source=standard/shell/{block}");
+        if !active.contains(&source) {
+            return Err(format!("missing shell block mount: {source}"));
+        }
+    }
+    if active.contains("COPY standard/shell/") {
+        return Err("a shell block is COPYed into the layer".into());
+    }
+    if !active.contains("sh /tmp/shell/verify-shell.sh") {
+        return Err("missing shell certification".into());
+    }
+    Ok(())
+}
+
 // Narrow presence checks over active continued instructions, not a layer parser.
 fn check_standard_blocks(text: &str) -> Result<(), String> {
     let active = text
@@ -8903,6 +8944,7 @@ fn check_standard_blocks(text: &str) -> Result<(), String> {
     }
     check_dsh_source_block(&active)?;
     check_pi_source_block(&active)?;
+    check_shell_defaults(&active)?;
     if !active.contains("sh /tmp/verify-standard.sh") {
         return Err("missing final gate".into());
     }
@@ -8946,6 +8988,20 @@ fn standard_blocks_and_mutations() {
         }
     }
     assert!(check_standard_blocks(&text.replace("sh /tmp/verify-standard.sh", "true")).is_err());
+    // The shell defaults are one append per shell from a reviewed block, certified
+    // by behavior: each half of that is separately load-bearing.
+    for mutation in [
+        ">> /etc/bash.bashrc",
+        ">> /etc/zsh/zshrc",
+        "source=standard/shell/bash.bashrc",
+        "source=standard/shell/zshrc",
+        "sh /tmp/shell/verify-shell.sh",
+    ] {
+        assert!(
+            check_standard_blocks(&text.replace(mutation, "true")).is_err(),
+            "accepted shell-defaults mutation {mutation}"
+        );
+    }
     for mutation in [
         "true",
         "--mount=from=recipe-contract-bin,source=/missing,target=/tmp/recipe-contract,ro",
