@@ -3,26 +3,40 @@
 // ADR 0017 (example layers stay self-contained) makes this a module of its own,
 // compiled by the layer's pinned `golang:` stage and mounted into the RUN that
 // uses it: an example build has no `--build-context`, so nothing from the host or
-// from ./internal can reach it. Slice 1 of #187 moves the one verb no other
-// program imports; `check`, `install` and `verify-installed` follow in slices 2
-// and 3.
+// from ./internal can reach it. Slice 1 of #187 moved the one verb no other
+// program imports; this slice adds the two offline reads — `check` and
+// `verify-installed` — which only read committed bytes and installed state. The
+// install leg and the writer stay in Python (#231, #232); the Python loader stays
+// alive as the differential oracle.
 package main
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/alexflint/go-arg"
 
+	"github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/gpg"
 	"github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/kacheprobe"
+	"github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain"
 )
 
-// prefix is the one diagnostic prefix this binary shares with the Python script
-// it replaces: the verifier's log lines and the shell suites match on it.
+// prefix is the diagnostic prefix the kache-probe verb shares with the Python
+// script it replaced: the verifier's log lines and the shell suites match on it.
 const prefix = kacheprobe.Prefix
 
+// toolchainPrefix is the frozen prefix for the two verbs that move here from
+// `rust_toolchain.py`. The suites match `rust_toolchain: ` and the differential
+// oracle requires it on every refusal.
+const toolchainPrefix = "rust_toolchain"
+
 type arguments struct {
-	KacheProbe *kacheProbeCommand `arg:"subcommand:kache-probe" help:"decide a kache doctor --probe --json report"`
+	KacheProbe      *kacheProbeCommand      `arg:"subcommand:kache-probe" help:"decide a kache doctor --probe --json report"`
+	Check           *checkCommand           `arg:"subcommand:check" help:"verify the committed pin data offline"`
+	VerifyInstalled *verifyInstalledCommand `arg:"subcommand:verify-installed" help:"verify the committed pin data and the installed toolchain"`
+	LogLevel        string                  `arg:"--log-level" default:"warn" placeholder:"LEVEL" help:"debug, info, warn or error; diagnostics go to stderr"`
 	// The fixture grammar is embedded: in the shipped build the type is empty, so
 	// the parser has no fixture flag to accept or to refuse (see seams_shipped.go).
 	fixtureArguments
@@ -40,22 +54,59 @@ func (kacheProbeCommand) Description() string {
 	return "Refuse a kache doctor report that fails, or is missing a required finding."
 }
 
+type checkCommand struct {
+	InputDir string `arg:"positional,required" placeholder:"INPUT_DIR" help:"the committed pin directory"`
+	// A pointer, so `--expect-channel ''` is an assertion that fails rather than
+	// "unset": the source reader's argparse default is None and it compares an
+	// empty string like any other.
+	ExpectChannel *string `arg:"--expect-channel" placeholder:"EXACT" help:"assert this exact X.Y.Z channel"`
+}
+
+func (checkCommand) Description() string {
+	return "Verify the committed pin data offline."
+}
+
+type verifyInstalledCommand struct {
+	InputDir      string                 `arg:"positional,required" placeholder:"INPUT_DIR" help:"the committed pin directory"`
+	Arch          toolchain.Architecture `arg:"--arch,required" placeholder:"AMD64|ARM64" help:"the installed architecture"`
+	ExpectChannel string                 `arg:"--expect-channel,required" placeholder:"EXACT" help:"assert this exact X.Y.Z channel"`
+	RustupHome    string                 `arg:"--rustup-home,required" placeholder:"DIR" help:"the installed RUSTUP_HOME"`
+	CargoHome     string                 `arg:"--cargo-home,required" placeholder:"DIR" help:"the installed CARGO_HOME"`
+}
+
+func (verifyInstalledCommand) Description() string {
+	return "Verify the committed pin data and the installed toolchain."
+}
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
-func run(args []string) int {
+// run maps every outcome to the source reader's status: 0 success, 1 refusal,
+// and 2 for a malformed invocation of a verb that exists here.
+func run(args []string) (status int) {
+	defer func() {
+		// A panic must not read as a usage error (status 2): the verifier treats a
+		// non-zero status as a failed build either way, but a wrong *status* would
+		// tell the suites the wrong story about which rule fired.
+		if recovered := recover(); recovered != nil {
+			status = refuseToolchain(fmt.Errorf("internal error: %v", recovered))
+		}
+	}()
 	var parsed arguments
-	parser, err := arg.NewParser(arg.Config{Program: "rust-dev-helper"}, &parsed)
+	parser, err := arg.NewParser(arg.Config{Program: "rust-dev-helper", IgnoreEnv: true},
+		&parsed)
 	if err != nil {
 		return refuse(err.Error())
 	}
 	if err := parser.Parse(args); err != nil {
-		// Every failure of this binary is status 1, usage included: the Python
-		// script it replaces printed a usage line and returned 1, and the verifier
-		// treats any non-zero status as a failed build. A go-arg refusal is a
-		// malformed invocation, so it is reported as usage rather than as a
-		// diagnostic from a verb that never ran.
+		// The verb comes from the subcommand chain go-arg recorded before it
+		// reported the error: a malformed invocation of `check` or
+		// `verify-installed` is argparse's status 2, and everything else is this
+		// binary's one refusal status, which is slice 1's contract.
+		if isToolchainVerb(parser.SubcommandNames()) {
+			return refuseUsage(toolchainPrefix)
+		}
 		return refuse("usage: " + usageText)
 	}
 	if parsed.fixtureSeamsRequested() {
@@ -64,22 +115,105 @@ func run(args []string) int {
 		}
 		return 0
 	}
+	configureLogging(parsed.LogLevel)
+	trust, err := parsed.trust()
+	if err != nil {
+		return refuseToolchain(err)
+	}
 	switch {
+	case parsed.Check != nil:
+		return runCheck(parsed.Check, trust)
+	case parsed.VerifyInstalled != nil:
+		return runVerifyInstalled(parsed.VerifyInstalled, trust)
 	case parsed.KacheProbe != nil:
 		return kacheprobe.Decide(parsed.KacheProbe.Report, os.Stdout, os.Stderr)
 	default:
+		// No verb: slice 1's contract, a usage line and status 1.
 		return refuse("usage: " + usageText)
 	}
 }
 
-const usageText = "rust-dev-helper kache-probe REPORT"
+// runCheck runs the offline read and prints the channel.
+func runCheck(command *checkCommand, trust toolchain.TrustPolicy) int {
+	program, err := gpg.Resolve()
+	if err != nil {
+		return refuseToolchain(err)
+	}
+	channel, err := toolchain.Check(context.Background(), toolchain.CheckRequest{
+		InputDir: command.InputDir, ExpectChannel: command.ExpectChannel, Trust: trust,
+		GPG: program,
+	})
+	if err != nil {
+		return refuseToolchain(err)
+	}
+	fmt.Println(channel)
+	return 0
+}
+
+// runVerifyInstalled runs the offline read and then the installed-state checks.
+func runVerifyInstalled(command *verifyInstalledCommand, trust toolchain.TrustPolicy) int {
+	program, err := gpg.Resolve()
+	if err != nil {
+		return refuseToolchain(err)
+	}
+	channel, err := toolchain.VerifyInstalled(context.Background(),
+		toolchain.VerifyInstalledRequest{
+			InputDir: command.InputDir, Arch: command.Arch,
+			ExpectChannel: command.ExpectChannel,
+			Homes:         toolchain.Homes{Rustup: command.RustupHome, Cargo: command.CargoHome},
+			Trust:         trust, GPG: program,
+		})
+	if err != nil {
+		return refuseToolchain(err)
+	}
+	fmt.Println(channel)
+	return 0
+}
+
+// configureLogging installs the one diagnostic sink: a text handler on stderr.
+// Contract lines are printed separately and never through this logger, because a
+// logger quotes and escapes.
+func configureLogging(level string) {
+	parsed := slog.LevelWarn
+	switch level {
+	case "debug":
+		parsed = slog.LevelDebug
+	case "info":
+		parsed = slog.LevelInfo
+	case "warn", "":
+		parsed = slog.LevelWarn
+	case "error":
+		parsed = slog.LevelError
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: parsed})))
+}
+
+// usageText is the one usage line. The shell suites match on it.
+const usageText = "rust-dev-helper {kache-probe,check,verify-installed} ARGS"
 
 // refuse reports one contract line on stderr and returns the refusal status. It is
-// the only status this binary returns besides success: the Python predecessor
-// returned 1 for every failure, including a usage error, so a caller cannot tell
-// a malformed invocation from a refused report by status alone -- and the
-// verifier, which is the only caller, does not need to.
+// the kache-probe verb's prefix, kept as slice 1 wrote it.
 func refuse(message string) int {
 	fmt.Fprintf(os.Stderr, "%s: %s\n", prefix, message)
 	return 1
+}
+
+// refuseToolchain reports one `rust_toolchain: ` line: the frozen prefix of the
+// two verbs that moved here, and the one the differential oracle requires.
+func refuseToolchain(err error) int {
+	fmt.Fprintf(os.Stderr, "%s: %s\n", toolchainPrefix, err)
+	return 1
+}
+
+// isToolchainVerb reports whether the parsed subcommand chain names a verb this
+// slice ported from `rust_toolchain.py`.
+func isToolchainVerb(names []string) bool {
+	return len(names) > 0 && (names[0] == "check" || names[0] == "verify-installed")
+}
+
+// refuseUsage reports a malformed invocation of a verb and returns 2, the status
+// the source reader's argparse returned.
+func refuseUsage(which string) int {
+	fmt.Fprintf(os.Stderr, "%s: usage: %s\n", which, usageText)
+	return 2
 }

@@ -108,3 +108,54 @@ func TestShippedBinaryCarriesNoFixtureSeam(t *testing.T) {
 		}
 	}
 }
+
+// TestFixtureBuildHonoursOnlyTheReviewedTrust is slice 2's seam: the fixture
+// build's `--fixture-trust` replaces the compiled trust, and it is a top-level
+// option, so it is accepted before the verb and after it.
+func TestFixtureBuildHonoursOnlyTheReviewedTrust(t *testing.T) {
+	shippedPath := build(t, "")
+	taggedPath := build(t, "example_fixture")
+	const fixtureFingerprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	committed := committedPinDir(t)
+
+	// The shipped build has no such flag: it refuses it, prints no channel and
+	// names no seam.
+	output, status := runBinary(t, shippedPath, "--fixture-trust", fixtureFingerprint,
+		"check", committed)
+	if status != 1 {
+		t.Fatalf("the shipped binary answered --fixture-trust with status %d:\n%s", status,
+			output)
+	}
+	if !strings.Contains(output, "usage: "+usageText) || strings.Contains(output, "fixture-") {
+		t.Fatalf("the shipped refusal is not a bare usage line:\n%s", output)
+	}
+	output, status = runBinary(t, shippedPath, "check", committed, "--fixture-trust",
+		fixtureFingerprint)
+	if status != 2 {
+		t.Fatalf("the shipped binary answered a post-verb --fixture-trust with status %d:\n%s",
+			status, output)
+	}
+
+	// The fixture build lists the seam.
+	output, status = runBinary(t, taggedPath, "--fixture-seams")
+	if status != 0 || !strings.Contains(output, "fixture-trust") {
+		t.Fatalf("the fixture build did not list fixture-trust: %d %s", status, output)
+	}
+	// With the fixture trust, the committed pin is not the reviewed trust any
+	// more, so both positions refuse with the trust-root rule rather than
+	// accepting it.
+	for _, args := range [][]string{
+		{"--fixture-trust", fixtureFingerprint, "check", committed},
+		{"check", committed, "--fixture-trust", fixtureFingerprint},
+	} {
+		output, status = runBinary(t, taggedPath, args...)
+		if status != 1 || !strings.Contains(output, "is not the reviewed primary key") {
+			t.Fatalf("%v: status %d:\n%s", args, status, output)
+		}
+	}
+	// Without the seam the fixture build behaves as the shipped one does.
+	output, status = runBinary(t, taggedPath, "check", committed)
+	if status != 0 || output != "1.98.1\n" {
+		t.Fatalf("the fixture build refused the committed pin: %d %q", status, output)
+	}
+}

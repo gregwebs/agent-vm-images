@@ -2,6 +2,8 @@
 
 package main
 
+import "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain"
+
 // A shipped build honours no fixture seam (ADR 0017, decision D1). Every
 // suite-only input -- the reviewed trust it checks against, the upstream it
 // fetches from, the program it runs a bootstrap with -- is added by a
@@ -22,3 +24,9 @@ type fixtureArguments struct{}
 // fixtureSeamsRequested reports whether the caller asked this build to print the
 // seams it honours. A shipped build has no such flag, so nothing can ask.
 func (fixtureArguments) fixtureSeamsRequested() bool { return false }
+
+// trust is the reviewed trust, and the only trust a shipped build can use. The
+// pin's own trust fields are compared against it; they never set it.
+func (fixtureArguments) trust() (toolchain.TrustPolicy, error) {
+	return toolchain.ReviewedTrust, nil
+}

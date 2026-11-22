@@ -402,6 +402,16 @@ invocation-private `file://` layout built from the original manifest bytes. The
 reasoning and the rejected alternatives are in
 [ADR 0007](../../docs/adr/0007-rust-example-toolchain-pins.md).
 
+The **offline reads** are the layer's own Go program: `rust-dev-helper check` and
+`rust-dev-helper verify-installed` decode the same pin, audit the same directory,
+check the same digests, run the same gpg verification and the same
+installed-state checks, and print the same diagnostics with the same statuses
+(#187 slice 2). The verifier `RUN` therefore runs no Python, and
+`example-layers.sh` runs both readers over the committed data and over each of
+its self-test mutants, failing on any disagreement. `install` — the leg that
+fetches and unpacks archives — is still Python (#231), and the Python loader is
+kept alive as the differential oracle until #232 deletes it.
+
 `rustup-init` has no detached signature or attestation for 1.28.2, so its use is
 a **scoped, dated, per-architecture hash-only exception** recorded in `pin.json`
 (reviewer, UTC review date, exact URLs/digests, evidence URLs, reassessment
@@ -493,9 +503,10 @@ Dockerfile — `install-rust.sh`, `install-kache.sh`, `install-verus.sh`,
 in at build time, so each can be read, reviewed and run on its own. The layer's
 own program, `rust-dev-helper`, is a Go module under `helper/` compiled by the
 recipe's first `FROM` from a pinned `golang:` image and mounted the same way; the
-verifier runs `rust-dev-helper kache-probe` on the `kache doctor` report. All of
-it is guarded by `script/test/example-layers.sh`, which `script/test/contracts.sh`
-runs.
+verifier runs `rust-dev-helper verify-installed` over the pin and the installed
+toolchain, then `rust-dev-helper kache-probe` on the `kache doctor` report. All
+of it is guarded by `script/test/example-layers.sh`, which
+`script/test/contracts.sh` runs.
 
 ## Go development
 

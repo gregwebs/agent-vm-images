@@ -19,6 +19,7 @@ import subprocess
 import tarfile
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Sequence
 
 CHANNEL = '9.9.9'
 DATE = '2026-01-02'
@@ -250,9 +251,16 @@ def sign_env(dist: 'Dist') -> dict[str, str]:
             'PATH': os.path.dirname(gpg_path()) + ':/usr/bin:/bin'}
 
 
-def armored_sign(path: Path, env: dict[str, str]) -> bytes:
+def armored_sign(path: Path, env: dict[str, str],
+                 extra: Sequence[str] = ()) -> bytes:
+    """An armored detached signature, with any extra gpg options before the input.
+
+    `extra` is how the differential suite signs a manifest with a one-day
+    signature expiry (`--default-sig-expire 1d`); the default is the pinned
+    signing invocation, unchanged.
+    """
     return subprocess.run([gpg_path(), '--batch', '--no-options', '--armor', '--detach-sign',
-                           '--output', '-', str(path)], env=env, check=True,
+                           *extra, '--output', '-', str(path)], env=env, check=True,
                           capture_output=True).stdout
 
 

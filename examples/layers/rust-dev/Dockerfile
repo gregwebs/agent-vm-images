@@ -159,7 +159,10 @@ RUN apt-get update \
 # signed manifest and every selected archive hash for this host) is installed by
 # rust_toolchain.py, which verifies all of it before anything executes. The
 # helper and the data are mounted read-only for this one step and are not part of
-# the image; the installed /opt toolchain is.
+# the image; the installed /opt toolchain is. The install leg is still Python:
+# `install` fetches and unpacks archives, which is #231. Only the offline reads
+# (`check`, and the verifier's `verify-installed` below) are the Go helper, and
+# both readers run over these same bytes on every host gate and every build.
 RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro \
     --mount=type=bind,source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro \
     --mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro \
@@ -213,13 +216,15 @@ ENV PATH=/opt/kache/shims:/opt/kache/bin:/opt/cargo/bin:/opt/verus/verus-x86-lin
 # missing component/target or a stale layer fails the build here instead of
 # surfacing as command-not-found in the guest, and the amd64 Verus check verifies
 # a real contract rather than only `--version`. The verifier bundle is mounted
-# read-only for this step and nothing is copied into the image.
+# read-only for this step and nothing is copied into the image. This step runs no
+# Python: `rust-dev-helper verify-installed` is the offline reader, verified by
+# the pins suite against the Python loader the install step still uses (#231
+# moves the install leg).
 RUN --network=none \
     --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro \
     --mount=type=bind,from=rust-dev-helper,source=/out/rust-dev-helper,target=/run/rust-verify/rust-dev-helper,ro \
-    --mount=type=bind,source=rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro \
     --mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro \
-    RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus PYTHONDONTWRITEBYTECODE=1 \
+    RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus \
     /bin/bash /run/rust-verify/verify-toolchain.sh
 
 # --- the shared kache remote and the cache layout ---------------------------

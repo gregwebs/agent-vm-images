@@ -114,6 +114,43 @@ against the Go program and is the oracle. Output text is frozen only where a
 consumer parses it. ADR 0004's byte-level differential parity is not required
 for new ports.
 
+**A ported reader has two implementations until the Python is deleted.** `#187
+slice 2` moved the rust-dev layer's `check` and `verify-installed` to its Go
+helper while `rust_toolchain.py` stayed in the build (the install leg is #231 and
+the writer is #232). Two implementations of one rule set is a hazard, so it is
+held as a *differential*: both readers run over the same bytes on every host gate
+and every image build, and a disagreement fails the gate. Python is the oracle,
+never a fallback; nothing chooses between them at run time. Concretely,
+`script/test/example-layers.sh` runs both over the committed pin directory and
+over each of its self-test mutants, the pins suite runs both in-process (the
+fixture trust) and through the two real CLIs (the reviewed trust), and the image
+build runs Python's `load_pin` inside `install` and Go's `verify-installed` in the
+verifier over the same bytes. A differential disagreement is a stop reported on
+the issue, never reconciled in code.
+
+**A TOML decoder is chosen by measurement, not by name.** The pin reader's TOML
+target is **TOML 1.0 with strict table semantics**, because that is what decides
+the bytes in a build: Debian trixie's Python 3.13 in the image, Python 3.12 in CI,
+and rustup's own parser. The vendored decoder is `pelletier/go-toml/v2` v2.2.4.
+Measured on the nine grammar vectors, every release from v2.0.8 to v2.4.3 matches
+TOML 1.0 with strict tables on all of them but one: they accept the TOML 1.1
+`\e` escape. `BurntSushi/toml` was rejected on measurement rather than taste — it
+lets a later key extend an already-sealed inline table, which is a *semantic*
+acceptance, and v1.4.0 also switches to TOML 1.1 when `BURNTSUSHI_TOML_110` is in
+the environment.
+
+The `\e` acceptance is a declared divergence, and
+`TestTOMLGrammar/escape-e` pins the behaviour it accepts (the document decodes, and
+the value is `U+001B`) rather than describing it. The suite's oracle is probed,
+never version-sniffed: `tomllib` is TOML 1.1 from CPython 3.15, so a 3.15 host
+compares the five 1.1-only rows against the measured TOML 1.0 column and prints how
+many rows it compared and against which grammar, making a thin run visible. The
+same measurement found a second, independent oracle deviation: `tomllib` accepts
+an integer beyond ±2^63, which TOML 1.0 requires to be an error, so the Go
+reader's refusal is asserted against the 1.0 column there too. (`#230` records
+both; the first is pre-approved, the second needs the owner's ruling before the
+slice merges.)
+
 **Conventions for new commands.** Arguments are parsed with go-arg and logs go
 through slog, vendored like `yaml/v3`. Every HTTP client goes through
 failsafe-go behind one internal package that checks status codes; a readiness

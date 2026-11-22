@@ -5257,6 +5257,15 @@ fn repository_files(
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
+                // `helper/vendor` is a dependency's own source tree (ADR 0017), not
+                // this repository's: its Dockerfile, shell and Python are upstream's
+                // bytes, authenticated by the module's vendor drift gate
+                // (script/test/example-helper-vendor.sh), and nothing here builds,
+                // ships or maintains them. Without this a vendored dependency's own
+                // recipe would have to be registered as one of ours.
+                if path.file_name().is_some_and(|found| found == "vendor") {
+                    continue;
+                }
                 stack.push(path);
                 continue;
             }

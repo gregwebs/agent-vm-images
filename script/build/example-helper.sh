@@ -20,7 +20,8 @@ usage: script/build/example-helper.sh LAYER [--root DIR] [--os linux|darwin]
 
 Compiles examples/layers/LAYER/helper with the flags the layer's Dockerfile stage
 uses and prints the binary's absolute path. Defaults: --root is this checkout,
---os is linux, --arch is the host's, --binary is LAYER-helper, and no fixture tag.
+--os is linux, --arch is the host's, --binary is LAYER-helper (LAYER-helper-fixture
+with --fixture), and no fixture tag.
 HELP
 }
 
@@ -102,8 +103,15 @@ case "$arch" in
 esac
 
 # The binary keeps the layer's name so a caller never has to know Go's default
-# (the module directory's base name would be `helper`).
-binary=${binary:-$layer-helper}
+# (the module directory's base name would be `helper`). A fixture build gets its
+# own name, so the two builds cannot overwrite each other: a gate that runs the
+# shipped binary while a differential suite builds the fixture one would otherwise
+# race on one path, and the loser would run the wrong program.
+default_binary=$layer-helper
+if [ "$fixture" = true ]; then
+    default_binary=$layer-helper-fixture
+fi
+binary=${binary:-$default_binary}
 case "$binary" in
     ''|*/*|.|..) echo "unsupported --binary: $binary" >&2; usage >&2; exit 2 ;;
 esac

@@ -67,7 +67,10 @@ Commit a reviewed finite closure and let rustup install only from it.
   decoding, canonical origins computed independently from the validated channel
   and date, real gpg under a private keyring against the committed primary
   fingerprint, bounded streaming HTTPS, hash-before-chmod/exec, ELF architecture
-  checks, and rust-installer format-3 metadata/coverage preflight. It then builds
+  checks, and rust-installer format-3 metadata/coverage preflight. Its offline
+  reads are the layer's Go helper from #187 slice 2 (`check`,
+  `verify-installed`); the rules, order and diagnostics are the same, and the
+  Python module stays as the differential oracle until #232 deletes it. It then builds
   an invocation-private `file://` dist layout from the original manifest bytes and
   runs rustup with automatic installation and self-update disabled. Ordinary builds never resolve, rewrite
   or repair a pin. The transport's whole-request deadline is a watchdog that

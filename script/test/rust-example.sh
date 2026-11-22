@@ -10,9 +10,10 @@
 #
 # Prerequisites: a native Linux daemon of the requested platform, a
 # daemon-backed builder, go (the layer's helper module is compiled for the
-# platform), python3 (rust_toolchain.py still verifies and installs the pin) git
-# and host-watchdog.py. The amd64 row must
-# come from a native amd64 host; QEMU is not acceptance.
+# platform: it verifies the pin here, and the image build still runs Python's
+# installer until #231), python3 (the image's install leg), git and
+# host-watchdog.py. The amd64 row must come from a native amd64 host; QEMU is not
+# acceptance.
 #
 # Usage: bash script/test/rust-example.sh [--platform linux/amd64|linux/arm64]
 #                                         [--base-image EXACT_REF] [--no-cache]
@@ -1131,15 +1132,17 @@ fi
 # --- phase 2: verifier bundle, no network ------------------------------------
 PHASE=verifier
 mkdir -p "$BUNDLE"
-cp "$ROOT/$EXAMPLE/verify-toolchain.sh" "$ROOT/$EXAMPLE/rust_toolchain.py" "$BUNDLE/"
-# The verifier runs the layer's own binary for the kache report; it is compiled by
-# script/build/example-helper.sh with the flags the Dockerfile stage uses, for the
-# platform under test, so the container's architecture never matters to the host.
+cp "$ROOT/$EXAMPLE/verify-toolchain.sh" "$BUNDLE/"
+# The verifier runs the layer's own binary for the pin read and the kache report;
+# it is compiled by script/build/example-helper.sh with the flags the Dockerfile
+# stage uses, for the platform under test, so the container's architecture never
+# matters to the host. The bundle carries no Python: the verifier step runs none.
 cp "$(bash "$ROOT/script/build/example-helper.sh" rust-dev --root "$ROOT" \
     --os linux --arch "${PLATFORM#linux/}")" "$BUNDLE/rust-dev-helper"
 cp -R "$ROOT/$EXAMPLE/data/rust-toolchain" "$BUNDLE/rust-toolchain"
 if ! run_bounded pin-check "$RUN_SECONDS" "$LOG_DIR/pin-check.log" \
-        env PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/$EXAMPLE/rust_toolchain.py" \
+        "$(bash "$ROOT/script/build/example-helper.sh" rust-dev --root "$ROOT" \
+            --os "$(uname -s | tr '[:upper:]' '[:lower:]')")" \
         check "$ROOT/$EXAMPLE/data/rust-toolchain"; then
     fail 'the committed pin data does not verify; no native phase is meaningful'
     exit 1
@@ -1152,7 +1155,7 @@ kache_version=$(sed -nE 's/^ARG KACHE_VERSION=(.*)$/\1/p' "$ROOT/$EXAMPLE/Docker
 OWNED_CONTAINER=1
 if run_bounded verifier-create "$RUN_SECONDS" "$LOG_DIR/verifier-create.log" \
         "$DOCKER" create --name "$CONTAINER" --label "$LABEL" --network none \
-        -e "RUST_TOOLCHAIN=$channel" -e "KACHE_VERSION=$kache_version" -e VERUS_DIR=/opt/verus -e PYTHONDONTWRITEBYTECODE=1 \
+        -e "RUST_TOOLCHAIN=$channel" -e "KACHE_VERSION=$kache_version" -e VERUS_DIR=/opt/verus \
         --entrypoint /bin/bash "$TAG" /run/rust-verify/verify-toolchain.sh; then
     if run_bounded verifier-copy "$RUN_SECONDS" "$LOG_DIR/verifier-copy.log" \
             "$DOCKER" cp "$BUNDLE" "$CONTAINER:/run/rust-verify"; then
