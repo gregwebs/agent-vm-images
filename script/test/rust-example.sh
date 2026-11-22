@@ -234,6 +234,34 @@ self_test() {
     selftest_expect "$(grep -c 'completed status=0' "$log_dir/cleanup.txt" 2>/dev/null || true)" 1 \
         'the cleanup log records success' "$out"
 
+    echo 'self-test: a broken Go pin check fails the run before any build'
+    # The pin read is the layer's own Go helper (#187 slice 2). A helper that
+    # cannot compile must fail the run at that phase, and must fail it *before*
+    # any build: the reviewer proved the verifier script exits 127 on a missing
+    # helper, and this is the harness half of the same claim.
+    local broken="$scratch/broken-tree" broken_out broken_log
+    broken_log="$scratch/broken-pin-check.log"
+    mkdir -p "$broken/script" "$broken/examples" "$broken/images"
+    for part in script examples images; do
+        ( cd "$ROOT/$part" && tar -cf - --exclude=target --exclude=__pycache__ . ) |
+            tar -xf - -C "$broken/$part"
+    done
+    cp "$ROOT/go.mod" "$broken/go.mod"
+    printf 'package toolchain\n\nthis is not Go\n' \
+        > "$broken/$EXAMPLE/helper/toolchain/does-not-compile.go"
+    broken_out=$scratch/broken-run.log
+    rc=0
+    mkdir -p "$scratch/broken-state"
+    FAKE_DOCKER_MODE=healthy FAKE_DOCKER_STATE="$scratch/broken-state" \
+        FAKE_DOCKER_LOG="$broken_log" PATH="$scratch/bin:$PATH" \
+        bash "$broken/script/test/rust-example.sh" --platform linux/amd64 \
+        >"$broken_out" 2>&1 || rc=$?
+    selftest_expect "$rc" 1 'a broken Go pin check fails the run' "$broken_out"
+    selftest_expect_grep 'the layer helper could not be built for the image' "$broken_out" \
+        'the failure names the build, not a later phase'
+    selftest_expect "$(grep -c 'container create' "$broken_log" 2>/dev/null || true)" 0 \
+        'no verifier container is created after a failed build'
+
     echo 'self-test: a failed or malformed mandatory inspection is not acceptance'
     local mode phase
     for mode in parent-inspect-fails image-inspect-fails image-bad-id; do
@@ -268,7 +296,7 @@ self_test() {
         'the cleanup result is recorded as failed'
     selftest_expect_grep 'FAIL [cleanup]: owned-resource cleanup failed' "$out" \
         'the failure is named, not masked'
-    echo 'self-test: passed (59 controls)'
+    echo 'self-test: passed (62 controls)'
 }
 
 # The canary legs are shell programs handed to a guest container. Nothing in the
@@ -1137,13 +1165,24 @@ cp "$ROOT/$EXAMPLE/verify-toolchain.sh" "$BUNDLE/"
 # it is compiled by script/build/example-helper.sh with the flags the Dockerfile
 # stage uses, for the platform under test, so the container's architecture never
 # matters to the host. The bundle carries no Python: the verifier step runs none.
-cp "$(bash "$ROOT/script/build/example-helper.sh" rust-dev --root "$ROOT" \
-    --os linux --arch "${PLATFORM#linux/}")" "$BUNDLE/rust-dev-helper"
+# The build is checked, not just substituted: a helper that cannot compile must
+# fail the run here, by name, rather than leave an empty path for the copy to
+# swallow. Two builds: the container runs the linux/<arch> binary, and the host
+# pin check runs the host's.
+go_helper_bundle=$(bash "$ROOT/script/build/example-helper.sh" rust-dev --root "$ROOT" \
+    --os linux --arch "${PLATFORM#linux/}") || {
+    fail 'the layer helper could not be built for the image; no native phase is meaningful'
+    exit 1
+}
+cp "$go_helper_bundle" "$BUNDLE/rust-dev-helper"
+go_helper_host=$(bash "$ROOT/script/build/example-helper.sh" rust-dev --root "$ROOT" \
+    --os "$(uname -s | tr '[:upper:]' '[:lower:]')") || {
+    fail 'the layer helper could not be built for this host; no native phase is meaningful'
+    exit 1
+}
 cp -R "$ROOT/$EXAMPLE/data/rust-toolchain" "$BUNDLE/rust-toolchain"
 if ! run_bounded pin-check "$RUN_SECONDS" "$LOG_DIR/pin-check.log" \
-        "$(bash "$ROOT/script/build/example-helper.sh" rust-dev --root "$ROOT" \
-            --os "$(uname -s | tr '[:upper:]' '[:lower:]')")" \
-        check "$ROOT/$EXAMPLE/data/rust-toolchain"; then
+        "$go_helper_host" check "$ROOT/$EXAMPLE/data/rust-toolchain"; then
     fail 'the committed pin data does not verify; no native phase is meaningful'
     exit 1
 fi

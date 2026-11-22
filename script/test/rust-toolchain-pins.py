@@ -2584,6 +2584,37 @@ def test_differential_manifest() -> None:
         else:
             differential_row(f'manifest {label}', ['check', str(target)],
                              fragments=(fragment,))
+    # Manifest *entry* paths: the input a re-signed manifest could carry. Each is
+    # compared against the pin's exact origin or refused by the directory audit, so
+    # no path is ever derived from the signed document -- the threat model this
+    # check exists for.
+    cargo_xz = (f'https://static.rust-lang.org/dist/{fixture.DATE}/cargo-'
+                f'{fixture.CHANNEL}-{host}.tar.xz')
+    entry_probes = [
+        ('xz-url traversal',
+         original.replace(f'xz_url = "{cargo_xz}"',
+                          f'xz_url = "https://static.rust-lang.org/dist/../dist/'
+                          f'cargo-{fixture.CHANNEL}-{host}.tar.xz"'),
+         'xz_url for cargo'),
+        ('xz-url absolute path', original.replace(f'xz_url = "{cargo_xz}"',
+                                                 'xz_url = "/tmp/cargo.tar.xz"'),
+         'xz_url for cargo'),
+        ('xz-url file scheme', original.replace(f'xz_url = "{cargo_xz}"',
+                                                'xz_url = "file:///tmp/cargo.tar.xz"'),
+         'xz_url for cargo'),
+    ]
+    for label, text, fragment in entry_probes:
+        target = resigned_manifest(label.replace(' ', '-').replace('/', '-'), text)
+        differential_row(f'manifest {label}', ['check', str(target)],
+                         fragments=(fragment, 'differs from the pin'))
+    # A symlinked manifest in the pin directory: the audit precedes any decode, so
+    # no reader ever opens the link.
+    linked = driver.copy_pin(fixture_root.pinned, fixture_root.root / 'manifest-symlink')
+    (linked / 'channel.toml').rename(linked / 'channel-real.toml')
+    (linked / 'channel.toml').symlink_to(linked / 'channel-real.toml')
+    differential_row('manifest symlinked in the pin directory', ['check', str(linked)],
+                     fragments=('unreviewed input: symlink channel.toml',))
+
     # A field of the wrong kind is a refusal on both sides (Python raises, which is
     # the pre-ruled P1 divergence: status 1, the text differs).
     renames = ('[renames.clippy]\nto = "clippy-preview"\n'
@@ -2735,8 +2766,14 @@ def test_differential_trust() -> None:
 
 def installed_row(label: str, arch: str = 'amd64', *, change=None, settings=None,
                   fragments=(), cargo='cargo', remove_rustup=False,
-                  python_crashes=False) -> None:
-    """One installed-state row: both readers ask the same emulator."""
+                  omit_std=(), python_crashes=False) -> None:
+    """One installed-state row: both readers ask the same emulator.
+
+    `omit_std` names targets whose standard library is *absent*. A row named for a
+    missing thing must be built by removing that thing: a row that keeps the file
+    and only asserts a refusal compares two successes, reads as coverage and proves
+    nothing (the reviewer's finding on the row this replaced).
+    """
     row = new_row()
     architecture = model.Architecture(arch)
     rustup_home = row / 'rustup'
@@ -2745,6 +2782,9 @@ def installed_row(label: str, arch: str = 'amd64', *, change=None, settings=None
     for target in (architecture.host, architecture.musl):
         library = rustup_home / 'toolchains' / toolchain / 'lib' / 'rustlib' / target.value / 'lib'
         library.mkdir(parents=True)
+        if target.value in omit_std:
+            # The directory stays; the library it must hold does not.
+            continue
         (library / 'libstd.rlib').write_bytes(b'')
     body = settings if settings is not None else (
         'profile = "minimal"\nauto_self_update = "disable"\nauto_install = "disable"\n'
@@ -2784,9 +2824,7 @@ def test_differential_installed() -> None:
     """The installed-state checks, one row per rule."""
     print('differential: installed rows')
     installed_row('clean')
-    installed_row('no settings', change=None,
-                  settings=None)
-    # No settings file at all.
+    # No settings file at all: the row's name is the file it omits.
     def absent(label: str) -> None:
         row = new_row()
         rustup_home = row / 'rustup'
@@ -2854,9 +2892,15 @@ def test_differential_installed() -> None:
                   fragments=('rustup --version failed with status 1',))
     installed_row('rustup absent', remove_rustup=True, python_crashes=True,
                   fragments=('rustup --version failed',))
-    installed_row('std library missing',
-                  change=None)
-    # The host standard library has no rlib.
+    # The library is *removed*, so the row refuses on both sides and names the
+    # target whose standard library is gone.
+    installed_row('host std library missing', omit_std=(fixture.HOSTS['amd64'],),
+                  fragments=(f'installed: missing {fixture.HOSTS["amd64"]} standard '
+                             'library',))
+    installed_row('musl std library missing',
+                  omit_std=('x86_64-unknown-linux-musl',),
+                  fragments=('installed: missing x86_64-unknown-linux-musl standard '
+                             'library',))
     installed_row('foreign architecture', arch='arm64')
 
 

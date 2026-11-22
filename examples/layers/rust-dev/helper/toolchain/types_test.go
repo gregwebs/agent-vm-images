@@ -35,9 +35,12 @@ func TestParseTypedValues(t *testing.T) {
 			"cargo-1.98.1-x86_64-unknown-linux-gnu/"},
 	}
 	for _, test := range good {
-		if err := test.parse(test.value, "field"); err != nil {
-			t.Errorf("%s: refused %v: %v", test.label, test.value, err)
-		}
+		test := test
+		t.Run(subtestName(test.label), func(t *testing.T) {
+			if err := test.parse(test.value, "field"); err != nil {
+				t.Fatalf("refused %v: %v", test.value, err)
+			}
+		})
 	}
 	bad := []struct {
 		label string
@@ -79,16 +82,19 @@ func TestParseTypedValues(t *testing.T) {
 			"a/b/", "expected a single archive member prefix like name/"},
 	}
 	for _, test := range bad {
-		err := test.parse(test.value, "field")
-		if test.frag == "" {
-			if err != nil {
-				t.Errorf("%s: refused %v: %v", test.label, test.value, err)
+		test := test
+		t.Run(subtestName(test.label), func(t *testing.T) {
+			err := test.parse(test.value, "field")
+			if test.frag == "" {
+				if err != nil {
+					t.Fatalf("refused %v: %v", test.value, err)
+				}
+				return
 			}
-			continue
-		}
-		if err == nil || !strings.Contains(err.Error(), test.frag) {
-			t.Errorf("%s: got %v, want a refusal naming %q", test.label, err, test.frag)
-		}
+			if err == nil || !strings.Contains(err.Error(), test.frag) {
+				t.Fatalf("got %v, want a refusal naming %q", err, test.frag)
+			}
+		})
 	}
 }
 
@@ -140,18 +146,21 @@ func TestParseURL(t *testing.T) {
 		{"not a string", "", "expected a URL string"},
 	}
 	for _, test := range cases {
-		expected := "https://static.rust-lang.org/dist/x.tar.xz"
-		value := any(test.url)
-		if test.label == "not a string" {
-			value = 7
-		}
-		_, err := ParseURL(value, "field", &expected)
-		switch {
-		case test.frag == "" && err != nil:
-			t.Errorf("%s: refused %q: %v", test.label, test.url, err)
-		case test.frag != "" && (err == nil || !strings.Contains(err.Error(), test.frag)):
-			t.Errorf("%s: got %v, want a refusal naming %q", test.label, err, test.frag)
-		}
+		test := test
+		t.Run(subtestName(test.label), func(t *testing.T) {
+			expected := "https://static.rust-lang.org/dist/x.tar.xz"
+			value := any(test.url)
+			if test.label == "not a string" {
+				value = 7
+			}
+			_, err := ParseURL(value, "field", &expected)
+			switch {
+			case test.frag == "" && err != nil:
+				t.Fatalf("refused %q: %v", test.url, err)
+			case test.frag != "" && (err == nil || !strings.Contains(err.Error(), test.frag)):
+				t.Fatalf("got %v, want a refusal naming %q", err, test.frag)
+			}
+		})
 	}
 	// Without an expected origin a case-folded URL is accepted, which is what the
 	// pin loader then compares against the canonical origin itself.
@@ -186,6 +195,13 @@ func TestRejectControlCharacters(t *testing.T) {
 			t.Errorf("%s: refused a clean string: %v", test.label, err)
 		}
 	}
+}
+
+// subtestName is the label as a runnable subtest name: `go test -run
+// 'TestX/some_case'` is what the PR's deletion-proof table cites, so a phantom
+// pattern cannot stand in for evidence.
+func subtestName(label string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(label, " ", "_"), "/", "_")
 }
 
 func TestArchitectureText(t *testing.T) {
