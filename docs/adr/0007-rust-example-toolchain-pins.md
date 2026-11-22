@@ -126,7 +126,7 @@ Hermetic: `script/test/rust-toolchain-pins.py` (pin/install faults against a
 signed synthetic distribution, with the production transport exercised through
 a controlled opener) and `script/test/rust-toolchain-maintenance.py` (staging,
 publication and signal faults of the real writer). Static:
-`script/test/example-layers.sh` (81 cases). The native harness
+`script/test/example-layers.sh` (150 cases). The native harness
 `script/test/rust-example.sh` bounds every command, supervises the suite, owns its
 cleanup and has `--self-test` controls that need no daemon. Real adoption of
 channel 1.98.1 /
