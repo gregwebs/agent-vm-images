@@ -10,6 +10,12 @@ CHROME_MARKER=/etc/agent-vm-capabilities/chrome-devtools-mcp
 CHROME_WRAPPER=/usr/local/bin/agent-vm-chrome-mcp
 LAYERS=examples/layers
 EXAMPLES='chrome-devtools go-dev rust-dev wirenboard-cpp'
+# The reviewed ARG sets are one committed data file, the only copy: the Rust gate
+# reads the same file (script/test/image-sources, `include_str!`), so the two
+# cannot drift about which names are reviewed. It sits next to this script rather
+# than under ROOT because it is part of the gate, not of the tree under review;
+# its header carries the rule (#235, #237).
+REVIEWED_ARGS_FILE=${CHECKER%/*}/reviewed-args.txt
 # Known space-free paths, explicitly moved from agent-vm's ci-contracts.sh:
 # deletion/rename must fail rather than silently leave lint coverage.
 GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp.sh go-dev/gopls_closure.py go-dev/install-go.sh go-dev/install-golangci-lint.sh go-dev/install-gopls.sh go-dev/verify-toolchain.sh rust-dev/install-kache.sh rust-dev/install-rust.sh rust-dev/install-verus.sh rust-dev/rust_toolchain.py rust-dev/verify-toolchain.sh'
@@ -35,7 +41,7 @@ GUARDED_DATA='chrome-devtools/data/chrome-devtools-mcp.sigstore.json chrome-devt
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=145
+SELF_TEST_CASES=148
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -137,25 +143,16 @@ logical_instructions() {
         }
     ' "$1"
 }
-# The ARG names each example declares today, whole file, frozen here (#235): an
-# ARG is one more build-time input to a recipe whose pins are reviewed as bytes,
-# so a new name is a review, not an edit. Whole file and not per stage, because
-# the question is whether the recipe has ever named the input; which stage reads
-# it is a separate rule (rust-dev's closed instruction set below). The set is
-# checked in both directions, so a name dropped from a recipe cannot leave a
-# stale permission behind.
+# One recipe's reviewed ARG names, read from the shared data file: a recipe with
+# no line, or with more than one, has no reviewed set to check against.
 reviewed_args() { # EXAMPLE
-    case $1 in
-        chrome-devtools) printf '%s\n' BASE_IMAGE ;;
-        go-dev) printf '%s\n' BASE_IMAGE GO_VERSION GO_AMD64_SHA256 GO_ARM64_SHA256 \
-            GOLANGCI_LINT_VERSION GOLANGCI_LINT_AMD64_SHA256 GOLANGCI_LINT_ARM64_SHA256 \
-            GOPLS_VERSION GO_PREFIX GO_TOOLS_BIN ;;
-        rust-dev) printf '%s\n' BASE_IMAGE RUST_TOOLCHAIN VERUS_RELEASE VERUS_SHA256 \
-            KACHE_VERSION KACHE_AMD64_SHA256 KACHE_ARM64_SHA256 KACHE_RELEASE_CERT_SHA256 \
-            RUSTUP_HOME CARGO_HOME KACHE_DIR VERUS_DIR ;;
-        wirenboard-cpp) printf '%s\n' BASE_IMAGE ;;
-        *) return 1 ;;
-    esac
+    awk -v recipe="$LAYERS/$1/Dockerfile" '
+        $1 == recipe {
+            lines++
+            for (i = 2; i <= NF; i++) print $i
+        }
+        END { exit !(lines == 1) }
+    ' "$REVIEWED_ARGS_FILE"
 }
 # A global ARG is the one instruction that can precede FROM, so it reaches the
 # parent line while every other instruction check looks after it. The reviewed
@@ -198,6 +195,7 @@ check() {
     # own message and not a shell or grep error from an assertion that reads it.
     # The data list is consulted at the end instead: the layer helpers read those
     # files first and report a deletion as their own `missing input: ...`.
+    [ -f "$REVIEWED_ARGS_FILE" ] || fail "reviewed ARG data file missing: $REVIEWED_ARGS_FILE"
     for rel in $GUARDED $GUARDED_GO; do
         [ -f "$LAYERS/$rel" ] || fail "guarded script missing: $rel"
     done
@@ -1356,6 +1354,34 @@ INSTRUCTION
                     "$godocker" > "$SCRATCH/rewrite"
                 cat "$SCRATCH/rewrite" > "$godocker"
                 expected='ARG review: go-dev declares an unreviewed global ARG: GOFLAGS' ;;
+            # 146-148: the keyword is separated by any ASCII whitespace and the
+            # reviewed sets are one committed data file (#237). 146 and 147 are
+            # the two lines this gate reads by field rather than by a literal
+            # space, so a reading that stopped splitting on a tab would pass them
+            # to the parent checks; 148 is the reverse direction of the set, the
+            # stale permission the data file's equality still refuses.
+            146)
+                awk '/^ARG BASE_IMAGE=/ { print; print "ARG\tGOFLAGS=-tags=example_fixture"; next } { print }' \
+                    "$godocker" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$godocker"
+                grep -qF "$(printf 'ARG\tGOFLAGS=-tags=example_fixture')" "$godocker" ||
+                    fail 'self-test: case 146 did not write a tab-delimited ARG'
+                expected='ARG review: go-dev declares an unreviewed global ARG: GOFLAGS' ;;
+            147)
+                awk '!placed && $0 == "FROM ${BASE_IMAGE}" {
+                        print "FROM\t${BASE_IMAGE}"; placed = 1; next
+                    } { print }' "$godocker" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$godocker"
+                grep -qxF "$(printf 'FROM\t${BASE_IMAGE}')" "$godocker" ||
+                    fail 'self-test: case 147 did not write a tab-delimited FROM'
+                expected='parent pin: FROM shape: go-dev' ;;
+            148)
+                awk '$0 != "ARG GO_PREFIX=/opt/go"' "$godocker" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$godocker"
+                if grep -qxF 'ARG GO_PREFIX=/opt/go' "$godocker"; then
+                    fail 'self-test: case 148 did not drop ARG GO_PREFIX'
+                fi
+                expected='ARG review: go-dev no longer declares the reviewed ARG GO_PREFIX' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac

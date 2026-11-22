@@ -3663,97 +3663,70 @@ fn dockerfile_instructions(source: &str) -> Result<Vec<String>, String> {
     Ok(instructions)
 }
 
-/// The ARG names each maintained recipe declares today, whole file, frozen here:
+/// The reviewed ARG sets, from the one committed data file that both gates read:
 /// an ARG is one more build-time input to a recipe whose pins are reviewed as
-/// bytes, so a name outside this set is a review rather than an edit (#235).
-/// Whole file and not per stage, because the question is whether the recipe has
-/// ever named the input; script/test/example-layers.sh holds the same sets, and
-/// `review_global_args` holds them to the same reading.
-const REVIEWED_ARGS: [(&str, &[&str]); 7] = [
-    (
-        "examples/base-extension/Dockerfile",
-        &["AGENT_VM_BASE_IDENTITY", "BASE_IMAGE"],
-    ),
-    (
-        "examples/layers/chrome-devtools/Dockerfile",
-        &["BASE_IMAGE"],
-    ),
-    (
-        "examples/layers/go-dev/Dockerfile",
-        &[
-            "BASE_IMAGE",
-            "GO_AMD64_SHA256",
-            "GO_ARM64_SHA256",
-            "GO_PREFIX",
-            "GO_TOOLS_BIN",
-            "GO_VERSION",
-            "GOLANGCI_LINT_AMD64_SHA256",
-            "GOLANGCI_LINT_ARM64_SHA256",
-            "GOLANGCI_LINT_VERSION",
-            "GOPLS_VERSION",
-        ],
-    ),
-    (
-        "examples/layers/rust-dev/Dockerfile",
-        &[
-            "BASE_IMAGE",
-            "CARGO_HOME",
-            "KACHE_AMD64_SHA256",
-            "KACHE_ARM64_SHA256",
-            "KACHE_DIR",
-            "KACHE_RELEASE_CERT_SHA256",
-            "KACHE_VERSION",
-            "RUSTUP_HOME",
-            "RUST_TOOLCHAIN",
-            "VERUS_DIR",
-            "VERUS_RELEASE",
-            "VERUS_SHA256",
-        ],
-    ),
-    ("examples/layers/wirenboard-cpp/Dockerfile", &["BASE_IMAGE"]),
-    (
-        "images/Dockerfile",
-        &[
-            "BUILD_CA_SHA256",
-            "CA_SHIM_CACHEBUST",
-            "TARGETARCH",
-            "ZELLIJ_SHA256_AMD64",
-            "ZELLIJ_SHA256_ARM64",
-            "ZELLIJ_VERSION",
-        ],
-    ),
-    (
-        "images/standard/Dockerfile",
-        &[
-            "AGENT_VERSION_AGY",
-            "AGENT_VERSION_CLAUDE",
-            "AGENT_VERSION_CODEX",
-            "AGENT_VERSION_COPILOT",
-            "AGENT_VERSION_DSH",
-            "AGENT_VERSION_OPENCODE",
-            "AGENT_VERSION_OPENCODE_CLAUDE",
-            "AGENT_VERSION_PI",
-            "AGENT_VERSION_PI_ANTIGRAVITY",
-            "AGENT_VERSION_PI_CLAUDE_BRIDGE",
-            "AGENT_VERSION_PNPM",
-            "BASE_IMAGE",
-            "TARGETARCH",
-        ],
-    ),
-];
+/// bytes, so a name outside a recipe's line is a review rather than an edit
+/// (#235), and the file is the only copy so `script/test/example-layers.sh` and
+/// this reader cannot drift (#237). Whole file and not per stage, because the
+/// question is whether the recipe has ever named the input; which stage reads it
+/// is a separate rule (rust-dev's closed instruction set). `include_str!` makes a
+/// data file this build cannot see a compile error rather than a narrower check.
+const REVIEWED_ARGS_TEXT: &str = include_str!("../../reviewed-args.txt");
+
+fn reviewed_args() -> &'static BTreeMap<&'static str, Vec<&'static str>> {
+    static TABLE: OnceLock<BTreeMap<&'static str, Vec<&'static str>>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = BTreeMap::new();
+        for line in REVIEWED_ARGS_TEXT.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut fields = line.split_whitespace();
+            let recipe = fields.next().expect("a reviewed-args line names a recipe");
+            let names: Vec<&'static str> = fields.collect();
+            assert!(
+                !names.is_empty(),
+                "{recipe}: a reviewed-args line names at least one ARG"
+            );
+            assert!(
+                table.insert(recipe, names).is_none(),
+                "{recipe}: one reviewed-args line per recipe"
+            );
+        }
+        table
+    })
+}
+
+/// The operands of the instruction whose keyword is `keyword`, or `None` when
+/// this instruction is a different one. BuildKit separates a keyword from its
+/// operands with any ASCII whitespace, so a tab is a separator: matching a
+/// literal space is how `ARG<TAB>NAME` walked past this reader while the awk
+/// gate refused the same line (#237). One helper rather than three readings,
+/// because the three call sites below all mean "this instruction is that one".
+fn instruction_operands<'a>(instruction: &'a str, keyword: &str) -> Option<&'a str> {
+    let head = instruction.get(..keyword.len())?;
+    if !head.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let rest = &instruction[keyword.len()..];
+    if !rest.is_empty() && !rest.starts_with(|c: char| c.is_ascii_whitespace()) {
+        return None;
+    }
+    Some(rest.trim_start_matches(|c: char| c.is_ascii_whitespace()))
+}
 
 /// The declared ARG names of a recipe: `global_only` stops at the first `FROM`.
 fn arg_names(instructions: &[String], global_only: bool) -> Vec<&str> {
     let mut names = Vec::new();
     for instruction in instructions {
-        let upper = instruction.to_ascii_uppercase();
-        if global_only && upper.starts_with("FROM ") {
+        if global_only && instruction_operands(instruction, "FROM").is_some() {
             break;
         }
-        if !upper.starts_with("ARG ") {
+        let Some(operands) = instruction_operands(instruction, "ARG") else {
             continue;
-        }
-        for declaration in instruction.split_whitespace().skip(1) {
+        };
+        for declaration in operands.split_whitespace() {
             names.push(declaration.split('=').next().unwrap_or(declaration));
         }
     }
@@ -3766,7 +3739,7 @@ fn arg_names(instructions: &[String], global_only: bool) -> Vec<&str> {
 fn review_global_args(path: &str, instructions: &[String]) -> Result<(), String> {
     let declared = arg_names(instructions, false);
     let global = arg_names(instructions, true);
-    let Some((_, reviewed)) = REVIEWED_ARGS.iter().find(|(recipe, _)| *recipe == path) else {
+    let Some(reviewed) = reviewed_args().get(path) else {
         return if global.is_empty() {
             Ok(())
         } else {
@@ -3781,7 +3754,7 @@ fn review_global_args(path: &str, instructions: &[String]) -> Result<(), String>
             return Err(format!("{path}: unreviewed global ARG: {name}"));
         }
     }
-    for name in *reviewed {
+    for name in reviewed {
         if !declared.contains(name) {
             return Err(format!(
                 "{path}: no longer declares the reviewed ARG {name}"
@@ -3797,15 +3770,13 @@ fn review_global_args(path: &str, instructions: &[String]) -> Result<(), String>
 fn global_defaults(instructions: &[String]) -> BTreeMap<String, String> {
     let mut defaults = BTreeMap::new();
     for instruction in instructions {
-        let upper = instruction.to_ascii_uppercase();
-        if upper.starts_with("FROM ") {
+        if instruction_operands(instruction, "FROM").is_some() {
             break;
         }
-        let split = instruction.split_once(' ');
-        let Some(("ARG" | "arg", rest)) = split else {
+        let Some(operands) = instruction_operands(instruction, "ARG") else {
             continue;
         };
-        for declaration in rest.split_whitespace() {
+        for declaration in operands.split_whitespace() {
             if let Some((name, value)) = declaration.split_once('=') {
                 defaults.insert(name.to_owned(), value.to_owned());
             }
@@ -3852,11 +3823,11 @@ fn collect_froms(instructions: &[String]) -> Result<Vec<FromInstruction>, String
     let defaults = global_defaults(instructions);
     let mut froms = Vec::new();
     for instruction in instructions {
-        if !instruction.to_ascii_uppercase().starts_with("FROM ") {
+        let Some(operands) = instruction_operands(instruction, "FROM") else {
             continue;
-        }
-        let tokens: Vec<&str> = instruction.split_whitespace().collect();
-        let mut index = 1;
+        };
+        let tokens: Vec<&str> = operands.split_whitespace().collect();
+        let mut index = 0;
         let mut platform = None;
         while let Some(token) = tokens.get(index) {
             if !token.starts_with("--") {
@@ -7397,12 +7368,81 @@ fn unreviewed_global_args_are_refused() {
     );
     // Every maintained recipe is covered by its own set, so a new recipe cannot
     // borrow another one's review.
-    for (recipe, _) in REVIEWED_ARGS {
+    for recipe in reviewed_args().keys() {
         assert!(
             parse_recipe(recipe, &read_text(recipe)).is_ok(),
             "{recipe} must pass its own reviewed ARG set"
         );
     }
+}
+
+/// A tab is a separator to BuildKit, so a tab-delimited keyword must be read
+/// like a spaced one. One case per helper, because each reads the keyword
+/// through `instruction_operands` in its own way: before the fix `arg_names`
+/// missed the `ARG<TAB>` line, `global_defaults` lost its default and
+/// `collect_froms` did not see the FROM at all, while the awk gate refused the
+/// same lines for the four example layers (#237).
+#[test]
+fn whitespace_delimited_keywords_are_read() {
+    // arg_names: the ARG keyword, and the global window ending on a tab FROM.
+    let instructions = dockerfile_instructions(
+        "ARG\tBASE_IMAGE=agent-vm-base:local\nFROM\tdebian:13\nARG\tZELLIJ_VERSION=0.45.0\n",
+    )
+    .expect("a tab-delimited recipe is read");
+    assert_eq!(
+        arg_names(&instructions, false),
+        vec!["BASE_IMAGE", "ZELLIJ_VERSION"],
+        "a tab-delimited ARG is a declaration, and only the global window ends at FROM"
+    );
+    assert_eq!(
+        arg_names(&instructions, true),
+        vec!["BASE_IMAGE"],
+        "a tab-delimited FROM ends the global window"
+    );
+    // global_defaults: the value a `${NAME}` FROM expands to.
+    let froms = parse_froms("ARG\tBASE_IMAGE=agent-vm-base:local\nFROM ${BASE_IMAGE}\n")
+        .expect("a tab-delimited global ARG is read");
+    assert_eq!(froms[0].resolved_image, LOCAL_BASE);
+    // collect_froms: the FROM instruction itself.
+    let froms = parse_froms("FROM\tdebian:13\n").expect("a tab-delimited FROM is read");
+    assert_eq!(
+        (froms[0].raw_image.as_str(), froms[0].stage.as_deref()),
+        ("debian:13", None)
+    );
+    let froms = parse_froms("FROM\tdebian:13\tAS\tbase\n").expect("tabs separate FROM operands");
+    assert_eq!(froms[0].stage.as_deref(), Some("base"));
+}
+
+/// `images/Dockerfile` is checked by this gate only: the awk gate covers the four
+/// example layers, so a global ARG this reader does not see has no gate at all.
+/// The tab that walked past the reader is the case that proves the coverage is
+/// this test's (#237).
+#[test]
+fn an_unreviewed_global_arg_off_a_tab_is_refused_in_images_dockerfile() {
+    let path = "images/Dockerfile";
+    let source = read_text(path);
+    let added = format!("ARG\tGOFLAGS=-tags=example_fixture\n{source}");
+    let error = parse_recipe(path, &added).expect_err("an unreviewed global ARG is refused");
+    assert!(
+        error.contains("unreviewed global ARG: GOFLAGS"),
+        "the refusal must name the ARG: {error}"
+    );
+}
+
+/// The set is bidirectional and the data file is its only copy, so a name a
+/// recipe no longer declares is a stale permission and is refused with its name:
+/// dropping an ARG must not leave the review behind (#235, #237).
+#[test]
+fn a_reviewed_arg_the_recipe_no_longer_declares_is_refused() {
+    let path = "examples/layers/go-dev/Dockerfile";
+    let source = read_text(path);
+    let dropped = source.replacen("ARG GO_PREFIX=/opt/go\n", "", 1);
+    assert_ne!(dropped, source, "the mutation did not apply");
+    let error = parse_recipe(path, &dropped).expect_err("a stale reviewed name is refused");
+    assert!(
+        error.contains("no longer declares the reviewed ARG GO_PREFIX"),
+        "the refusal must name the stale name: {error}"
+    );
 }
 
 /// Ordinary builds never invoke the maintenance path: no maintained recipe or

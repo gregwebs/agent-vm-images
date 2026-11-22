@@ -1,0 +1,25 @@
+# The reviewed ARG sets of the maintained recipes: one `path NAME...` line per
+# recipe, naming every ARG that recipe declares, whole file.
+#
+# The rule this file carries: an ARG is one more build-time input to a recipe
+# whose pins are reviewed as bytes, so a name is a review rather than an edit. A
+# recipe that declares a global ARG (one before the first FROM, which is what
+# retargets a parent) outside its line is refused, and so is a line that still
+# names an ARG its recipe no longer declares - the set is bidirectional so a
+# dropped ARG cannot leave a stale permission behind (#235). Whole file and not
+# per stage, because the question is whether the recipe has ever named the input;
+# which stage reads it is a separate rule (rust-dev's closed instruction set).
+#
+# Read by both gates, and this file is the only copy of the sets:
+#   script/test/example-layers.sh   `reviewed_args`, the four examples/layers
+#   script/test/image-sources/tests/image_sources.rs  `reviewed_args`, which
+#       include_str!s this file for every maintained recipe
+# A recipe added to one reader and not the other is therefore impossible, and a
+# new global ARG is one line here instead of an edit in two languages.
+examples/base-extension/Dockerfile AGENT_VM_BASE_IDENTITY BASE_IMAGE
+examples/layers/chrome-devtools/Dockerfile BASE_IMAGE
+examples/layers/go-dev/Dockerfile BASE_IMAGE GO_AMD64_SHA256 GO_ARM64_SHA256 GO_PREFIX GO_TOOLS_BIN GO_VERSION GOLANGCI_LINT_AMD64_SHA256 GOLANGCI_LINT_ARM64_SHA256 GOLANGCI_LINT_VERSION GOPLS_VERSION
+examples/layers/rust-dev/Dockerfile BASE_IMAGE CARGO_HOME KACHE_AMD64_SHA256 KACHE_ARM64_SHA256 KACHE_DIR KACHE_RELEASE_CERT_SHA256 KACHE_VERSION RUSTUP_HOME RUST_TOOLCHAIN VERUS_DIR VERUS_RELEASE VERUS_SHA256
+examples/layers/wirenboard-cpp/Dockerfile BASE_IMAGE
+images/Dockerfile BUILD_CA_SHA256 CA_SHIM_CACHEBUST TARGETARCH ZELLIJ_SHA256_AMD64 ZELLIJ_SHA256_ARM64 ZELLIJ_VERSION
+images/standard/Dockerfile AGENT_VERSION_AGY AGENT_VERSION_CLAUDE AGENT_VERSION_CODEX AGENT_VERSION_COPILOT AGENT_VERSION_DSH AGENT_VERSION_OPENCODE AGENT_VERSION_OPENCODE_CLAUDE AGENT_VERSION_PI AGENT_VERSION_PI_ANTIGRAVITY AGENT_VERSION_PI_CLAUDE_BRIDGE AGENT_VERSION_PNPM BASE_IMAGE TARGETARCH
