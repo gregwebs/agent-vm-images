@@ -145,11 +145,16 @@ the value is `U+001B`) rather than describing it. The suite's oracle is probed,
 never version-sniffed: `tomllib` is TOML 1.1 from CPython 3.15, so a 3.15 host
 compares the five 1.1-only rows against the measured TOML 1.0 column and prints how
 many rows it compared and against which grammar, making a thin run visible. The
-same measurement found a second, independent oracle deviation: `tomllib` accepts
-an integer beyond ±2^63, which TOML 1.0 requires to be an error, so the Go
-reader's refusal is asserted against the 1.0 column there too. (`#230` records
-both; the first is pre-approved, the second needs the owner's ruling before the
-slice merges.)
+same measurement found a second, independent oracle deviation, ruled **P5** on
+#230: `tomllib` accepts an integer beyond ±2^63, which TOML 1.0 requires to be an
+error. Go refuses it, which is also what the producer does — `settings.toml` is
+written and read by `rustup`, through Rust's int64 `toml` crate — so the Go
+reader agrees with the program that opens the file and the oracle is the odd one
+out. P5 is its own entry because P4 was scoped to grammar that varies by Python
+version; this does not vary. A declared divergence must fail when it stops being
+true, so the row asserts both directions: Go refuses at the int64 limit *and* the
+oracle still accepts, so the day `tomllib` enforces int64 the suite goes red and
+the declaration is deleted rather than inherited.
 
 **Conventions for new commands.** Arguments are parsed with go-arg and logs go
 through slog, vendored like `yaml/v3`. Every HTTP client goes through

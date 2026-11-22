@@ -45,7 +45,7 @@ GUARDED_DATA='chrome-devtools/data/chrome-devtools-mcp.sigstore.json chrome-devt
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=154
+SELF_TEST_CASES=156
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -1478,6 +1478,22 @@ INSTRUCTION
             154)
                 rewrite "$rustdocker" 's|^    /bin/bash /run/rust-verify/verify-toolchain.sh|    PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/rust-verify/verify-toolchain.sh|'
                 expected='verifier RUN must be exactly' ;;
+            # 155-156: the vendored dependency boundary (#187 slice 2). 155 is the
+            # lookalike: a directory whose name starts with `vendor` is not the
+            # vendor tree, so its script is still a script the sweep must name --
+            # the exclusion is the exact path `helper/vendor/`, not a prefix. 156 is
+            # the excluded class itself: a `.go` file under `helper/vendor/` is
+            # upstream's, so the layer sweep passes and the module's vendor drift
+            # gate (`example-helper-vendor.sh`) is the check that authenticates it.
+            155)
+                mkdir -p "$tree/$LAYERS/rust-dev/helper/vendorx"
+                printf '#!/bin/sh\ntrue\n' > "$tree/$LAYERS/rust-dev/helper/vendorx/run.sh"
+                expected="unguarded example script: rust-dev/helper/vendorx/run.sh" ;;
+            156)
+                mkdir -p "$tree/$LAYERS/rust-dev/helper/vendor/example.test/pkg"
+                printf 'package pkg\n' \
+                    > "$tree/$LAYERS/rust-dev/helper/vendor/example.test/pkg/pkg.go"
+                expected='' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac

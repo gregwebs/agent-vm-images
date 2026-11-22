@@ -2120,13 +2120,20 @@ def toml_grammar() -> str:
 
 
 def oracle_accepts_out_of_range_integer() -> bool:
-    """Whether the oracle's own decoder rejects an integer TOML 1.0 refuses.
+    """The P5 probe: does the oracle accept an integer TOML 1.0 refuses?
 
-    TOML 1.0: "Arbitrary 64-bit signed integers (from -2^63 to 2^63-1) should be
-    accepted and handled losslessly. If an integer cannot be represented
+    TOML 1.0, Integer: "Arbitrary 64-bit signed integers (from -2^63 to 2^63-1)
+    should be accepted and handled losslessly. If an integer cannot be represented
     losslessly, an error must be thrown." `tomllib` keeps arbitrary precision
-    instead, so its verdict on such a document is not the TOML 1.0 verdict -- at
-    any Python version. Measured, never inferred.
+    instead -- a documented deviation from the grammar it claims to implement --
+    so its verdict on such a document is not the TOML 1.0 verdict, at any Python
+    version.
+
+    And the file this row describes is not Python's: `settings.toml` is written and
+    read by `rustup`, a Rust program using the `toml` crate, which is int64. In
+    production the question "does this file parse" is answered by a 64-bit reader,
+    so the Go reader agrees with the program that opens the file and the oracle is
+    the odd one out. Measured, never inferred.
     """
     try:
         tomllib.loads('x = 9223372036854775808\n')
@@ -2853,6 +2860,40 @@ def test_differential_installed() -> None:
     installed_row('foreign architecture', arch='arm64')
 
 
+def settings_row(label: str, body: str) -> tuple[Path, list[str]]:
+    """One install whose settings.toml is `body`, with both readers pointed at it.
+
+    The row is short (`rtp-*` in the temp directory) because gpg-agent's socket
+    path is a unix socket of at most 104 bytes on macOS.
+    """
+    row = new_row()
+    rustup_home = row / 'rustup'
+    host = fixture.HOSTS['amd64']
+    toolchain = f'{fixture.CHANNEL}-{host}'
+    for target in ('x86_64-unknown-linux-gnu', 'x86_64-unknown-linux-musl'):
+        library = rustup_home / 'toolchains' / toolchain / 'lib' / 'rustlib' / target / 'lib'
+        library.mkdir(parents=True)
+        (library / 'libstd.rlib').write_bytes(b'')
+    (rustup_home / 'settings.toml').write_text(body)
+    case = {
+        'rustup_version': fixture.RUSTUP_VERSION,
+        'toolchains': [f'{toolchain} (active, default)'],
+        'components': [f'{fixture.STEMS[package]}-{target.value}'
+                       for package, target in model.selected_pairs(model.Architecture.AMD64)],
+        'targets': [host, 'x86_64-unknown-linux-musl'],
+        'rustc_verbose': f'rustc 1.0.0\nrelease: {fixture.CHANNEL}\nhost: {host}\n',
+        'cargo_version': 'cargo 1.0.0 (fixture)',
+        'clippy_version': 'clippy 0.1.0 (fixture)',
+        'rustfmt_version': 'rustfmt 1.0.0 (fixture)',
+        'fail_when': [],
+    }
+    Path(str(rustup_home) + '.case.json').write_text(json.dumps(case))
+    argv = ['verify-installed', str(fixture_root.pinned), '--arch', 'amd64',
+            '--expect-channel', fixture.CHANNEL, '--rustup-home', str(rustup_home),
+            '--cargo-home', os.environ[TOOLS_ENV] + '/tools/cargo']
+    return row, argv
+
+
 def test_differential_toml() -> None:
     """settings.toml: the measured grammar, and the rows a struct decoder would miss."""
     print('differential: TOML rows')
@@ -2880,69 +2921,27 @@ def test_differential_toml() -> None:
         ('crlf', 'profile = "minimal"\r\n', True, ''),
         ('a date where a string belongs', 'profile = 2026-01-01\n', True,
          'installed: rustup setting profile is'),
-        ('an integer beyond int64 in an unused key', 'x = 9223372036854775808\n', False,
-         'not valid TOML'),
     ]
     for label, extra, accepts, fragment in rows:
         if label == 'crlf':
             body = clean.replace('\n', '\r\n')
-        elif label.startswith('an integer beyond'):
-            body = clean + extra
         elif label == 'a date where a string belongs':
             body = clean.replace('profile = "minimal"\n', extra)
         else:
             body = clean + extra
-        row = new_row()
-        rustup_home = row / 'rustup'
-        host = fixture.HOSTS['amd64']
-        toolchain = f'{fixture.CHANNEL}-{host}'
-        for target in ('x86_64-unknown-linux-gnu', 'x86_64-unknown-linux-musl'):
-            library = rustup_home / 'toolchains' / toolchain / 'lib' / 'rustlib' / target / 'lib'
-            library.mkdir(parents=True)
-            (library / 'libstd.rlib').write_bytes(b'')
-        (rustup_home / 'settings.toml').write_text(body)
-        case = {
-            'rustup_version': fixture.RUSTUP_VERSION,
-            'toolchains': [f'{toolchain} (active, default)'],
-            'components': [f'{fixture.STEMS[package]}-{target.value}'
-                           for package, target in model.selected_pairs(model.Architecture.AMD64)],
-            'targets': [host, 'x86_64-unknown-linux-musl'],
-            'rustc_verbose': f'rustc 1.0.0\nrelease: {fixture.CHANNEL}\nhost: {host}\n',
-            'cargo_version': 'cargo 1.0.0 (fixture)',
-            'clippy_version': 'clippy 0.1.0 (fixture)',
-            'rustfmt_version': 'rustfmt 1.0.0 (fixture)',
-            'fail_when': [],
-        }
-        Path(str(rustup_home) + '.case.json').write_text(json.dumps(case))
-        argv = ['verify-installed', str(fixture_root.pinned), '--arch', 'amd64',
-                '--expect-channel', fixture.CHANNEL, '--rustup-home', str(rustup_home),
-                '--cargo-home', os.environ[TOOLS_ENV] + '/tools/cargo']
-        row_grammar_sensitive = label in ('trailing comma in an inline table',
-                                          'newline in an inline table', 'escape x',
-                                          'local time')
-        oracle_agrees = True
-        if label.startswith('an integer beyond'):
-            # TOML 1.0 requires the error; the oracle does not throw one, at any
-            # Python version, so its verdict here is not the 1.0 verdict. The Go
-            # reader's verdict is the TOML 1.0 one and is asserted against the
-            # column; the disagreement is reported, not reconciled.
-            oracle_agrees = not ORACLE['out_of_range_integer']
-            if not oracle_agrees:
-                DIFFERENTIAL['oracle_deviations'].append(
-                    'TOML integer range: the Go reader refuses an integer beyond '
-                    'int64 as TOML 1.0 requires; tomllib accepts it')
-        if (row_grammar_sensitive and grammar == '1.1') or not oracle_agrees:
-            # The oracle's own grammar (or its own integer range) does not agree
-            # with TOML 1.0 here; the Go verdict is the TOML 1.0 one. Compared
-            # against the column, not against the oracle.
+        row, argv = settings_row(label, body)
+        if label in ('trailing comma in an inline table',
+                     'newline in an inline table', 'escape x', 'local time') \
+                and grammar == '1.1':
+            # The oracle's own grammar accepts these; the Go verdict is the TOML
+            # 1.0 one. Compared against the column, not against the oracle.
             DIFFERENTIAL['go_only'] += 1
             go = differential.run_go(HELPER_FIXTURE,
                                ['--fixture-trust', fixture_root.dist.fingerprint, *argv],
                                {'PATH': os.path.dirname(go_program('record'))
                                 + ':/usr/bin:/bin', 'HOME': str(row), 'TMPDIR': str(row)})
-            expected_status = 0 if accepts else 1
             check(f'differential TOML {label} (Go against the TOML 1.0 column)',
-                  go[0] == expected_status,
+                  go[0] == (0 if accepts else 1),
                   f'(go status {go[0]}: {go[2]!r})')
             continue
         # The expected exit is the refusal's, not the grammar's: a document TOML
@@ -2955,6 +2954,42 @@ def test_differential_toml() -> None:
     escape_row = clean + 'a = "\\e"\n'
     DIFFERENTIAL['declared'].append(
         'TOML \\e: Go accepts it (ESC); TOML 1.0 refuses it (pre-approved P4)')
+
+
+def test_differential_p5_integer_range() -> None:
+    """P5: the TOML integer range, witnessed in both directions.
+
+    Go refuses an integer beyond int64 because TOML 1.0 requires the error and
+    because `rustup` -- the program that writes and reads `settings.toml`, through
+    Rust's `toml` crate -- is a 64-bit reader. The oracle accepts it, which is the
+    declared divergence.
+
+    The second assertion is what keeps the declaration honest. A "known
+    difference" with no witness becomes folklore and outlives its cause: the day
+    `tomllib` starts enforcing int64 the divergence no longer exists, so this goes
+    red and someone must delete the declaration rather than inherit it.
+    """
+    print('differential: P5, the TOML integer range')
+    toolchain = f'{fixture.CHANNEL}-{fixture.HOSTS["amd64"]}'
+    clean = (f'profile = "minimal"\nauto_self_update = "disable"\n'
+             f'auto_install = "disable"\ndefault_toolchain = "{toolchain}"\n')
+    row, argv = settings_row('p5-integer-range', clean + 'x = 9223372036854775808\n')
+    DIFFERENTIAL['go_only'] += 1
+    go = differential.run_go(HELPER_FIXTURE,
+                             ['--fixture-trust', fixture_root.dist.fingerprint, *argv],
+                             {'PATH': os.path.dirname(go_program('record'))
+                              + ':/usr/bin:/bin', 'HOME': str(row), 'TMPDIR': str(row)})
+    check('P5: Go refuses an integer beyond int64, as TOML 1.0 requires',
+          go[0] == 1 and 'not valid TOML' in go[2] and '9223372036854775808' in go[2],
+          f'(go status {go[0]}: {go[2]!r})')
+    check('P5: the oracle still accepts it, so the divergence is still a divergence',
+          ORACLE['out_of_range_integer'],
+          '(tomllib now refuses an integer beyond int64: the divergence no longer '
+          'exists, so delete the P5 declaration and compare this row live instead of '
+          'inheriting it)')
+    DIFFERENTIAL['oracle_deviations'].append(
+        "P5 TOML integer range: Go refuses an integer beyond int64 (TOML 1.0, and "
+        "rustup's own int64 reader); tomllib accepts it")
 
 
 def test_differential_usage() -> None:
@@ -3056,6 +3091,7 @@ def main() -> int:
         test_differential_trust()
         test_differential_installed()
         test_differential_toml()
+        test_differential_p5_integer_range()
         test_differential_usage()
         test_go_child_boundary()
         print()
