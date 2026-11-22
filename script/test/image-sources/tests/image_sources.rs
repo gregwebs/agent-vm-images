@@ -3684,11 +3684,9 @@ fn reviewed_args() -> &'static BTreeMap<&'static str, Vec<&'static str>> {
             }
             let mut fields = line.split_whitespace();
             let recipe = fields.next().expect("a reviewed-args line names a recipe");
+            // A bare path is legal: it says the recipe declares no ARG, which is
+            // a review with nothing to permit rather than an omission.
             let names: Vec<&'static str> = fields.collect();
-            assert!(
-                !names.is_empty(),
-                "{recipe}: a reviewed-args line names at least one ARG"
-            );
             assert!(
                 table.insert(recipe, names).is_none(),
                 "{recipe}: one reviewed-args line per recipe"
@@ -3698,22 +3696,32 @@ fn reviewed_args() -> &'static BTreeMap<&'static str, Vec<&'static str>> {
     })
 }
 
+/// The characters Docker accepts after an instruction keyword: space, tab,
+/// vertical tab, form feed and carriage return. Deliberately not
+/// `char::is_ascii_whitespace`, which omits the vertical tab BuildKit accepts
+/// (`ARG\x0bFOO=1` builds), and deliberately not `char::is_whitespace`, which
+/// adds the no-break space BuildKit refuses; both were measured against a real
+/// builder rather than assumed (#237, #238 review).
+fn is_keyword_separator(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\u{000b}' | '\u{000c}' | '\r')
+}
+
 /// The operands of the instruction whose keyword is `keyword`, or `None` when
-/// this instruction is a different one. BuildKit separates a keyword from its
-/// operands with any ASCII whitespace, so a tab is a separator: matching a
-/// literal space is how `ARG<TAB>NAME` walked past this reader while the awk
-/// gate refused the same line (#237). One helper rather than three readings,
-/// because the three call sites below all mean "this instruction is that one".
+/// this instruction is a different one. A keyword is separated from its operands
+/// by `is_keyword_separator`, so a tab is a separator too: matching a literal
+/// space is how `ARG<TAB>NAME` walked past this reader while the awk gate refused
+/// the same line (#237). One helper rather than several readings, because every
+/// call site below means "this instruction is that one".
 fn instruction_operands<'a>(instruction: &'a str, keyword: &str) -> Option<&'a str> {
     let head = instruction.get(..keyword.len())?;
     if !head.eq_ignore_ascii_case(keyword) {
         return None;
     }
     let rest = &instruction[keyword.len()..];
-    if !rest.is_empty() && !rest.starts_with(|c: char| c.is_ascii_whitespace()) {
+    if !rest.is_empty() && !rest.starts_with(is_keyword_separator) {
         return None;
     }
-    Some(rest.trim_start_matches(|c: char| c.is_ascii_whitespace()))
+    Some(rest.trim_start_matches(is_keyword_separator))
 }
 
 /// The declared ARG names of a recipe: `global_only` stops at the first `FROM`.
@@ -5343,11 +5351,38 @@ fn check_required_recipes(recipes: &BTreeMap<String, String>) -> Result<(), Stri
     Ok(())
 }
 
+/// The data file is the register of reviewed recipes, so a maintained recipe with
+/// no line is an unreviewed recipe and not one that declares nothing -- a bare
+/// path says that, and it is legal. Exact set equality both ways, like the parent
+/// inventory: a recipe added to one and not the other is the drift #237 was
+/// filed for (#238 review).
+fn check_reviewed_arg_coverage(recipes: &BTreeMap<String, String>) -> Result<(), String> {
+    let register: BTreeSet<&str> = reviewed_args().keys().copied().collect();
+    let maintained: BTreeSet<&str> = recipes.keys().map(String::as_str).collect();
+    let unreviewed: Vec<&str> = maintained.difference(&register).copied().collect();
+    if !unreviewed.is_empty() {
+        return Err(format!(
+            "no reviewed ARG set in script/test/reviewed-args.txt (a line naming the recipe, \
+             bare if it declares no ARG) for: {}",
+            unreviewed.join(", ")
+        ));
+    }
+    let stale: Vec<&str> = register.difference(&maintained).copied().collect();
+    if !stale.is_empty() {
+        return Err(format!(
+            "reviewed in script/test/reviewed-args.txt but not a maintained recipe: {}",
+            stale.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 #[test]
 fn the_parent_inventory_pins_every_maintained_recipe() {
     let inventory = parse_parent_inventory(&read_text(PARENT_INVENTORY)).unwrap();
     let recipes = maintained_recipes();
     check_required_recipes(&recipes).unwrap();
+    check_reviewed_arg_coverage(&recipes).unwrap();
     // Exact set equality both ways, so an unregistered recipe fails too.
     check_recipe_parents(&inventory, &recipes).unwrap();
     let debian = match &inventory.pins[DEBIAN_PIN] {
@@ -7413,6 +7448,27 @@ fn whitespace_delimited_keywords_are_read() {
     );
     let froms = parse_froms("FROM\tdebian:13\tAS\tbase\n").expect("tabs separate FROM operands");
     assert_eq!(froms[0].stage.as_deref(), Some("base"));
+    // The exact separator set: the vertical tab is the one
+    // `char::is_ascii_whitespace` omits (BuildKit builds `ARG\x0bFOO=1`), the
+    // form feed and carriage return it has, and the no-break space is what
+    // `char::is_whitespace` would wrongly add (BuildKit refuses it). All measured
+    // against a real builder in the #238 review.
+    for separator in [' ', '\t', '\u{000b}', '\u{000c}', '\r'] {
+        let source = format!(
+            "ARG{separator}BASE_IMAGE=agent-vm-base:local\nFROM{separator}${{BASE_IMAGE}}\n"
+        );
+        let froms = parse_froms(&source)
+            .unwrap_or_else(|error| panic!("{separator:?} separates a keyword: {error}"));
+        assert_eq!(
+            froms[0].resolved_image, LOCAL_BASE,
+            "{separator:?} separates the ARG and FROM keywords"
+        );
+    }
+    assert_eq!(
+        instruction_operands("FROM\u{00a0}debian:13", "FROM"),
+        None,
+        "a no-break space is not a keyword separator, so this is not a FROM instruction"
+    );
 
     // check_standard_verify_is_first_product_run: the product stage is found by
     // its FROM keyword, so a tab must not read as "no product stage".
@@ -7452,18 +7508,23 @@ fn whitespace_delimited_keywords_are_read() {
 
 /// `images/Dockerfile` is checked by this gate only: the awk gate covers the four
 /// example layers, so a global ARG this reader does not see has no gate at all.
-/// The tab that walked past the reader is the case that proves the coverage is
-/// this test's (#237).
+/// Every keyword separator is a case, because the vertical tab is what a
+/// whitespace predicate written from memory omits (#237, #238 review).
 #[test]
-fn an_unreviewed_global_arg_off_a_tab_is_refused_in_images_dockerfile() {
+fn an_unreviewed_global_arg_off_a_keyword_separator_is_refused_in_images_dockerfile() {
     let path = "images/Dockerfile";
     let source = read_text(path);
-    let added = format!("ARG\tGOFLAGS=-tags=example_fixture\n{source}");
-    let error = parse_recipe(path, &added).expect_err("an unreviewed global ARG is refused");
-    assert!(
-        error.contains("unreviewed global ARG: GOFLAGS"),
-        "the refusal must name the ARG: {error}"
-    );
+    for separator in ['\t', '\u{000b}', '\u{000c}', '\r'] {
+        let added = format!("ARG{separator}GOFLAGS=-tags=example_fixture\n{source}");
+        let error = match parse_recipe(path, &added) {
+            Ok(_) => panic!("{separator:?}: an unreviewed global ARG is accepted"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("unreviewed global ARG: GOFLAGS"),
+            "{separator:?}: the refusal must name the ARG: {error}"
+        );
+    }
 }
 
 /// The set is bidirectional and the data file is its only copy, so a name a

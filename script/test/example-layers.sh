@@ -41,7 +41,7 @@ GUARDED_DATA='chrome-devtools/data/chrome-devtools-mcp.sigstore.json chrome-devt
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=148
+SELF_TEST_CASES=150
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -166,13 +166,31 @@ review_args() { # EXAMPLE INSTRUCTIONS
             failed=1
             exit 1
         }
-        BEGIN {
-            for (i = 1; i <= split(ENVIRON["REVIEWED_ARGS"], names, "\n"); i++) reviewed_name[names[i]]=1
+        # Docker accepts space, tab, vertical tab, form feed and carriage return
+        # after a keyword. The default awk field split knows only some of those
+        # (BSD awk does not split on the vertical tab), so the separators are
+        # normalized before the keyword and the names are read; the Rust gate
+        # matches the same set (#237, #238 review). The shell single-quotes this
+        # program, so no apostrophe may appear in any of its comments.
+        function normalize(line) {
+            gsub(/[[:space:]]+/, " ", line)
+            sub(/^ /, "", line)
+            return line
         }
-        toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { stage=1 }
-        toupper($1) == "ARG" {
-            for (i = 2; i <= NF; i++) {
-                name=$i
+        BEGIN {
+            # A bare path in the data file is a reviewed recipe that declares no
+            # ARG, so an empty set is legal and must not become one empty name.
+            if (ENVIRON["REVIEWED_ARGS"] != "")
+                for (i = 1; i <= split(ENVIRON["REVIEWED_ARGS"], names, "\n"); i++) reviewed_name[names[i]]=1
+        }
+        {
+            instruction=normalize($0)
+        }
+        toupper(instruction) ~ /^FROM([[:space:]]|$)/ { stage=1 }
+        toupper(instruction) ~ /^ARG / {
+            count=split(instruction, operands, " ")
+            for (i = 2; i <= count; i++) {
+                name=operands[i]
                 sub(/=.*$/, "", name)
                 declared[name]=1
                 if (!stage && !(name in reviewed_name))
@@ -208,10 +226,20 @@ check() {
         [[ "$first" =~ ^ARG\ BASE_IMAGE=ghcr\.io/gregwebs/agent-vm-standard@sha256:[0-9a-f]{64}$ ]] || fail "parent pin: ARG shape: $example"
         # C2a first-ARG shape end
         [ "$(printf '%s\n' "$instructions" | awk '
-            toupper($1) == "ARG" {
-                for (i=2; i<=NF; i++) if ($i ~ /^BASE_IMAGE(=|$)/) count++
+            # The same separator set as review_args above: the count must see a
+            # BASE_IMAGE redeclaration however the keyword is separated.
+            function normalize(line) {
+                gsub(/[[:space:]]+/, " ", line)
+                sub(/^ /, "", line)
+                return line
             }
-            END { print count+0 }
+            {
+                instruction=normalize($0)
+                count=split(instruction, operands, " ")
+                if (toupper(instruction) ~ /^ARG /)
+                    for (i=2; i<=count; i++) if (operands[i] ~ /^BASE_IMAGE(=|$)/) found++
+            }
+            END { print found+0 }
         ')" -eq 1 ] || fail "parent pin: ARG shape: $example redefinition"
         if [ "$example" = rust-dev ]; then
             # The one example whose helper module is compiled in-image: its first
@@ -1354,12 +1382,16 @@ INSTRUCTION
                     "$godocker" > "$SCRATCH/rewrite"
                 cat "$SCRATCH/rewrite" > "$godocker"
                 expected='ARG review: go-dev declares an unreviewed global ARG: GOFLAGS' ;;
-            # 146-148: the keyword is separated by any ASCII whitespace and the
-            # reviewed sets are one committed data file (#237). 146 and 147 are
-            # the two lines this gate reads by field rather than by a literal
-            # space, so a reading that stopped splitting on a tab would pass them
-            # to the parent checks; 148 is the reverse direction of the set, the
-            # stale permission the data file's equality still refuses.
+            # 146-150: the keyword is separated by any of Docker's five separators
+            # and the reviewed sets are one committed data file (#237). 146, 147
+            # and 149 are the lines this gate reads by field rather than by a
+            # literal space, so a reading that stopped splitting on a tab or a
+            # vertical tab would pass them to the parent checks (BSD awk does not
+            # split fields on the vertical tab, so 149 is the case that needs the
+            # normalization); 150 is the same vertical tab in the BASE_IMAGE
+            # redefinition count, which a field-split read cannot see either; 148
+            # is the reverse direction of the set, the stale permission the data
+            # file's equality still refuses.
             146)
                 awk '/^ARG BASE_IMAGE=/ { print; print "ARG\tGOFLAGS=-tags=example_fixture"; next } { print }' \
                     "$godocker" > "$SCRATCH/rewrite"
@@ -1382,6 +1414,20 @@ INSTRUCTION
                     fail 'self-test: case 148 did not drop ARG GO_PREFIX'
                 fi
                 expected='ARG review: go-dev no longer declares the reviewed ARG GO_PREFIX' ;;
+            149)
+                awk '/^ARG BASE_IMAGE=/ { print; print "ARG\vGOFLAGS=-tags=example_fixture"; next } { print }' \
+                    "$godocker" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$godocker"
+                grep -qF "$(printf 'ARG\vGOFLAGS=-tags=example_fixture')" "$godocker" ||
+                    fail 'self-test: case 149 did not write a vertical-tab-delimited ARG'
+                expected='ARG review: go-dev declares an unreviewed global ARG: GOFLAGS' ;;
+            150)
+                awk '/^ARG BASE_IMAGE=/ { print; print "ARG\vBASE_IMAGE=debian:13"; next } { print }' \
+                    "$godocker" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$godocker"
+                grep -qF "$(printf 'ARG\vBASE_IMAGE=debian:13')" "$godocker" ||
+                    fail 'self-test: case 150 did not write a vertical-tab-delimited ARG'
+                expected='parent pin: ARG shape: go-dev redefinition' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac

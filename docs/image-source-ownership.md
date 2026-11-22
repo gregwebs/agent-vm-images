@@ -516,7 +516,7 @@ installer shape, the kache policy file, the two ENVs that select it (including
 the store's path outside `$HOME`) and that it is installed after the verifier,
 the kache evidence hashing to its ARGs, banned live-bootstrap or
 mutable-channel tokens, and the Verus smoke shape — by
-`script/test/example-layers.sh` (148 cases). Hermetic behaviour:
+`script/test/example-layers.sh` (150 cases). Hermetic behaviour:
 `python3 script/test/rust-toolchain-pins.py` and
 `python3 script/test/rust-toolchain-maintenance.py`. Native evidence:
 `bash script/test/rust-example.sh --platform linux/arm64|linux/amd64` on a
@@ -581,7 +581,7 @@ all four ARG-derived assertions), the exact installer/verifier RUN shapes and
 mounts, `--network=none` on the verifier, exactly one `ENV GOTOOLCHAIN=local`, the
 absence of any other `GO*` policy ENV, and banned unpinned-install /
 graph-regeneration / checksum-bypass tokens — by `script/test/example-layers.sh`
-(148 cases). Hermetic behaviour on a pinned native Go:
+(150 cases). Hermetic behaviour on a pinned native Go:
 `python3 script/test/gopls-closure-pins.py --go-root PATH` and
 `python3 script/test/gopls-closure-maintenance.py --go-root PATH`. Native
 evidence: `bash script/test/go-example.sh --platform linux/arm64|linux/amd64

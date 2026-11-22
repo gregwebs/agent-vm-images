@@ -1,6 +1,11 @@
 # The reviewed ARG sets of the maintained recipes: one `path NAME...` line per
 # recipe, naming every ARG that recipe declares, whole file.
 #
+# Every maintained recipe has a line, and a line is required even when the recipe
+# declares no ARG: a bare path is legal and says exactly that, so a missing recipe
+# is an unreviewed one rather than one with nothing to review. The line set and
+# the maintained set are compared both ways.
+#
 # The rule this file carries: an ARG is one more build-time input to a recipe
 # whose pins are reviewed as bytes, so a name is a review rather than an edit. A
 # recipe that declares a global ARG (one before the first FROM, which is what
@@ -9,6 +14,10 @@
 # dropped ARG cannot leave a stale permission behind (#235). Whole file and not
 # per stage, because the question is whether the recipe has ever named the input;
 # which stage reads it is a separate rule (rust-dev's closed instruction set).
+#
+# Both gates read an instruction keyword followed by any of Docker's five
+# separators - space, tab, vertical tab, form feed and carriage return - and not
+# by a no-break space, which BuildKit refuses (measured against a builder, #238).
 #
 # Read by both gates, and this file is the only copy of the sets:
 #   script/test/example-layers.sh   `reviewed_args`, the four examples/layers
