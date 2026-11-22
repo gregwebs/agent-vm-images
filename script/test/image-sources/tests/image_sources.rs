@@ -7377,11 +7377,13 @@ fn unreviewed_global_args_are_refused() {
 }
 
 /// A tab is a separator to BuildKit, so a tab-delimited keyword must be read
-/// like a spaced one. One case per helper, because each reads the keyword
+/// like a spaced one. One case per reader, because each reads the keyword
 /// through `instruction_operands` in its own way: before the fix `arg_names`
 /// missed the `ARG<TAB>` line, `global_defaults` lost its default and
 /// `collect_froms` did not see the FROM at all, while the awk gate refused the
-/// same lines for the four example layers (#237).
+/// same lines for the four example layers (#237). The last two cases are the
+/// checks that read a keyword off a normalized instruction list for a reason of
+/// their own: a tab there reported a recipe defect that was really this one.
 #[test]
 fn whitespace_delimited_keywords_are_read() {
     // arg_names: the ARG keyword, and the global window ending on a tab FROM.
@@ -7411,6 +7413,41 @@ fn whitespace_delimited_keywords_are_read() {
     );
     let froms = parse_froms("FROM\tdebian:13\tAS\tbase\n").expect("tabs separate FROM operands");
     assert_eq!(froms[0].stage.as_deref(), Some("base"));
+
+    // check_standard_verify_is_first_product_run: the product stage is found by
+    // its FROM keyword, so a tab must not read as "no product stage".
+    let standard = read_text("images/standard/Dockerfile");
+    let tabbed_product = standard.replacen("FROM ${BASE_IMAGE}\n", "FROM\t${BASE_IMAGE}\n", 1);
+    assert_ne!(tabbed_product, standard, "the mutation did not apply");
+    check_standard_verify_is_first_product_run(&tabbed_product)
+        .expect("a tab-delimited product FROM is still the product stage");
+
+    // extension_identity: both the exactly-one default count and the stage-local
+    // redeclaration are ARG keyword reads, so a tab must not read as a missing
+    // default or as a missing redeclaration.
+    let extension = read_text("examples/base-extension/Dockerfile");
+    let identity = extension_identity(&extension).expect("the committed extension is reviewed");
+    let tabbed_extension = extension
+        .replacen(
+            &format!("ARG {BASE_IDENTITY_ARG}={identity}\n"),
+            &format!("ARG\t{BASE_IDENTITY_ARG}={identity}\n"),
+            1,
+        )
+        .replacen(
+            &format!("ARG {BASE_IDENTITY_ARG}\n"),
+            &format!("ARG\t{BASE_IDENTITY_ARG}\n"),
+            1,
+        );
+    assert!(
+        tabbed_extension.contains(&format!("ARG\t{BASE_IDENTITY_ARG}={identity}"))
+            && tabbed_extension.contains(&format!("ARG\t{BASE_IDENTITY_ARG}\n")),
+        "the mutation did not apply"
+    );
+    assert_eq!(
+        extension_identity(&tabbed_extension)
+            .expect("a tab-delimited identity ARG is the same declaration"),
+        identity
+    );
 }
 
 /// `images/Dockerfile` is checked by this gate only: the awk gate covers the four
@@ -7885,8 +7922,7 @@ fn check_base_stamp_is_last_run(base: &str) -> Result<(), String> {
 fn check_standard_verify_is_first_product_run(standard: &str) -> Result<(), String> {
     let instructions = dockerfile_instructions(standard)?;
     let Some(start) = instructions.iter().rposition(|instruction| {
-        instruction.to_ascii_uppercase().starts_with("FROM ")
-            && instruction.contains("${BASE_IMAGE}")
+        instruction_operands(instruction, "FROM").is_some() && instruction.contains("${BASE_IMAGE}")
     }) else {
         return Err("the standard recipe no longer declares the product stage".into());
     };
@@ -8242,10 +8278,11 @@ fn extension_identity(extension: &str) -> Result<String, String> {
     let declarations = instructions
         .iter()
         .filter(|instruction| {
-            instruction.starts_with("ARG ")
-                && instruction
+            instruction_operands(instruction, "ARG").is_some_and(|operands| {
+                operands
                     .split_whitespace()
                     .any(|word| word.starts_with(&format!("{BASE_IDENTITY_ARG}=")))
+            })
         })
         .count();
     if declarations != 1 {
@@ -8255,7 +8292,7 @@ fn extension_identity(extension: &str) -> Result<String, String> {
     }
     let stage_local = instructions
         .iter()
-        .any(|instruction| instruction == &format!("ARG {BASE_IDENTITY_ARG}"));
+        .any(|instruction| instruction_operands(instruction, "ARG") == Some(BASE_IDENTITY_ARG));
     if !stage_local {
         return Err(format!(
             "the extension must redeclare {BASE_IDENTITY_ARG} inside the stage without a default"

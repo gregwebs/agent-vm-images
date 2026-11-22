@@ -78,6 +78,8 @@ SHARED_INPUTS = frozenset({
     'script/ci/apt-install.sh',
     'script/test/contracts.sh',
     'script/test/example-layers.sh',
+    # The reviewed ARG sets: the awk gate's data, read for every layer's verdict.
+    'script/test/reviewed-args.txt',
     '.github/workflows/contracts.yml',
     '.github/workflows/example-layers.yml',
     # Kept during the rename transition so a merge-base that predates it still
@@ -698,6 +700,7 @@ def _self_test_shared_inputs(test: SelfTest, fixture: Fixture) -> None:
                  'images/parent-pins.json', 'script/ci/layer-changes.py',
                  'script/test/image-sources/tests/image_sources.rs',
                  'script/test/network_requests.py',
+                 'script/test/reviewed-args.txt',
                  '.github/workflows/chrome-example.yml'):
         head = fixture.branch(f'shared-{path.replace("/", "-")}', {path: 'changed\n'})
         selection = test.select(test.pull_request(fixture.base, head))
