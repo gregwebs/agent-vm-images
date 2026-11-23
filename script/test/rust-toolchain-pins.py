@@ -11,6 +11,7 @@ acceptance is ``script/test/rust-example.sh``.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import lzma
@@ -26,6 +27,7 @@ import threading
 import time
 import tomllib
 import traceback
+import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -3088,6 +3090,243 @@ def test_go_child_boundary() -> None:
                      fragments=('rustup --version failed',), python_crashes=True)
 
 
+
+
+# --- install differential ----------------------------------------------------
+# The Go installer's differential rows. Both implementations fetch from the same
+# fixture bytes and run the same emulated toolchain; the Go side additionally
+# exercises the real internal/fetch client through a harness-owned loopback
+# listener. What is compared is the plan's key: status and streams, the frozen
+# --events sequence, the exact fetched URL set (no duplicates), the gpg
+# transcript, the ordered process transcript, the reviewed child environment, and
+# that neither TMPDIR nor the work directory survives.
+
+REVIEWED_INSTALL_ENV = ('PATH', 'LANG', 'LC_ALL', 'TZ', 'HOME', 'XDG_CACHE_HOME',
+                        'XDG_DATA_HOME', 'XDG_CONFIG_HOME', 'TMPDIR', 'RUSTUP_HOME',
+                        'CARGO_HOME', 'RUSTUP_DIST_SERVER', 'RUSTUP_UPDATE_ROOT',
+                        'RUSTUP_AUTO_INSTALL')
+
+
+def bootstrap_digests(dist) -> dict[str, str]:
+    digests = {}
+    for arch in fixture.HOSTS:
+        url = (f'https://static.rust-lang.org/rustup/archive/{fixture.RUSTUP_VERSION}/'
+               f'{fixture.HOSTS[arch]}/rustup-init')
+        digests[fixture.HOSTS[arch]] = hashlib.sha256(dist.files[url]).hexdigest()
+    return digests
+
+
+def write_bootstrap_digests(dist) -> None:
+    directory = Path(os.environ[TOOLS_ENV]) / 'tools' / 'bootstrap'
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / 'digests.json').write_text(json.dumps(bootstrap_digests(dist)))
+
+
+def clean_case(arch: str) -> dict:
+    host, musl = fixture.HOSTS[arch], fixture.MUSL[arch]
+    return {'rustup_version': fixture.RUSTUP_VERSION,
+            'toolchains': [f'{fixture.CHANNEL}-{host} (active, default)'],
+            'components': [f'{fixture.STEMS[package]}-{target}'
+                           for package, target in fixture.selection(arch)],
+            'targets': [host, musl],
+            'rustc_verbose': f'rustc {fixture.CHANNEL}\nbinary: rustc\n'
+                             f'release: {fixture.CHANNEL}\nhost: {host}\n',
+            'cargo_version': 'cargo 1.0.0 (fixture)',
+            'clippy_version': 'clippy 0.1.0 (fixture)',
+            'rustfmt_version': 'rustfmt 1.0.0 (fixture)', 'fail_when': []}
+
+
+def _normalizer(pairs):
+    def normalize(value):
+        if not isinstance(value, str):
+            return value
+        for prefix, replacement in pairs:
+            # A file:// URI embeds the path, so replace wherever it appears, not
+            # only at a string boundary.
+            value = value.replace(prefix, replacement)
+        # Each implementation's scratch names are random per invocation.
+        return re.sub(r'/rust-(prepare|install|verify)-[^/]+', r'/rust-\1-<X>', value)
+    return normalize
+
+
+def _compare_install_env(python_calls, go_calls, normalize) -> list[str]:
+    """Compare the reviewed environment and reject an extra name on the Go side."""
+    problems = []
+    # The install verbs carry the reviewed literal list; the installed-state reads
+    # carry the smaller tool environment. Only the first pair is the install
+    # environment, and it is the one the exact-name rule applies to.
+    for calls, label in ((python_calls[:1], 'python'), (go_calls[:1], 'go')):
+        for argv, env, cwd in calls:
+            names = set(env)
+            allowed = set(REVIEWED_INSTALL_ENV)
+            if label == 'python':
+                allowed.add('PYTHONDONTWRITEBYTECODE')
+            extra = names - allowed
+            missing = set(REVIEWED_INSTALL_ENV) - names
+            if extra or missing:
+                problems.append(f'{label} environment names differ: extra {sorted(extra)} '
+                                f'missing {sorted(missing)}')
+                return problems
+    for (py_argv, py_env, _), (go_argv, go_env, _) in zip(python_calls, go_calls):
+        for name in REVIEWED_INSTALL_ENV:
+            if name not in py_env or name not in go_env:
+                continue
+            left = normalize(py_env[name])
+            right = normalize(go_env[name])
+            if left != right:
+                problems.append(f'environment {name} differs: python {left!r} go {right!r}')
+                return problems
+    return problems
+
+
+def differential_install_row(label: str, arch: str, mutate=None, expect=0,
+                             fragments=(), homes_exist=True, expect_fetches=None):
+    row = new_row()
+    python_root, go_root = row / 'python', row / 'go'
+    for root in (python_root, go_root):
+        (root / 'tmp').mkdir(parents=True)
+        (root / 'work').mkdir()
+    files = dict(fixture_root.dist.files)
+    if mutate is not None:
+        mutate(files)
+    write_bootstrap_digests(SimpleNamespace(files=files))
+    python_homes = (python_root / 'rustup', python_root / 'cargo')
+    go_homes = (go_root / 'rustup', go_root / 'cargo')
+    python_events, go_events = python_root / 'events', go_root / 'events'
+    program = go_program('record')
+    transport = driver.FixtureTransport(files)
+    runner = driver.RecordingRunner(model.Architecture(arch), fixture.CHANNEL,
+                                    fixture.RUSTUP_VERSION, gpg=program)
+    dependencies = model.Dependencies(transport=transport, runner=runner,
+                                      gpg=model.GpgProgram(program),
+                                      trust=fixture_root.trust, github_actions=False)
+    row_env, previous = _set_row_environment(program)
+    argv = ['install', str(fixture_root.pinned), '--arch', arch,
+            '--expect-channel', fixture.CHANNEL,
+            '--rustup-home', str(python_homes[0]), '--cargo-home', str(python_homes[1]),
+            '--events', str(python_events), '--work-dir', str(python_root / 'work')]
+    python = differential.run_python(argv, dependencies, python_root / 'tmp')
+    _restore_row_environment(previous)
+    python_transcript = differential.transcript(python_root)
+    case_path = Path(str(go_homes[0]) + '.case.json')
+    case_path.write_text(json.dumps(clean_case(arch)))
+    with differential.LoopbackDistribution(files) as server:
+        go_argv = ['--fixture-trust', fixture_root.dist.fingerprint,
+                   '--fixture-upstream', server.origin,
+                   '--fixture-bootstrap-exec',
+                   str(Path(os.environ[TOOLS_ENV]) / 'tools' / 'bootstrap' / 'fake-bootstrap'),
+                   'install', str(fixture_root.pinned), '--arch', arch,
+                   '--expect-channel', fixture.CHANNEL,
+                   '--rustup-home', str(go_homes[0]), '--cargo-home', str(go_homes[1]),
+                   '--events', str(go_events), '--work-dir', str(go_root / 'work')]
+        environment = {**row_env, 'HOME': str(go_root), 'TMPDIR': str(go_root / 'tmp')}
+        go = differential.run_go(HELPER_FIXTURE, go_argv, environment)
+        fetched = [urllib.parse.urlsplit(path).path for path in server.paths()]
+    go_transcript = differential.transcript(go_root)
+    normalize_transcript = _normalizer([
+        (str(python_root), '<ROOT>'), (str(go_root), '<ROOT>'),
+        (os.path.realpath(str(python_root)), '<ROOT>'),
+        (os.path.realpath(str(go_root)), '<ROOT>'),
+    ])
+
+    def normalize_entries(entries):
+        return [{'mode': entry['mode'],
+                 'argv': [normalize_transcript(item) for item in entry['argv']],
+                 'env': {key: normalize_transcript(value)
+                         for key, value in entry['env'].items()},
+                 'keyring_mode': entry['keyring_mode']} for entry in entries]
+    python_transcript = normalize_entries(python_transcript)
+    go_transcript = normalize_entries(go_transcript)
+    comparison = differential.compare(label, python, go, fragments=fragments,
+                                channel=fixture.CHANNEL,
+                                python_transcript=python_transcript,
+                                go_transcript=go_transcript,
+                                python_tmpdir=python_root / 'tmp',
+                                go_tmpdir=go_root / 'tmp')
+    DIFFERENTIAL['compared'] += 1
+    expected_paths = [urllib.parse.urlsplit(url).path for url in transport.fetches]
+    if fetched != expected_paths:
+        comparison.problems.append(f'{label}: fetched paths differ: '
+                                   f'python {expected_paths} go {fetched}')
+    for name in ('events',):
+        left = (python_root / name).read_text() if (python_root / name).exists() else ''
+        right = (go_root / name).read_text() if (go_root / name).exists() else ''
+        if left != right:
+            comparison.problems.append(f'{label}: --events differ:\npython {left!r}\n'
+                                       f'go {right!r}')
+    for root, label_name in ((python_root / 'work', 'python'),
+                             (go_root / 'work', 'go')):
+        left = sorted(entry.name for entry in root.iterdir())
+        if left:
+            comparison.problems.append(f'{label}: {label_name} work dir left {left}')
+    for homes, label_name in ((python_homes, 'python'), (go_homes, 'go')):
+        present = [path.name for path in homes if path.exists()]
+        if homes_exist and len(present) != 2:
+            comparison.problems.append(f'{label}: {label_name} homes missing')
+        if not homes_exist and present:
+            comparison.problems.append(f'{label}: {label_name} left homes {present}')
+    normalize = _normalizer([
+        (str(python_root), '<ROOT>'), (str(go_root), '<ROOT>'),
+        (str(python_homes[0]), '<RUSTUP>'), (str(go_homes[0]), '<RUSTUP>'),
+        (str(python_homes[1]), '<CARGO>'), (str(go_homes[1]), '<CARGO>'),
+        (str(python_root / 'work'), '<WORK>'), (str(go_root / 'work'), '<WORK>'),
+        (os.path.realpath(str(python_root)), '<ROOT>'),
+        (os.path.realpath(str(go_root)), '<ROOT>'),
+    ])
+    python_calls = [(argv, env, cwd) for argv, env, cwd in runner.calls
+                    if os.path.basename(argv[0]) not in ('gpg', 'rustup-init')]
+    go_calls = []
+    calls_path = Path(str(go_homes[0]) + '/calls.jsonl')
+    if calls_path.exists():
+        for line in calls_path.read_text().splitlines():
+            entry = json.loads(line)
+            go_calls.append((entry['argv'], entry['env'], entry.get('cwd')))
+    if len(python_calls) != len(go_calls):
+        comparison.problems.append(f'{label}: process transcripts differ in length: '
+                                   f'python {len(python_calls)} go {len(go_calls)}')
+    else:
+        for (py_argv, _, py_cwd), (go_argv, _, go_cwd) in zip(python_calls, go_calls):
+            left = [os.path.basename(py_argv[0])] + [normalize(item) for item in py_argv[1:]]
+            right = [os.path.basename(go_argv[0])] + [normalize(item) for item in go_argv[1:]]
+            if left != right:
+                comparison.problems.append(f'{label}: argv differs: {left} vs {right}')
+                break
+            if py_cwd is not None and normalize(py_cwd) != normalize(go_cwd or ''):
+                comparison.problems.append(f'{label}: cwd differs: {py_cwd} vs {go_cwd}')
+                break
+        if comparison.ok:
+            comparison.problems.extend(_compare_install_env(python_calls, go_calls, normalize))
+    if comparison.ok and python[0] != expect:
+        comparison.problems.append(f'{label}: both returned {python[0]}, expected {expect}')
+    if expect_fetches is not None and len(expected_paths) != expect_fetches:
+        comparison.problems.append(f'{label}: {len(expected_paths)} fetches, expected '
+                                   f'{expect_fetches}')
+    check(f'differential {label}', comparison.ok,
+          '(' + '; '.join(comparison.problems) + ')' if not comparison.ok else '')
+
+
+def test_differential_install() -> None:
+    print('differential: install rows')
+    for arch in ('amd64', 'arm64'):
+        differential_install_row(f'install clean {arch}', arch, expect_fetches=7)
+    def corrupt_bootstrap(files):
+        url = (f'https://static.rust-lang.org/rustup/archive/{fixture.RUSTUP_VERSION}/'
+               f'{fixture.HOSTS["amd64"]}/rustup-init')
+        files[url] = files[url] + b'x'
+    differential_install_row('install refuses a bad bootstrap digest', 'amd64',
+                             mutate=corrupt_bootstrap, expect=1,
+                             fragments=('do not match the committed digest',),
+                             homes_exist=False, expect_fetches=1)
+
+    def corrupt_archive(files):
+        url = fixture.url_of_archive('rustfmt-preview', fixture.HOSTS['amd64'])
+        files[url] = files[url] + b'\x00'
+    differential_install_row('install refuses a late archive hash', 'amd64',
+                             mutate=corrupt_archive, expect=1,
+                             fragments=('do not match the signed manifest hash',),
+                             homes_exist=False, expect_fetches=7)
+
+
 def main() -> int:
     global fixture_root
     root = Path(tempfile.mkdtemp(prefix='rust-toolchain-pins-')).resolve()
@@ -3134,6 +3373,8 @@ def main() -> int:
         test_differential_gpg()
         test_differential_trust()
         test_differential_installed()
+        write_bootstrap_digests(fixture_root.dist)
+        test_differential_install()
         test_differential_toml()
         test_differential_p5_integer_range()
         test_differential_usage()

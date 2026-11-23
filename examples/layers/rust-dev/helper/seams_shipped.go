@@ -2,7 +2,10 @@
 
 package main
 
-import "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain"
+import (
+	"github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/fetch"
+	"github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain"
+)
 
 // A shipped build honours no fixture seam (ADR 0017, decision D1). Every
 // suite-only input -- the reviewed trust it checks against, the upstream it
@@ -29,4 +32,19 @@ func (fixtureArguments) fixtureSeamsRequested() bool { return false }
 // pin's own trust fields are compared against it; they never set it.
 func (fixtureArguments) trust() (toolchain.TrustPolicy, error) {
 	return toolchain.ReviewedTrust, nil
+}
+
+// transport is the production fetcher. The factory argument is the pin's exact
+// URL closure, which a shipped build does not need: every HTTPS URL the pin names
+// is fetched from its committed origin.
+func (fixtureArguments) transport() (toolchain.TransportFactory, error) {
+	return func([]toolchain.CanonicalURL) (toolchain.Transport, error) {
+		return fetch.NewClient(), nil
+	}, nil
+}
+
+// runner executes the bootstrap and the installed tools as the pinned paths name
+// them.
+func (fixtureArguments) runner() (toolchain.Runner, error) {
+	return toolchain.ExecRunner{}, nil
 }

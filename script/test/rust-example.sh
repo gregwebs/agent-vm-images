@@ -10,10 +10,10 @@
 #
 # Prerequisites: a native Linux daemon of the requested platform, a
 # daemon-backed builder, go (the layer's helper module is compiled for the
-# platform: it verifies the pin here, and the image build still runs Python's
-# installer until #231), python3 (the image's install leg), git and
-# host-watchdog.py. The amd64 row must come from a native amd64 host; QEMU is not
-# acceptance.
+# platform: it verifies the pin here and its `install` verb downloads and installs
+# the toolchain in the image), python3 (the host watchdog and the canary guest),
+# git and host-watchdog.py. The amd64 row must come from a native amd64 host; QEMU
+# is not acceptance.
 #
 # Usage: bash script/test/rust-example.sh [--platform linux/amd64|linux/arm64]
 #                                         [--base-image EXACT_REF] [--no-cache]
@@ -1235,7 +1235,7 @@ case "$1" in
             *' VERUS_SHA256=0000000'*)
                 printf 'sha256sum: FAILED\n' >&2; exit 1 ;;
             *' --no-cache '*)
-                printf 'bytes differ from the committed digest\n' >&2; exit 1 ;;
+                printf 'rust_toolchain: channel.toml: bytes differ from the committed digest\n' >&2; exit 1 ;;
         esac
         local id='' label='' previous='' arg
         for arg in "$@"; do
@@ -1634,7 +1634,7 @@ record "image id=$IMAGE_ID size=$IMAGE_SIZE parent=$PARENT_REF parent-id=$PARENT
 PHASE=inspect
 run_bounded inspect-env "$RUN_SECONDS" "$LOG_DIR/inspect.log" \
     "$DOCKER" run --rm --network none --label "$LABEL" --entrypoint /bin/bash "$TAG" -c \
-    'env | sort; stat -c "%a %U:%G %n" /opt /opt/rustup /opt/cargo /opt/cargo/bin /opt/cargo/bin/rustup /opt/rustup/settings.toml /opt/kache /opt/kache/bin /opt/kache/bin/kache /opt/kache/shims /opt/kache/shims/.kache-shims /opt/kache/config.toml 2>&1; readlink /opt/kache/shims/cc 2>&1; ls -d /run/rust-verify 2>&1 || true; ls /tmp/rust_toolchain.py /tmp/install-rust.sh /tmp/kache-config.toml 2>&1 || true; ls -d /tmp/rust-prepare-* /tmp/rust-install-* /tmp/rust-verify-* /tmp/kache-pin 2>&1 || true' \
+    'env | sort; stat -c "%a %U:%G %n" /opt /opt/rustup /opt/cargo /opt/cargo/bin /opt/cargo/bin/rustup /opt/rustup/settings.toml /opt/kache /opt/kache/bin /opt/kache/bin/kache /opt/kache/shims /opt/kache/shims/.kache-shims /opt/kache/config.toml 2>&1; readlink /opt/kache/shims/cc 2>&1; ls -d /run/rust-verify 2>&1 || true; ls /tmp/rust-dev-helper /tmp/install-rust.sh /tmp/kache-config.toml 2>&1 || true; ls -d /tmp/rust-prepare-* /tmp/rust-install-* /tmp/rust-verify-* /tmp/kache-pin 2>&1 || true' \
     || true
 # The C/C++ shims are image state, not a guest setup step (ADR 0015): the image
 # PATH leads with the farm, and the farm is a read-only part of /opt like the
@@ -1992,7 +1992,7 @@ if run_bounded build-mutant "$BUILD_SECONDS" "$LOG_DIR/build-mutant.log" \
         "$DOCKER" build --no-cache --builder "$runner" --platform "$PLATFORM" --progress plain \
         --label "$LABEL" --build-arg "BASE_IMAGE=$PARENT_REF" -t "$MUTANT_TAG" "$MUTANT_ROOT"; then
     fail 'a mutated committed manifest byte must fail the build'
-elif grep -qE 'bytes differ from the committed digest|rust_toolchain' "$LOG_DIR/build-mutant.log"; then
+elif grep -qF 'rust_toolchain: channel.toml: bytes differ from the committed digest' "$LOG_DIR/build-mutant.log"; then
     pass 'changed manifest byte fails the build through the named pin error'
 else
     fail 'build failed without the named pin error'

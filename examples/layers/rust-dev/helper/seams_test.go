@@ -12,9 +12,7 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,40 +22,6 @@ import (
 // out rather than read from the tagged file, because a shipped build cannot
 // compile that file: the list is the contract this test holds.
 var seamNames = []string{"fixture-trust", "fixture-upstream", "fixture-bootstrap-exec"}
-
-func build(t *testing.T, tags string) string {
-	t.Helper()
-	binary := filepath.Join(t.TempDir(), "rust-dev-helper")
-	args := []string{"build", "-trimpath", "-buildvcs=false", "-o", binary}
-	if tags != "" {
-		args = append(args, "-tags", tags)
-	}
-	args = append(args, ".")
-	command := exec.Command("go", args...)
-	command.Env = append(os.Environ(), "GOFLAGS=-mod=vendor", "GOPROXY=off")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("go build (tags %q): %v\n%s", tags, err, output)
-	}
-	return binary
-}
-
-func runBinary(t *testing.T, binary string, args ...string) (string, int) {
-	t.Helper()
-	command := exec.Command(binary, args...)
-	var output bytes.Buffer
-	command.Stdout = &output
-	command.Stderr = &output
-	err := command.Run()
-	if err == nil {
-		return output.String(), 0
-	}
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		return output.String(), exit.ExitCode()
-	}
-	t.Fatalf("running %s: %v", binary, err)
-	return "", 0
-}
 
 func TestShippedBinaryCarriesNoFixtureSeam(t *testing.T) {
 	if len(fixtureSeams) != 0 {
@@ -136,6 +100,24 @@ func TestFixtureBuildHonoursOnlyTheReviewedTrust(t *testing.T) {
 			status, output)
 	}
 
+	// The two slice-3 seams are equally absent from the shipped grammar, both
+	// before the verb and after it.
+	for _, flag := range []string{"--fixture-upstream", "--fixture-bootstrap-exec"} {
+		output, status = runBinary(t, shippedPath, flag, "/tmp", "install", committed,
+			"--arch", "amd64", "--expect-channel", "1.98.1", "--rustup-home",
+			filepath.Join(t.TempDir(), "r"), "--cargo-home", filepath.Join(t.TempDir(), "c"))
+		if status != 1 || !strings.Contains(output, "usage: "+usageText) ||
+			strings.Contains(output, "fixture-") {
+			t.Fatalf("shipped %s before the verb: status %d:\n%s", flag, status, output)
+		}
+		output, status = runBinary(t, shippedPath, "install", committed, "--arch", "amd64",
+			"--expect-channel", "1.98.1", "--rustup-home", filepath.Join(t.TempDir(), "r"),
+			"--cargo-home", filepath.Join(t.TempDir(), "c"), flag, "/tmp")
+		if status != 2 || !strings.Contains(output, "usage: "+usageText) ||
+			strings.Contains(output, "fixture-") {
+			t.Fatalf("shipped %s after the verb: status %d:\n%s", flag, status, output)
+		}
+	}
 	// The fixture build lists the seam.
 	output, status = runBinary(t, taggedPath, "--fixture-seams")
 	if status != 0 || !strings.Contains(output, "fixture-trust") {

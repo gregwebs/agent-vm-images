@@ -116,16 +116,21 @@ for new ports.
 
 **A ported reader has two implementations until the Python is deleted.** `#187
 slice 2` moved the rust-dev layer's `check` and `verify-installed` to its Go
-helper while `rust_toolchain.py` stayed in the build (the install leg is #231 and
-the writer is #232). Two implementations of one rule set is a hazard, so it is
-held as a *differential*: both readers run over the same bytes on every host gate
-and every image build, and a disagreement fails the gate. Python is the oracle,
-never a fallback; nothing chooses between them at run time. Concretely,
-`script/test/example-layers.sh` runs both over the committed pin directory and
-over each of its self-test mutants, the pins suite runs both in-process (the
-fixture trust) and through the two real CLIs (the reviewed trust), and the image
-build runs Python's `load_pin` inside `install` and Go's `verify-installed` in the
-verifier over the same bytes. A differential disagreement is a stop reported on
+helper, and slice 3 (#231) moved `install` as well: the Go helper now fetches the
+seven pinned URLs, preflights the archives with `ulikunitz/xz` `SingleStream` and
+runs rustup, so zero Python runs in the `rust-dev` image build and `python3`
+leaves its apt line. `rust_toolchain.py` stays on disk, byte-identical and never
+mounted into a build, as the host-only oracle and the writer's library until #232.
+Two implementations of one rule set is a hazard, so the overlap is held as a
+*differential*: both readers run over the same bytes on every host gate, and a
+differential `install` row runs both from the same fixture bytes, with the Go
+side driving the real HTTP client through a harness-owned loopback listener. A
+disagreement fails the gate. Python is the oracle, never a fallback; nothing
+chooses between them at run time. The image build no longer compares the two
+implementations because it no longer runs Python; the host suites do.
+`script/test/example-layers.sh` runs both readers over the committed pin
+directory and each of its self-test mutants, and the pins suite runs the
+`install` rows side by side. A differential disagreement is a stop reported on
 the issue, never reconciled in code.
 
 **A TOML decoder is chosen by measurement, not by name.** The pin reader's TOML
@@ -182,7 +187,7 @@ Egress this rule does not govern includes:
   a user's image from a recipe that fetches what that image installs, so its
   install step may download. #187's slice 3 moves that fetch into the example's
   own `internal/fetch`, keeping one attempt, Python's bounds and no redirects;
-  slice 1 changes nothing about it. Its bounds are the pin's: seven canonical
+  slice 3 (#231) landed that. Its bounds are the pin's: seven canonical
   rust-lang.org URLs recorded in `data/rust-toolchain/pin.json`, one digest and
   one OpenPGP signature per archive, a 300 s per-request deadline, a 30 s
   inactivity bound, size caps per kind and status 200 only, all verified before

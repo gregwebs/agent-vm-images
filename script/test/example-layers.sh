@@ -29,7 +29,7 @@ GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp
 # listed file that vanishes fails as `guarded script missing`, and a `.go` file
 # nobody listed fails as `unreviewed helper file`. The vendor tree is deliberately
 # out of this list: its bytes belong to the module's vendor drift gate.
-GUARDED_GO='rust-dev/helper/go.mod rust-dev/helper/go.sum rust-dev/helper/main.go rust-dev/helper/main_test.go rust-dev/helper/imports_test.go rust-dev/helper/seams_fixture.go rust-dev/helper/seams_shipped.go rust-dev/helper/seams_test.go rust-dev/helper/kacheprobe/probe.go rust-dev/helper/kacheprobe/probe_test.go rust-dev/helper/internal/gpg/gpg.go rust-dev/helper/internal/gpg/gpg_test.go rust-dev/helper/internal/strictjson/decode.go rust-dev/helper/internal/strictjson/decode_test.go rust-dev/helper/toolchain/toolchain.go rust-dev/helper/toolchain/policy.go rust-dev/helper/toolchain/types.go rust-dev/helper/toolchain/refusal.go rust-dev/helper/toolchain/decode.go rust-dev/helper/toolchain/pin.go rust-dev/helper/toolchain/inputs.go rust-dev/helper/toolchain/manifest.go rust-dev/helper/toolchain/installed.go rust-dev/helper/toolchain/commands.go rust-dev/helper/toolchain/types_test.go rust-dev/helper/toolchain/decode_test.go rust-dev/helper/toolchain/pin_test.go rust-dev/helper/toolchain/manifest_test.go rust-dev/helper/toolchain/installed_test.go rust-dev/helper/toolchain/fuzz_test.go'
+GUARDED_GO='rust-dev/helper/go.mod rust-dev/helper/go.sum rust-dev/helper/main.go rust-dev/helper/main_test.go rust-dev/helper/imports_test.go rust-dev/helper/seams_fixture.go rust-dev/helper/seams_shipped.go rust-dev/helper/seams_test.go rust-dev/helper/kacheprobe/probe.go rust-dev/helper/kacheprobe/probe_test.go rust-dev/helper/internal/gpg/gpg.go rust-dev/helper/internal/gpg/gpg_test.go rust-dev/helper/internal/strictjson/decode.go rust-dev/helper/internal/strictjson/decode_test.go rust-dev/helper/toolchain/toolchain.go rust-dev/helper/toolchain/policy.go rust-dev/helper/toolchain/types.go rust-dev/helper/toolchain/refusal.go rust-dev/helper/toolchain/decode.go rust-dev/helper/toolchain/pin.go rust-dev/helper/toolchain/inputs.go rust-dev/helper/toolchain/manifest.go rust-dev/helper/toolchain/installed.go rust-dev/helper/toolchain/commands.go rust-dev/helper/toolchain/types_test.go rust-dev/helper/toolchain/decode_test.go rust-dev/helper/toolchain/pin_test.go rust-dev/helper/toolchain/manifest_test.go rust-dev/helper/toolchain/installed_test.go rust-dev/helper/toolchain/fuzz_test.go rust-dev/helper/toolchain/events.go rust-dev/helper/toolchain/preflight.go rust-dev/helper/toolchain/prepare.go rust-dev/helper/toolchain/install.go rust-dev/helper/toolchain/preflight_test.go rust-dev/helper/toolchain/prepare_test.go rust-dev/helper/toolchain/install_test.go rust-dev/helper/toolchain/fuzz_install_test.go rust-dev/helper/helpers_test.go rust-dev/helper/internal/fetch/fetch.go rust-dev/helper/internal/fetch/loopback_fixture.go rust-dev/helper/internal/fetch/fetch_test.go rust-dev/helper/internal/fetch/loopback_fixture_test.go rust-dev/helper/internal/tarwalk/tarwalk.go rust-dev/helper/internal/tarwalk/tarwalk_test.go'
 # The rust-dev helper's builder stage. It is a reviewed parent:
 # `images/parent-pins.json` records its digest, and its tag is the root go.mod's
 # toolchain. Both are named by the literals below rather than by a variable, so a
@@ -45,7 +45,7 @@ GUARDED_DATA='chrome-devtools/data/chrome-devtools-mcp.sigstore.json chrome-devt
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=156
+SELF_TEST_CASES=161
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -457,12 +457,13 @@ HELPER_BUILDER
     [ "$go_out" = "$rust_arg" ] || fail "rust-dev pins: channel disagreement"
     [ "$py_out" = "$rust_arg" ] || fail "rust-dev pins: the Python reader's channel disagrees"
     selected=$go_out
-reviewed_installer='RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro --mount=type=bind,source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro --mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro bash /tmp/install-rust.sh'
+reviewed_installer='RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro --mount=type=bind,from=rust-dev-helper,source=/out/rust-dev-helper,target=/tmp/rust-dev-helper,ro --mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro bash /tmp/install-rust.sh'
 reviewed_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro --mount=type=bind,from=rust-dev-helper,source=/out/rust-dev-helper,target=/run/rust-verify/rust-dev-helper,ro --mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus /bin/bash /run/rust-verify/verify-toolchain.sh'
 installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || true)
     [ "$installer_runs" -eq 1 ] || fail 'rust-dev: installer RUN must appear exactly once'
     installer_line=$(printf '%s\n' "$instructions" | grep -F 'install-rust.sh')
-    for token in 'source=install-rust.sh' 'source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro' \
+    for token in 'source=install-rust.sh' \
+        'from=rust-dev-helper,source=/out/rust-dev-helper,target=/tmp/rust-dev-helper,ro' \
         'source=data/rust-toolchain,target=/tmp/rust-toolchain,ro'; do
         case "$installer_line" in
             *"$token"*) ;;
@@ -498,6 +499,26 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     if grep -qE 'python3|PYTHONDONTWRITEBYTECODE|rust_toolchain\.py' \
         "$rustdir/verify-toolchain.sh"; then
         fail 'rust-dev: the verifier step must run no Python'
+    fi
+    # The install leg is Go too (#231): python3 leaves this layer's apt line (the
+    # parent still ships /usr/bin/python3 as a user feature), the entry point runs
+    # the helper, and no Python name survives in it.
+    apt_line=$(printf '%s\n' "$instructions" | grep -F 'apt-get install')
+    case "$apt_line" in
+        *python3*) fail 'rust-dev: apt install line must not carry python3' ;;
+    esac
+    for token in 'gnupg' 'ca-certificates'; do
+        case "$apt_line" in
+            *"$token"*) ;;
+            *) fail "rust-dev: apt install line must keep $token" ;;
+        esac
+    done
+    grep -qF '"$HERE/rust-dev-helper" install "$HERE/rust-toolchain"' \
+        "$rustdir/install-rust.sh" ||
+        fail 'rust-dev: install-rust.sh must run rust-dev-helper install'
+    if grep -qE 'python3|PYTHONDONTWRITEBYTECODE|rust_toolchain\.py' \
+        "$rustdir/install-rust.sh"; then
+        fail 'rust-dev: the install step must run no Python'
     fi
     grep -qxF 'ENV RUSTUP_AUTO_INSTALL=0' "$rustdir/Dockerfile" ||
         fail 'rust-dev: missing the no-implicit-install contract (ENV RUSTUP_AUTO_INSTALL=0)'
@@ -1088,8 +1109,8 @@ self_test() {
                 rewrite "$rustdocker" 's|^ARG RUST_TOOLCHAIN=.*|ARG RUST_TOOLCHAIN=1.0.0|'
                 expected='asserted channel' ;;
             64)
-                rewrite "$rustdocker" '/source=rust_toolchain.py,target=\/tmp\/rust_toolchain.py,ro/d'
-                expected='installer RUN lacks the reviewed runtime bind: source=rust_toolchain.py' ;;
+                rewrite "$rustdocker" '/from=rust-dev-helper,source=\/out\/rust-dev-helper,target=\/tmp\/rust-dev-helper,ro/d'
+                expected='installer RUN lacks the reviewed runtime bind: from=rust-dev-helper,source=/out/rust-dev-helper,target=/tmp/rust-dev-helper,ro' ;;
             65)
                 rewrite "$rustdocker" '/source=data\/rust-toolchain,target=\/tmp\/rust-toolchain,ro/d'
                 expected='installer RUN lacks the reviewed runtime bind: source=data/rust-toolchain' ;;
@@ -1494,6 +1515,26 @@ INSTRUCTION
                 printf 'package pkg\n' \
                     > "$tree/$LAYERS/rust-dev/helper/vendor/example.test/pkg/pkg.go"
                 expected='' ;;
+            # 157-161: the zero-Python install leg (#231). The apt line must drop
+            # python3 without losing gpg, the entry point must run the Go verb and
+            # name no Python, the installer must not mount the Python reader, and
+            # a helper source file that is not in GUARDED_GO must fail.
+            157)
+                rewrite "$rustdocker" 's|        gnupg ca-certificates|        python3 gnupg ca-certificates|'
+                expected='apt install line must not carry python3' ;;
+            158)
+                rewrite "$rustdocker" 's|        gnupg ca-certificates|        ca-certificates|'
+                expected='apt install line must keep gnupg' ;;
+            159)
+                rewrite "$tree/$LAYERS/rust-dev/install-rust.sh" \
+                    's|"\$HERE/rust-dev-helper" install|python3 "$HERE/rust_toolchain.py" install|'
+                expected='install-rust.sh must run rust-dev-helper install' ;;
+            160)
+                rewrite "$rustdocker" 's|--mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro|--mount=type=bind,source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro --mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro|'
+                expected='installer RUN must be exactly' ;;
+            161)
+                printf 'package fetch\n' > "$tree/$LAYERS/rust-dev/helper/internal/fetch/unreviewed.go"
+                expected='unreviewed helper file: rust-dev/helper/internal/fetch/unreviewed.go' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac

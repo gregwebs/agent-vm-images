@@ -1,9 +1,9 @@
 package main
 
-// Invariant 31: this binary reads committed bytes and runs the reviewed programs
-// only. It has no network, and it executes nothing but gpg and the installed
-// toolchain, because that is the whole set of programs either verb is allowed to
-// start.
+// Invariant 32: the network lives in one package and child processes in two files.
+// The install verb is allowed to download (it is image content, not a build
+// helper), but only internal/fetch may name net, net/http, net/url or crypto/tls,
+// and only the gpg verifier and the installed-state checks may start a program.
 
 import (
 	"go/parser"
@@ -15,9 +15,9 @@ import (
 	"testing"
 )
 
-// forbiddenImports are the packages that would give this binary a way onto the
-// network.
-var forbiddenImports = []string{"net", "net/http", "net/url", "crypto/tls", "net/rpc"}
+// networkImports are the packages that reach the network. They are allowed only
+// under internal/fetch: the shipped Fetch and its fixture-only loopback rewriter.
+var networkImports = []string{"net", "net/http", "net/url", "crypto/tls", "net/rpc"}
 
 // execImporters are the only packages allowed to start a child process: the gpg
 // package (one reviewed program, one private keyring) and the installed-state
@@ -55,9 +55,12 @@ func TestImportsAreReviewed(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			for _, forbidden := range forbiddenImports {
-				if name == forbidden || strings.HasPrefix(name, forbidden+"/") {
-					t.Errorf("%s imports %s: this binary has no network", relative, name)
+			for _, network := range networkImports {
+				if name == network || strings.HasPrefix(name, network+"/") {
+					if !strings.HasPrefix(relative, "internal/fetch/") {
+						t.Errorf("%s imports %s: only internal/fetch may reach the network",
+							relative, name)
+					}
 				}
 			}
 			if name == "os/exec" && !execImporters[relative] {
@@ -87,8 +90,8 @@ func TestForbiddenImportMutantIsDetected(t *testing.T) {
 	detected := false
 	for _, imported := range file.Imports {
 		name, _ := strconv.Unquote(imported.Path.Value)
-		for _, forbidden := range forbiddenImports {
-			if name == forbidden {
+		for _, network := range networkImports {
+			if name == network {
 				detected = true
 			}
 		}

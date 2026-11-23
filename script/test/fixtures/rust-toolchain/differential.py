@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import traceback
 from pathlib import Path
 import dataclasses
@@ -83,6 +84,13 @@ def install_tools(directory: Path, real_gpg: str, python: str) -> dict[str, list
         copy.write_text(f'#!{python} -I\n{emulator}')
         copy.chmod(0o755)
         programs.append(str(copy))
+    bootstrap_directory = tools / 'bootstrap'
+    bootstrap_directory.mkdir(parents=True, exist_ok=True)
+    bootstrap = bootstrap_directory / 'fake-bootstrap'
+    bootstrap.write_text(f'#!{python} -I\n'
+                         + (Path(__file__).resolve().parent / 'fake_bootstrap.py').read_text())
+    bootstrap.chmod(0o755)
+    programs.append(str(bootstrap))
     wrapper_source = (Path(__file__).resolve().parent / 'fake_gpg.py').read_text()
     for mode in ('gpg-record', 'gpg-fail', 'gpg-expire'):
         mode_directory = tools / mode
@@ -93,7 +101,8 @@ def install_tools(directory: Path, real_gpg: str, python: str) -> dict[str, list
         path.chmod(0o755)
         wrappers.append(str(path))
     return {'programs': programs, 'wrappers': wrappers,
-            'cargo': str(cargo), 'cargo_absent': str(absent)}
+            'cargo': str(cargo), 'cargo_absent': str(absent),
+            'bootstrap': str(bootstrap)}
 
 
 def run_python(argv, dependencies, tmpdir: Path, cwd: Path | None = None):
@@ -267,6 +276,71 @@ def remove_tools(directory: Path, prefix: str) -> None:
         raise AssertionError(f'refusing to remove {resolved}: not a {prefix}* under '
                              f'{temporary}')
     shutil.rmtree(resolved)
+
+
+class LoopbackDistribution:
+    """The harness-side listener for the Go install rows.
+
+    The binary gets only an exact-URL rewrite onto this origin; the listener is
+    here. It serves the same `dist.files` byte store the Python transport reads,
+    sets `Content-Length` so the shipped client's truncation check is exercised,
+    and records every path it was asked for. A path the pin does not name would
+    be a 404, and the binary refuses it before it ever gets here.
+    """
+
+    def __init__(self, files: dict[str, bytes]) -> None:
+        import http.server
+        import urllib.parse
+
+        parsed = {}
+        for url, raw in files.items():
+            parsed[urllib.parse.urlsplit(url).path] = raw
+        self.files = parsed
+        self.requests: list[str] = []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802 - http.server's name
+                outer.requests.append(self.path)
+                raw = outer.files.get(self.path)
+                if raw is None:
+                    self.send_response(404)
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *arguments) -> None:
+                pass
+
+        import socketserver
+
+        class Server(http.server.ThreadingHTTPServer):
+            # BaseHTTPServer.server_bind calls socket.getfqdn, which is an
+            # off-host resolver call and is refused inside the fixture boundary.
+            # Nothing here needs a name: the origin is always 127.0.0.1.
+            def server_bind(self):
+                socketserver.TCPServer.server_bind(self)
+                self.server_name, self.server_port = self.server_address[:2]
+
+        self.server = Server(('127.0.0.1', 0), Handler)
+        self.origin = f'http://127.0.0.1:{self.server.server_address[1]}'
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *arguments) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join()
+
+    def paths(self) -> list[str]:
+        return list(self.requests)
 
 
 def interpreter() -> str:

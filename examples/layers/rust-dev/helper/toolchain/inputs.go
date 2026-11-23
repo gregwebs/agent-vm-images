@@ -15,8 +15,6 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
-
-	"github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/gpg"
 )
 
 // VerifiedManifest is a pin whose committed manifest is authenticated.
@@ -28,7 +26,7 @@ type VerifiedManifest struct {
 // VerifyInputs audits the pin directory, checks every committed digest and
 // checksum line, verifies the manifest signature and then the manifest closure.
 func VerifyInputs(ctx context.Context, directory string, pin Pin,
-	verifier *gpg.Verifier) (VerifiedManifest, error) {
+	verifier SignatureVerifier) (VerifiedManifest, error) {
 	var verified VerifiedManifest
 	if err := verifyInputDirectory(directory, pin); err != nil {
 		return verified, err

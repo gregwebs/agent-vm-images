@@ -86,6 +86,18 @@ func (a Architecture) Musl() TargetTriple {
 	return "x86_64-unknown-linux-musl"
 }
 
+// ELFMachine is the ELF e_machine the bootstrap and every component executable
+// must carry: 62 (EM_X86_64) or 183 (EM_AARCH64).
+func (a Architecture) ELFMachine() uint16 {
+	if a == ARM64 {
+		return 183
+	}
+	return 62
+}
+
+// BootstrapTarget names the bootstrap's ELF machine in a diagnostic.
+func (a Architecture) BootstrapTarget() string { return string(a.Host()) }
+
 // UnmarshalText decodes `--arch amd64|arm64`.
 func (a *Architecture) UnmarshalText(text []byte) error {
 	switch string(text) {
