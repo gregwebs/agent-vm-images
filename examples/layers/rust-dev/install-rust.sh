@@ -2,10 +2,12 @@
 # Install the reviewed Rust toolchain closure for this host.
 #
 # Why it is this thin: the reviewed bytes, hashes and signatures live in
-# rust-toolchain/, and rust_toolchain.py is the only program that verifies and
-# installs them. This adapter exists so the Dockerfile keeps one plain RUN line
+# rust-toolchain/, and `rust-dev-helper install` is the only program that verifies
+# and installs them. This adapter exists so the Dockerfile keeps one plain RUN line
 # and a standalone host build behaves the same way. There is no alternate install
-# path, no live bootstrap download and no "latest" resolution here.
+# path, no live bootstrap download and no "latest" resolution here. The step runs
+# no Python: the helper fetches the seven pinned URLs, checks every archive and
+# runs rustup itself (#231).
 #
 # Environment:
 #   RUST_TOOLCHAIN  required; the exact channel the committed pin records
@@ -25,7 +27,6 @@ CARGO_HOME=${CARGO_HOME:-/opt/cargo}
     exit 1
 }
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-export PYTHONDONTWRITEBYTECODE=1
 
 arch=$(dpkg --print-architecture)
 case "$arch" in
@@ -36,7 +37,7 @@ case "$arch" in
         ;;
 esac
 
-/usr/bin/python3 "$HERE/rust_toolchain.py" install "$HERE/rust-toolchain" \
+"$HERE/rust-dev-helper" install "$HERE/rust-toolchain" \
     --arch "$arch" --expect-channel "$RUST_TOOLCHAIN" \
     --rustup-home "$RUSTUP_HOME" --cargo-home "$CARGO_HOME"
 

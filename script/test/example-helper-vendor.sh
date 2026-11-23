@@ -34,10 +34,16 @@ trap cleanup EXIT
 
 # The reviewed closure, stated here so a change to it is a diff in a gate as well
 # as in the module. It is the go-arg grammar ADR 0017 requires for every command,
-# the scalar decoder go-arg uses, and the TOML decoder the pin reader was measured
+# the scalar decoder go-arg uses, the TOML decoder the pin reader was measured
 # against (docs/adr/0017-go-programs.md): go-toml/v2 v2.2.4, the newest release
-# that matches TOML 1.0 with strict tables on eight of the nine grammar vectors.
-# The ninth, the TOML 1.1 `\e` escape, is a declared divergence with a test.
+# that matches TOML 1.0 with strict tables on eight of the nine grammar vectors
+# (the ninth, the TOML 1.1 `\e` escape, is a declared divergence with a test), and
+# ulikunitz/xz v0.5.17 for the single-stream archive preflight. The xz version is
+# the one the root go.mod already pins, so slice 4's shared-dependency check has
+# no MVS skew. This is the second vendored dependency under examples/; the three
+# repo-wide walks exclude `helper/vendor/` by that exact path (contracts.sh,
+# image-sources, example-layers.sh), and its 36 files add no exclusion: the one
+# `#!/bin/sh` file, make-docs, is mode 0644 and lives under the excluded tree.
 expected_sum='github.com/alexflint/go-arg v1.6.1 h1:uZogJ6VDBjcuosydKgvYYRhh9sRCusjOvoOLZopBlnA=
 github.com/alexflint/go-arg v1.6.1/go.mod h1:nQ0LFYftLJ6njcaee0sU+G0iS2+2XJQfA8I062D0LGc=
 github.com/alexflint/go-scalar v1.2.0 h1:WR7JPKkeNpnYIOfHRa7ivM21aWAdHD0gEWHCx+WQBRw=
@@ -51,6 +57,8 @@ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZN
 github.com/stretchr/testify v1.2.2/go.mod h1:a8OnRcib4nhh0OaRAV+Yts87kKdq0PP7pXfy6kDkUVs=
 github.com/stretchr/testify v1.7.0 h1:nwc3DEeHmmLAfoZucVR881uASk0Mfjw8xYJ99tb5CcY=
 github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
+github.com/ulikunitz/xz v0.5.17 h1:flR0y/x1hgM8EGV1AW3Xll6T413G0glV8UfBwR617V4=
+github.com/ulikunitz/xz v0.5.17/go.mod h1:H9Rt/W6/Qj27PGauhQc6nfCDy7vHpzsOThBSaYDoEhw=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
 gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM='
 

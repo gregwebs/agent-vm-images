@@ -34,9 +34,9 @@ type Result struct {
 	Status int
 }
 
-// Runner runs one tool child with exactly env.
+// Runner runs one tool child with exactly env and cwd (empty means the parent's).
 type Runner interface {
-	Run(ctx context.Context, argv []string, env []string) (Result, error)
+	Run(ctx context.Context, argv []string, env []string, cwd string) (Result, error)
 }
 
 // ExecRunner is the real one: the program at argv[0], not resolved further,
@@ -44,9 +44,10 @@ type Runner interface {
 type ExecRunner struct{}
 
 // Run executes argv with exactly env.
-func (ExecRunner) Run(ctx context.Context, argv []string, env []string) (Result, error) {
+func (ExecRunner) Run(ctx context.Context, argv []string, env []string, cwd string) (Result, error) {
 	command := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	command.Env = env
+	command.Dir = cwd
 	var stdout, stderr strings.Builder
 	command.Stdout = &stdout
 	command.Stderr = &stderr
@@ -103,7 +104,7 @@ func CheckInstalled(ctx context.Context, pin Pin, arch Architecture, homes Homes
 		return refuse("installed: rustup settings override RUSTUP_TOOLCHAIN")
 	}
 
-	version, err := requireSuccess(ctx, runner, []string{rustup, "--version"}, env,
+	version, err := requireSuccess(ctx, runner, []string{rustup, "--version"}, env, "",
 		"rustup --version")
 	if err != nil {
 		return err
@@ -112,7 +113,7 @@ func CheckInstalled(ctx context.Context, pin Pin, arch Architecture, homes Homes
 		return refuse("installed: rustup is not %s: %s", pin.RustupVersion,
 			strings.TrimSpace(version.Stdout))
 	}
-	listing, err := requireSuccess(ctx, runner, []string{rustup, "toolchain", "list"}, env,
+	listing, err := requireSuccess(ctx, runner, []string{rustup, "toolchain", "list"}, env, "",
 		"rustup toolchain list")
 	if err != nil {
 		return err
@@ -122,7 +123,7 @@ func CheckInstalled(ctx context.Context, pin Pin, arch Architecture, homes Homes
 		return refuse("installed: unexpected toolchains %s", pyListRepr(toolchains))
 	}
 	installed, err := requireSuccess(ctx, runner,
-		[]string{rustup, "component", "list", "--installed"}, env, "rustup component list")
+		[]string{rustup, "component", "list", "--installed"}, env, "", "rustup component list")
 	if err != nil {
 		return err
 	}
@@ -138,7 +139,7 @@ func CheckInstalled(ctx context.Context, pin Pin, arch Architecture, homes Homes
 			pyListRepr(expectedComponents))
 	}
 	targetsOut, err := requireSuccess(ctx, runner,
-		[]string{rustup, "target", "list", "--installed"}, env, "rustup target list")
+		[]string{rustup, "target", "list", "--installed"}, env, "", "rustup target list")
 	if err != nil {
 		return err
 	}
@@ -158,7 +159,7 @@ func CheckInstalled(ctx context.Context, pin Pin, arch Architecture, homes Homes
 	}
 
 	verbose, err := requireSuccess(ctx, runner, []string{filepath.Join(homes.Cargo, "bin", "rustc"),
-		"-vV"}, env, "rustc -vV")
+		"-vV"}, env, "", "rustc -vV")
 	if err != nil {
 		return err
 	}
@@ -176,7 +177,7 @@ func CheckInstalled(ctx context.Context, pin Pin, arch Architecture, homes Homes
 		{filepath.Join(homes.Cargo, "bin", "rustfmt"), "--version"},
 	}
 	for _, tool := range tools {
-		if _, err := requireSuccess(ctx, runner, tool, env,
+		if _, err := requireSuccess(ctx, runner, tool, env, "",
 			strings.Join(tool[1:], " ")); err != nil {
 			return err
 		}
@@ -207,9 +208,9 @@ func toolEnvironment(homes Homes) []string {
 }
 
 // requireSuccess applies the source reader's `require_success` rule.
-func requireSuccess(ctx context.Context, runner Runner, argv, env []string,
+func requireSuccess(ctx context.Context, runner Runner, argv, env []string, cwd string,
 	what string) (Result, error) {
-	result, err := runner.Run(ctx, argv, env)
+	result, err := runner.Run(ctx, argv, env, cwd)
 	if err != nil {
 		return result, refuse("%s failed: %v", what, err)
 	}

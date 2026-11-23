@@ -427,6 +427,23 @@ func requireExtension(extensions []RustComponent, pkg string, target TargetTripl
 	return nil
 }
 
+// PackageComponentName is the rust-installer directory/component name selected
+// for a manifest package. rust-std carries both a host and a musl component, so
+// its name includes the target.
+func PackageComponentName(pkg string, target TargetTriple) string {
+	if pkg == "rust-std" {
+		return "rust-std-" + string(target)
+	}
+	return pkg
+}
+
+// DeriveSelection is the reviewed closure derivable from a manifest before any
+// fetch, sorted by (package, target). It is exported for #232's writer, which
+// must derive the same selection from the same signed manifest.
+func DeriveSelection(manifest map[string]any, arch Architecture) ([][2]string, error) {
+	return deriveSelection(manifest, arch)
+}
+
 // deriveSelection is the reviewed closure derivable from this manifest before
 // any fetch, sorted by (package, target) as the source reader sorts it.
 func deriveSelection(manifest map[string]any, arch Architecture) ([][2]string, error) {

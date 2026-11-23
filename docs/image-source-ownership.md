@@ -407,14 +407,13 @@ Rust layer and the example owns it, like the Chrome MCP pin:
   `rust-std` for the matching musl target, for both `linux/amd64` and
   `linux/arm64`.
 
-`rust_toolchain.py` verifies and installs this; an ordinary build never resolves
-a channel, rewrites the signed manifest, refreshes a hash or falls back to
-another origin. Missing or changed bytes fail the build. Its two offline reads
-(`check`, `verify-installed`) are now the layer's own Go program,
-`rust-dev-helper` (#187 slice 2): it applies the same rules in the same order with
-the same diagnostics, the verifier step runs no Python, and the Python loader
-stays in the build as the differential oracle the host gates compare against
-until #232 deletes it.
+`rust-dev-helper` verifies and installs this: its `check` and `verify-installed`
+verbs landed in #187 slice 2 and its `install` verb in #231. It applies the same
+rules in the same order with the same diagnostics, and it fetches only the seven
+URLs the pin names with one attempt, no redirects and the Python bounds. The
+`rust-dev` image build runs no Python and its apt line carries no `python3`.
+`rust_toolchain.py` stays on disk, never mounted into a build, as the host-only
+differential oracle the pins suite compares against until #232 deletes it.
 The `rustup-init` binaries carry no detached signature for 1.28.2, so `pin.json`
 records a **scoped, dated, per-architecture hash-only exception** with exact
 URLs/digests, upstream `.sha256` and installation-document evidence, reviewer and

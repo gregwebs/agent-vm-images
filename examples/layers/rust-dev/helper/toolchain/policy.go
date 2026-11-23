@@ -8,10 +8,10 @@ package toolchain
 // published via https://keybase.io/rust). A different primary key or signer set
 // is a reviewed policy change in the image input policy and the ADR.
 
-const (
-	// ReviewedPrimaryFingerprint is the one trust root a pin may name.
-	ReviewedPrimaryFingerprint Fingerprint = "108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE"
+// ReviewedPrimaryFingerprint is the one trust root a pin may name.
+const ReviewedPrimaryFingerprint Fingerprint = "108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE"
 
+const (
 	PinFile                = "pin.json"
 	ManifestPath           = "channel.toml"
 	ManifestChecksumPath   = "channel.toml.sha256"
@@ -26,7 +26,30 @@ const (
 	MaxURLRunes            = 512
 	MaxTripleRunes         = 64
 	MaxReviewerHandleRunes = 64
+
+	// Download and archive bounds (ADR 0017 D2). A measured review, not an
+	// automatic increase, changes them.
+	MaxBootstrapBytes     int64 = 32 << 20
+	MaxArchiveBytes       int64 = 256 << 20
+	MaxEvidenceBytes      int64 = 2 << 20
+	MaxMembers                  = 100000
+	MaxMetadataFileBytes  int64 = 2 << 20
+	MaxMetadataTotalBytes int64 = 8 << 20
+	MaxMetadataLines            = 100000
+	MaxLineBytes                = 4096
+	MaxExpandedBytes      int64 = 2 << 30
+	RustInstallerVersion        = "3\n"
+	NoUpdatesDirectory          = "no-updates"
 )
+
+// ComponentExecutables are the executables a component payload must carry and
+// that must be 64-bit little-endian ELF for the host architecture.
+var ComponentExecutables = map[string][]string{
+	"cargo":           {"bin/cargo"},
+	"clippy-preview":  {"bin/cargo-clippy", "bin/clippy-driver"},
+	"rustc":           {"bin/rustc"},
+	"rustfmt-preview": {"bin/cargo-fmt", "bin/rustfmt"},
+}
 
 // ReviewedSigningFingerprints is the compiled signer set. It is compared for
 // equality against the committed record by TestReviewedTrustIsTheCommittedRecord,

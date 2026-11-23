@@ -142,29 +142,28 @@ ARG KACHE_DIR=/opt/kache
 #   - musl-tools: the *-unknown-linux-musl target the guest agentd needs
 #     when building the vendored msb (agent-vm itself does not need it);
 #   - shellcheck: agent-vm's script/test/ci-contracts.sh lints its scripts;
-#   - python3 + gnupg + ca-certificates: the reviewed pin verifier needs a real
-#     gpg (OpenPGP verification of the manifest and of every selected archive)
-#     and authenticated HTTPS to fetch them. The released parent may predate
-#     these, so this layer installs them explicitly from official Debian apt.
+#   - gnupg + ca-certificates: the reviewed pin verifier needs a real gpg
+#     (OpenPGP verification of the manifest and of every selected archive) and
+#     authenticated HTTPS to fetch them. The released parent may predate these, so
+#     this layer installs them explicitly from official Debian apt. There is no
+#     python3 here: every step that reads or installs the toolchain is Go (#231).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         build-essential pkg-config \
         libcap-ng-dev libdbus-1-dev \
         musl-tools \
         shellcheck \
-        python3 gnupg ca-certificates \
+        gnupg ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 # Rust toolchain: the reviewed closure in rust-toolchain/ (exact bootstrap,
 # signed manifest and every selected archive hash for this host) is installed by
-# rust_toolchain.py, which verifies all of it before anything executes. The
-# helper and the data are mounted read-only for this one step and are not part of
-# the image; the installed /opt toolchain is. The install leg is still Python:
-# `install` fetches and unpacks archives, which is #231. Only the offline reads
-# (`check`, and the verifier's `verify-installed` below) are the Go helper, and
-# both readers run over these same bytes on every host gate and every build.
+# `rust-dev-helper install`, which verifies all of it before anything executes and
+# downloads only the seven URLs the pin names. The helper and the data are mounted
+# read-only for this one step and are not part of the image; the installed /opt
+# toolchain is. The step runs no Python, and this is the last leg that did.
 RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro \
-    --mount=type=bind,source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro \
+    --mount=type=bind,from=rust-dev-helper,source=/out/rust-dev-helper,target=/tmp/rust-dev-helper,ro \
     --mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro \
     bash /tmp/install-rust.sh
 
@@ -218,8 +217,7 @@ ENV PATH=/opt/kache/shims:/opt/kache/bin:/opt/cargo/bin:/opt/verus/verus-x86-lin
 # a real contract rather than only `--version`. The verifier bundle is mounted
 # read-only for this step and nothing is copied into the image. This step runs no
 # Python: `rust-dev-helper verify-installed` is the offline reader, verified by
-# the pins suite against the Python loader the install step still uses (#231
-# moves the install leg).
+# the pins suite against the Python loader on the host.
 RUN --network=none \
     --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro \
     --mount=type=bind,from=rust-dev-helper,source=/out/rust-dev-helper,target=/run/rust-verify/rust-dev-helper,ro \

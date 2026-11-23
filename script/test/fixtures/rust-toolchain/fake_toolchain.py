@@ -22,9 +22,10 @@ Rules, all of them fail-closed:
 * Anything outside the table exits 97 with ``fixture emulator: unrecognized
   command``, so a command the shipped checks grew cannot pass by accident.
 
-Only the read commands are here: they are the ones `verify-installed` reaches. The
-install rows (`rustup toolchain install`, `default`, `set …`) belong to #231's
-differential, which is the first caller that has them.
+Both halves are here: the read commands `verify-installed` reaches, and the four
+install verbs `install` reaches (`set …`, `toolchain install`, `default`). The
+install verbs update the same settings and toolchain tree a real rustup would, so
+the post-install verification runs against the state the transcript produced.
 """
 from __future__ import annotations
 
@@ -46,11 +47,44 @@ def case_for(rustup_home: str) -> dict:
         return json.load(handle)
 
 
+def settings_path(rustup_home: str) -> str:
+    return rustup_home + '/settings.toml'
+
+
+def update_settings(rustup_home: str, **updates: str) -> None:
+    path = settings_path(rustup_home)
+    lines = open(path, encoding='utf-8').read().splitlines() if os.path.exists(path) else []
+    seen = set()
+    result = []
+    for line in lines:
+        key = line.split(' = ', 1)[0]
+        if key in updates:
+            result.append(f'{key} = "{updates[key]}"')
+            seen.add(key)
+        else:
+            result.append(line)
+    for key, value in updates.items():
+        if key not in seen:
+            result.insert(0, f'{key} = "{value}"')
+    with open(path, 'w', encoding='utf-8') as handle:
+        handle.write('\n'.join(result) + '\n')
+
+
+def create_toolchain(rustup_home: str, channel: str, host: str, musl: str) -> None:
+    root = os.path.join(rustup_home, 'toolchains', f'{channel}-{host}')
+    for target in (host, musl):
+        lib = os.path.join(root, 'lib', 'rustlib', target, 'lib')
+        os.makedirs(lib, exist_ok=True)
+        with open(os.path.join(lib, 'libstd-fixture.rlib'), 'wb') as handle:
+            handle.write(b'rlib')
+
+
 def record(rustup_home: str, argv: list[str]) -> None:
     # One line per call: the differential compares the two logs of one row, so the
     # writer must not reorder or rewrite them.
     with open(rustup_home + '/calls.jsonl', 'a', encoding='utf-8') as handle:
-        handle.write(json.dumps({'argv': argv, 'env': dict(os.environ)},
+        handle.write(json.dumps({'argv': argv, 'env': dict(os.environ),
+                                 'cwd': os.getcwd()},
                                 sort_keys=True) + '\n')
 
 
@@ -73,6 +107,22 @@ def main() -> int:
             print('injected failure', file=sys.stderr)
             return 1
     if name == 'rustup':
+        if argv == ['set', 'auto-self-update', 'disable']:
+            update_settings(rustup_home, auto_self_update='disable')
+            return 0
+        if argv == ['set', 'auto-install', 'disable']:
+            update_settings(rustup_home, auto_install='disable')
+            return 0
+        if len(argv) >= 2 and argv[:2] == ['toolchain', 'install']:
+            channel = argv[2]
+            target = argv[argv.index('--target') + 1] if '--target' in argv else ''
+            host = case['rustc_verbose'].split('host: ', 1)[1].splitlines()[0]
+            create_toolchain(rustup_home, channel, host, target)
+            return 0
+        if len(argv) == 2 and argv[0] == 'default':
+            host = case['rustc_verbose'].split('host: ', 1)[1].splitlines()[0]
+            update_settings(rustup_home, default_toolchain=f'{argv[1]}-{host}')
+            return 0
         if argv == ['--version']:
             print(f"rustup {case['rustup_version']} (fixture)")
             return 0

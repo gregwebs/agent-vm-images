@@ -63,14 +63,18 @@ Commit a reviewed finite closure and let rustup install only from it.
   argv and hash-only bootstrap exception are properties of that version, so a
   different `--rustup` value is refused before any fetch and needs a code and
   policy review rather than inheriting this record's rationale.
-- `rust_toolchain.py` verifies all of that before anything executes: strict pin
+- `rust-dev-helper` verifies all of that before anything executes: strict pin
   decoding, canonical origins computed independently from the validated channel
   and date, real gpg under a private keyring against the committed primary
   fingerprint, bounded streaming HTTPS, hash-before-chmod/exec, ELF architecture
-  checks, and rust-installer format-3 metadata/coverage preflight. Its offline
-  reads are the layer's Go helper from #187 slice 2 (`check`,
-  `verify-installed`); the rules, order and diagnostics are the same, and the
-  Python module stays as the differential oracle until #232 deletes it. It then builds
+  checks, and rust-installer format-3 metadata/coverage preflight. Its `check`
+  and `verify-installed` verbs landed in #187 slice 2 and its `install` verb in
+  #231; the rules, order and diagnostics are Python's, and `rust_toolchain.py`
+  stays on disk as the host-only differential oracle until #232 deletes it. The
+  vendored `ulikunitz/xz` v0.5.17 `SingleStream` preflight is stricter than
+  Python's `LZMADecompressor` about trailing bytes; it is a declared strictness
+  note, not a reachable behaviour change, because an archive's checksum is
+  compared before the decoder sees it. The image build runs no Python. It then builds
   an invocation-private `file://` dist layout from the original manifest bytes and
   runs rustup with automatic installation and self-update disabled. Ordinary builds never resolve, rewrite
   or repair a pin. The transport's whole-request deadline is a watchdog that

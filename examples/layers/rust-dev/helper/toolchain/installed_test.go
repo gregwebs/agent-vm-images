@@ -17,7 +17,7 @@ type fakeRunner struct {
 	envs    [][]string
 }
 
-func (f *fakeRunner) Run(_ context.Context, argv []string, env []string) (Result, error) {
+func (f *fakeRunner) Run(_ context.Context, argv []string, env []string, _ string) (Result, error) {
 	key := filepath.Base(argv[0]) + " " + strings.Join(argv[1:], " ")
 	f.calls = append(f.calls, argv)
 	f.envs = append(f.envs, env)
@@ -33,8 +33,15 @@ func (f *fakeRunner) Run(_ context.Context, argv []string, env []string) (Result
 func newInstalledTree(t *testing.T, arch Architecture) (Homes, string) {
 	t.Helper()
 	root := t.TempDir()
-	rustupHome := filepath.Join(root, "rustup")
-	cargoHome := filepath.Join(root, "cargo")
+	homes := Homes{Rustup: filepath.Join(root, "rustup"), Cargo: filepath.Join(root, "cargo")}
+	populateInstalledTree(t, homes, arch)
+	return homes, "1.98.1-" + string(arch.Host())
+}
+
+func populateInstalledTree(t *testing.T, homes Homes, arch Architecture) {
+	t.Helper()
+	rustupHome := homes.Rustup
+	cargoHome := homes.Cargo
 	channel := "1.98.1"
 	toolchain := channel + "-" + string(arch.Host())
 	if err := os.MkdirAll(filepath.Join(rustupHome, "toolchains", toolchain, "lib", "rustlib",
@@ -62,7 +69,6 @@ func newInstalledTree(t *testing.T, arch Architecture) (Homes, string) {
 	for _, name := range []string{"rustup", "rustc", "cargo", "rustfmt"} {
 		write(t, filepath.Join(cargoHome, "bin", name), "")
 	}
-	return Homes{Rustup: rustupHome, Cargo: cargoHome}, toolchain
 }
 
 // cleanOutputs is what a correct install answers.

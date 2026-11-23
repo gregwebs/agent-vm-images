@@ -4,14 +4,15 @@
 // compiled by the layer's pinned `golang:` stage and mounted into the RUN that
 // uses it: an example build has no `--build-context`, so nothing from the host or
 // from ./internal can reach it. Slice 1 of #187 moved the one verb no other
-// program imports; this slice adds the two offline reads — `check` and
-// `verify-installed` — which only read committed bytes and installed state. The
-// install leg and the writer stay in Python (#231, #232); the Python loader stays
-// alive as the differential oracle.
+// program imports; slice 2 added the two offline reads; slice 3 (#231) adds the
+// downloading installer, so zero Python runs in the rust-dev image build. The
+// Python loader stays on the host, byte-identical, as the differential oracle
+// until #232 replaces the writer.
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -35,6 +36,7 @@ const toolchainPrefix = "rust_toolchain"
 type arguments struct {
 	KacheProbe      *kacheProbeCommand      `arg:"subcommand:kache-probe" help:"decide a kache doctor --probe --json report"`
 	Check           *checkCommand           `arg:"subcommand:check" help:"verify the committed pin data offline"`
+	Install         *installCommand         `arg:"subcommand:install" help:"fetch, verify and install the pinned toolchain"`
 	VerifyInstalled *verifyInstalledCommand `arg:"subcommand:verify-installed" help:"verify the committed pin data and the installed toolchain"`
 	LogLevel        string                  `arg:"--log-level" default:"warn" placeholder:"LEVEL" help:"debug, info, warn or error; diagnostics go to stderr"`
 	// The fixture grammar is embedded: in the shipped build the type is empty, so
@@ -76,6 +78,20 @@ type verifyInstalledCommand struct {
 
 func (verifyInstalledCommand) Description() string {
 	return "Verify the committed pin data and the installed toolchain."
+}
+
+type installCommand struct {
+	InputDir      string                 `arg:"positional,required" placeholder:"INPUT_DIR" help:"the committed pin directory"`
+	Arch          toolchain.Architecture `arg:"--arch,required" placeholder:"AMD64|ARM64" help:"the installed architecture"`
+	ExpectChannel string                 `arg:"--expect-channel,required" placeholder:"EXACT" help:"assert this exact X.Y.Z channel"`
+	RustupHome    string                 `arg:"--rustup-home,required" placeholder:"DIR" help:"the RUSTUP_HOME to create"`
+	CargoHome     string                 `arg:"--cargo-home,required" placeholder:"DIR" help:"the CARGO_HOME to create"`
+	Events        *string                `arg:"--events" placeholder:"FILE" help:"append the frozen operation log to FILE"`
+	WorkDir       *string                `arg:"--work-dir" placeholder:"DIR" help:"an existing directory for the private dist layout"`
+}
+
+func (installCommand) Description() string {
+	return "Fetch, verify and install the pinned toolchain."
 }
 
 func main() {
@@ -123,6 +139,8 @@ func run(args []string) (status int) {
 	switch {
 	case parsed.Check != nil:
 		return runCheck(parsed.Check, trust)
+	case parsed.Install != nil:
+		return runInstall(parsed.Install, trust, parsed.fixtureArguments)
 	case parsed.VerifyInstalled != nil:
 		return runVerifyInstalled(parsed.VerifyInstalled, trust)
 	case parsed.KacheProbe != nil:
@@ -144,6 +162,48 @@ func runCheck(command *checkCommand, trust toolchain.TrustPolicy) int {
 		GPG: program,
 	})
 	if err != nil {
+		return refuseToolchain(err)
+	}
+	fmt.Println(channel)
+	return 0
+}
+
+// runInstall runs the downloading installer. The fixture grammar supplies its
+// transport and runner; the shipped build's two methods return the production
+// client and ExecRunner, and carry no seam name.
+func runInstall(command *installCommand, trust toolchain.TrustPolicy,
+	seams fixtureArguments) int {
+	program, err := gpg.Resolve()
+	if err != nil {
+		return refuseToolchain(err)
+	}
+	factory, err := seams.transport()
+	if err != nil {
+		return refuseToolchain(err)
+	}
+	runner, err := seams.runner()
+	if err != nil {
+		return refuseToolchain(err)
+	}
+	request := toolchain.InstallRequest{
+		InputDir: command.InputDir, Arch: command.Arch,
+		ExpectChannel: command.ExpectChannel,
+		Homes:         toolchain.Homes{Rustup: command.RustupHome, Cargo: command.CargoHome},
+		Trust:         trust, GPG: program,
+		TransportFactory: factory, Runner: runner,
+	}
+	if command.Events != nil {
+		request.EventsPath = *command.Events
+	}
+	if command.WorkDir != nil {
+		request.WorkDir, request.WorkDirSet = *command.WorkDir, true
+	}
+	channel, err := toolchain.Install(context.Background(), request)
+	if err != nil {
+		var signal *toolchain.SignalError
+		if errors.As(err, &signal) {
+			return 128 + int(signal.Signal)
+		}
 		return refuseToolchain(err)
 	}
 	fmt.Println(channel)
@@ -189,7 +249,7 @@ func configureLogging(level string) {
 }
 
 // usageText is the one usage line. The shell suites match on it.
-const usageText = "rust-dev-helper {kache-probe,check,verify-installed} ARGS"
+const usageText = "rust-dev-helper {kache-probe,check,install,verify-installed} ARGS"
 
 // refuse reports one contract line on stderr and returns the refusal status. It is
 // the kache-probe verb's prefix, kept as slice 1 wrote it.
@@ -208,7 +268,8 @@ func refuseToolchain(err error) int {
 // isToolchainVerb reports whether the parsed subcommand chain names a verb this
 // slice ported from `rust_toolchain.py`.
 func isToolchainVerb(names []string) bool {
-	return len(names) > 0 && (names[0] == "check" || names[0] == "verify-installed")
+	return len(names) > 0 && (names[0] == "check" || names[0] == "install" ||
+		names[0] == "verify-installed")
 }
 
 // refuseUsage reports a malformed invocation of a verb and returns 2, the status
