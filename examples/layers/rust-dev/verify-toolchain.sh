@@ -7,8 +7,11 @@
 # host, rustup version, the five host components and the musl target, no extra
 # toolchains, minimal profile, auto-install/self-update disabled, the musl
 # standard library present, and the paired kache release behind RUSTC_WRAPPER and
-# behind the C/C++ shims on PATH) and then invokes real tools. On amd64 the Verus
-# check goes beyond `--version`:
+# behind the C/C++ shims on PATH) and then invokes real tools. The pin reading and
+# the installed-state checks are the layer's own `rust-dev-helper`, so this step
+# runs no Python: the same verb was Python's until #187 slice 2, which is why
+# example-layers.sh and the pins suite compare both readers on every input. On
+# amd64 the Verus check goes beyond `--version`:
 # it verifies a trivial contract and requires the `N verified, 0 errors` line, so
 # a Verus tree that cannot reach its bundled vstd + z3, or that exits 0 while
 # verifying nothing (ADR-0018), fails the build. arm64 keeps the documented no-op:
@@ -33,13 +36,12 @@ VERUS_DIR=${VERUS_DIR:-/opt/verus}
 KACHE_DIR=${KACHE_DIR:-/opt/kache}
 KACHE_SHIM_DIR=${KACHE_SHIM_DIR:-/opt/kache/shims}
 VERIFY_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-export PYTHONDONTWRITEBYTECODE=1
 # The image's own PATH (see the Dockerfile): the shim farm first, so `cc` and
 # friends are kache, then the two toolchain directories.
 export PATH=$KACHE_SHIM_DIR:/opt/kache/bin:/opt/cargo/bin:/opt/verus/verus-x86-linux:${PATH}
 
 arch=$(dpkg --print-architecture)
-/usr/bin/python3 "$VERIFY_DIR/rust_toolchain.py" verify-installed "$VERIFY_DIR/rust-toolchain" \
+"$VERIFY_DIR/rust-dev-helper" verify-installed "$VERIFY_DIR/rust-toolchain" \
     --arch "$arch" --expect-channel "$RUST_TOOLCHAIN" \
     --rustup-home /opt/rustup --cargo-home /opt/cargo
 

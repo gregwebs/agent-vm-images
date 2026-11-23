@@ -24,6 +24,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import tomllib
 import traceback
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,11 +44,63 @@ REAL_DATADIR = REPOSITORY_ROOT / 'examples' / 'layers' / 'rust-dev' / 'data' / '
 # the deadline controls open their own loopback peer, which is the one allowance
 # the boundary is asked to keep.
 import sandbox  # noqa: E402
+import differential  # noqa: E402
 
 GPG = shutil.which('gpg') or '/usr/bin/gpg'
+TOOLS_ENV = 'FIXTURE_TOOLS'
+PROGRAMS_ENV = 'FIXTURE_PROGRAMS'
+TOOLS_PREFIX = 'rust-toolchain-pins-tools-'
+
+
+def host_os() -> str:
+    return 'darwin' if sys.platform == 'darwin' else 'linux'
+
+
+def build_helpers() -> tuple[str, str]:
+    """Build the two binaries the differential runs, and print no other output.
+
+    This happens in the first pass, unsandboxed, because the sandbox's exec
+    allowlist is a list of literal paths fixed before the second pass starts: a
+    program built after that point could not be executed by the Go child at all.
+    A build failure is a failed suite before any case runs.
+    """
+    built = {}
+    for fixture_tag in (True, False):
+        arguments = ['bash', str(REPOSITORY_ROOT / 'script' / 'build'
+                                 / 'example-helper.sh'), 'rust-dev',
+                     '--root', str(REPOSITORY_ROOT), '--os', host_os()]
+        if fixture_tag:
+            arguments.append('--fixture')
+        completed = subprocess.run(arguments, capture_output=True, text=True)
+        if completed.returncode != 0:
+            print(f'ISOLATION-UNAVAILABLE: cannot build the layer helper: '
+                  f'{completed.stderr.strip()}', file=sys.stderr)
+            sys.exit(1)
+        built[fixture_tag] = completed.stdout.strip()
+    return built[True], built[False]
+
+
+# The programs the Go child may execute: both helper builds, the emulated
+# toolchain, and the three gpg wrappers. Every one of them exists before
+# ``reexec_into_sandbox`` fixes the allowlist. The paths are carried into the
+# second pass through the environment so both passes allowlist the same literals.
+HELPER_FIXTURE, HELPER_SHIPPED = '', ''
+PROGRAMS: list[str] = []
+if os.environ.get(sandbox.SANDBOXED_ENV) == '1':
+    PROGRAMS = json.loads(os.environ[PROGRAMS_ENV])
+    HELPER_FIXTURE, HELPER_SHIPPED = PROGRAMS[0], PROGRAMS[1]
+else:
+    HELPER_FIXTURE, HELPER_SHIPPED = build_helpers()
+    tools_root = Path(tempfile.mkdtemp(prefix=TOOLS_PREFIX)).resolve()
+    os.environ[TOOLS_ENV] = str(tools_root)
+    FARM = differential.install_tools(tools_root, os.path.realpath(GPG),
+                                      os.path.realpath(sys.executable))
+    PROGRAMS = [HELPER_FIXTURE, HELPER_SHIPPED, *FARM['programs'], *FARM['wrappers']]
+    os.environ[PROGRAMS_ENV] = json.dumps(PROGRAMS)
+
 try:
     sandbox.reexec_into_sandbox(
-        sandbox.gpg_executables(GPG) + [sys.executable],
+        sandbox.gpg_executables(GPG) + [sys.executable] + PROGRAMS,
         writable=[tempfile.gettempdir(), '/tmp', '/private/tmp'],
         readable=[str(FIXTURES), str(REPOSITORY_ROOT), os.getcwd()],
         loopback=True)
@@ -66,7 +119,12 @@ EXEC_BOUNDARY = sandbox.exec_of_copy_denied([GPG])
 # gpg): a name match would let any file called `gpg` run.
 import guards  # noqa: E402
 
-guards.install([GPG])
+# The audit hook is the exec authority for Python children on Linux, and the
+# differential's Go child is a Python child of this process: the two helpers, the
+# emulated tools and the gpg wrappers must be registered here as well as in the
+# OS allowlist, or the HooksControl `process_attempt` case below would refuse the
+# suite's own rows.
+guards.install([GPG, sys.executable, *PROGRAMS])
 
 import driver  # noqa: E402
 import fixture  # noqa: E402
@@ -2014,8 +2072,1033 @@ def test_real_manifest_selection() -> None:
             'not a rustup component field')
 
 
+
+
+# --- the differential oracle: Python's loader against Go's reader ------------
+# Every row here runs both implementations over the same bytes. Python is the
+# oracle, never a fallback: a disagreement fails, and nothing chooses between the
+# two at run time. The counters are printed at the end so a run that compared
+# fewer rows (a TOML 1.1 oracle, a host with no wrapper) is visible rather than
+# mistaken for a full one.
+DIFFERENTIAL = {'compared': 0, 'go_only': 0, 'declared': [], 'grammar': '',
+                'oracle_deviations': []}
+ORACLE = {'out_of_range_integer': False}
+# Every differential row gets a short directory of its own. A gpg-agent socket path
+# is a unix socket: 104 bytes on this platform, so a row's TMPDIR has to stay short
+# or every gpg call fails with `can't connect to the gpg-agent: File name too
+# long`. The rows are outside the suite's fixture root for that reason, and are
+# removed here at the end.
+ROW_ROOTS: list[Path] = []
+
+
+def new_row() -> Path:
+    row = Path(tempfile.mkdtemp(prefix='rtp-')).resolve()
+    ROW_ROOTS.append(row)
+    return row
+MATRIX = {'1.0': {'A': True, 'R': False}}
+
+
+class RefusingTransport:
+    """The offline verbs must never fetch: a fetch is a failing case."""
+
+    def fetch(self, url, destination, max_bytes):
+        raise AssertionError(f'the offline verbs must not fetch {url.value}')
+
+
+def toml_grammar() -> str:
+    """The oracle's measured TOML grammar, by a probe document and not a version.
+
+    `tomllib` is TOML 1.1 from CPython 3.15 on: it accepts a trailing comma in an
+    inline table. The probe is the measurement, so a patched or backported
+    `tomllib` is classified by what it does rather than by `sys.version_info`.
+    """
+    try:
+        tomllib.loads('a = {b = 1,}\n')
+    except tomllib.TOMLDecodeError:
+        return '1.0'
+    return '1.1'
+
+
+def oracle_accepts_out_of_range_integer() -> bool:
+    """The P5 probe: does the oracle accept an integer TOML 1.0 refuses?
+
+    TOML 1.0, Integer: "Arbitrary 64-bit signed integers (from -2^63 to 2^63-1)
+    should be accepted and handled losslessly. If an integer cannot be represented
+    losslessly, an error must be thrown." `tomllib` keeps arbitrary precision
+    instead -- a documented deviation from the grammar it claims to implement --
+    so its verdict on such a document is not the TOML 1.0 verdict, at any Python
+    version.
+
+    And the file this row describes is not Python's: `settings.toml` is written and
+    read by `rustup`, a Rust program using the `toml` crate, which is int64. In
+    production the question "does this file parse" is answered by a 64-bit reader,
+    so the Go reader agrees with the program that opens the file and the oracle is
+    the odd one out. Measured, never inferred.
+    """
+    try:
+        tomllib.loads('x = 9223372036854775808\n')
+    except tomllib.TOMLDecodeError:
+        return False
+    return True
+
+
+def go_program(mode: str) -> str:
+    if mode == 'real':
+        return os.path.realpath(GPG)
+    return str(Path(os.environ[TOOLS_ENV]) / 'tools' / f'gpg-{mode}' / 'gpg')
+
+
+ROW_ENV_KEYS = ('PATH', 'LANG', 'LC_ALL', 'TZ')
+
+
+def _set_row_environment(gpg_program: str) -> tuple[dict[str, str], dict[str, str | None]]:
+    """One tool environment, used by both implementations for one row.
+
+    The installed-state checks build their child environment from these four
+    variables, so giving Python and Go different ones would compare two different
+    questions. The caller restores them: this suite's own later rows resolve gpg
+    through PATH.
+    """
+    previous = {key: os.environ.get(key) for key in ROW_ENV_KEYS}
+    row_env = {'PATH': os.path.dirname(gpg_program) + ':/usr/bin:/bin',
+               'LANG': 'C.UTF-8', 'LC_ALL': 'C', 'TZ': 'UTC'}
+    for key, value in row_env.items():
+        os.environ[key] = value
+    return row_env, previous
+
+
+def _restore_row_environment(previous: dict[str, str | None]) -> None:
+    for key, value in previous.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
+def run_differential(label: str, argv, *, fragments=(), python_crashes=False,
+                     gpg_mode='record', channel=fixture.CHANNEL, trust='fixture',
+                     expect=None) -> oracle.Comparison:
+    """Run one row through both implementations and compare them."""
+    row = new_row()
+    tmpdir = row / 't'
+    tmpdir.mkdir()
+    program = go_program(gpg_mode)
+    dependencies = model.Dependencies(transport=RefusingTransport(),
+                                      runner=model.ProcessRunner(),
+                                      gpg=model.GpgProgram(program),
+                                      trust=fixture_root.trust, github_actions=False)
+    row_env, previous = _set_row_environment(program)
+    snapshot = (driver.digest_tree(Path(argv[1]))
+                if len(argv) > 1 and Path(argv[1]).is_dir() else None)
+    python = differential.run_python(argv, dependencies, tmpdir)
+    python_transcript = differential.transcript(row)
+    _restore_row_environment(previous)
+    transcript_file = row / 'gpg-transcript.jsonl'
+    if transcript_file.exists():
+        transcript_file.unlink()
+    if trust == 'fixture':
+        go_argv = ['--fixture-trust', fixture_root.dist.fingerprint, *argv]
+        go_binary = HELPER_FIXTURE
+    else:
+        go_argv = list(argv)
+        go_binary = HELPER_SHIPPED
+    environment = {**row_env, 'HOME': str(row), 'TMPDIR': str(tmpdir)}
+    go = differential.run_go(go_binary, go_argv, environment)
+    go_transcript = differential.transcript(row)
+    comparison = differential.compare(label, python, go, fragments=fragments,
+                                channel=channel, python_crashes=python_crashes,
+                                python_transcript=python_transcript,
+                                go_transcript=go_transcript, python_tmpdir=tmpdir,
+                                go_tmpdir=tmpdir)
+    DIFFERENTIAL['compared'] += 1
+    if snapshot is not None and snapshot != driver.digest_tree(Path(argv[1])):
+        comparison.problems.append(f'{label}: the pin directory changed')
+    if comparison.ok and expect is not None and python[0] != expect:
+        comparison.problems.append(
+            f'{label}: both readers returned {python[0]}, expected {expect}: {python[2]!r}')
+    return comparison
+
+
+def differential_row(label: str, argv, **keywords) -> None:
+    comparison = run_differential(label, argv, **keywords)
+    check(f'differential {label}', comparison.ok,
+          '(' + '; '.join(comparison.problems) + ')' if not comparison.ok else '')
+
+
+def test_differential_self_control() -> None:
+    """A mismatched pair must be reported as DIFFERENTIAL.
+
+    Without this, a green differential suite proves only that the comparator runs.
+    """
+    print('differential: self-control')
+    pinned = str(fixture_root.pinned)
+    row = new_row()
+    tmpdir = row / 't'
+    tmpdir.mkdir()
+    program = go_program('record')
+    dependencies = model.Dependencies(transport=RefusingTransport(),
+                                      runner=model.ProcessRunner(),
+                                      gpg=model.GpgProgram(program),
+                                      trust=fixture_root.trust, github_actions=False)
+    row_env, previous = _set_row_environment(program)
+    python = differential.run_python(['check', pinned], dependencies, tmpdir)
+    _restore_row_environment(previous)
+    go = differential.run_go(HELPER_FIXTURE,
+                      ['--fixture-trust', fixture_root.dist.fingerprint, 'check', pinned,
+                       '--expect-channel', '0.0.0'],
+                      {**row_env, 'HOME': str(row), 'TMPDIR': str(tmpdir)})
+    comparison = differential.compare('self-control', python, go, channel=fixture.CHANNEL)
+    check('differential: the comparator reports a mismatched pair',
+          not comparison.ok,
+          f'(the self-control pair agreed: python {python} go {go})')
+
+
+def test_differential_check_fixture() -> None:
+    """The fixture pin through both readers: status, streams, gpg transcript."""
+    print('differential: check on the fixture pin')
+    differential_row('check accepts the fixture pin', ['check', str(fixture_root.pinned)],
+                     expect=0)
+    differential_row('check asserts the channel',
+                     ['check', str(fixture_root.pinned), '--expect-channel', fixture.CHANNEL],
+                     expect=0)
+    differential_row('check refuses a wrong asserted channel',
+                     ['check', str(fixture_root.pinned), '--expect-channel', '0.0.0'],
+                     fragments=('asserted channel',))
+    differential_row('check with an empty asserted channel',
+                     ['check', str(fixture_root.pinned), '--expect-channel', ''],
+                     fragments=('asserted channel ',))
+
+
+def pin_variant(label: str, change) -> Path:
+    """A copy of the fixture pin with `change` applied to its decoded document."""
+    target = driver.copy_pin(fixture_root.pinned, fixture_root.root / f'pin-{label}')
+    document = json.loads((target / 'pin.json').read_text())
+    change(document)
+    (target / 'pin.json').write_text(json.dumps(document, indent=2) + '\n')
+    return target
+
+
+def raw_pin_variant(label: str, raw: bytes) -> Path:
+    target = driver.copy_pin(fixture_root.pinned, fixture_root.root / f'raw-{label}')
+    (target / 'pin.json').write_bytes(raw)
+    return target
+
+
+def test_differential_pin() -> None:
+    """pin.json: every rule the loader applies, both ways."""
+    print('differential: pin.json rows')
+    original = (fixture_root.pinned / 'pin.json').read_text()
+    raw_rows = [
+        ('empty file', b'', 'not valid JSON'),
+        ('top-level array', b'[]', 'expected an object'),
+        ('trailing document', original.encode() + b' {}', 'not valid JSON'),
+        ('leading BOM', b'\xef\xbb\xbf' + original.encode(),
+         'leading UTF-8 BOM is not accepted'),
+        ('invalid UTF-8', b'{"a": "\xff"}', 'not valid UTF-8'),
+        ('NaN', b'{"schema": NaN}', 'NaN is not valid JSON'),
+        ('Infinity', b'{"schema": Infinity}', 'Infinity is not valid JSON'),
+        ('-Infinity', b'{"schema": -Infinity}', '-Infinity is not valid JSON'),
+        ('duplicate key',
+         original.replace('"schema": 1,', '"schema": 1, "schema": 1,', 1).encode(),
+         "duplicate key 'schema'"),
+        ('duplicate through an escape',
+         original.replace('"schema": 1,', '"schema": 1, "\\u0073chema": 1,', 1).encode(),
+         "duplicate key 'schema'"),
+        ('raw control character',
+         original.replace('"reviewer": "fixture-reviewer"',
+                          '"reviewer": "fixture\x01reviewer"', 1).encode(),
+         'not valid JSON'),
+        ('schema float', original.replace('"schema": 1', '"schema": 1.0', 1).encode(),
+         'expected an integer'),
+        ('schema 2^64',
+         original.replace('"schema": 1', '"schema": 18446744073709551616', 1).encode(),
+         'unsupported schema'),
+        ('schema -0', original.replace('"schema": 1', '"schema": -0', 1).encode(),
+         'unsupported schema'),
+    ]
+    for label, raw, fragment in raw_rows:
+        target = raw_pin_variant(label.replace(' ', '-'), raw)
+        differential_row(f'pin {label}', ['check', str(target)], fragments=(fragment,))
+    tree_rows = [
+        ('unknown key', lambda d: d.update(extra=1), 'unknown keys: extra'),
+        ('missing key', lambda d: d.pop('profile'), 'pin.json: missing profile'),
+        ('schema bool', lambda d: d.update(schema=True), 'expected an integer'),
+        ('schema 2', lambda d: d.update(schema=2), 'unsupported schema'),
+        ('channel', lambda d: d.update(channel='9.9'), 'expected an exact X.Y.Z release channel'),
+        ('date', lambda d: d.update(release_date='2026-02-30'), 'not a calendar date'),
+        ('profile', lambda d: d.update(profile='complete'), 'pin.json: profile must be minimal'),
+        ('unaudited rustup', lambda d: d.update(rustup_version='1.28.1'),
+         'is not an audited installer'),
+        ('key path', lambda d: d['trust']['key'].update(path='other.asc'),
+         'key path must be rust-release-key.asc'),
+        ('empty signers', lambda d: d['trust'].update(signing_fingerprints=[]),
+         'must not be empty'),
+        ('fixture primary',
+         lambda d: d['trust'].update(primary_fingerprint='A' * 40),
+         'is not the reviewed primary key'),
+        ('extra signer',
+         lambda d: d['trust'].update(signing_fingerprints=[fixture_root.dist.fingerprint,
+                                                          'A' * 40]),
+         'is not in the reviewed signer set'),
+        ('manifest url',
+         lambda d: d['manifest'].update(
+             url=f'https://static.rust-lang.org/dist/channel-rust-1.0.0.toml'),
+         'manifest URL is not the canonical channel manifest origin'),
+        ('manifest checksum url',
+         lambda d: d['manifest']['checksum'].update(
+             url='https://static.rust-lang.org/dist/other.toml.sha256'),
+         'manifest checksum URL is not <manifest>.sha256'),
+        ('manifest signature url',
+         lambda d: d['manifest']['signature'].update(
+             url='https://static.rust-lang.org/dist/other.toml.asc'),
+         'manifest signature URL is not <manifest>.asc'),
+        ('lookalike host',
+         lambda d: d['manifest'].update(
+             url=f'https://static.rust-lang.org.evil.test/dist/'
+                 f'channel-rust-{fixture.CHANNEL}.toml'),
+         'not a canonical rust-lang.org HTTPS URL'),
+        ('query string',
+         lambda d: d['manifest'].update(
+             url=f'https://static.rust-lang.org/dist/channel-rust-{fixture.CHANNEL}.toml?a=1'),
+         'not a canonical rust-lang.org HTTPS URL'),
+        ('url traversal',
+         lambda d: d['manifest'].update(
+             url=f'https://static.rust-lang.org/dist/../channel-rust-{fixture.CHANNEL}.toml'),
+         'URL path is not canonical'),
+        ('port', lambda d: d['manifest'].update(
+            url=f'https://static.rust-lang.org:443/dist/channel-rust-{fixture.CHANNEL}.toml'),
+         'not a canonical rust-lang.org HTTPS URL'),
+        ('userinfo', lambda d: d['manifest'].update(
+            url=f'https://user@static.rust-lang.org/dist/channel-rust-{fixture.CHANNEL}.toml'),
+         'not a canonical rust-lang.org HTTPS URL'),
+        ('fragment', lambda d: d['manifest'].update(
+            url=f'https://static.rust-lang.org/dist/channel-rust-{fixture.CHANNEL}.toml#x'),
+         'not a canonical rust-lang.org HTTPS URL'),
+        ('backslash', lambda d: d['manifest'].update(
+            url=f'https://static.rust-lang.org/dist\\channel-rust-{fixture.CHANNEL}.toml'),
+         'URL path is not canonical'),
+        ('double slash', lambda d: d['manifest'].update(
+            url=f'https://static.rust-lang.org//dist/channel-rust-{fixture.CHANNEL}.toml'),
+         'URL path is not canonical'),
+        ('tab', lambda d: d['manifest'].update(
+            url=f'https://static.rust-lang.org/dist/channel-rust-{fixture.CHANNEL}.toml\t'),
+         'manifest URL is not the canonical channel manifest origin'),
+        ('missing platform',
+         lambda d: d['platforms'].pop('linux/arm64'),
+         'platforms must be exactly linux/amd64 and linux/arm64'),
+        ('foreign host',
+         lambda d: d['platforms']['linux/amd64'].update(host=fixture.HOSTS['arm64']),
+         'host/musl triples do not match the architecture'),
+        ('bootstrap url',
+         lambda d: d['platforms']['linux/amd64']['bootstrap'].update(
+             url=d['platforms']['linux/amd64']['bootstrap']['url'].replace('1.28.2', '1.28.1')),
+         'bootstrap URL is not the versioned rustup-init origin'),
+        ('archive url',
+         lambda d: d['platforms']['linux/amd64']['archives'][0].update(
+             url=d['platforms']['linux/amd64']['archives'][0]['url'].replace(
+                 fixture.DATE, '2026-01-03')),
+         'archive URL is not the canonical dated origin'),
+        ('member prefix',
+         lambda d: d['platforms']['linux/amd64']['archives'][0].update(
+             member_prefix='cargo-9.9.9-aarch64-unknown-linux-gnu/'),
+         'member prefix does not match the archive name'),
+        ('reordered archives',
+         lambda d: d['platforms']['linux/amd64'].update(
+             archives=d['platforms']['linux/amd64']['archives'][1:2]
+             + d['platforms']['linux/amd64']['archives'][0:1]
+             + d['platforms']['linux/amd64']['archives'][2:]),
+         'selected archives must be in canonical order'),
+        ('extra archive',
+         lambda d: d['platforms']['linux/amd64'].update(
+             archives=d['platforms']['linux/amd64']['archives']
+             + [dict(d['platforms']['linux/amd64']['archives'][0], package='rust-src')]),
+         'unexpected selected archive'),
+        ('missing musl',
+         lambda d: d['platforms']['linux/amd64'].update(
+             archives=[archive for archive in d['platforms']['linux/amd64']['archives']
+                       if not archive['target'].endswith('-musl')]),
+         'selected closure is incomplete'),
+        ('evidence path ../x',
+         lambda d: d['platforms']['linux/amd64']['archives'][0]['signature'].update(
+             path='evidence/../x'),
+         'not a canonical relative path'),
+        ('exception unbound',
+         lambda d: d['bootstrap_exception']['scope']['linux/amd64'].update(sha256='0' * 64),
+         'exception is not bound to the committed bootstrap URL and digest'),
+        ('exception method',
+         lambda d: d['bootstrap_exception'].update(method='assumed-signed'),
+         'hash-only exception'),
+        ('empty reason', lambda d: d['bootstrap_exception'].update(reason='   '),
+         'must be recorded'),
+        ('reviewer handle', lambda d: d['bootstrap_exception'].update(reviewer='two words'),
+         'expected a simple reviewer handle'),
+    ]
+    for label, change, fragment in tree_rows:
+        target = pin_variant(label.replace(' ', '-'), change)
+        differential_row(f'pin {label}', ['check', str(target)], fragments=(fragment,))
+    # A surrogate in an identity string arrives as WTF-8 in Go and as a lone
+    # surrogate in Python: both must refuse it as a control character.
+    surrogate = raw_pin_variant(
+        'surrogate', original.replace('"reviewer": "fixture-reviewer"',
+                                      '"reviewer": "fixture\\ud800reviewer"', 1).encode())
+    differential_row('pin surrogate in reviewer', ['check', str(surrogate)],
+                     fragments=('control character in identity string',))
+
+
+def test_differential_evidence() -> None:
+    """The directory audit, the digests and the checksum lines."""
+    print('differential: evidence rows')
+    cases = [
+        ('component digest',
+         lambda target: (target / 'channel.toml').write_bytes(b'substituted\n'),
+         'channel.toml: bytes differ from the committed digest'),
+        ('substituted key',
+         lambda target: (target / 'rust-release-key.asc').write_bytes(b'not a key\n'),
+         'rust-release-key.asc: bytes differ from the committed digest'),
+        ('extra file',
+         lambda target: (target / 'extra.txt').write_text('x'),
+         'unreviewed input: extra.txt'),
+        ('extra directory',
+         lambda target: (target / 'spare').mkdir(),
+         'unreviewed input: spare'),
+        ('missing evidence',
+         lambda target: (target / 'evidence' / 'amd64-cargo.asc').unlink(),
+         'missing input: evidence/amd64-cargo.asc'),
+        ('symlinked pin.json',
+         lambda target: ((target / 'pin.json').rename(target / 'pin-real.json'),
+                         (target / 'pin.json').symlink_to(target / 'pin-real.json')),
+         'missing input: pin.json'),
+    ]
+    for label, change, fragment in cases:
+        target = driver.copy_pin(fixture_root.pinned, fixture_root.root / f'ev-{label}')
+        change(target)
+        differential_row(f'evidence {label}', ['check', str(target)], fragments=(fragment,))
+    # A FIFO is a special file: refused by name, by both.
+    fifo = driver.copy_pin(fixture_root.pinned, fixture_root.root / 'ev-fifo')
+    os.mkfifo(fifo / 'pipe')
+    differential_row('evidence special file', ['check', str(fifo)],
+                     fragments=('unreviewed input: special file pipe',))
+    # A symlinked input root is not a plain directory.
+    link = fixture_root.root / 'ev-root-link'
+    if link.exists() or link.is_symlink():
+        link.unlink()
+    link.symlink_to(fixture_root.pinned)
+    differential_row('evidence symlinked input root', ['check', str(link)],
+                     fragments=('input directory is not a plain directory',))
+    # A stale signature over malformed TOML must name the signature: authenticity
+    # precedes semantics.
+    stale = driver.copy_pin(fixture_root.pinned, fixture_root.root / 'ev-stale')
+    malformed = b'[renames.clippy\nto = "clippy-preview"\n'
+    (stale / 'channel.toml').write_bytes(malformed)
+    (stale / 'channel.toml.sha256').write_text(
+        model.sha_of_bytes(malformed) + f'  channel-rust-{fixture.CHANNEL}.toml\n')
+    document = json.loads((stale / 'pin.json').read_text())
+    document['manifest']['sha256'] = model.sha_of_bytes(malformed)
+    document['manifest']['checksum']['sha256'] = model.sha_of_bytes(
+        (stale / 'channel.toml.sha256').read_bytes())
+    (stale / 'pin.json').write_text(json.dumps(document, indent=2) + '\n')
+    differential_row('evidence stale signature over malformed TOML', ['check', str(stale)],
+                     fragments=('manifest signature check failed with status',))
+
+
+def resigned_manifest(label: str, text: str, *, expiry: str | None = None) -> Path:
+    """A pin copy whose manifest is `text`, re-signed with the fixture key."""
+    target = driver.copy_pin(fixture_root.pinned, fixture_root.root / f'manifest-{label}')
+    raw = text.encode()
+    (target / 'channel.toml').write_bytes(raw)
+    (target / 'channel.toml.sha256').write_text(
+        model.sha_of_bytes(raw) + f'  channel-rust-{fixture.CHANNEL}.toml\n')
+    document = json.loads((target / 'pin.json').read_text())
+    document['manifest']['sha256'] = model.sha_of_bytes(raw)
+    document['manifest']['checksum']['sha256'] = model.sha_of_bytes(
+        (target / 'channel.toml.sha256').read_bytes())
+    signed = Path(tempfile.mkdtemp(dir=fixture_root.root)) / 'resign-input'
+    signed.write_bytes(raw)
+    extra = ['--default-sig-expire', expiry] if expiry else []
+    signature = fixture.armored_sign(signed, fixture.sign_env(fixture_root.dist), extra)
+    (target / 'channel.toml.asc').write_bytes(signature)
+    document['manifest']['signature']['sha256'] = model.sha_of_bytes(signature)
+    (target / 'pin.json').write_text(json.dumps(document, indent=2) + '\n')
+    return target
+
+
+def test_differential_manifest() -> None:
+    """The synthetic manifest: every semantic rule, re-signed so only it can fail."""
+    print('differential: manifest rows')
+    url = f'https://static.rust-lang.org/dist/channel-rust-{fixture.CHANNEL}.toml'
+    original = fixture_root.dist.files[url].decode()
+    host = fixture.HOSTS['amd64']
+    cases = [
+        ('unchanged', original, None),
+        ('malformed-toml', original.replace('[renames.clippy]', '[renames.clippy'),
+         'not valid TOML'),
+        ('manifest-version', original.replace('manifest-version = "2"',
+                                              'manifest-version = "3"'),
+         'unsupported manifest-version'),
+        ('date', original.replace(f'date = "{fixture.DATE}"', 'date = "2026-01-03"'),
+         'release date does not match the pin'),
+        ('unquoted date', original.replace(f'date = "{fixture.DATE}"',
+                                           f'date = {fixture.DATE}'),
+         'expected YYYY-MM-DD'),
+        ('profile-change', original.replace(
+            'minimal = ["rustc", "cargo", "rust-std", "rust-mingw"]',
+            'minimal = ["rustc", "cargo", "rust-std"]'),
+         'schema/policy review required'),
+        ('rename-change', original.replace('to = "clippy-preview"', 'to = "clippy"'),
+         'unexpected rename'),
+        ('zstd-present', original.replace(
+            f'xz_url = "https://static.rust-lang.org/dist/{fixture.DATE}/cargo-'
+            f'{fixture.CHANNEL}-{host}.tar.xz"',
+            f'zst_url = "https://static.rust-lang.org/dist/{fixture.DATE}/cargo-'
+            f'{fixture.CHANNEL}-{host}.tar.zst"\nxz_url = "https://static.rust-lang.org/'
+            f'dist/{fixture.DATE}/cargo-{fixture.CHANNEL}-{host}.tar.xz"'),
+         'advertises zstd'),
+        ('extension-flag', original.replace(
+            f'[[pkg.rust.target.{host}.extensions]]\npkg = "rust-src"',
+            f'[[pkg.rust.target.{host}.extensions]]\npkg = "rust-src"\nextension = true'),
+         'is not a rustup component field'),
+        ('wildcard', original.replace(
+            f'[[pkg.rust.target.{host}.extensions]]\npkg = "rust-src"\ntarget = "*"',
+            f'[[pkg.rust.target.{host}.extensions]]\npkg = "rustfmt-preview"\ntarget = "*"'),
+         'target-independent'),
+        ('unknown top-level key', original.replace(
+            'manifest-version = "2"', 'manifest-version = "2"\nextra = 1'),
+         'unknown keys: extra'),
+        ('available-false', original.replace(
+            f'[pkg.cargo.target.{host}]\navailable = true',
+            f'[pkg.cargo.target.{host}]\navailable = false'), 'is not available'),
+        ('xz-hash', original.replace(
+            f'xz_url = "https://static.rust-lang.org/dist/{fixture.DATE}/cargo-'
+            f'{fixture.CHANNEL}-{host}.tar.xz"\nxz_hash = "', 'xz_url = "https://static.'
+            f'rust-lang.org/dist/{fixture.DATE}/cargo-{fixture.CHANNEL}-{host}.tar.xz"\n'
+            'xz_hash = "not-the-digest', 1),
+         'differs from the pin'),
+        ('half gzip pair', original.replace(
+            f'url = "https://static.rust-lang.org/dist/{fixture.DATE}/cargo-'
+            f'{fixture.CHANNEL}-{host}.tar.gz"\n', ''), 'half gzip format pair'),
+    ]
+    for label, text, fragment in cases:
+        target = resigned_manifest(label.replace(' ', '-'), text)
+        if fragment is None:
+            differential_row(f'manifest {label}', ['check', str(target)], expect=0)
+        else:
+            differential_row(f'manifest {label}', ['check', str(target)],
+                             fragments=(fragment,))
+    # Manifest *entry* paths: the input a re-signed manifest could carry. Each is
+    # compared against the pin's exact origin or refused by the directory audit, so
+    # no path is ever derived from the signed document -- the threat model this
+    # check exists for.
+    cargo_xz = (f'https://static.rust-lang.org/dist/{fixture.DATE}/cargo-'
+                f'{fixture.CHANNEL}-{host}.tar.xz')
+    entry_probes = [
+        ('xz-url traversal',
+         original.replace(f'xz_url = "{cargo_xz}"',
+                          f'xz_url = "https://static.rust-lang.org/dist/../dist/'
+                          f'cargo-{fixture.CHANNEL}-{host}.tar.xz"'),
+         'xz_url for cargo'),
+        ('xz-url absolute path', original.replace(f'xz_url = "{cargo_xz}"',
+                                                 'xz_url = "/tmp/cargo.tar.xz"'),
+         'xz_url for cargo'),
+        ('xz-url file scheme', original.replace(f'xz_url = "{cargo_xz}"',
+                                                'xz_url = "file:///tmp/cargo.tar.xz"'),
+         'xz_url for cargo'),
+    ]
+    for label, text, fragment in entry_probes:
+        target = resigned_manifest(label.replace(' ', '-').replace('/', '-'), text)
+        differential_row(f'manifest {label}', ['check', str(target)],
+                         fragments=(fragment, 'differs from the pin'))
+    # A symlinked manifest in the pin directory: the audit precedes any decode, so
+    # no reader ever opens the link.
+    linked = driver.copy_pin(fixture_root.pinned, fixture_root.root / 'manifest-symlink')
+    (linked / 'channel.toml').rename(linked / 'channel-real.toml')
+    (linked / 'channel.toml').symlink_to(linked / 'channel-real.toml')
+    differential_row('manifest symlinked in the pin directory', ['check', str(linked)],
+                     fragments=('unreviewed input: symlink channel.toml',))
+
+    # A field of the wrong kind is a refusal on both sides (Python raises, which is
+    # the pre-ruled P1 divergence: status 1, the text differs).
+    renames = ('[renames.clippy]\nto = "clippy-preview"\n'
+               '[renames.rustfmt]\nto = "rustfmt-preview"\n')
+    profile = '[profiles]\nminimal = ["rustc", "cargo", "rust-std", "rust-mingw"]\n'
+    preamble = f'manifest-version = "2"\ndate = "{fixture.DATE}"\n'
+    rust = f'[pkg.rust]\nversion = "{fixture.CHANNEL} (fixture)"\n'
+    # `pkg` and `renames` of the wrong kind are the pre-ruled P1 rows: Python
+    # raises outside `refuse()`, so the status is 1 and only the text differs.
+    # `profiles` is not one of them -- the source reader refuses it by name.
+    for label, text in (
+            ('pkg-not-a-table', preamble + 'pkg = 1\n' + renames + profile),
+            ('renames-a-string',
+             preamble + 'renames = "x"\n' + profile + rust)):
+        target = resigned_manifest(label, text)
+        differential_row(f'manifest {label}', ['check', str(target)],
+                         python_crashes=True)
+    bad_profiles = resigned_manifest('profiles-not-a-table',
+                                     preamble + 'profiles = 1\n' + renames + rust)
+    differential_row('manifest profiles-not-a-table', ['check', str(bad_profiles)],
+                     fragments=('manifest: no profiles table',))
+
+
+def test_differential_real_manifest() -> None:
+    """The real 900 KB manifest through both parsers, re-keyed with the fixture key."""
+    print('differential: the real manifest re-keyed')
+    target = driver.copy_pin(REAL_DATADIR, fixture_root.root / 'real-rekeyed')
+    dist = fixture_root.dist
+    (target / 'rust-release-key.asc').write_bytes(dist.key.read_bytes())
+    text = (target / 'channel.toml').read_bytes()
+    (target / 'channel.toml.sha256').write_text(
+        model.sha_of_bytes(text) + '  channel-rust-1.98.1.toml\n')
+    signed = Path(tempfile.mkdtemp(dir=fixture_root.root)) / 'real-resign'
+    signed.write_bytes(text)
+    signature = fixture.armored_sign(signed, fixture.sign_env(dist))
+    (target / 'channel.toml.asc').write_bytes(signature)
+    document = json.loads((target / 'pin.json').read_text())
+    document['trust']['key']['sha256'] = model.sha_of_bytes(dist.key.read_bytes())
+    document['trust']['primary_fingerprint'] = dist.fingerprint
+    document['trust']['signing_fingerprints'] = [dist.fingerprint]
+    document['manifest']['sha256'] = model.sha_of_bytes(text)
+    document['manifest']['checksum']['sha256'] = model.sha_of_bytes(
+        (target / 'channel.toml.sha256').read_bytes())
+    document['manifest']['signature']['sha256'] = model.sha_of_bytes(signature)
+    (target / 'pin.json').write_text(json.dumps(document, indent=2) + '\n')
+    # A pristine copy (accept) and one host-only mutation, so the parsed structure
+    # matters and not merely that both decoders read the file.
+    differential_row('real manifest unchanged', ['check', str(target)], expect=0,
+                     channel='1.98.1')
+    mutated = driver.copy_pin(target, fixture_root.root / 'real-rekeyed-mutant')
+    text = (mutated / 'channel.toml').read_bytes()
+    # The committed archive digests are the pin's; the manifest's xz hash for one
+    # selected archive is replaced so the closure comparison is what refuses.
+    changed = text.replace(b'xz_hash = "ea1de9f9', b'xz_hash = "00000000', 1)
+    (mutated / 'channel.toml').write_bytes(changed)
+    (mutated / 'channel.toml.sha256').write_text(
+        model.sha_of_bytes(changed) + '  channel-rust-1.98.1.toml\n')
+    signed = Path(tempfile.mkdtemp(dir=fixture_root.root)) / 'real-resign-2'
+    signed.write_bytes(changed)
+    signature = fixture.armored_sign(signed, fixture.sign_env(dist))
+    (mutated / 'channel.toml.asc').write_bytes(signature)
+    document = json.loads((mutated / 'pin.json').read_text())
+    document['manifest']['sha256'] = model.sha_of_bytes(changed)
+    document['manifest']['checksum']['sha256'] = model.sha_of_bytes(
+        (mutated / 'channel.toml.sha256').read_bytes())
+    document['manifest']['signature']['sha256'] = model.sha_of_bytes(signature)
+    (mutated / 'pin.json').write_text(json.dumps(document, indent=2) + '\n')
+    differential_row('real manifest re-keyed with a changed xz hash',
+                     ['check', str(mutated)], fragments=('differs from the pin',),
+                     channel='1.98.1')
+
+
+def test_differential_gpg() -> None:
+    """gpg's transcript, its exit status, keyring contents and expiry."""
+    print('differential: gpg rows')
+    differential_row('gpg transcript is identical', ['check', str(fixture_root.pinned)],
+                     expect=0, gpg_mode='record')
+    differential_row('gpg exits 1 with a real VALIDSIG', ['check', str(fixture_root.pinned)],
+                     fragments=('manifest signature check failed with status 1',),
+                     gpg_mode='fail')
+    # An expired signature: re-signed with a one-day expiry, then the wrapper moves
+    # the verifier's clock two days ahead.
+    expiring = resigned_manifest('expiring', fixture_root.dist.files[
+        f'https://static.rust-lang.org/dist/channel-rust-{fixture.CHANNEL}.toml'].decode(),
+        expiry='1d')
+    differential_row('expired signature', ['check', str(expiring)],
+                     fragments=('manifest signature check failed with status 1',),
+                     gpg_mode='expire')
+    # The same signature verifies through the real gpg while it is valid, which is
+    # what makes the row above about expiry rather than about the bytes.
+    differential_row('the expiring manifest verifies while valid', ['check', str(expiring)],
+                     expect=0, gpg_mode='real')
+    # Two primaries in the key file.
+    two = driver.copy_pin(fixture_root.pinned, fixture_root.root / 'gpg-two-primaries')
+    other_home = Path(tempfile.mkdtemp(dir=fixture_root.root)) / 'other-keyring'
+    other_home.mkdir(mode=0o700)
+    subprocess.run([GPG, '--batch', '--passphrase', '', '--quick-generate-key',
+                    'other <other@example.test>', 'ed25519', 'sign', 'never'],
+                   env=fixture.sign_env(fixture_root.dist) | {'GNUPGHOME': str(other_home)},
+                   capture_output=True, check=True)
+    other = subprocess.run([GPG, '--batch', '--armor', '--export', 'other@example.test'],
+                           env=fixture.sign_env(fixture_root.dist)
+                           | {'GNUPGHOME': str(other_home)},
+                           capture_output=True, check=True).stdout
+    (two / 'rust-release-key.asc').write_bytes(
+        (two / 'rust-release-key.asc').read_bytes() + other)
+    document = json.loads((two / 'pin.json').read_text())
+    document['trust']['key']['sha256'] = model.sha_of_bytes(
+        (two / 'rust-release-key.asc').read_bytes())
+    (two / 'pin.json').write_text(json.dumps(document, indent=2) + '\n')
+    differential_row('two primaries in the key file', ['check', str(two)],
+                     fragments=('key file must hold exactly the reviewed primary key',))
+
+
+def test_differential_trust() -> None:
+    """Layer A': the reviewed trust, through the two real CLIs."""
+    print('differential: reviewed trust')
+    accepted = driver.copy_pin(REAL_DATADIR, fixture_root.root / 'real-data')
+    cases = [
+        ('the committed data is accepted', accepted, None, 0),
+        ('the fixture-key pin is refused', fixture_root.pinned,
+         'is not the reviewed primary key', 1),
+    ]
+    for label, target, fragment, expected in cases:
+        row = new_row()
+        tmpdir = row / 't'
+        tmpdir.mkdir()
+        program = os.path.realpath(GPG)
+        environment = {'PATH': os.path.dirname(program) + ':/usr/bin:/bin',
+                       'HOME': str(row), 'TMPDIR': str(tmpdir), 'LC_ALL': 'C',
+                       'LANG': 'C.UTF-8', 'TZ': 'UTC'}
+        python = subprocess.run(
+            [sys.executable, '-I',
+             str(REPOSITORY_ROOT / 'examples' / 'layers' / 'rust-dev'
+                 / 'rust_toolchain.py'), 'check', str(target)],
+            capture_output=True, text=True, env=environment)
+        go = differential.run_go(HELPER_SHIPPED, ['check', str(target)], environment)
+        comparison = differential.compare(
+            label, (python.returncode, python.stdout, python.stderr), go,
+            fragments=(fragment,) if fragment else (), channel='1.98.1',
+            python_tmpdir=tmpdir, go_tmpdir=tmpdir)
+        DIFFERENTIAL['compared'] += 1
+        if comparison.ok and python.returncode != expected:
+            comparison.problems.append(f'{label}: both returned {python.returncode}, '
+                                       f'expected {expected}')
+        check(f'differential {label}', comparison.ok,
+              '(' + '; '.join(comparison.problems) + ')' if not comparison.ok else '')
+
+
+def installed_row(label: str, arch: str = 'amd64', *, change=None, settings=None,
+                  fragments=(), cargo='cargo', remove_rustup=False,
+                  omit_std=(), python_crashes=False) -> None:
+    """One installed-state row: both readers ask the same emulator.
+
+    `omit_std` names targets whose standard library is *absent*. A row named for a
+    missing thing must be built by removing that thing: a row that keeps the file
+    and only asserts a refusal compares two successes, reads as coverage and proves
+    nothing (the reviewer's finding on the row this replaced).
+    """
+    row = new_row()
+    architecture = model.Architecture(arch)
+    rustup_home = row / 'rustup'
+    host = architecture.host.value
+    toolchain = f'{fixture.CHANNEL}-{host}'
+    for target in (architecture.host, architecture.musl):
+        library = rustup_home / 'toolchains' / toolchain / 'lib' / 'rustlib' / target.value / 'lib'
+        library.mkdir(parents=True)
+        if target.value in omit_std:
+            # The directory stays; the library it must hold does not.
+            continue
+        (library / 'libstd.rlib').write_bytes(b'')
+    body = settings if settings is not None else (
+        'profile = "minimal"\nauto_self_update = "disable"\nauto_install = "disable"\n'
+        f'default_toolchain = "{toolchain}"\n')
+    rustup_home.mkdir(parents=True, exist_ok=True)
+    (rustup_home / 'settings.toml').write_text(body)
+    case = {
+        'rustup_version': fixture.RUSTUP_VERSION,
+        'toolchains': [f'{toolchain} (active, default)'],
+        'components': [f'{fixture.STEMS[package]}-{target.value}'
+                       for package, target in model.selected_pairs(architecture)],
+        'targets': [host, architecture.musl.value],
+        'rustc_verbose': f'rustc 1.0.0\nbinary: rustc\nrelease: {fixture.CHANNEL}\n'
+                         f'host: {host}\n',
+        'cargo_version': 'cargo 1.0.0 (fixture)',
+        'clippy_version': 'clippy 0.1.0 (fixture)',
+        'rustfmt_version': 'rustfmt 1.0.0 (fixture)',
+        'fail_when': [],
+    }
+    if change is not None:
+        change(case)
+    Path(str(rustup_home) + '.case.json').write_text(json.dumps(case))
+    cargo_home = os.environ[TOOLS_ENV] + '/tools/' + cargo
+    if remove_rustup:
+        # A cargo home the allowlist already knows, with no rustup in it: a copy
+        # made now could not be executed inside the boundary at all, which is the
+        # boundary row and not this one.
+        cargo_home = os.environ[TOOLS_ENV] + '/tools/cargo-absent'
+    argv = ['verify-installed', str(fixture_root.pinned), '--arch', arch,
+            '--expect-channel', fixture.CHANNEL, '--rustup-home', str(rustup_home),
+            '--cargo-home', str(cargo_home)]
+    differential_row(f'installed {label}', argv, fragments=fragments,
+                     python_crashes=python_crashes)
+
+
+def test_differential_installed() -> None:
+    """The installed-state checks, one row per rule."""
+    print('differential: installed rows')
+    installed_row('clean')
+    # No settings file at all: the row's name is the file it omits.
+    def absent(label: str) -> None:
+        row = new_row()
+        rustup_home = row / 'rustup'
+        rustup_home.mkdir()
+        case = {'rustup_version': fixture.RUSTUP_VERSION, 'toolchains': [],
+                'components': [], 'targets': [], 'rustc_verbose': '',
+                'cargo_version': '', 'clippy_version': '', 'rustfmt_version': '',
+                'fail_when': []}
+        Path(str(rustup_home) + '.case.json').write_text(json.dumps(case))
+        argv = ['verify-installed', str(fixture_root.pinned), '--arch', 'amd64',
+                '--expect-channel', fixture.CHANNEL, '--rustup-home', str(rustup_home),
+                '--cargo-home', os.environ[TOOLS_ENV] + '/tools/cargo']
+        differential_row(label, argv, fragments=('installed: missing rustup settings',))
+    absent('installed missing settings')
+    toolchain = f'{fixture.CHANNEL}-{fixture.HOSTS["amd64"]}'
+    installed_row('profile wrong',
+                  settings=f'profile = "default"\nauto_self_update = "disable"\n'
+                           f'auto_install = "disable"\ndefault_toolchain = "{toolchain}"\n',
+                  fragments=('installed: rustup setting profile',))
+    installed_row('auto_self_update wrong',
+                  settings=f'profile = "minimal"\nauto_self_update = "enable"\n'
+                           f'auto_install = "disable"\ndefault_toolchain = "{toolchain}"\n',
+                  fragments=('installed: rustup setting auto_self_update',))
+    installed_row('auto_install wrong',
+                  settings=f'profile = "minimal"\nauto_self_update = "disable"\n'
+                           f'auto_install = "enable"\ndefault_toolchain = "{toolchain}"\n',
+                  fragments=('installed: rustup setting auto_install',))
+    installed_row('default toolchain wrong',
+                  settings=f'profile = "minimal"\nauto_self_update = "disable"\n'
+                           f'auto_install = "disable"\ndefault_toolchain = "9.9.9-'
+                           f'{fixture.HOSTS["amd64"]}"\n',
+                  fragments=('rustup default toolchain is not the pinned exact channel',))
+    installed_row('RUSTUP_TOOLCHAIN key',
+                  settings=f'profile = "minimal"\nauto_self_update = "disable"\n'
+                           f'auto_install = "disable"\ndefault_toolchain = "{toolchain}"\n'
+                           f'RUSTUP_TOOLCHAIN = "{toolchain}"\n',
+                  fragments=('installed: rustup settings override RUSTUP_TOOLCHAIN',))
+    installed_row('rustup 1.28.1', change=lambda case: case.update(rustup_version='1.28.1'),
+                  fragments=('installed: rustup is not 1.28.2',))
+    installed_row('extra toolchain',
+                  change=lambda case: case['toolchains'].append('stable-x86_64-unknown-linux-gnu'),
+                  fragments=('installed: unexpected toolchains',))
+    installed_row('component missing',
+                  change=lambda case: case['components'].pop(),
+                  fragments=('installed: components',))
+    installed_row('musl target missing',
+                  change=lambda case: case['targets'].remove(case['targets'][1]),
+                  fragments=('installed: targets',))
+    installed_row('rustc release wrong',
+                  change=lambda case: case.update(
+                      rustc_verbose=f'rustc 1.0.0\nrelease: 1.0.0\nhost: '
+                                    f'{fixture.HOSTS["amd64"]}\n'),
+                  fragments=('installed: rustc release',))
+    installed_row('rustc host wrong',
+                  change=lambda case: case.update(
+                      rustc_verbose=f'rustc 1.0.0\nrelease: {fixture.CHANNEL}\n'
+                                    f'host: {fixture.HOSTS["arm64"]}\n'),
+                  fragments=('installed: rustc host',))
+    installed_row('clippy exits 1', change=lambda case: case['fail_when'].append('clippy'),
+                  fragments=('clippy --version failed with status 1',))
+    installed_row('rustfmt exits 1', change=lambda case: case['fail_when'].append('rustfmt'),
+                  fragments=('--version failed with status 1',))
+    installed_row('rustup version exits 1',
+                  change=lambda case: case['fail_when'].append('--version'),
+                  fragments=('rustup --version failed with status 1',))
+    installed_row('rustup absent', remove_rustup=True, python_crashes=True,
+                  fragments=('rustup --version failed',))
+    # The library is *removed*, so the row refuses on both sides and names the
+    # target whose standard library is gone.
+    installed_row('host std library missing', omit_std=(fixture.HOSTS['amd64'],),
+                  fragments=(f'installed: missing {fixture.HOSTS["amd64"]} standard '
+                             'library',))
+    installed_row('musl std library missing',
+                  omit_std=('x86_64-unknown-linux-musl',),
+                  fragments=('installed: missing x86_64-unknown-linux-musl standard '
+                             'library',))
+    installed_row('foreign architecture', arch='arm64')
+
+
+def settings_row(label: str, body: str) -> tuple[Path, list[str]]:
+    """One install whose settings.toml is `body`, with both readers pointed at it.
+
+    The row is short (`rtp-*` in the temp directory) because gpg-agent's socket
+    path is a unix socket of at most 104 bytes on macOS.
+    """
+    row = new_row()
+    rustup_home = row / 'rustup'
+    host = fixture.HOSTS['amd64']
+    toolchain = f'{fixture.CHANNEL}-{host}'
+    for target in ('x86_64-unknown-linux-gnu', 'x86_64-unknown-linux-musl'):
+        library = rustup_home / 'toolchains' / toolchain / 'lib' / 'rustlib' / target / 'lib'
+        library.mkdir(parents=True)
+        (library / 'libstd.rlib').write_bytes(b'')
+    (rustup_home / 'settings.toml').write_text(body)
+    case = {
+        'rustup_version': fixture.RUSTUP_VERSION,
+        'toolchains': [f'{toolchain} (active, default)'],
+        'components': [f'{fixture.STEMS[package]}-{target.value}'
+                       for package, target in model.selected_pairs(model.Architecture.AMD64)],
+        'targets': [host, 'x86_64-unknown-linux-musl'],
+        'rustc_verbose': f'rustc 1.0.0\nrelease: {fixture.CHANNEL}\nhost: {host}\n',
+        'cargo_version': 'cargo 1.0.0 (fixture)',
+        'clippy_version': 'clippy 0.1.0 (fixture)',
+        'rustfmt_version': 'rustfmt 1.0.0 (fixture)',
+        'fail_when': [],
+    }
+    Path(str(rustup_home) + '.case.json').write_text(json.dumps(case))
+    argv = ['verify-installed', str(fixture_root.pinned), '--arch', 'amd64',
+            '--expect-channel', fixture.CHANNEL, '--rustup-home', str(rustup_home),
+            '--cargo-home', os.environ[TOOLS_ENV] + '/tools/cargo']
+    return row, argv
+
+
+def test_differential_toml() -> None:
+    """settings.toml: the measured grammar, and the rows a struct decoder would miss."""
+    print('differential: TOML rows')
+    grammar = DIFFERENTIAL['grammar']
+    toolchain = f'{fixture.CHANNEL}-{fixture.HOSTS["amd64"]}'
+    clean = (f'profile = "minimal"\nauto_self_update = "disable"\n'
+             f'auto_install = "disable"\ndefault_toolchain = "{toolchain}"\n')
+    # Each row: label, extra text appended to a clean settings.toml, and whether the
+    # row's TOML 1.0 verdict is acceptance. The Go verdict is asserted against the
+    # 1.0 column unconditionally; the Python cross-check applies only where the
+    # oracle's measured grammar agrees.
+    rows = [
+        ('duplicate key', 'profile = "minimal"\n', False, 'not valid TOML'),
+        ('redefined table', '[a]\nb = 1\n[a]\nc = 2\n', False, 'not valid TOML'),
+        ('inline table extended by a dotted key', 'a = {b = 1}\na.c = 2\n', False,
+         'not valid TOML'),
+        ('inline table extended by a header', 'a = {b = 1}\n[a.c]\nd = 1\n', False,
+         'not valid TOML'),
+        ('table redefined after dotted keys', '[a]\nb.c = 1\n[a.b]\nd = 2\n', False,
+         'not valid TOML'),
+        ('trailing comma in an inline table', 'a = {b = 1,}\n', False, 'not valid TOML'),
+        ('newline in an inline table', 'a = {b = 1,\nc = 2}\n', False, 'not valid TOML'),
+        ('escape x', 'a = "\\x41"\n', False, 'not valid TOML'),
+        ('local time', 'a = 07:32\n', False, 'not valid TOML'),
+        ('crlf', 'profile = "minimal"\r\n', True, ''),
+        ('a date where a string belongs', 'profile = 2026-01-01\n', True,
+         'installed: rustup setting profile is'),
+    ]
+    for label, extra, accepts, fragment in rows:
+        if label == 'crlf':
+            body = clean.replace('\n', '\r\n')
+        elif label == 'a date where a string belongs':
+            body = clean.replace('profile = "minimal"\n', extra)
+        else:
+            body = clean + extra
+        row, argv = settings_row(label, body)
+        if label in ('trailing comma in an inline table',
+                     'newline in an inline table', 'escape x', 'local time') \
+                and grammar == '1.1':
+            # The oracle's own grammar accepts these; the Go verdict is the TOML
+            # 1.0 one. Compared against the column, not against the oracle.
+            DIFFERENTIAL['go_only'] += 1
+            go = differential.run_go(HELPER_FIXTURE,
+                               ['--fixture-trust', fixture_root.dist.fingerprint, *argv],
+                               {'PATH': os.path.dirname(go_program('record'))
+                                + ':/usr/bin:/bin', 'HOME': str(row), 'TMPDIR': str(row)})
+            check(f'differential TOML {label} (Go against the TOML 1.0 column)',
+                  go[0] == (0 if accepts else 1),
+                  f'(go status {go[0]}: {go[2]!r})')
+            continue
+        # The expected exit is the refusal's, not the grammar's: a document TOML
+        # 1.0 accepts can still fail a settings rule.
+        differential_row(f'TOML {label}', argv, fragments=(fragment,) if fragment else (),
+                         expect=0 if not fragment else None)
+    # The declared divergence: no go-toml/v2 release refuses the TOML 1.1 `\e`
+    # escape, so Go accepts it. A 1.0 oracle refuses the document; the row is
+    # therefore recorded rather than compared, and the Go unit test pins the value.
+    escape_row = clean + 'a = "\\e"\n'
+    DIFFERENTIAL['declared'].append(
+        'TOML \\e: Go accepts it (ESC); TOML 1.0 refuses it (pre-approved P4)')
+
+
+def test_differential_p5_integer_range() -> None:
+    """P5: the TOML integer range, witnessed in both directions.
+
+    Go refuses an integer beyond int64 because TOML 1.0 requires the error and
+    because `rustup` -- the program that writes and reads `settings.toml`, through
+    Rust's `toml` crate -- is a 64-bit reader. The oracle accepts it, which is the
+    declared divergence.
+
+    The second assertion is what keeps the declaration honest. A "known
+    difference" with no witness becomes folklore and outlives its cause: the day
+    `tomllib` starts enforcing int64 the divergence no longer exists, so this goes
+    red and someone must delete the declaration rather than inherit it.
+    """
+    print('differential: P5, the TOML integer range')
+    toolchain = f'{fixture.CHANNEL}-{fixture.HOSTS["amd64"]}'
+    clean = (f'profile = "minimal"\nauto_self_update = "disable"\n'
+             f'auto_install = "disable"\ndefault_toolchain = "{toolchain}"\n')
+    row, argv = settings_row('p5-integer-range', clean + 'x = 9223372036854775808\n')
+    DIFFERENTIAL['go_only'] += 1
+    go = differential.run_go(HELPER_FIXTURE,
+                             ['--fixture-trust', fixture_root.dist.fingerprint, *argv],
+                             {'PATH': os.path.dirname(go_program('record'))
+                              + ':/usr/bin:/bin', 'HOME': str(row), 'TMPDIR': str(row)})
+    check('P5: Go refuses an integer beyond int64, as TOML 1.0 requires',
+          go[0] == 1 and 'not valid TOML' in go[2] and '9223372036854775808' in go[2],
+          f'(go status {go[0]}: {go[2]!r})')
+    check('P5: the oracle still accepts it, so the divergence is still a divergence',
+          ORACLE['out_of_range_integer'],
+          '(tomllib now refuses an integer beyond int64: the divergence no longer '
+          'exists, so delete the P5 declaration and compare this row live instead of '
+          'inheriting it)')
+    DIFFERENTIAL['oracle_deviations'].append(
+        "P5 TOML integer range: Go refuses an integer beyond int64 (TOML 1.0, and "
+        "rustup's own int64 reader); tomllib accepts it")
+
+
+def test_differential_usage() -> None:
+    """The argparse status 2 table."""
+    print('differential: usage rows')
+    differential_row('usage missing input dir', ['check'])
+    differential_row('usage extra positional', ['check', str(fixture_root.pinned), 'extra'])
+    differential_row('usage missing rustup home',
+                     ['verify-installed', str(fixture_root.pinned), '--arch', 'amd64',
+                      '--expect-channel', fixture.CHANNEL, '--cargo-home', '/tmp'])
+    differential_row('usage bad architecture',
+                     ['verify-installed', str(fixture_root.pinned), '--arch', 'riscv64',
+                      '--expect-channel', fixture.CHANNEL, '--rustup-home', '/tmp',
+                      '--cargo-home', '/tmp'])
+    differential_row('usage expect-channel without a value',
+                     ['check', str(fixture_root.pinned), '--expect-channel'])
+
+
+def test_go_child_boundary() -> None:
+    """The Go child cannot exec a program the allowlist does not name.
+
+    A copy of the emulator is written into writable scratch *after* the allowlist
+    is fixed, so the operating system refuses the Go child's exec exactly as the
+    audit hook refuses Python's.
+    """
+    print('differential: the Go child boundary')
+    row = new_row()
+    rustup_home = row / 'rustup'
+    cargo = row / 'cargo'
+    (cargo / 'bin').mkdir(parents=True)
+    for name in ('cargo', 'rustc', 'rustfmt', 'rustup'):
+        source = Path(os.environ[TOOLS_ENV]) / 'tools' / 'cargo' / 'bin' / name
+        (cargo / 'bin' / name).write_bytes(source.read_bytes())
+        (cargo / 'bin' / name).chmod(0o755)
+    toolchain = f'{fixture.CHANNEL}-{fixture.HOSTS["amd64"]}'
+    for target in ('x86_64-unknown-linux-gnu', 'x86_64-unknown-linux-musl'):
+        library = rustup_home / 'toolchains' / toolchain / 'lib' / 'rustlib' / target / 'lib'
+        library.mkdir(parents=True)
+        (library / 'libstd.rlib').write_bytes(b'')
+    (rustup_home / 'settings.toml').write_text(
+        f'profile = "minimal"\nauto_self_update = "disable"\n'
+        f'auto_install = "disable"\ndefault_toolchain = "{toolchain}"\n')
+    case = {'rustup_version': fixture.RUSTUP_VERSION,
+            'toolchains': [f'{toolchain} (active, default)'], 'components': [],
+            'targets': [], 'rustc_verbose': '', 'cargo_version': '',
+            'clippy_version': '', 'rustfmt_version': '', 'fail_when': []}
+    Path(str(rustup_home) + '.case.json').write_text(json.dumps(case))
+    argv = ['verify-installed', str(fixture_root.pinned), '--arch', 'amd64',
+            '--expect-channel', fixture.CHANNEL, '--rustup-home', str(rustup_home),
+            '--cargo-home', str(cargo)]
+    differential_row('installed with an unlisted rustup copy', argv,
+                     fragments=('rustup --version failed',), python_crashes=True)
+
+
 def main() -> int:
+    global fixture_root
     root = Path(tempfile.mkdtemp(prefix='rust-toolchain-pins-')).resolve()
+    DIFFERENTIAL['grammar'] = toml_grammar()
+    ORACLE['out_of_range_integer'] = oracle_accepts_out_of_range_integer()
+    print(f'oracle: measured TOML grammar {DIFFERENTIAL["grammar"]} '
+          f'(probe: a = {{b = 1,}})')
+    if DIFFERENTIAL['grammar'] == '1.1':
+        print(f'oracle is TOML 1.1 (Python {sys.version.split()[0]}); the grammar rows '
+              'are compared to the TOML 1.0 column and the Go verdict is asserted '
+              'against it')
     try:
         test_os_boundary()
         test_deny_guard()
@@ -2042,8 +3125,31 @@ def main() -> int:
         test_install_command(fixture_root)
         test_transport()
         test_transport_real_deadline()
+        test_differential_self_control()
+        test_differential_check_fixture()
+        test_differential_pin()
+        test_differential_evidence()
+        test_differential_manifest()
+        test_differential_real_manifest()
+        test_differential_gpg()
+        test_differential_trust()
+        test_differential_installed()
+        test_differential_toml()
+        test_differential_p5_integer_range()
+        test_differential_usage()
+        test_go_child_boundary()
+        print()
+        print(f'differential: {DIFFERENTIAL["compared"]} rows compared live, '
+              f'{DIFFERENTIAL["go_only"]} rows compared to the TOML 1.0 column only, '
+              f'grammar {DIFFERENTIAL["grammar"]}')
+        for declared in DIFFERENTIAL['declared'] + DIFFERENTIAL['oracle_deviations']:
+            print(f'differential: declared divergence: {declared}')
     finally:
         shutil.rmtree(root, ignore_errors=True)
+        for row in ROW_ROOTS:
+            shutil.rmtree(row, ignore_errors=True)
+        if os.environ.get(sandbox.SANDBOXED_ENV) == '1':
+            differential.remove_tools(Path(os.environ[TOOLS_ENV]), TOOLS_PREFIX)
     print()
     if Failures:
         print(f'FAILED {len(Failures)} case(s): {", ".join(Failures)}')

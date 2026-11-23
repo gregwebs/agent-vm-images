@@ -5257,6 +5257,22 @@ fn repository_files(
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
+                // `<layer>/helper/vendor` is a dependency's own source tree (ADR
+                // 0017), not this repository's: its Dockerfile, shell and Python are
+                // upstream's bytes, authenticated byte for byte by the module's
+                // vendor drift gate (script/test/example-helper-vendor.sh), and
+                // nothing here builds, ships or maintains them. The test is the two
+                // exact path components, not a `vendor` name anywhere: a directory
+                // called `vendor` in any other position stays in scope, so this
+                // cannot swallow a future tree that is ours.
+                let helper_vendor = path.file_name().is_some_and(|found| found == "vendor")
+                    && path
+                        .parent()
+                        .and_then(|parent| parent.file_name())
+                        .is_some_and(|found| found == "helper");
+                if helper_vendor {
+                    continue;
+                }
                 stack.push(path);
                 continue;
             }

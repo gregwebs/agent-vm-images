@@ -16,6 +16,10 @@ EXAMPLES='chrome-devtools go-dev rust-dev wirenboard-cpp'
 # than under ROOT because it is part of the gate, not of the tree under review;
 # its header carries the rule (#235, #237).
 REVIEWED_ARGS_FILE=${CHECKER%/*}/reviewed-args.txt
+# The host helper build wrapper, through this script's own location so the
+# self-test builds the tree it is reviewing (`--root "$ROOT"`) and never the
+# checkout it was started from.
+HELPER_BUILD=${CHECKER%/*}/../build/example-helper.sh
 # Known space-free paths, explicitly moved from agent-vm's ci-contracts.sh:
 # deletion/rename must fail rather than silently leave lint coverage.
 GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp.sh go-dev/gopls_closure.py go-dev/install-go.sh go-dev/install-golangci-lint.sh go-dev/install-gopls.sh go-dev/verify-toolchain.sh rust-dev/install-kache.sh rust-dev/install-rust.sh rust-dev/install-verus.sh rust-dev/rust_toolchain.py rust-dev/verify-toolchain.sh'
@@ -25,7 +29,7 @@ GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp
 # listed file that vanishes fails as `guarded script missing`, and a `.go` file
 # nobody listed fails as `unreviewed helper file`. The vendor tree is deliberately
 # out of this list: its bytes belong to the module's vendor drift gate.
-GUARDED_GO='rust-dev/helper/go.mod rust-dev/helper/go.sum rust-dev/helper/main.go rust-dev/helper/seams_fixture.go rust-dev/helper/seams_shipped.go rust-dev/helper/kacheprobe/probe.go rust-dev/helper/kacheprobe/probe_test.go rust-dev/helper/seams_test.go rust-dev/helper/toolchain/toolchain.go'
+GUARDED_GO='rust-dev/helper/go.mod rust-dev/helper/go.sum rust-dev/helper/main.go rust-dev/helper/main_test.go rust-dev/helper/imports_test.go rust-dev/helper/seams_fixture.go rust-dev/helper/seams_shipped.go rust-dev/helper/seams_test.go rust-dev/helper/kacheprobe/probe.go rust-dev/helper/kacheprobe/probe_test.go rust-dev/helper/internal/gpg/gpg.go rust-dev/helper/internal/gpg/gpg_test.go rust-dev/helper/internal/strictjson/decode.go rust-dev/helper/internal/strictjson/decode_test.go rust-dev/helper/toolchain/toolchain.go rust-dev/helper/toolchain/policy.go rust-dev/helper/toolchain/types.go rust-dev/helper/toolchain/refusal.go rust-dev/helper/toolchain/decode.go rust-dev/helper/toolchain/pin.go rust-dev/helper/toolchain/inputs.go rust-dev/helper/toolchain/manifest.go rust-dev/helper/toolchain/installed.go rust-dev/helper/toolchain/commands.go rust-dev/helper/toolchain/types_test.go rust-dev/helper/toolchain/decode_test.go rust-dev/helper/toolchain/pin_test.go rust-dev/helper/toolchain/manifest_test.go rust-dev/helper/toolchain/installed_test.go rust-dev/helper/toolchain/fuzz_test.go'
 # The rust-dev helper's builder stage. It is a reviewed parent:
 # `images/parent-pins.json` records its digest, and its tag is the root go.mod's
 # toolchain. Both are named by the literals below rather than by a variable, so a
@@ -41,7 +45,7 @@ GUARDED_DATA='chrome-devtools/data/chrome-devtools-mcp.sigstore.json chrome-devt
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=150
+SELF_TEST_CASES=156
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -325,9 +329,6 @@ check() {
     [ -d "$datadir" ] || fail 'rust-dev: missing Rust input directory'
     rust_arg=$(sed -nE 's/^ARG RUST_TOOLCHAIN=(.*)$/\1/p' "$rustdir/Dockerfile")
     [ -n "$rust_arg" ] || fail 'rust-dev pins: ARG RUST_TOOLCHAIN'
-    selected=$(PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/$helper" check "$ROOT/$datadir" \
-        --expect-channel "$rust_arg" 2>&1) || fail "rust-dev pins: $selected"
-    [ "$selected" = "$rust_arg" ] || fail "rust-dev pins: channel disagreement"
     instructions=$(logical_instructions "$rustdir/Dockerfile" rust-dev) || exit 1
     # Normalized for comparison: `logical_instructions` keeps a continuation's
 # spacing, so runs of blanks are collapsed before the exact shape comparison.
@@ -437,8 +438,27 @@ RUN --network=none --mount=type=bind,source=helper,target=/src,ro cd /src && { [
 HELPER_BUILDER
     [ "$(normalize_instruction "$builder_stage")" = "$reviewed_helper_builder" ] ||
         fail "rust-dev: the helper stage RUN must be exactly: $reviewed_helper_builder (got: $(normalize_instruction "$builder_stage"))"
+    # Two readers, one answer. `check` moved to the layer's own Go helper
+    # (#187 slice 2) and `rust_toolchain.py` stays as the differential oracle
+    # until #232 deletes it, so every input is read twice here: a refusal either
+    # reader reports alone fails as a disagreement, and a shared refusal is
+    # reported with the Go text so the fragments below stay the Go text's.
+    host_os=$(uname -s | tr '[:upper:]' '[:lower:]')
+    go_helper=$(bash "$HELPER_BUILD" rust-dev --root "$ROOT" \
+        --os "$host_os") || fail 'rust-dev pins: cannot build the host helper'
+    go_out='' go_status=0
+    go_out=$("$go_helper" check "$ROOT/$datadir" --expect-channel "$rust_arg" 2>&1) || go_status=$?
+    py_out='' py_status=0
+    py_out=$(PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/$helper" check "$ROOT/$datadir" \
+        --expect-channel "$rust_arg" 2>&1) || py_status=$?
+    [ "$go_status" -eq "$py_status" ] ||
+        fail "rust-dev pins: the Go and Python readers disagree (go $go_status: $go_out; python $py_status: $py_out)"
+    [ "$go_status" -eq 0 ] || fail "rust-dev pins: $go_out"
+    [ "$go_out" = "$rust_arg" ] || fail "rust-dev pins: channel disagreement"
+    [ "$py_out" = "$rust_arg" ] || fail "rust-dev pins: the Python reader's channel disagrees"
+    selected=$go_out
 reviewed_installer='RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro --mount=type=bind,source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro --mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro bash /tmp/install-rust.sh'
-reviewed_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro --mount=type=bind,from=rust-dev-helper,source=/out/rust-dev-helper,target=/run/rust-verify/rust-dev-helper,ro --mount=type=bind,source=rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro --mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/rust-verify/verify-toolchain.sh'
+reviewed_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro --mount=type=bind,from=rust-dev-helper,source=/out/rust-dev-helper,target=/run/rust-verify/rust-dev-helper,ro --mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus /bin/bash /run/rust-verify/verify-toolchain.sh'
 installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || true)
     [ "$installer_runs" -eq 1 ] || fail 'rust-dev: installer RUN must appear exactly once'
     installer_line=$(printf '%s\n' "$instructions" | grep -F 'install-rust.sh')
@@ -462,10 +482,8 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     esac
     for token in 'verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro' \
         'from=rust-dev-helper,source=/out/rust-dev-helper,target=/run/rust-verify/rust-dev-helper,ro' \
-        'rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro' \
         'data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro' \
-        'RUST_TOOLCHAIN=$RUST_TOOLCHAIN' 'KACHE_VERSION=$KACHE_VERSION' 'VERUS_DIR=/opt/verus' \
-        'PYTHONDONTWRITEBYTECODE=1'; do
+        'RUST_TOOLCHAIN=$RUST_TOOLCHAIN' 'KACHE_VERSION=$KACHE_VERSION' 'VERUS_DIR=/opt/verus'; do
         case "$verifier_line" in
             *"$token"*) ;;
             *) fail "rust-dev: verifier RUN lacks the reviewed delivery: $token" ;;
@@ -473,6 +491,14 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     done
     [ "$(normalize_instruction "$verifier_line")" = "$reviewed_verifier" ] ||
         fail "rust-dev: verifier RUN must be exactly: $reviewed_verifier (got: $(normalize_instruction "$verifier_line"))"
+    # The verifier script's own two halves: the Go verb, and no Python at all.
+    grep -qF '"$VERIFY_DIR/rust-dev-helper" verify-installed "$VERIFY_DIR/rust-toolchain"' \
+        "$rustdir/verify-toolchain.sh" ||
+        fail 'rust-dev: verify-toolchain.sh must run the Go verifier'
+    if grep -qE 'python3|PYTHONDONTWRITEBYTECODE|rust_toolchain\.py' \
+        "$rustdir/verify-toolchain.sh"; then
+        fail 'rust-dev: the verifier step must run no Python'
+    fi
     grep -qxF 'ENV RUSTUP_AUTO_INSTALL=0' "$rustdir/Dockerfile" ||
         fail 'rust-dev: missing the no-implicit-install contract (ENV RUSTUP_AUTO_INSTALL=0)'
     grep -qxF 'ENV RUSTUP_HOME=/opt/rustup' "$rustdir/Dockerfile" ||
@@ -712,16 +738,20 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         # gate's to authenticate, so they are the one class this list skips.
         case "$rest" in
             helper | helper/*)
+                # The vendor tree first, including any file a dependency ships
+                # with a shebang: those bytes are not this repository's and are
+                # not shipped, and they are authenticated by the module's vendor
+                # drift gate against the pinned go.sum rather than by this list.
+                case "$rest" in
+                    helper/vendor/*) continue ;;
+                esac
                 if [ "$(head -c 2 "$file")" = '#!' ]; then
                     fail "unguarded example script: $rel"
                 fi
                 case "$rest" in
-                    helper/go.mod | helper/go.sum | helper/vendor/*) ;;
+                    helper/go.mod | helper/go.sum) ;;
                     helper/*.go | helper/*/*) ;;
                     *) fail "unclassified example file: $rel" ;;
-                esac
-                case "$rest" in
-                    helper/vendor/*) continue ;;
                 esac
                 case " $GUARDED_GO " in
                     *" $rel "*) continue ;;
@@ -1428,6 +1458,42 @@ INSTRUCTION
                 grep -qF "$(printf 'ARG\vBASE_IMAGE=debian:13')" "$godocker" ||
                     fail 'self-test: case 150 did not write a vertical-tab-delimited ARG'
                 expected='parent pin: ARG shape: go-dev redefinition' ;;
+            # 151-154: the two readers, and the verifier RUN's two removed
+            # Python halves (#187 slice 2). 151 and 152 change one reader's
+            # compiled trust root so exactly one side refuses: the disagreement
+            # must be reported, not reconciled in code. 153 restores the Python
+            # mount and 154 the bytecode variable; both must fail the exact RUN
+            # shape.
+            151)
+                rewrite "$tree/$LAYERS/rust-dev/helper/toolchain/policy.go" \
+                    's|108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE|108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FF|'
+                expected='the Go and Python readers disagree' ;;
+            152)
+                rewrite "$tree/$LAYERS/rust-dev/rust_toolchain.py" \
+                    "s|^REVIEWED_PRIMARY_FINGERPRINT = '108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE'|REVIEWED_PRIMARY_FINGERPRINT = '108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FF'|"
+                expected='the Go and Python readers disagree' ;;
+            153)
+                rewrite "$rustdocker" 's|--mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro|--mount=type=bind,source=rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro --mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro|'
+                expected='verifier RUN must be exactly' ;;
+            154)
+                rewrite "$rustdocker" 's|^    /bin/bash /run/rust-verify/verify-toolchain.sh|    PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/rust-verify/verify-toolchain.sh|'
+                expected='verifier RUN must be exactly' ;;
+            # 155-156: the vendored dependency boundary (#187 slice 2). 155 is the
+            # lookalike: a directory whose name starts with `vendor` is not the
+            # vendor tree, so its script is still a script the sweep must name --
+            # the exclusion is the exact path `helper/vendor/`, not a prefix. 156 is
+            # the excluded class itself: a `.go` file under `helper/vendor/` is
+            # upstream's, so the layer sweep passes and the module's vendor drift
+            # gate (`example-helper-vendor.sh`) is the check that authenticates it.
+            155)
+                mkdir -p "$tree/$LAYERS/rust-dev/helper/vendorx"
+                printf '#!/bin/sh\ntrue\n' > "$tree/$LAYERS/rust-dev/helper/vendorx/run.sh"
+                expected="unguarded example script: rust-dev/helper/vendorx/run.sh" ;;
+            156)
+                mkdir -p "$tree/$LAYERS/rust-dev/helper/vendor/example.test/pkg"
+                printf 'package pkg\n' \
+                    > "$tree/$LAYERS/rust-dev/helper/vendor/example.test/pkg/pkg.go"
+                expected='' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac

@@ -280,8 +280,14 @@ trap 'rm -f "$embedded_manifest"' EXIT
 # `target` is generated build scratch, not a maintained-source allowance. The
 # Codex vendor snapshot used to carry an inline metadata parser; the committed pin
 # replaced it, so there is no longer an exemption for it here.
+#
+# `examples/layers/*/helper/vendor` is a dependency's own source tree, not this
+# repository's shell (ADR 0017): no build here runs it, none of it is delivered to
+# an image, and every byte is authenticated by `script/test/example-helper-vendor.sh`
+# against the module's pinned go.sum. Its `ci.sh` scripts are upstream's, so this
+# gate's subject -- shell source this repository maintains -- excludes them.
 if ! find images script examples -type f -name '*.sh' \
-    ! -path '*/target/*' \
+    ! -path '*/target/*' ! -path '*/helper/vendor/*' \
     -print0 >"$embedded_manifest"; then
     echo 'FAIL: cannot enumerate shell sources for the embedded-Python gate' >&2
     exit 1
@@ -355,7 +361,7 @@ while IFS= read -r -d '' script; do
     # SC2016 in the byte-preserved Claude seed JS is inherited informational
     # literal interpolation, not a warning; don't rewrite reviewed payloads.
     shellcheck --severity=warning "$script"
-done < <(find images script examples -type f \( -name '*.sh' -o -name hello-image \) ! -name '*.upstream.sh' ! -path '*/target/*' -print0)
+done < <(find images script examples -type f \( -name '*.sh' -o -name hello-image \) ! -name '*.upstream.sh' ! -path '*/target/*' ! -path '*/helper/vendor/*' -print0)
 # --- self-location -----------------------------------------------------------
 # Every maintained shell source resolves its own directory with `dirname`, which
 # answers `.` for a bare file name: `${BASH_SOURCE[0]%/*}` keeps the file name

@@ -2,6 +2,10 @@
 
 package main
 
+import (
+	"github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain"
+)
+
 // This file exists only in a `-tags example_fixture` build, and it is the only
 // way a suite-only input reaches this program (ADR 0017, decision D1). The tag
 // protects a seam three ways at once:
@@ -14,21 +18,34 @@ package main
 //     instruction class. Nothing in it can add a tag, so an example image build
 //     cannot produce this binary.
 //   - The host wrapper that does build it, `script/build/example-helper.sh
-//     --fixture`, says so on its command line, so a fixture binary is always a
-//     deliberate act by a suite.
+//     --fixture`, says so on its command line and writes its own file name, so a
+//     fixture binary is always a deliberate act by a suite.
 //
-// Slice 1 of #187 lands the tag and its grammar; the three seams -- the reviewed
-// trust, the upstream transport and the bootstrap exec -- arrive with the verbs
-// that take them (slices 2 and 3), each as a flag declared here.
+// Slice 1 of #187 landed the tag and its grammar. Slice 2 adds the reviewed trust
+// seam; the upstream transport and the bootstrap exec arrive with #231.
 type fixtureArguments struct {
-	FixtureSeams bool `arg:"--fixture-seams" help:"print the suite-only inputs this build honours; writes nothing"`
+	FixtureSeams bool    `arg:"--fixture-seams" help:"print the suite-only inputs this build honours; writes nothing"`
+	FixtureTrust *string `arg:"--fixture-trust" placeholder:"FINGERPRINT" help:"use this fingerprint as the primary key and the only signer"`
 }
 
-// fixtureSeams names the inputs a fixture build will honour. The shipped build
-// carries the same names nowhere, and no verb of this slice reads them yet: the
-// list is what the ADR's seam rule is held to, so slice 2's flag is added here and
-// the absence test in seams_test.go covers it without being rewritten.
+// fixtureSeams names the inputs a fixture build honours. The shipped build
+// carries the same names nowhere; seams_test.go holds both halves.
 var fixtureSeams = []string{"fixture-trust", "fixture-upstream", "fixture-bootstrap-exec"}
 
 // fixtureSeamsRequested reports whether the caller asked for the seam list.
 func (fixture fixtureArguments) fixtureSeamsRequested() bool { return fixture.FixtureSeams }
+
+// trust is the seam: with --fixture-trust FINGERPRINT the primary key and the
+// signer set are both that fingerprint, which is what the pins suite's
+// `driver.build` TrustPolicy does. Without it the reviewed trust applies, so the
+// fixture binary can also stand in for the shipped one.
+func (fixture fixtureArguments) trust() (toolchain.TrustPolicy, error) {
+	if fixture.FixtureTrust == nil {
+		return toolchain.ReviewedTrust, nil
+	}
+	fingerprint, err := toolchain.ParseFingerprint(*fixture.FixtureTrust, "--fixture-trust")
+	if err != nil {
+		return toolchain.TrustPolicy{}, err
+	}
+	return toolchain.TrustRoot(fingerprint, []toolchain.Fingerprint{fingerprint}), nil
+}

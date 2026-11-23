@@ -10,9 +10,10 @@
 #
 # Prerequisites: a native Linux daemon of the requested platform, a
 # daemon-backed builder, go (the layer's helper module is compiled for the
-# platform), python3 (rust_toolchain.py still verifies and installs the pin) git
-# and host-watchdog.py. The amd64 row must
-# come from a native amd64 host; QEMU is not acceptance.
+# platform: it verifies the pin here, and the image build still runs Python's
+# installer until #231), python3 (the image's install leg), git and
+# host-watchdog.py. The amd64 row must come from a native amd64 host; QEMU is not
+# acceptance.
 #
 # Usage: bash script/test/rust-example.sh [--platform linux/amd64|linux/arm64]
 #                                         [--base-image EXACT_REF] [--no-cache]
@@ -219,6 +220,16 @@ self_test() {
     log_dir=$(sed -n 's/^.*(logs: \(.*\))$/\1/p' "$out" | tail -1)
     selftest_expect_grep_e '^=== [0-9]+ checks, 0 failed' "$out" \
         'the healthy run reports no failed check'
+    # Every negative assertion over the fake docker log has its phrase proven
+    # visible in this healthy run, where the call does happen: `^create ` is the
+    # verifier container the failed-build control asserts is absent, and `^build `
+    # is what the --no-cache control reads.
+    selftest_expect "$(grep -c '^create ' "$scratch/healthy-docker.log" || true)" 1 \
+        'the create invocation is visible in the fake docker log'
+    # Three builds: the example, the wrong-Verus-digest control and the mutated
+    # manifest negative -- the same count the diagnostic-parent control asserts.
+    selftest_expect "$(grep -c '^build ' "$scratch/healthy-docker.log" || true)" 3 \
+        'the build invocation is visible in the fake docker log'
     selftest_expect "$(grep -c 'canary' "$log_dir/cleanup-containers-list.log" 2>/dev/null || true)" 1 \
         'the labelled sweep removed the canary container once' "$out"
     selftest_expect "$(wc -l <"$log_dir/cleanup-images-list.log" 2>/dev/null | tr -d ' ' || true)" 1 \
@@ -232,6 +243,43 @@ self_test() {
         'no cleanup removal had to be excused as already absent' "$out"
     selftest_expect "$(grep -c 'completed status=0' "$log_dir/cleanup.txt" 2>/dev/null || true)" 1 \
         'the cleanup log records success' "$out"
+
+    echo 'self-test: a broken helper build fails the verifier phase'
+    # The pin read is the layer's own Go helper (#187 slice 2), and the verifier
+    # phase is late: the example image has already been built and inspected by the
+    # time either helper build runs, so this control claims failure *at that phase*
+    # and no verifier container -- not "before any build".
+    #
+    # It exercises the **image-target** build (the first of the two), which is what
+    # a tree whose module does not compile fails on. A host-only build failure is
+    # covered by the second, explicit check (`the layer helper could not be built
+    # for this host`), not by this control.
+    local broken="$scratch/broken-tree" broken_out broken_log
+    broken_log="$scratch/broken-pin-check.log"
+    mkdir -p "$broken/script" "$broken/examples" "$broken/images"
+    for part in script examples images; do
+        ( cd "$ROOT/$part" && tar -cf - --exclude=target --exclude=__pycache__ . ) |
+            tar -xf - -C "$broken/$part"
+    done
+    cp "$ROOT/go.mod" "$broken/go.mod"
+    printf 'package toolchain\n\nthis is not Go\n' \
+        > "$broken/$EXAMPLE/helper/toolchain/does-not-compile.go"
+    broken_out=$scratch/broken-run.log
+    rc=0
+    mkdir -p "$scratch/broken-state"
+    FAKE_DOCKER_MODE=healthy FAKE_DOCKER_STATE="$scratch/broken-state" \
+        FAKE_DOCKER_LOG="$broken_log" PATH="$scratch/bin:$PATH" \
+        bash "$broken/script/test/rust-example.sh" --platform linux/amd64 \
+        >"$broken_out" 2>&1 || rc=$?
+    selftest_expect "$rc" 1 'a broken Go pin check fails the run' "$broken_out"
+    selftest_expect_grep 'the layer helper could not be built for the image' "$broken_out" \
+        'the failure names the build, not a later phase'
+    # The fake docker records the harness's argv, so the invocation it makes is
+    # `create --name …`. Matching anything else here (it said `container create`
+    # once) made the assertion invisible to the call it was about: a control that
+    # cannot see the call is green over nothing.
+    selftest_expect "$(grep -c '^create ' "$broken_log" 2>/dev/null || true)" 0 \
+        'no verifier container is created after a failed build'
 
     echo 'self-test: a failed or malformed mandatory inspection is not acceptance'
     local mode phase
@@ -267,7 +315,7 @@ self_test() {
         'the cleanup result is recorded as failed'
     selftest_expect_grep 'FAIL [cleanup]: owned-resource cleanup failed' "$out" \
         'the failure is named, not masked'
-    echo 'self-test: passed (59 controls)'
+    echo 'self-test: passed (64 controls)'
 }
 
 # The canary legs are shell programs handed to a guest container. Nothing in the
@@ -1131,16 +1179,29 @@ fi
 # --- phase 2: verifier bundle, no network ------------------------------------
 PHASE=verifier
 mkdir -p "$BUNDLE"
-cp "$ROOT/$EXAMPLE/verify-toolchain.sh" "$ROOT/$EXAMPLE/rust_toolchain.py" "$BUNDLE/"
-# The verifier runs the layer's own binary for the kache report; it is compiled by
-# script/build/example-helper.sh with the flags the Dockerfile stage uses, for the
-# platform under test, so the container's architecture never matters to the host.
-cp "$(bash "$ROOT/script/build/example-helper.sh" rust-dev --root "$ROOT" \
-    --os linux --arch "${PLATFORM#linux/}")" "$BUNDLE/rust-dev-helper"
+cp "$ROOT/$EXAMPLE/verify-toolchain.sh" "$BUNDLE/"
+# The verifier runs the layer's own binary for the pin read and the kache report;
+# it is compiled by script/build/example-helper.sh with the flags the Dockerfile
+# stage uses, for the platform under test, so the container's architecture never
+# matters to the host. The bundle carries no Python: the verifier step runs none.
+# The build is checked, not just substituted: a helper that cannot compile must
+# fail the run here, by name, rather than leave an empty path for the copy to
+# swallow. Two builds: the container runs the linux/<arch> binary, and the host
+# pin check runs the host's.
+go_helper_bundle=$(bash "$ROOT/script/build/example-helper.sh" rust-dev --root "$ROOT" \
+    --os linux --arch "${PLATFORM#linux/}") || {
+    fail 'the layer helper could not be built for the image; no native phase is meaningful'
+    exit 1
+}
+cp "$go_helper_bundle" "$BUNDLE/rust-dev-helper"
+go_helper_host=$(bash "$ROOT/script/build/example-helper.sh" rust-dev --root "$ROOT" \
+    --os "$(uname -s | tr '[:upper:]' '[:lower:]')") || {
+    fail 'the layer helper could not be built for this host; no native phase is meaningful'
+    exit 1
+}
 cp -R "$ROOT/$EXAMPLE/data/rust-toolchain" "$BUNDLE/rust-toolchain"
 if ! run_bounded pin-check "$RUN_SECONDS" "$LOG_DIR/pin-check.log" \
-        env PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/$EXAMPLE/rust_toolchain.py" \
-        check "$ROOT/$EXAMPLE/data/rust-toolchain"; then
+        "$go_helper_host" check "$ROOT/$EXAMPLE/data/rust-toolchain"; then
     fail 'the committed pin data does not verify; no native phase is meaningful'
     exit 1
 fi
@@ -1152,7 +1213,7 @@ kache_version=$(sed -nE 's/^ARG KACHE_VERSION=(.*)$/\1/p' "$ROOT/$EXAMPLE/Docker
 OWNED_CONTAINER=1
 if run_bounded verifier-create "$RUN_SECONDS" "$LOG_DIR/verifier-create.log" \
         "$DOCKER" create --name "$CONTAINER" --label "$LABEL" --network none \
-        -e "RUST_TOOLCHAIN=$channel" -e "KACHE_VERSION=$kache_version" -e VERUS_DIR=/opt/verus -e PYTHONDONTWRITEBYTECODE=1 \
+        -e "RUST_TOOLCHAIN=$channel" -e "KACHE_VERSION=$kache_version" -e VERUS_DIR=/opt/verus \
         --entrypoint /bin/bash "$TAG" /run/rust-verify/verify-toolchain.sh; then
     if run_bounded verifier-copy "$RUN_SECONDS" "$LOG_DIR/verifier-copy.log" \
             "$DOCKER" cp "$BUNDLE" "$CONTAINER:/run/rust-verify"; then

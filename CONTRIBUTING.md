@@ -739,6 +739,19 @@ before the modules under test are imported) is the authority for which programs
 run. The kernel-side gap is follow-up work, not a property the suite claims. On a
 host with neither sandbox tool, the suites exit nonzero before running anything
 under test.
+
+The pins suite also runs the rust-dev layer's **Go** reader against the same
+bytes as Python's loader, so it needs `go` and builds the layer's helper twice in a
+first pass, *before* it enters the boundary: the sandbox's exec allowlist is a list
+of literal paths fixed at entry, and a binary built after that point could not be
+executed by the Go child at all. That first pass also writes the emulated
+toolchain and the three gpg wrappers it allowlists. The Go child's execs are then
+bound by the same two layers as a Python child's — `sandbox-exec` on macOS,
+Landlock plus the audit hook for its own children on Linux — and by the suite's
+own assertion that a copy of an allowed program in writable scratch does not
+start. gpg-agent's socket path is a unix socket of at most 104 bytes on macOS, so
+each differential row gets a short `TMPDIR` of its own; a deep temp path fails with
+`can't connect to the gpg-agent: File name too long`.
 On macOS:
 
 ```bash
