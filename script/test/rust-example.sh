@@ -128,7 +128,7 @@ canary_verdict() { # EXPECTED_STATUS STATUS
 # say so.
 SELFTEST_SCRATCH=''
 self_test() {
-    local scratch rc=0 out
+    local scratch rc=0 out missing
     # Global, not local: the EXIT trap runs after this function returns.
     SELFTEST_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/rust-example-selftest.XXXXXX")
     scratch=$SELFTEST_SCRATCH
@@ -166,29 +166,29 @@ self_test() {
     FAKE_DOCKER_MODE=record FAKE_DOCKER_LOG="$scratch/docker.log" PATH="$scratch/bin:$PATH" \
         bash "${BASH_SOURCE[0]}" --platform linux/amd64 --base-image "$diagnostic" \
         >"$out" 2>&1 || true
-    local builds with_parent pulls
-    builds=$(grep -c '^build ' "$scratch/docker.log" || true)
-    with_parent=$(grep '^build ' "$scratch/docker.log" |
-        grep -c -- "--build-arg BASE_IMAGE=$diagnostic" || true)
-    pulls=$(grep -c "^pull .*$diagnostic" "$scratch/docker.log" || true)
-    selftest_expect "$pulls" 1 'the diagnostic parent is what gets pulled' "$out"
+    selftest_grep_count "$scratch/docker.log" "^pull .*$diagnostic" 1 \
+        'the diagnostic parent is what gets pulled' "$out"
     # Three builds: the example, the wrong-Verus-digest control and the mutated
-    # manifest negative. Every one must be given the inspected parent.
-    selftest_expect "$builds" 3 'every build runs' "$out"
-    selftest_expect "$with_parent" "$builds" \
+    # manifest negative. Every one must be given the inspected parent, so the
+    # filtered count below is taken over the same file and the same `^build `
+    # selection as this positive count: a log that was never written produces no
+    # `^build ` line for either of them.
+    selftest_grep_count "$scratch/docker.log" '^build ' 3 'every build runs' "$out"
+    selftest_selected_grep_count "$scratch/docker.log" '^build ' \
+        "--build-arg BASE_IMAGE=$diagnostic" 3 \
         'every build carries --build-arg BASE_IMAGE=<inspected ref>' "$out"
-    selftest_expect \
-        "$(grep '^build ' "$scratch/docker.log" | head -1 | grep -c -- '--no-cache' || true)" 0 \
+    # The first build line is the example's (the mutated-manifest negative carries
+    # a hard-coded --no-cache of its own), so a cold flag on it is the example's.
+    selftest_first_grep_count "$scratch/docker.log" '^build ' '--no-cache' 0 \
         'a default run does not ask for a cold example build' "$out"
 
     echo 'self-test: a cold build is requested and named'
     out=$scratch/cold-build.log
     FAKE_DOCKER_MODE=record FAKE_DOCKER_LOG="$scratch/cold-docker.log" PATH="$scratch/bin:$PATH" \
         bash "${BASH_SOURCE[0]}" --platform linux/amd64 --no-cache >"$out" 2>&1 || true
-    selftest_expect \
-        "$(grep '^build ' "$scratch/cold-docker.log" | head -1 | grep -c -- '--no-cache' || true)" 1 \
+    selftest_first_grep_count "$scratch/cold-docker.log" '^build ' '--no-cache' 1 \
         '--no-cache reaches the example build' "$out"
-    selftest_expect "$(grep -c 'cold=yes' "$out" || true)" 1 \
+    selftest_grep_count "$out" 'cold=yes' 1 \
         'the cold build is named in the harness log' "$out"
 
     echo 'self-test: canary guest program'
@@ -220,29 +220,55 @@ self_test() {
     log_dir=$(sed -n 's/^.*(logs: \(.*\))$/\1/p' "$out" | tail -1)
     selftest_expect_grep_e '^=== [0-9]+ checks, 0 failed' "$out" \
         'the healthy run reports no failed check'
-    # Every negative assertion over the fake docker log has its phrase proven
-    # visible in this healthy run, where the call does happen: `^create ` is the
-    # verifier container the failed-build control asserts is absent, and `^build `
-    # is what the --no-cache control reads.
-    selftest_expect "$(grep -c '^create ' "$scratch/healthy-docker.log" || true)" 1 \
-        'the create invocation is visible in the fake docker log'
+    # Every count this control takes names the fake docker log it reads. The two
+    # positives are what proves that log was written and that the patterns the
+    # negatives below use are visible in it: `^create ` is the verifier container
+    # the failed-build control asserts is absent, and `^build ` is what the
+    # --no-cache control reads.
+    selftest_grep_count "$scratch/healthy-docker.log" '^create ' 1 \
+        'the create invocation is visible in the fake docker log' "$scratch/healthy-docker.log"
     # Three builds: the example, the wrong-Verus-digest control and the mutated
     # manifest negative -- the same count the diagnostic-parent control asserts.
-    selftest_expect "$(grep -c '^build ' "$scratch/healthy-docker.log" || true)" 3 \
-        'the build invocation is visible in the fake docker log'
-    selftest_expect "$(grep -c 'canary' "$log_dir/cleanup-containers-list.log" 2>/dev/null || true)" 1 \
+    selftest_grep_count "$scratch/healthy-docker.log" '^build ' 3 \
+        'the build invocation is visible in the fake docker log' "$scratch/healthy-docker.log"
+    selftest_grep_count "$log_dir/cleanup-containers-list.log" 'canary' 1 \
         'the labelled sweep removed the canary container once' "$out"
-    selftest_expect "$(wc -l <"$log_dir/cleanup-images-list.log" 2>/dev/null | tr -d ' ' || true)" 1 \
+    selftest_line_count "$log_dir/cleanup-images-list.log" 1 \
         'the labelled sweep removed the one owned image' "$out"
     if [ -e "$log_dir/cleanup-container-verifier.log" ]; then
         selftest_expect 1 0 'the removed verifier container is not removed a second time' "$out"
     else
         selftest_expect 0 0 'the removed verifier container is not removed a second time' "$out"
     fi
-    selftest_expect "$(grep -c 'already-absent' "$log_dir/durations.txt" 2>/dev/null || true)" 0 \
+    # The duration log is read twice here, and the positive comes first on
+    # purpose: it is the witness that this run wrote durations.txt, so the
+    # negative's zero is a zero over a log that was read. It used to read a
+    # different file (cleanup.txt), and a positive in another log proves nothing
+    # about the file the negative read.
+    selftest_grep_count "$log_dir/durations.txt" '^cleanup-containers-list status=0 ' 1 \
+        'the duration log records the cleanup sweep this control reads' "$out"
+    selftest_grep_count "$log_dir/durations.txt" 'already-absent' 0 \
         'no cleanup removal had to be excused as already absent' "$out"
-    selftest_expect "$(grep -c 'completed status=0' "$log_dir/cleanup.txt" 2>/dev/null || true)" 1 \
+    selftest_grep_count "$log_dir/cleanup.txt" 'completed status=0' 1 \
         'the cleanup log records success' "$out"
+
+    echo 'self-test: a missing evidence log fails the assertion that reads it'
+    # The deleted-evidence controls. Each one takes an assertion that just passed,
+    # deletes the log it reads, and requires the same assertion to fail *by name*
+    # and to name the missing file -- not to print `integer expression expected`
+    # and report ok, which is what `$(grep -c PATTERN "$log" 2>/dev/null || true)`
+    # did over a log that was never written (PR #241 review). The subshell is what
+    # makes a failing assertion observable instead of fatal to this self-test.
+    rm -f "$log_dir/durations.txt"
+    missing=$scratch/durations-deleted.log
+    rc=0
+    ( selftest_grep_count "$log_dir/durations.txt" 'already-absent' 0 \
+        'no cleanup removal had to be excused as already absent' ) >"$missing" 2>&1 || rc=$?
+    selftest_expect "$rc" 1 'deleting the duration log fails the already-absent control' "$missing"
+    selftest_expect_grep 'no cleanup removal had to be excused as already absent' "$missing" \
+        'that failure names the already-absent control'
+    selftest_expect_grep 'was never written' "$missing" \
+        'that failure names the missing evidence, not a count'
 
     echo 'self-test: a broken helper build fails the verifier phase'
     # The pin read is the layer's own Go helper (#187 slice 2), and the verifier
@@ -278,8 +304,27 @@ self_test() {
     # `create --name …`. Matching anything else here (it said `container create`
     # once) made the assertion invisible to the call it was about: a control that
     # cannot see the call is green over nothing.
-    selftest_expect "$(grep -c '^create ' "$broken_log" 2>/dev/null || true)" 0 \
-        'no verifier container is created after a failed build'
+    #
+    # The positive comes first and reads the same log: the example build is what
+    # this run did before the verifier phase, so a log that was never written
+    # cannot produce this one `^build ` line either.
+    selftest_grep_count "$broken_log" '^build ' 1 \
+        'the broken run built the example image before the helper build failed' "$broken_log"
+    selftest_grep_count "$broken_log" '^create ' 0 \
+        'no verifier container is created after a failed build' "$broken_log"
+    # Deleting the log this control just read must fail that same control by name,
+    # naming the missing file: an absent log used to yield an empty count, and an
+    # empty count used to be reported as ok.
+    rm -f "$broken_log"
+    missing=$scratch/broken-pin-check-deleted.log
+    rc=0
+    ( selftest_grep_count "$broken_log" '^create ' 0 \
+        'no verifier container is created after a failed build' ) >"$missing" 2>&1 || rc=$?
+    selftest_expect "$rc" 1 'deleting the broken run log fails the no-container control' "$missing"
+    selftest_expect_grep 'no verifier container is created after a failed build' "$missing" \
+        'that failure names the no-container control'
+    selftest_expect_grep 'was never written' "$missing" \
+        'that failure names the missing evidence, not a count'
 
     echo 'self-test: a failed or malformed mandatory inspection is not acceptance'
     local mode phase
@@ -296,12 +341,15 @@ self_test() {
         selftest_expect "$rc" 1 "an inspection that fails or reports a non-identity fails the run ($mode)" "$out"
         selftest_expect_grep "FAIL [$phase]: " "$out" \
             "the failed inspection is named as a $phase-phase failure"
-        selftest_expect "$(grep -c 'id=unknown' "$out" || true)" 0 \
-            "no unknown identity is recorded as evidence ($mode)"
-        selftest_expect "$(grep -cE '^image (garbage|unknown) ' "$out" || true)" 0 \
+        # Every count below reads this mode's harness log, whose positive witness
+        # is the `FAIL [$phase]: ` assertion immediately above: it fails when the
+        # log was never written, so these zeros are zeros over a log that was read.
+        selftest_grep_count "$out" 'id=unknown' 0 \
+            "no unknown identity is recorded as evidence ($mode)" "$out"
+        selftest_grep_count_e "$out" '^image (garbage|unknown) ' 0 \
             "the malformed identity is never logged as the built image ($mode)" "$out"
-        selftest_expect "$(grep -c 'checks, 0 failed' "$out" || true)" 0 \
-            "the run never reports a clean summary ($mode)"
+        selftest_grep_count "$out" 'checks, 0 failed' 0 \
+            "the run never reports a clean summary ($mode)" "$out"
     done
 
     echo 'self-test: a genuine cleanup failure is still a failure'
@@ -315,7 +363,7 @@ self_test() {
         'the cleanup result is recorded as failed'
     selftest_expect_grep 'FAIL [cleanup]: owned-resource cleanup failed' "$out" \
         'the failure is named, not masked'
-    echo 'self-test: passed (64 controls)'
+    echo 'self-test: passed (73 controls)'
 }
 
 # The canary legs are shell programs handed to a guest container. Nothing in the
@@ -430,7 +478,11 @@ EOF
     mv "$root/opt/cargo/bin/rustup.stub" "$root/opt/cargo/bin/rustup"
     selftest_expect_text "$(canary_verdict '!' "$status")" harness-setup \
         'a failed persisted-policy setup is a harness fault' "$masked"
-    selftest_expect_text "$(grep -c 'COMMAND-RAN' "$masked" || true)" 0 \
+    # The masked log is read twice: the positive names the failing rustup stub's
+    # own message, so the zero below is a zero over a log that was written.
+    selftest_grep_count "$masked" 'CANARY-SETUP-FAILED' 1 \
+        'the masked log records the setup failure it is read for' "$masked"
+    selftest_grep_count "$masked" 'COMMAND-RAN' 0 \
         'a leg whose persisted setting failed never runs its command' "$masked"
     status=0
     rm -rf "$root/tmp"
@@ -452,7 +504,7 @@ EOF
 # scratch PATH and counts actual extraction calls, then proves the same count
 # catches a mutant that moves the extraction before the checksum.
 verus_digest_controls() { # SCRATCH LOG
-    local scratch=$1 out=$2 shims root trace mutant unzip_line status=0
+    local scratch=$1 out=$2 shims root trace mutant status=0
     shims=$scratch/verus-shims
     root=$scratch/verus-install
     trace=$scratch/verus-trace
@@ -510,41 +562,147 @@ SHIM
         'a wrong Verus digest fails the installer' "$out"
     selftest_expect_grep 'FAILED' "$root/bad-digest.log" \
         'the refusal names the failed digest check'
-    selftest_expect "$(grep -c '^unzip ' "$trace" || true)" 0 \
+    selftest_grep_count "$trace" '^unzip ' 0 \
         'the refused install performed zero extraction calls' "$out"
-    selftest_expect_grep 'curl ' "$trace" 'the refused install fetched the asset first'
+    # A positive read of the same trace: the fetch is what the refusal is about,
+    # so a trace that was never written cannot produce it either.
+    selftest_grep_count "$trace" '^curl ' 1 'the refused install fetched the asset first' "$out"
 
     # The discrimination control: the same installer with an extraction call
     # added before the checksum must show one call, so a zero count is evidence.
     mutant=$root/install-verus-early-unzip.sh
     awk '/sha256sum -c -/ && !placed { print "unzip -q \"$archive\" -d \"$VERUS_DIR\""; placed = 1 } { print }' \
         "$ROOT/$EXAMPLE/install-verus.sh" >"$mutant"
-    unzip_line=$(grep -c '^unzip -q ' "$mutant" || true)
-    selftest_expect "$unzip_line" 2 'the early-extraction mutant applied' "$out"
+    selftest_grep_count "$mutant" '^unzip -q ' 2 'the early-extraction mutant applied' "$out"
     status=0
     run_installer "$mutant" "$root/early-unzip.log" || status=$?
     selftest_expect_text "$([ "$status" -ne 0 ] && echo refused || echo accepted)" refused \
         'the early-extraction mutant still fails on the digest' "$out"
-    selftest_expect "$(grep -c '^unzip ' "$trace" || true)" 1 \
+    selftest_grep_count "$trace" '^unzip ' 1 \
         'the early-extraction mutant is caught by the extraction count' "$out"
 }
 
-selftest_expect() { # ACTUAL EXPECTED NAME LOG
-    if [ "$1" -ne "$2" ]; then
-        echo "self-test: $3: expected status $2, got $1" >&2
-        cat "$4" >&2
-        exit 1
-    fi
-    echo "self-test: ok   $3"
+selftest_fatal() { # NAME MESSAGE [LOG]
+    printf 'self-test: %s: %s\n' "$1" "$2" >&2
+    if [ -n "${3:-}" ]; then cat "$3" >&2; fi
+    exit 1
 }
 
-selftest_expect_text() { # ACTUAL EXPECTED NAME LOG
-    if [ "$1" != "$2" ]; then
-        echo "self-test: $3: expected '$2', got '$1'" >&2
-        cat "$4" >&2
-        exit 1
+# Every assertion exits on failure and names what failed. The diagnostic log is
+# optional (`${4:-}`): the visibility controls fail their assertion without a log
+# argument, and `cat "$4"` under `set -u` used to abort the failure path itself
+# with `$4: unbound variable`, so the one message that said what failed was never
+# printed (PR #241 review).
+selftest_expect() { # ACTUAL EXPECTED NAME [LOG]
+    local actual=$1 expected=$2 name=$3 log=${4:-}
+    case "$actual" in
+        '' | *[!0-9]*)
+            selftest_fatal "$name" "expected $expected, got something that is not a number: '$actual'" "$log" ;;
+    esac
+    [ "$actual" -eq "$expected" ] || selftest_fatal "$name" "expected $expected, got $actual" "$log"
+    echo "self-test: ok   $name"
+}
+
+selftest_expect_text() { # ACTUAL EXPECTED NAME [LOG]
+    local actual=$1 expected=$2 name=$3 log=${4:-}
+    [ "$actual" = "$expected" ] || selftest_fatal "$name" "expected '$expected', got '$actual'" "$log"
+    echo "self-test: ok   $name"
+}
+
+# A count is a claim that a file was read, so every count in this self-test goes
+# through one of the helpers below, which name the file and refuse to answer when
+# it was never written. The defect this closes: `$(grep -c PATTERN "$log"
+# 2>/dev/null || true)` over a missing log yields '', `[ '' -ne 0 ]` prints
+# `integer expression expected`, returns 2, so the `if` took its else branch and
+# the control reported ok -- a negative assertion green over a log that was never
+# written (PR #241 review, reproduced with a deleted broken-run log and a deleted
+# durations.txt). Each control's positive count over the same file is what proves
+# the file was read; where the positive and the negative read different files the
+# pairing is not sound, so they are aligned or the pairing is stated in place.
+selftest_evidence() { # FILE NAME [LOG]
+    if [ ! -e "$1" ]; then
+        selftest_fatal "$2" "the evidence file $1 was never written, so there is no count to assert" "${3:-}"
     fi
-    echo "self-test: ok   $3"
+    if [ ! -f "$1" ] || [ ! -r "$1" ]; then
+        selftest_fatal "$2" "the evidence file $1 is not a readable regular file, so there is no count to assert" "${3:-}"
+    fi
+}
+
+# A count that is empty, negative or not a number fails here too, so no call site
+# can reach its comparison with a value that a failed read produced.
+selftest_count_is() { # FILE COUNT EXPECTED NAME [LOG]
+    local file=$1 count=$2 expected=$3 name=$4 log=${5:-}
+    case "$count" in
+        '' | *[!0-9]*)
+            selftest_fatal "$name" "the count over $file is not a number: '$count'" "$log" ;;
+    esac
+    [ "$count" -eq "$expected" ] ||
+        selftest_fatal "$name" "expected $expected, got $count over $file" "$log"
+    echo "self-test: ok   $name"
+}
+
+selftest_grep_count() { # FILE PATTERN EXPECTED NAME [LOG]
+    local file=$1 pattern=$2 expected=$3 name=$4 log=${5:-} count status=0
+    selftest_evidence "$file" "$name" "$log"
+    count=$(grep -c -- "$pattern" "$file") || status=$?
+    # grep exits 1 for "no line selected", which is a real zero; anything higher is
+    # an error and must not be read as a count.
+    [ "$status" -le 1 ] || selftest_fatal "$name" "grep -c exited $status over $file" "$log"
+    selftest_count_is "$file" "$count" "$expected" "$name" "$log"
+}
+
+selftest_grep_count_e() { # FILE EXTENDED_PATTERN EXPECTED NAME [LOG]
+    local file=$1 pattern=$2 expected=$3 name=$4 log=${5:-} count status=0
+    selftest_evidence "$file" "$name" "$log"
+    count=$(grep -cE -- "$pattern" "$file") || status=$?
+    [ "$status" -le 1 ] || selftest_fatal "$name" "grep -cE exited $status over $file" "$log"
+    selftest_count_is "$file" "$count" "$expected" "$name" "$log"
+}
+
+# A count over the lines of FILE that match SELECT, with the literal PATTERN
+# counted inside them. Both halves are required: the file must exist, and the
+# selection must hold at least one line, so a filter that matched nothing cannot
+# be reported as a zero.
+selftest_selected_grep_count() { # FILE SELECT PATTERN EXPECTED NAME [LOG]
+    local file=$1 select=$2 pattern=$3 expected=$4 name=$5 log=${6:-}
+    local selected status=0 count
+    selftest_evidence "$file" "$name" "$log"
+    selected=$(grep -- "$select" "$file") || status=$?
+    [ "$status" -le 1 ] || selftest_fatal "$name" "grep exited $status over $file" "$log"
+    [ -n "$selected" ] ||
+        selftest_fatal "$name" "no line of $file matches '$select', so the count over it would be over nothing" "$log"
+    count=$(printf '%s\n' "$selected" | grep -cF -- "$pattern") || status=$?
+    [ "$status" -le 1 ] ||
+        selftest_fatal "$name" "grep -c exited $status over the selected lines of $file" "$log"
+    selftest_count_is "$file" "$count" "$expected" "$name" "$log"
+}
+
+# The same, over the first line of FILE that matches SELECT: the example build is
+# the first `^build ` line, while a later mutant build carries --no-cache of its
+# own, so counting the flag across every build line would not answer the question.
+selftest_first_grep_count() { # FILE SELECT PATTERN EXPECTED NAME [LOG]
+    local file=$1 select=$2 pattern=$3 expected=$4 name=$5 log=${6:-}
+    # Not named `first`: `PHASE=first-use` later in this script would then look like
+    # an arithmetic assignment to shellcheck (SC2100).
+    local first_line status=0 count
+    selftest_evidence "$file" "$name" "$log"
+    first_line=$(grep -m1 -- "$select" "$file") || status=$?
+    [ "$status" -le 1 ] || selftest_fatal "$name" "grep exited $status over $file" "$log"
+    [ -n "$first_line" ] ||
+        selftest_fatal "$name" "no line of $file matches '$select', so the first matching line was never read" "$log"
+    count=$(printf '%s\n' "$first_line" | grep -cF -- "$pattern") || status=$?
+    [ "$status" -le 1 ] ||
+        selftest_fatal "$name" "grep -c exited $status over the first '$select' line of $file" "$log"
+    selftest_count_is "$file" "$count" "$expected" "$name" "$log"
+}
+
+selftest_line_count() { # FILE EXPECTED NAME [LOG]
+    local file=$1 expected=$2 name=$3 log=${4:-} count status=0
+    selftest_evidence "$file" "$name" "$log"
+    count=$(wc -l <"$file") || status=$?
+    [ "$status" -eq 0 ] || selftest_fatal "$name" "wc -l exited $status over $file" "$log"
+    count=${count//[[:space:]]/}
+    selftest_count_is "$file" "$count" "$expected" "$name" "$log"
 }
 
 selftest_expect_grep_e() { # EXTENDED_PATTERN LOG NAME
@@ -1306,9 +1464,16 @@ first_use() { # LABEL EXPECT_STATUS EXPECT_REQUESTS CMD
         -e HOME=/tmp/home -e RUSTUP_AUTO_INSTALL=0 \
         -v "$ROOT/$FIXTURES/project:/work:ro" -v "$LOG_DIR/toolchain-files:/toolchain:ro" \
         -w /tmp --entrypoint /bin/bash "$TAG" -c "mkdir -p /tmp/home; $command" || status=$?
-    if [ -s "$LOG_DIR/first-use-$label.log" ]; then
-        observed=$(grep -c '/dist/' "$LOG_DIR/first-use-$label.log" || true)
+    # The count names the leg's own transcript, which the run_bounded redirect
+    # above writes. A missing transcript is a lost log, not zero requests: four
+    # legs assert exactly zero, so reading an absent file as a zero would report
+    # them green over nothing (the defect PR #241's review found in the
+    # self-test, guarded here at the same call site).
+    if [ ! -f "$LOG_DIR/first-use-$label.log" ]; then
+        fail "$label: the run wrote no log, so there is no distribution-request count"
+        return 0
     fi
+    observed=$(grep -c '/dist/' "$LOG_DIR/first-use-$label.log" || true)
     record "first-use-$label status=$status dist-requests=$observed"
     if [ "$expected" = '!' ] && [ "$status" -ne 0 ]; then matched=1; fi
     if [ "$expected" != '!' ] && [ "$status" -eq "$expected" ]; then matched=1; fi
@@ -1340,6 +1505,11 @@ canary_leg() { # LABEL IDENTITY PERSISTED EXPECT_STATUS EXPECT_REQUESTS SETUP CO
     # identity is spelled with '-' in file names only; Docker still gets the pair.
     local id=${identity//:/-}
     local status=0 before=0 after=0 observed=0 verdict log
+    # `before` is a baseline, so an absent canary server log is a real zero: the
+    # file is not written until the first leg's `docker logs` runs. `after` is not
+    # a baseline -- the run_bounded immediately below redirects `docker logs` into
+    # this same file -- so a missing file there is a lost transcript, and reading
+    # it as zero requests would report every `none` leg green over nothing.
     before=$(grep -c '^request' "$LOG_DIR/canary-server.log" 2>/dev/null || true)
     log=$LOG_DIR/canary-$label-$id.log
     run_bounded "canary-$label-$identity" "$RUN_SECONDS" "$log" \
@@ -1352,7 +1522,9 @@ canary_leg() { # LABEL IDENTITY PERSISTED EXPECT_STATUS EXPECT_REQUESTS SETUP CO
         /fixtures/canary-guest.sh "$persisted" "$setup" "$command" || status=$?
     run_bounded "canary-server-$label-$identity" "$RUN_SECONDS" \
         "$LOG_DIR/canary-server.log" "$DOCKER" logs "$CANARY_NAME" || true
-    after=$(grep -c '^request' "$LOG_DIR/canary-server.log" 2>/dev/null || true)
+    [ -f "$LOG_DIR/canary-server.log" ] ||
+        { fail "canary $label as $identity: the canary server log was never written"; return 0; }
+    after=$(grep -c '^request' "$LOG_DIR/canary-server.log" || true)
     observed=$((after - before))
     cp "$LOG_DIR/canary-server.log" "$LOG_DIR/canary-requests-$label-$id.log" || true
     record "canary-$label-$identity status=$status dist-requests=$observed"
