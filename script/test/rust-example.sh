@@ -122,9 +122,18 @@ canary_verdict() { # EXPECTED_STATUS STATUS
 }
 
 # The run id a rust-example log names in its banner, so a control can require the
-# log it reads to be this run's rather than a healthy run's copy.
+# log it reads to be this run's rather than a healthy run's copy. This is the anchor
+# every binding in a block derives from, so a banner that is absent is fatal and
+# names the file: returning '' here would make every marker in the block vacuous
+# (and '' is reachable -- a child run that exits on a bad argument prints no banner).
 selftest_run_id() { # LOG
-    sed -n 's/^=== rust-example \([^ ]*\) platform=.*$/\1/p' "$1" | head -1
+    local log=$1 run_id
+    run_id=$(sed -n 's/^=== rust-example \([^ ]*\) platform=.*$/\1/p' "$log" | head -1)
+    if [ -z "$run_id" ]; then
+        selftest_fatal 'the run log names no run' \
+            "no banner line in $log, so no marker can be derived from it" "$log"
+    fi
+    printf '%s\n' "$run_id"
 }
 
 # The fake docker derives an image id from the tag it was built with, and the tag
@@ -149,6 +158,10 @@ self_test() {
     # thing the pairing claim was supposed to establish and did not (PR #241
     # review: a durations.txt from another healthy run satisfied both halves).
     SELFTEST_RUN="selftest-$$-$(date -u +%s)"
+    # Every child run in this self-test echoes this token in its banner, so the run
+    # id a control derives from that banner is anchored to this invocation and a
+    # log copied from another invocation cannot bring a matching one.
+    export RUST_EXAMPLE_RUN_TOKEN="$SELFTEST_RUN"
     # Global, not local: the EXIT trap runs after this function returns.
     SELFTEST_SCRATCH=$(mktemp -d "${TMPDIR:-/tmp}/rust-example-selftest.XXXXXX")
     scratch=$SELFTEST_SCRATCH
@@ -189,6 +202,9 @@ self_test() {
         bash "${BASH_SOURCE[0]}" --platform linux/amd64 --base-image "$diagnostic" \
         >"$out" 2>&1 || true
     run_id=$(selftest_run_id "$out")
+        selftest_grep_count "$out" "$SELFTEST_RUN" \
+        "^=== rust-example $run_id platform=.* token=$SELFTEST_RUN ===$" 1 \
+        'the run log is this invocation'\''s (diagnostic parent)' "$out"
     selftest_grep_count "$scratch/docker.log" "$run_id" \
         "^pull .*diagnostic-parent-$SELFTEST_RUN" 1 \
         'the diagnostic parent is what gets pulled' "$out"
@@ -213,11 +229,12 @@ self_test() {
     FAKE_DOCKER_MODE=record FAKE_DOCKER_LOG="$scratch/cold-docker.log" PATH="$scratch/bin:$PATH" \
         bash "${BASH_SOURCE[0]}" --platform linux/amd64 --no-cache >"$out" 2>&1 || true
     run_id=$(selftest_run_id "$out")
+        selftest_grep_count "$out" "$SELFTEST_RUN" \
+        "^=== rust-example $run_id platform=.* token=$SELFTEST_RUN ===$" 1 \
+        'the run log is this invocation'\''s (cold build)' "$out"
     selftest_first_grep_count "$scratch/cold-docker.log" "$run_id" '^build ' '--no-cache' 1 \
         '--no-cache reaches the example build' "$out"
-    selftest_grep_count "$out" "$run_id" "^=== rust-example $run_id platform=" 1 \
-        'the cold run log is this run'\''s' "$out"
-    selftest_grep_count "$out" "$run_id" 'cold=yes' 1 \
+    selftest_grep_count "$out" "$SELFTEST_RUN" 'cold=yes' 1 \
         'the cold build is named in the harness log' "$out"
 
     echo 'self-test: canary guest program'
@@ -256,9 +273,14 @@ self_test() {
     # The two positives are also what proves the `^create ` and `^build ` patterns
     # the negatives below use are visible in this log.
     run_id=$(selftest_run_id "$out")
-    # The evidence directory the run reports must be named for the run its banner
-    # names, so a log swapped in from another run cannot bring its own run id and
-    # a matching directory name with it.
+    # The banner carries this invocation's token (the harness echoes the one this
+    # self-test exports), so the run id below is derived from a line only this
+    # invocation's child run writes: a copy of another run's log fails right here,
+    # before any count that depends on that run id. The directory the run reports
+    # must also be named for it.
+        selftest_grep_count "$out" "$SELFTEST_RUN" \
+        "^=== rust-example $run_id platform=.* token=$SELFTEST_RUN ===$" 1 \
+        'the healthy run log is this invocation'\''s' "$out"
     selftest_expect_text "${log_dir##*/}" "$run_id" \
         'the evidence directory is named for the run its log names' "$out"
     selftest_grep_count "$scratch/healthy-docker.log" "$run_id" "^create .*$run_id" 1 \
@@ -359,6 +381,44 @@ EOF
         'the counter reads this run'\''s own log' "$out"
     chmod 600 "$shapes/unreadable.log"
 
+    echo 'self-test: a missing or empty marker is refused, not satisfied'
+    # The mark of this class is an *empty* value being read as "no requirement".
+    # `grep -F ""` matches every line, so an empty marker makes the content check
+    # vacuous -- and an empty marker is reachable: a child run that exits before
+    # printing its banner yields no run id. Both halves are controls here.
+    # Content with no `status=0` at all: with a vacuous marker the count is a real
+    # zero and the negative assertion below would report ok over any file.
+    printf 'anything at all, and not the pattern\n' >"$scratch/any-content.log"
+    rc=0
+    ( selftest_grep_count "$scratch/any-content.log" '' 'status=0' 0 \
+        'the counter refuses an empty marker' ) >"$scratch/empty-marker.log" 2>&1 || rc=$?
+    selftest_expect "$rc" 1 'the counter refuses an empty marker' "$scratch/empty-marker.log"
+    selftest_expect_grep 'any file would satisfy it' "$scratch/empty-marker.log" \
+        'the empty-marker refusal says why it is refused'
+    # The anchor itself: a log with no banner must fail the run-id helper by name
+    # rather than return '', which every later marker would then be satisfied by.
+    printf 'no banner here\n' >"$scratch/no-banner.log"
+    rc=0
+    ( selftest_run_id "$scratch/no-banner.log" ) >"$scratch/no-banner.out" 2>&1 || rc=$?
+    selftest_expect "$rc" 1 'a log with no banner fails the run-id helper' "$scratch/no-banner.out"
+    selftest_expect_grep "$scratch/no-banner.log" "$scratch/no-banner.out" \
+        'the run-id failure names the file it read'
+    # And end to end: the harness exits on an unsupported platform before printing
+    # its banner, so a block over that log must fail by name -- not assert against
+    # an empty marker and report the negative green (the defect this closes).
+    out=$scratch/no-banner-run.log
+    rc=0
+    bash "${BASH_SOURCE[0]}" --platform totally-bogus >"$out" 2>&1 || rc=$?
+    selftest_expect "$rc" 2 'the harness refuses an unsupported platform before its banner' "$out"
+    rc=0
+    ( run_id=$(selftest_run_id "$out")
+      selftest_grep_count "$out" "$run_id" 'checks, 0 failed' 0 \
+          'no run is reported clean' "$out" ) >"$scratch/no-banner-control.log" 2>&1 || rc=$?
+    selftest_expect "$rc" 1 'a child log with no banner fails its control by name' \
+        "$scratch/no-banner-control.log"
+    selftest_expect_grep 'names no run' "$scratch/no-banner-control.log" \
+        'the failure names the banner it could not read'
+
     echo 'self-test: a canary server log this run cannot read fails the leg by name'
     # The attack on the native canary count, end to end: the fake docker makes the
     # file the harness redirected it into unreadable while the descriptor is still
@@ -376,9 +436,10 @@ EOF
     selftest_expect_grep 'is not readable, so there is no request count' "$out" \
         'the failure names the unreadable log, not a request count of zero'
     run_id=$(selftest_run_id "$out")
-    selftest_grep_count "$out" "$run_id" "^=== rust-example $run_id platform=" 1 \
-        'the failed canary run log is this run'\''s' "$out"
-    selftest_grep_count "$out" "$run_id" 'checks, 0 failed' 0 \
+        selftest_grep_count "$out" "$SELFTEST_RUN" \
+        "^=== rust-example $run_id platform=.* token=$SELFTEST_RUN ===$" 1 \
+        'the failed canary run log is this invocation'\''s' "$out"
+    selftest_grep_count "$out" "$SELFTEST_RUN" 'checks, 0 failed' 0 \
         'no canary leg is reported as a clean run' "$out"
 
     echo 'self-test: a canary log that does not name this run is refused'
@@ -395,7 +456,10 @@ EOF
     selftest_expect_grep 'was not written by this run: no line names' "$out" \
         'the failure names the missing run marker, not a request count of zero'
     run_id=$(selftest_run_id "$out")
-    selftest_grep_count "$out" "$run_id" 'checks, 0 failed' 0 \
+        selftest_grep_count "$out" "$SELFTEST_RUN" \
+        "^=== rust-example $run_id platform=.* token=$SELFTEST_RUN ===$" 1 \
+        'the failed canary run log is this invocation'\''s (foreign log)' "$out"
+    selftest_grep_count "$out" "$SELFTEST_RUN" 'checks, 0 failed' 0 \
         'no canary leg is reported as a clean run over a foreign log' "$out"
 
     echo 'self-test: a first-use log this run cannot read fails the leg by name'
@@ -410,9 +474,10 @@ EOF
     selftest_expect_grep 'is not readable, so there is no distribution-request count' "$out" \
         'the failure names the unreadable log, not zero distribution requests'
     run_id=$(selftest_run_id "$out")
-    selftest_grep_count "$out" "$run_id" "^=== rust-example $run_id platform=" 1 \
-        'the failed first-use run log is this run'\''s' "$out"
-    selftest_grep_count "$out" "$run_id" 'checks, 0 failed' 0 \
+        selftest_grep_count "$out" "$SELFTEST_RUN" \
+        "^=== rust-example $run_id platform=.* token=$SELFTEST_RUN ===$" 1 \
+        'the failed first-use run log is this invocation'\''s' "$out"
+    selftest_grep_count "$out" "$SELFTEST_RUN" 'checks, 0 failed' 0 \
         'no first-use leg is reported as a clean run' "$out"
 
     echo 'self-test: a broken helper build fails the verifier phase'
@@ -454,6 +519,9 @@ EOF
     # this run did before the verifier phase, and it carries the run id from the
     # broken run's own tag, so a log from another run cannot stand in for it.
     run_id=$(selftest_run_id "$broken_out")
+    selftest_grep_count "$broken_out" "$SELFTEST_RUN" \
+        "^=== rust-example $run_id platform=.* token=$SELFTEST_RUN ===$" 1 \
+        'the broken run log is this invocation'\''s' "$broken_out"
     selftest_grep_count "$broken_log" "$run_id" \
         "^build .*-t agent-vm-rust-dev.*:$run_id" 1 \
         'the broken run built the example image before the helper build failed' "$broken_log"
@@ -493,13 +561,14 @@ EOF
         # assertion immediately above: these zeros are zeros over a log that was
         # read and that this run wrote.
         run_id=$(selftest_run_id "$out")
-        selftest_grep_count "$out" "$run_id" "^=== rust-example $run_id platform=" 1 \
-            "the harness log is this run's ($mode)" "$out"
-        selftest_grep_count "$out" "$run_id" 'id=unknown' 0 \
+        selftest_grep_count "$out" "$SELFTEST_RUN" \
+            "^=== rust-example $run_id platform=.* token=$SELFTEST_RUN ===$" 1 \
+            "the harness log is this invocation's ($mode)" "$out"
+        selftest_grep_count "$out" "$SELFTEST_RUN" 'id=unknown' 0 \
             "no unknown identity is recorded as evidence ($mode)" "$out"
-        selftest_grep_count_e "$out" "$run_id" '^image (garbage|unknown) ' 0 \
+        selftest_grep_count_e "$out" "$SELFTEST_RUN" '^image (garbage|unknown) ' 0 \
             "the malformed identity is never logged as the built image ($mode)" "$out"
-        selftest_grep_count "$out" "$run_id" 'checks, 0 failed' 0 \
+        selftest_grep_count "$out" "$SELFTEST_RUN" 'checks, 0 failed' 0 \
             "the run never reports a clean summary ($mode)" "$out"
     done
 
@@ -514,7 +583,7 @@ EOF
         'the cleanup result is recorded as failed'
     selftest_expect_grep 'FAIL [cleanup]: owned-resource cleanup failed' "$out" \
         'the failure is named, not masked'
-    echo 'self-test: passed (110 controls)'
+    echo 'self-test: passed (121 controls)'
 }
 
 # The canary legs are shell programs handed to a guest container. Nothing in the
@@ -802,6 +871,14 @@ LOG_COUNT_ERROR=''
 # stale directory -- impossible to report as a pass. See the PR body.
 log_readable() { # FILE MARKER -> 0 when FILE is this run's log
     LOG_COUNT_ERROR=''
+    # A marker is not optional, and `''` is not "no requirement": `grep -F ''`
+    # matches every line, so an empty marker would make this guard vacuous -- and an
+    # empty marker is reachable, because a child run that exits before printing its
+    # banner yields no run id. Refuse it here, before any file is opened.
+    if [ -z "${2:-}" ]; then
+        LOG_COUNT_ERROR="no marker was given to check $1 against, so any file would satisfy it"
+        return 1
+    fi
     if [ -L "$1" ]; then
         LOG_COUNT_ERROR="the log $1 is a symlink, so it is not this run's own file"
     elif [ ! -e "$1" ]; then
@@ -1301,6 +1378,11 @@ if [ "${RUST_EXAMPLE_SUPERVISED:-0}" != 1 ]; then
 fi
 
 RUN_ID="rust-example-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+# Echoed in the banner, never branched on: the daemon-free self-test exports one so
+# its controls can tell their own child run's log from a copy of another run's, and
+# the run id a control derives from the banner is then anchored to this invocation.
+# A native run leaves it unset and the banner says token=none.
+RUN_TOKEN=${RUST_EXAMPLE_RUN_TOKEN:-none}
 LOG_DIR="$ROOT/target/rust-example/$RUN_ID"
 mkdir -p "$LOG_DIR"
 LABEL="org.agent-vm.test.rust-example=$RUN_ID"
@@ -1434,7 +1516,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log "=== rust-example $RUN_ID platform=$PLATFORM arch=$ARCH ==="
+log "=== rust-example $RUN_ID platform=$PLATFORM arch=$ARCH token=$RUN_TOKEN ==="
 log "source $(git -C "$ROOT" rev-parse HEAD) dirty=$(git -C "$ROOT" status --porcelain | grep -cv '^?? ' || true)"
 run_bounded daemon "$DAEMON_SECONDS" "$LOG_DIR/daemon.log" "$DOCKER" version || true
 run_bounded context "$DAEMON_SECONDS" "$LOG_DIR/context.log" "$DOCKER" context show || true
