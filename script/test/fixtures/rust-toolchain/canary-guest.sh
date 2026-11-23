@@ -36,6 +36,11 @@ command=$3
 
 # A syntax error is a harness defect, not a policy result: refuse before the
 # setup so a negative leg cannot pass by failing to launch.
+#
+# `CANARY_RUN` is a per-invocation token the daemon-free self-test passes so a
+# transcript can be attributed to the run that produced it; the native leg passes
+# none, so it prints nothing.
+if [ -n "${CANARY_RUN:-}" ]; then printf 'canary-run=%s\n' "$CANARY_RUN"; fi
 for program in "$setup" "$command"; do
     if ! bash -n -c "$program"; then
         echo 'CANARY-PARSE-FAILED: the leg is not valid Bash' >&2
