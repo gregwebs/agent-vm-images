@@ -220,6 +220,16 @@ self_test() {
     log_dir=$(sed -n 's/^.*(logs: \(.*\))$/\1/p' "$out" | tail -1)
     selftest_expect_grep_e '^=== [0-9]+ checks, 0 failed' "$out" \
         'the healthy run reports no failed check'
+    # Every negative assertion over the fake docker log has its phrase proven
+    # visible in this healthy run, where the call does happen: `^create ` is the
+    # verifier container the failed-build control asserts is absent, and `^build `
+    # is what the --no-cache control reads.
+    selftest_expect "$(grep -c '^create ' "$scratch/healthy-docker.log" || true)" 1 \
+        'the create invocation is visible in the fake docker log'
+    # Three builds: the example, the wrong-Verus-digest control and the mutated
+    # manifest negative -- the same count the diagnostic-parent control asserts.
+    selftest_expect "$(grep -c '^build ' "$scratch/healthy-docker.log" || true)" 3 \
+        'the build invocation is visible in the fake docker log'
     selftest_expect "$(grep -c 'canary' "$log_dir/cleanup-containers-list.log" 2>/dev/null || true)" 1 \
         'the labelled sweep removed the canary container once' "$out"
     selftest_expect "$(wc -l <"$log_dir/cleanup-images-list.log" 2>/dev/null | tr -d ' ' || true)" 1 \
@@ -234,11 +244,16 @@ self_test() {
     selftest_expect "$(grep -c 'completed status=0' "$log_dir/cleanup.txt" 2>/dev/null || true)" 1 \
         'the cleanup log records success' "$out"
 
-    echo 'self-test: a broken Go pin check fails the run before any build'
-    # The pin read is the layer's own Go helper (#187 slice 2). A helper that
-    # cannot compile must fail the run at that phase, and must fail it *before*
-    # any build: the reviewer proved the verifier script exits 127 on a missing
-    # helper, and this is the harness half of the same claim.
+    echo 'self-test: a broken helper build fails the verifier phase'
+    # The pin read is the layer's own Go helper (#187 slice 2), and the verifier
+    # phase is late: the example image has already been built and inspected by the
+    # time either helper build runs, so this control claims failure *at that phase*
+    # and no verifier container -- not "before any build".
+    #
+    # It exercises the **image-target** build (the first of the two), which is what
+    # a tree whose module does not compile fails on. A host-only build failure is
+    # covered by the second, explicit check (`the layer helper could not be built
+    # for this host`), not by this control.
     local broken="$scratch/broken-tree" broken_out broken_log
     broken_log="$scratch/broken-pin-check.log"
     mkdir -p "$broken/script" "$broken/examples" "$broken/images"
@@ -259,7 +274,11 @@ self_test() {
     selftest_expect "$rc" 1 'a broken Go pin check fails the run' "$broken_out"
     selftest_expect_grep 'the layer helper could not be built for the image' "$broken_out" \
         'the failure names the build, not a later phase'
-    selftest_expect "$(grep -c 'container create' "$broken_log" 2>/dev/null || true)" 0 \
+    # The fake docker records the harness's argv, so the invocation it makes is
+    # `create --name …`. Matching anything else here (it said `container create`
+    # once) made the assertion invisible to the call it was about: a control that
+    # cannot see the call is green over nothing.
+    selftest_expect "$(grep -c '^create ' "$broken_log" 2>/dev/null || true)" 0 \
         'no verifier container is created after a failed build'
 
     echo 'self-test: a failed or malformed mandatory inspection is not acceptance'
@@ -296,7 +315,7 @@ self_test() {
         'the cleanup result is recorded as failed'
     selftest_expect_grep 'FAIL [cleanup]: owned-resource cleanup failed' "$out" \
         'the failure is named, not masked'
-    echo 'self-test: passed (62 controls)'
+    echo 'self-test: passed (64 controls)'
 }
 
 # The canary legs are shell programs handed to a guest container. Nothing in the

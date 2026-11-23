@@ -305,7 +305,9 @@ func TestLoadPinRefusals(t *testing.T) {
 				delete(d["platforms"].(map[string]any), "linux/arm64")
 			})
 		}, "platforms must be exactly linux/amd64 and linux/arm64"},
-		{"missing platform", func(t *testing.T) []byte {
+		// The platform is present and empty; `platforms missing` is the row that
+		// deletes one.
+		{"empty platform", func(t *testing.T) []byte {
 			return mutatePin(t, func(d map[string]any) {
 				d["platforms"].(map[string]any)["linux/amd64"] = map[string]any{}
 			})
