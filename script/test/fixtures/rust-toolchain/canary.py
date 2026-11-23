@@ -22,8 +22,11 @@ class Recorder(http.server.BaseHTTPRequestHandler):
 
 def main() -> int:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
+    # The harness passes the run it started this recorder for, so the transcript
+    # names that run: a log from another run cannot stand in for this one.
+    run = sys.argv[2] if len(sys.argv) > 2 else ''
     server = http.server.HTTPServer(('0.0.0.0', port), Recorder)
-    print(f'canary listening on {port}', flush=True)
+    print(f'canary listening on {port}' + (f' run={run}' if run else ''), flush=True)
     server.serve_forever()
     return 0
 
