@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,30 +195,77 @@ func (m mapTransport) Fetch(_ context.Context, url, destination string, maxBytes
 	return os.WriteFile(destination, raw, 0o600)
 }
 
-// TestStageRefusesAManifestItCannotAdopt holds the three manifest rules the
-// stager applies before it downloads a single component: the upstream version must
-// be the channel asked for, the manifest must be the reviewed format, and the
-// published .sha256 line must name the bytes that arrived.
-func TestStageRefusesAManifestItCannotAdopt(t *testing.T) {
+// fixtureManifest is the smallest manifest the owner can derive a selection from:
+// the reviewed profile and renames, one available rust row per Linux host with the
+// reviewed component/extension rows, and a full `xz` pair for every selected
+// package. The digests are placeholders; these cases never fetch an archive.
+func fixtureManifest(t *testing.T, channel, version, manifestVersion string) string {
+	t.Helper()
+	selection := func(host, musl string) [][2]string {
+		return [][2]string{{"cargo", host}, {"clippy-preview", host}, {"rust-std", host},
+			{"rust-std", musl}, {"rustc", host}, {"rustfmt-preview", host}}
+	}
+	var body strings.Builder
+	fmt.Fprintf(&body, "manifest-version = %q\ndate = \"2026-01-02\"\n", manifestVersion)
+	fmt.Fprintf(&body, "[pkg.rust]\nversion = %q\n\n", version)
+	body.WriteString("[renames]\nclippy = \"clippy-preview\"\nrustfmt = \"rustfmt-preview\"\n\n")
+	body.WriteString("[profiles]\nminimal = [\"rustc\", \"cargo\", \"rust-std\", " +
+		"\"rust-mingw\"]\n\n")
+	for _, arch := range Architectures() {
+		host, musl := string(arch.Host()), string(arch.Musl())
+		fmt.Fprintf(&body, "[pkg.rust.target.%q]\navailable = true\nurl = \"https://example.test/x.tar.gz\"\n"+
+			"hash = \"%s\"\nxz_url = \"https://example.test/x.tar.xz\"\nxz_hash = \"%s\"\n\n",
+			host, strings.Repeat("0", 64), strings.Repeat("0", 64))
+		for _, pair := range selection(host, musl) {
+			fmt.Fprintf(&body, "[[pkg.rust.target.%q.components]]\npkg = %q\ntarget = %q\n\n",
+				host, pair[0], pair[1])
+		}
+		for _, pair := range [][2]string{{"rust-std", musl}, {"clippy-preview", host},
+			{"rustfmt-preview", host}, {"rust-mingw",
+				map[Architecture]string{AMD64: "x86_64-pc-windows-gnu",
+					ARM64: "aarch64-pc-windows-gnu"}[arch]}} {
+			fmt.Fprintf(&body, "[[pkg.rust.target.%q.extensions]]\npkg = %q\ntarget = %q\n\n",
+				host, pair[0], pair[1])
+		}
+	}
+	return body.String()
+}
+
+// TestStageHandsTheManifestToItsOwner proves the manifest rules the stager used to
+// restate are the owner's now: a release version or manifest version this writer
+// cannot adopt is refused by `manifest`-prefixed owner code, and the stager's own
+// wording for those two rules is gone.
+//
+// Declared limit: the *early* `VerifyManifestClosure` call is not separately
+// witnessed by deletion. Every manifest that reaches the owner's header rules has
+// to derive a selection first (the pin it is checked against comes from that
+// selection), so a table the owner cannot derive is refused by `DeriveSelection`
+// before the header rules run -- and a table it *can* derive needs the full
+// per-package target rows of a real distribution, which is a fixture, not a unit
+// test. `manifest-checksum` below is the one rule whose deletion this test does
+// turn red, and it is a rule the stager still owns. The canonical-`xz_url` half is
+// covered where it lives: the pins suite's reader tables call the same owner.
+func TestStageHandsTheManifestToItsOwner(t *testing.T) {
 	const channel = "9.9.9"
 	const manifestURL = "https://static.rust-lang.org/dist/channel-rust-" + channel + ".toml"
-	good := "manifest-version = \"2\"\ndate = \"2026-01-02\"\n" +
-		"[pkg.rust]\nversion = \"" + channel + " (000000000 2026-01-01)\"\n"
-	digest := func(text string) string {
-		return string(shaOfBytes([]byte(text)))
-	}
+	good := fixtureManifest(t, channel, channel+" (000000000 2026-01-01)", "2")
+	digest := func(text string) string { return string(shaOfBytes([]byte(text))) }
 	for _, testCase := range []struct {
 		name     string
 		manifest string
 		checksum string
 		want     string
 	}{
-		{name: "another channel", want: "upstream manifest describes",
+		{name: "another channel", want: "manifest: ",
 			manifest: strings.Replace(good, `version = "9.9.9`, `version = "9.9.8`, 1)},
-		{name: "unreviewed manifest format", want: "is not manifest-version 2",
+		{name: "unreviewed manifest format", want: "manifest: ",
 			manifest: strings.Replace(good, `manifest-version = "2"`, `manifest-version = "3"`, 1)},
-		{name: "checksum line for other bytes", want: "does not match its published .sha256 line",
-			manifest: good, checksum: strings.Repeat("0", 64) + "  channel-rust-9.9.9.toml\n"},
+		{name: "checksum line for other bytes",
+			want:     "upstream manifest does not match its published .sha256 line",
+			manifest: good,
+			// Kept, not re-read: the source writer refuses there before gpg, and the
+			// differential compares that order (the `manifest-checksum` fault row).
+			checksum: strings.Repeat("0", 64) + "  channel-rust-9.9.9.toml\n"},
 	} {
 		checksum := testCase.checksum
 		if checksum == "" {
@@ -242,8 +290,15 @@ func TestStageRefusesAManifestItCannotAdopt(t *testing.T) {
 			Out:     filepath.Join(t.TempDir(), "candidate"), Dockerfile: dockerfile,
 		}, StageDependencies{Transport: transport, Trust: ReviewedTrust,
 			Verifier: func(string, string) SignatureVerifier { return acceptingVerifier{} }})
-		if err == nil || !strings.Contains(err.Error(), testCase.want) {
-			t.Fatalf("%s: want %q, got %v", testCase.name, testCase.want, err)
+		if err == nil || !strings.HasPrefix(err.Error(), testCase.want) {
+			t.Fatalf("%s: want a refusal starting %q, got %v", testCase.name, testCase.want, err)
+		}
+		// The stager must not be the place these rules live any more: its own
+		// wording for them is gone, and whatever the owner says is prefixed with
+		// the manifest it owns.
+		if strings.Contains(err.Error(), "upstream manifest describes") ||
+			strings.Contains(err.Error(), "upstream manifest is not manifest-version") {
+			t.Fatalf("%s: the stager restated a manifest rule: %v", testCase.name, err)
 		}
 	}
 }

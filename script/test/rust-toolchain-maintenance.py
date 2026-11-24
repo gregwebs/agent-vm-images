@@ -47,6 +47,15 @@ Passed = 0
 # Comparisons keeps the differential honest the way Passed keeps the cases honest:
 # a suite that compared nothing cannot pass.
 Comparisons = 0
+# FilesCompared is the differential's other half: the comparisons above count
+# calls, this counts the files those calls actually compared, so an emptied
+# snapshot cannot leave the suite green.
+FilesCompared = 0
+# The floors below are reviewed numbers, not minima found by trial: every tree
+# this suite builds starts with the five files tree() copies, and the 28 comparisons
+# compare well over three hundred files between them.
+MIN_TREE_FILES = 5
+MIN_FILES_COMPARED = 400
 FAKE_PYTHON = 'python3'
 WRITERS = ('go', 'oracle')
 STAGER = 'script/dev/rust-toolchain-update.py'
@@ -153,9 +162,42 @@ def run_one(writers: dict[str, Path], writer: str, fixture_root: driver.Fixture,
     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
+def retained_snapshot(path: Path, tree_root: Path) -> dict[str, tuple[int, str]]:
+    """Bytes and modes of one writer's retained recovery material.
+
+    The two runs' paths differ by construction, and `recovery.json` names them, so
+    each run's own two strings are substituted before hashing. That is the one
+    normalization here; the structure, the modes, the backups and the marker are
+    compared as they are.
+    """
+    snapshot = {}
+    for file in sorted(path.rglob('*')):
+        if not file.is_file():
+            continue
+        raw = file.read_bytes()
+        for value, replacement in ((str(path), '<WORK>'), (str(tree_root), '<TREE>')):
+            raw = raw.replace(value.encode(), replacement.encode())
+        snapshot[file.relative_to(path).as_posix()] = (file.stat().st_mode & 0o7777,
+                                                       hashlib.sha256(raw).hexdigest())
+    return snapshot
+
+
+def run_direct(writers: dict[str, Path], writer: str, fixture_root: driver.Fixture,
+               tree_root: Path, argv: list[str]) -> subprocess.CompletedProcess:
+    """One writer's own verb, with no publisher in front of it.
+
+    The two declared divergences below are direct-verb divergences: the shell
+    wrapper refuses before either can be reached, so a case that went through it
+    would compare the wrapper's behaviour instead of the writer's.
+    """
+    env = environment(fixture_root, tree_root, writers[writer])
+    return subprocess.run([str(writers[writer] / 'avm-pin'), *argv], cwd=str(tree_root),
+                          env=env, capture_output=True, text=True, timeout=300)
+
+
 def compare_writers(arguments: list[str], go_tree: Path, go: subprocess.CompletedProcess,
                     oracle_root: Path, oracle: subprocess.CompletedProcess) -> None:
-    global Comparisons
+    global Comparisons, FilesCompared
     label = ' '.join(arguments) if arguments else '(no arguments)'
     problems = []
     if go.returncode != oracle.returncode:
@@ -167,10 +209,34 @@ def compare_writers(arguments: list[str], go_tree: Path, go: subprocess.Complete
                             f'{normalize(getattr(go, stream), go_tree)[-400:]!r}\n  oracle: '
                             f'{normalize(getattr(oracle, stream), oracle_root)[-400:]!r}')
     go_files, oracle_files = full_snapshot(go_tree), full_snapshot(oracle_root)
+    # A snapshot that is empty, or short of the files every tree starts with, means
+    # the comparison ran over nothing -- which is how an emptied snapshot used to
+    # stay green.
+    for label, snapshot in (('go', go_files), ('oracle', oracle_files)):
+        if len(snapshot) < MIN_TREE_FILES:
+            problems.append(f'the {label} tree snapshot has {len(snapshot)} files, want at '
+                            f'least {MIN_TREE_FILES}')
+    FilesCompared += len(go_files) + len(oracle_files)
     differing = sorted(name for name in set(go_files) | set(oracle_files)
                        if go_files.get(name) != oracle_files.get(name))
     if differing:
         problems.append(f'{len(differing)} written file(s) differ: {differing[:4]}')
+    # Retention: a status-3 or interrupted run leaves its recovery material behind,
+    # and both writers must leave the same material -- the map, the backups and the
+    # markers -- not merely the same exit status. The oracle's tree is removed after
+    # the comparison; the shipped writer's is left for the row that owns the case.
+    go_retained, oracle_retained = retained_work(go), retained_work(oracle)
+    if (go_retained is None) != (oracle_retained is None):
+        problems.append(f'one writer retained recovery material and the other did not: '
+                        f'go={go_retained}, oracle={oracle_retained}')
+    elif go_retained is not None:
+        retained_go = retained_snapshot(go_retained, go_tree)
+        retained_oracle = retained_snapshot(oracle_retained, oracle_root)
+        if retained_go != retained_oracle:
+            names = sorted(name for name in set(retained_go) | set(retained_oracle)
+                           if retained_go.get(name) != retained_oracle.get(name))
+            problems.append(f'{len(names)} retained file(s) differ: {names[:4]}')
+        shutil.rmtree(oracle_retained, ignore_errors=True)
     check(f'differential [{label}]: the two writers agree', not problems,
           '; '.join(problems))
     Comparisons += 1
@@ -719,6 +785,65 @@ def main() -> int:
                 if retained is not None:
                     shutil.rmtree(retained, ignore_errors=True)
 
+        # --- declared divergences --------------------------------------------
+        # The two places the Go writer deliberately reads differently from the
+        # Python stager, declared here where the reader looks rather than only in a
+        # PR body. Each witness turns RED when the divergence closes, so a
+        # declaration cannot outlive the difference it describes.
+        #
+        # 1. `current` on an unusable pin directory. The Python entrypoint calls
+        #    `load_pin` with nothing above it, so an `OSError` from the read (a
+        #    directory where a file must be; permission-denied behaves the same way
+        #    for a non-root uid) escapes as a traceback with status 1. The Go verb
+        #    turns `LoadPin`'s refusal into one `rust_toolchain: ` line with status
+        #    1. The *reason* differs for the same class of input, and status agrees.
+        #    The directory case is used because it is deterministic whatever uid the
+        #    suite runs as; permission-denied is the same shape but proves nothing
+        #    as root.
+        # 2. `stage --reviewer ""`. The source writer only treats `None` as absent,
+        #    so an empty reviewer is carried into the exception and the *loader*
+        #    refuses it later (status 1). The Go verb refuses the pair up front
+        #    (status 2), because the flag was given and is empty rather than absent.
+        #    Again a direct-verb divergence: `upgrade-rust-toolchain.sh` refuses an
+        #    empty `--reviewer` as usage before either writer runs.
+        print('declared divergences')
+        work = tree(root / 'repo-divergence', fixture_root, writers['go'])
+        unusable = work / 'unusable'
+        unusable.mkdir()
+        (unusable / 'pin.json').mkdir()
+        go = run_direct(writers, 'go', fixture_root, work,
+                        ['rust-toolchain', 'current', str(unusable)])
+        oracle = run_direct(writers, 'oracle', fixture_root, work,
+                            ['rust-toolchain', 'current', str(unusable)])
+        check('declared divergence [current on an unusable pin]: both exit 1',
+              go.returncode == 1 and oracle.returncode == 1,
+              f'({go.returncode}, {oracle.returncode}) {go.stderr[-200:]}{oracle.stderr[-200:]}')
+        check('declared divergence [current on an unusable pin]: Go refuses in one line',
+              'rust_toolchain: missing input: pin.json' in go.stderr and
+              'Traceback' not in go.stderr, go.stderr[-300:])
+        check('declared divergence [current on an unusable pin]: the oracle raises',
+              'Traceback' in oracle.stderr, oracle.stderr[-300:])
+        empty_reviewer = [
+            'rust-toolchain', 'stage', '--channel', fixture.CHANNEL,
+            '--rustup', fixture.RUSTUP_VERSION, '--key', str(fixture_root.dist.key),
+            '--current', str(work / 'absent'),
+            '--dockerfile', str(work / 'examples/layers/rust-dev/Dockerfile'),
+            '--verify-bootstrap-exception', '2026-01-02', '--reviewer', '']
+        go = run_direct(writers, 'go', fixture_root, work,
+                        empty_reviewer + ['--out', str(root / 'divergence-go')])
+        oracle = run_direct(writers, 'oracle', fixture_root, work,
+                            empty_reviewer + ['--out', str(root / 'divergence-oracle')])
+        check('declared divergence [empty reviewer]: Go refuses as usage, the oracle stages',
+              go.returncode == 2 and oracle.returncode == 1,
+              f'({go.returncode}, {oracle.returncode}) {go.stderr[-200:]}{oracle.stderr[-200:]}')
+        check('declared divergence [empty reviewer]: Go names the flag pair',
+              '--verify-bootstrap-exception and --reviewer are given together' in go.stderr,
+              go.stderr[-300:])
+        check('declared divergence [empty reviewer]: the oracle reaches the loader',
+              'expected a simple reviewer handle' in oracle.stderr, oracle.stderr[-300:])
+        shutil.rmtree(root / 'divergence-go', ignore_errors=True)
+        shutil.rmtree(root / 'divergence-oracle', ignore_errors=True)
+
         # --- fixture-child guards --------------------------------------------
         # A fixture child must be deny-by-default *before* it imports the modules
         # under test, or a direct urllib/subprocess fallback in the shipped stager
@@ -851,8 +976,12 @@ def main() -> int:
     if Comparisons == 0:
         print('FAILED the differential compared no pair of writers')
         return 1
+    if FilesCompared < MIN_FILES_COMPARED:
+        print(f'FAILED the differential compared {FilesCompared} files, want at least '
+              f'{MIN_FILES_COMPARED}')
+        return 1
     print(f'rust-toolchain maintenance suite passed ({Passed} checks, '
-          f'{Comparisons} differential comparisons)')
+          f'{Comparisons} differential comparisons, {FilesCompared} files compared)')
     return 0
 
 

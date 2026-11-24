@@ -256,25 +256,31 @@ func stageInto(ctx context.Context, request StageRequest, dependencies StageDepe
 	if err != nil {
 		return proposal, err
 	}
-	releaseDate, err := ParseDate(manifest["date"], "manifest.date")
+	releaseDateNode, err := fieldOf(manifest, "date", "upstream manifest")
 	if err != nil {
 		return proposal, err
 	}
-	versionNode, present, err := lookup(manifest, "pkg", "rust", "version")
+	releaseDate, err := ParseDate(releaseDateNode, "manifest.date")
 	if err != nil {
 		return proposal, err
 	}
-	if !present {
-		versionNode = nil
+	// The manifest is handed to the package that owns its rules rather than
+	// re-read here: `VerifyManifestClosure` is the one place that decides the
+	// supported manifest version, that the release version is the channel asked
+	// for, the reviewed profile and renames, the availability of every selected
+	// row, and that each selected row's `xz_url` is the canonical dated origin.
+	// The pin it checks against is provisional -- its archive URLs are the
+	// canonical ones and its digests come from the signed rows -- because the
+	// writer's job at this point is to decide whether it may fetch, and fetching
+	// from the canonical origin is itself the rule under test. The candidate
+	// re-read below repeats the same call against the *written* pin, which is what
+	// catches a non-canonical `xz_url` in a signed manifest.
+	provisional, err := provisionalPin(request, dependencies.Trust, manifest, releaseDate)
+	if err != nil {
+		return proposal, err
 	}
-	if version, ok := versionNode.(string); !ok ||
-		strings.Split(version, " ")[0] != string(request.Channel) {
-		return proposal, refuse("upstream manifest describes %s, not %s",
-			pyRepr(versionNode), request.Channel)
-	}
-	if manifest["manifest-version"] != "2" {
-		return proposal, refuse("upstream manifest is not manifest-version 2; verifier/policy " +
-			"review required")
+	if err := VerifyManifestClosure(manifestRaw, provisional); err != nil {
+		return proposal, err
 	}
 
 	bootstrapDigests := map[Architecture]Sha256{}
@@ -319,25 +325,24 @@ func stageInto(ctx context.Context, request StageRequest, dependencies StageDepe
 	signatureBytes := map[string][]byte{}
 	closures := [2]HostClosure{}
 	for _, arch := range Architectures() {
-		selection, err := DeriveSelection(manifest, arch)
-		if err != nil {
-			return proposal, err
-		}
-		closure := HostClosure{Arch: arch, Host: arch.Host(), Musl: arch.Musl(),
-			Bootstrap: Content{URL: CanonicalURL(ExpectedBootstrapURL(request.Rustup, arch)),
-				Digest: bootstrapDigests[arch]},
-			BootstrapChecksum: Evidence{
-				Path:   EvidencePath(ExpectedBootstrapChecksumPath(arch)),
-				Digest: shaOfBytes(bootstrapChecksums[arch])}}
-		digests := make([]ArchiveDigest, 0, len(selection))
-		for _, pair := range selection {
-			archive, raw, err := stageArchive(ctx, request, dependencies, verifier, downloads,
-				manifest, releaseDate, arch, pair[0], TargetTriple(pair[1]))
+		closure := provisional.Closure(arch)
+		closure.Bootstrap = Content{URL: CanonicalURL(ExpectedBootstrapURL(request.Rustup, arch)),
+			Digest: bootstrapDigests[arch]}
+		closure.BootstrapChecksum = Evidence{
+			Path:   EvidencePath(ExpectedBootstrapChecksumPath(arch)),
+			Digest: shaOfBytes(bootstrapChecksums[arch])}
+		digests := make([]ArchiveDigest, 0, len(closure.Archives))
+		for index := range closure.Archives {
+			archive := &closure.Archives[index]
+			raw, err := stageArchive(ctx, dependencies, verifier, downloads, *archive)
 			if err != nil {
 				return proposal, err
 			}
+			// The signature's digest is the one thing this loop adds: the provisional
+			// record named the evidence path, and the bytes that arrived are what the
+			// pin records.
+			archive.Signature.Digest = shaOfBytes(raw)
 			signatureBytes[string(archive.Signature.Path)] = raw
-			closure.Archives = append(closure.Archives, archive)
 			digests = append(digests, ArchiveDigest{Package: archive.Package,
 				Target: archive.Target, Digest: archive.Content.Digest})
 		}
@@ -397,7 +402,16 @@ func stageInto(ctx context.Context, request StageRequest, dependencies StageDepe
 	}
 
 	// The candidate is held to the reader before it is offered: a proposal the
-	// image would refuse must fail here, not after publication.
+	// image would refuse fails here, not after publication.
+	//
+	// Declared: this re-read is *not* witnessed by deletion. Nothing a fixture can
+	// reach makes the writer emit a candidate the loader rejects (both are built
+	// from one model, in one package), so no test turns red when these two calls
+	// are removed, and this comment is where that is stated rather than only in a
+	// PR body. It stays because a writer bug is exactly the thing it is for: the
+	// document, the evidence file set and the digests are the only part of this
+	// path that is written rather than called, and this is the only check on them
+	// that reads them back from disk.
 	candidate, err := LoadPin(data, dependencies.Trust)
 	if err != nil {
 		return proposal, err
@@ -411,61 +425,89 @@ func stageInto(ctx context.Context, request StageRequest, dependencies StageDepe
 	return proposal, nil
 }
 
-// stageArchive fetches, verifies and preflights one selected component archive,
-// returning the committed record and the signature bytes to publish as evidence.
-func stageArchive(ctx context.Context, request StageRequest, dependencies StageDependencies,
-	verifier SignatureVerifier, downloads string, manifest map[string]any, releaseDate IsoDate,
-	arch Architecture, pkg string, target TargetTriple) (ComponentArchive, []byte, error) {
-	var archive ComponentArchive
-	entry, err := manifestEntry(manifest, pkg, target)
-	if err != nil {
-		return archive, nil, err
-	}
-	urlText := ExpectedArchiveURL(request.Channel, releaseDate, pkg, target)
-	if text, ok := entry["xz_url"].(string); !ok || text != urlText {
-		return archive, nil, refuse("manifest: %s %s xz_url %s != %s", pkg, target,
-			pythonText(entry["xz_url"]), urlText)
-	}
-	url := CanonicalURL(urlText)
+// stageArchive fetches one selected archive from the canonical origin its record
+// names, requires the bytes to be the ones the signed manifest described, verifies
+// the detached signature and preflights the payload. It returns the signature bytes
+// to publish as evidence.
+//
+// It reads nothing out of the manifest: the record it is given was validated by
+// `VerifyManifestClosure` (including that the URL is the canonical dated origin),
+// so the only rule applied here is the one no earlier step can apply -- whether the
+// bytes that arrived are the bytes the signed manifest named.
+func stageArchive(ctx context.Context, dependencies StageDependencies,
+	verifier SignatureVerifier, downloads string, archive ComponentArchive) ([]byte, error) {
+	url := archive.Content.URL
 	targetPath := filepath.Join(downloads, url.Filename())
 	if err := dependencies.Transport.Fetch(ctx, string(url), targetPath,
 		MaxArchiveBytes); err != nil {
-		return archive, nil, adopt(err)
+		return nil, adopt(err)
 	}
 	digest, err := hashFile(targetPath)
 	if err != nil {
-		return archive, nil, err
+		return nil, err
 	}
-	if want, _ := entry["xz_hash"].(string); string(digest) != want {
-		return archive, nil, refuse("%s: downloaded bytes do not match the manifest hash",
-			url.Filename())
+	if digest != archive.Content.Digest {
+		return nil, refuse("%s: downloaded bytes do not match the manifest hash", url.Filename())
 	}
 	signaturePath := filepath.Join(downloads, url.Filename()+".asc")
 	if err := dependencies.Transport.Fetch(ctx, string(url)+".asc", signaturePath,
 		MaxEvidenceBytes); err != nil {
-		return archive, nil, adopt(err)
+		return nil, adopt(err)
 	}
 	if err := verifier.Verify(ctx, targetPath, signaturePath,
 		url.Filename()+" signature"); err != nil {
-		return archive, nil, err
+		return nil, err
 	}
 	raw, err := os.ReadFile(signaturePath)
 	if err != nil {
-		return archive, nil, adopt(err)
-	}
-	stem := ArchiveFilename(request.Channel, pkg, target)
-	archive = ComponentArchive{
-		Package:      pkg,
-		Target:       target,
-		Content:      Content{URL: url, Digest: digest},
-		MemberPrefix: MemberPrefix(stem[:len(stem)-len(".tar.xz")] + "/"),
-		Signature: Evidence{Path: EvidencePath(ExpectedSignaturePath(arch, pkg, target)),
-			Digest: shaOfBytes(raw)},
+		return nil, adopt(err)
 	}
 	if err := PreflightArchive(targetPath, archive, NewEvents("")); err != nil {
-		return archive, nil, err
+		return nil, err
 	}
-	return archive, raw, nil
+	return raw, nil
+}
+
+// provisionalPin is the pin this run *would* write, built from the signed
+// manifest's selection with the canonical origins the policy derives. It exists
+// only so the manifest's own rules are applied by their owner before anything is
+// downloaded; the digests and the member prefixes are the manifest's, and a
+// mismatch between them and the downloaded bytes is the one rule `stageArchive`
+// keeps.
+func provisionalPin(request StageRequest, trust TrustPolicy, manifest map[string]any,
+	releaseDate IsoDate) (Pin, error) {
+	pin := Pin{Channel: request.Channel, ReleaseDate: releaseDate, Profile: Profile,
+		RustupVersion: request.Rustup, Primary: trust.Primary(), Signers: trust.Signers()}
+	for _, arch := range Architectures() {
+		selection, err := DeriveSelection(manifest, arch)
+		if err != nil {
+			return pin, err
+		}
+		closure := HostClosure{Arch: arch, Host: arch.Host(), Musl: arch.Musl(),
+			Bootstrap: Content{URL: CanonicalURL(ExpectedBootstrapURL(request.Rustup, arch))}}
+		for _, pair := range selection {
+			pkg, target := pair[0], TargetTriple(pair[1])
+			entry, err := manifestEntry(manifest, pkg, target)
+			if err != nil {
+				return pin, err
+			}
+			digest, ok := entry["xz_hash"].(string)
+			if !ok {
+				return pin, refuse("manifest: %s %s lacks a full xz pair", pkg, target)
+			}
+			stem := ArchiveFilename(request.Channel, pkg, target)
+			closure.Archives = append(closure.Archives, ComponentArchive{
+				Package: pkg,
+				Target:  target,
+				Content: Content{URL: CanonicalURL(ExpectedArchiveURL(request.Channel,
+					releaseDate, pkg, target)), Digest: Sha256(digest)},
+				MemberPrefix: MemberPrefix(stem[:len(stem)-len(".tar.xz")] + "/"),
+				Signature:    Evidence{Path: EvidencePath(ExpectedSignaturePath(arch, pkg, target))},
+			})
+		}
+		pin.Closures[int(arch)] = closure
+	}
+	return pin, nil
 }
 
 // Describe is the proposal summary the maintainer reviews. It is a contract line
@@ -815,14 +857,4 @@ func writeNewFile(path string, raw []byte) error {
 func shaOfBytes(raw []byte) Sha256 {
 	digest := sha256.Sum256(raw)
 	return Sha256(hex.EncodeToString(digest[:]))
-}
-
-// pythonText renders a decoded document value the way an f-string's `{value}`
-// did, so a refusal about a malformed upstream manifest reads the same. `pyRepr`
-// is the `{value!r}` form and is used where the source writer used it.
-func pythonText(value any) string {
-	if text, ok := value.(string); ok {
-		return text
-	}
-	return pyRepr(value)
 }
