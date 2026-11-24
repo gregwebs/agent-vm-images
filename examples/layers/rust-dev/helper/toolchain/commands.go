@@ -23,6 +23,19 @@ func PolicyFor(trust TrustPolicy) gpg.Policy {
 	return gpg.Policy{Primary: string(trust.Primary()), Signers: signers}
 }
 
+// CheckOffline is `check` for a caller outside this module (`avm-pin
+// rust-toolchain check`): it resolves the reviewed gpg program itself, so the
+// program type stays inside the module that owns the verification policy.
+func CheckOffline(ctx context.Context, inputDir string, expectChannel *string,
+	trust TrustPolicy) (Channel, error) {
+	program, err := gpg.Resolve()
+	if err != nil {
+		return "", adopt(err)
+	}
+	return Check(ctx, CheckRequest{InputDir: inputDir, ExpectChannel: expectChannel,
+		Trust: trust, GPG: program})
+}
+
 // CheckRequest is one `check` invocation.
 type CheckRequest struct {
 	InputDir string

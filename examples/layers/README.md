@@ -410,7 +410,9 @@ no `python3`. The reasoning and the rejected alternatives are in
 `rust_toolchain.py` stays on disk, byte-identical and never mounted into a build,
 as the host-only differential oracle; `example-layers.sh` and the pins suite run
 both implementations over the committed data and each self-test mutant, failing on
-any disagreement. It is deleted in #232.
+any disagreement. It is deleted in slice 4b of #232. The *writer* is already Go:
+`avm-pin rust-toolchain` stages through this layer's own `toolchain` package, so
+the maintainer's run and the image build compile one library.
 
 `rustup-init` has no detached signature or attestation for 1.28.2, so its use is
 a **scoped, dated, per-architecture hash-only exception** recorded in `pin.json`
@@ -501,7 +503,8 @@ The layer's build steps are committed as standalone scripts beside the
 Dockerfile — `install-rust.sh`, `install-kache.sh`, `install-verus.sh`,
 `verify-toolchain.sh` — and bind-mounted in at build time, so each can be read,
 reviewed and run on its own. `rust_toolchain.py` also stays on disk, but it is
-host-only now and no build mounts it: it is the differential oracle until #232.
+host-only now and no build mounts it: it is the differential oracle until slice 4b
+of #232.
 The layer's own program, `rust-dev-helper`, is a Go module under `helper/`
 compiled by the recipe's first `FROM` from a pinned `golang:` image and mounted
 the same way. `install-rust.sh` runs `rust-dev-helper install` (which fetches and

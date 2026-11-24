@@ -413,7 +413,9 @@ rules in the same order with the same diagnostics, and it fetches only the seven
 URLs the pin names with one attempt, no redirects and the Python bounds. The
 `rust-dev` image build runs no Python and its apt line carries no `python3`.
 `rust_toolchain.py` stays on disk, never mounted into a build, as the host-only
-differential oracle the pins suite compares against until #232 deletes it.
+differential oracle the pins suite compares against until slice 4b of #232
+deletes it. The writer is `avm-pin rust-toolchain`, which stages through the same
+`toolchain` package the image's helper compiles (#232 slice 4a).
 The `rustup-init` binaries carry no detached signature for 1.28.2, so `pin.json`
 records a **scoped, dated, per-architecture hash-only exception** with exact
 URLs/digests, upstream `.sha256` and installation-document evidence, reviewer and
@@ -478,9 +480,10 @@ maintainer-host step, never a build step: download the new per-architecture
 tarballs, their `.sha256` sidecars and the key, confirm the digests, replace
 `kache/` and move the four ARGs together.
 
-Only `script/dev/upgrade-rust-toolchain.sh` (with
-`script/dev/rust-toolchain-update.py`) writes these files, on a maintainer host
-(it refuses `GITHUB_ACTIONS=true`). It authenticates the entire
+Only `script/dev/upgrade-rust-toolchain.sh` writes these files, on a maintainer
+host (it refuses `GITHUB_ACTIONS=true`). It stages with `avm-pin rust-toolchain`
+-- the layer's own `toolchain` package reached through the root module's replace --
+and owns the publication transaction, its rollback and its signal states. It authenticates the entire
 two-architecture closure without executing the foreign bootstrap and publishes
 the pins, evidence and the Dockerfile `ARG RUST_TOOLCHAIN` assertion as one
 transaction:

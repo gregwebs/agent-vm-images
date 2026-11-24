@@ -22,10 +22,11 @@ import (
 )
 
 type arguments struct {
-	Artifact *artifactCommand `arg:"subcommand:artifact" help:"refresh the Node or GitHub CLI release-artifact pin"`
-	Agy      *agyCommand      `arg:"subcommand:agy" help:"refresh the agy release-artifact pin"`
-	Claude   *claudeCommand   `arg:"subcommand:claude" help:"refresh the Claude native payload closure"`
-	Codex    *codexCommand    `arg:"subcommand:codex" help:"refresh the Codex payload closure"`
+	Artifact *artifactCommand      `arg:"subcommand:artifact" help:"refresh the Node or GitHub CLI release-artifact pin"`
+	Agy      *agyCommand           `arg:"subcommand:agy" help:"refresh the agy release-artifact pin"`
+	Claude   *claudeCommand        `arg:"subcommand:claude" help:"refresh the Claude native payload closure"`
+	Codex    *codexCommand         `arg:"subcommand:codex" help:"refresh the Codex payload closure"`
+	Rust     *rustToolchainCommand `arg:"subcommand:rust-toolchain" help:"stage the rust-dev example's toolchain pin"`
 }
 
 func (arguments) Description() string {
@@ -103,7 +104,7 @@ func run(args []string) int {
 		return 2
 	}
 	if parsed.Artifact == nil && parsed.Agy == nil && parsed.Claude == nil &&
-		parsed.Codex == nil {
+		parsed.Codex == nil && parsed.Rust == nil {
 		parser.WriteHelp(os.Stderr)
 		return 2
 	}
@@ -115,6 +116,9 @@ func run(args []string) int {
 	}
 	if parsed.Codex != nil {
 		return runCodex(parsed.Codex)
+	}
+	if parsed.Rust != nil {
+		return runRustToolchain(parsed.Rust)
 	}
 	command := parsed.Artifact
 	root, err := resolveRoot(command.Root)
@@ -183,6 +187,8 @@ func prefixFor(args []string) string {
 			return codewriter.Prefix
 		case "agy":
 			return agywriter.Prefix
+		case "rust-toolchain":
+			return rustToolchainPrefix
 		}
 	}
 	return artifactwriter.Prefix

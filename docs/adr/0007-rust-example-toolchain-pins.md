@@ -70,7 +70,10 @@ Commit a reviewed finite closure and let rustup install only from it.
   checks, and rust-installer format-3 metadata/coverage preflight. Its `check`
   and `verify-installed` verbs landed in #187 slice 2 and its `install` verb in
   #231; the rules, order and diagnostics are Python's, and `rust_toolchain.py`
-  stays on disk as the host-only differential oracle until #232 deletes it. The
+  stays on disk as the host-only differential oracle until #232 slice 4b deletes
+  it. The *writer* is already Go: `avm-pin rust-toolchain` stages through this
+  package, and the vendor copy of it is held to the layer's source byte for byte
+  by `internal/vendordrift`. The
   vendored `ulikunitz/xz` v0.5.17 `SingleStream` preflight is stricter than
   Python's `LZMADecompressor` about trailing bytes; it is a declared strictness
   note, not a reachable behaviour change, because an archive's checksum is
@@ -83,12 +86,17 @@ Commit a reviewed finite closure and let rustup install only from it.
   outlives the budget, and closing the response does not cancel it either --
   `HTTPResponse.close()` waits on the same buffered-reader lock the in-progress
   read holds. Only interrupting the socket wakes the blocked read.
-- `script/dev/rust-toolchain-update.py` + `script/dev/upgrade-rust-toolchain.sh`
-  are the only writers. A run downloads and authenticates the entire
+- `avm-pin rust-toolchain` (staging) + `script/dev/upgrade-rust-toolchain.sh`
+  (publication) are the only writers. The staging rules are not a second copy:
+  they are the layer's own `toolchain` package, which the root module imports
+  through a local `replace` (#232 slice 4a), so the writer and the image cannot
+  disagree about what a pin means. A run downloads and authenticates the entire
   two-architecture closure (never executing the foreign bootstrap) into scratch
-  and publishes the fixed destination list as one transaction with the
-  existing publisher. An incomplete download, a bad signature or a refused
-  endpoint leaves the committed sources byte-identical.
+  and publishes the fixed destination list as one transaction with the existing
+  publisher. An incomplete download, a bad signature or a refused endpoint leaves
+  the committed sources byte-identical. `script/dev/rust-toolchain-update.py`
+  survives only as the differential oracle the maintenance suite compares against
+  until slice 4b deletes it.
 - Signed archives are verified with OpenPGP, so they need no exception. The
   `rustup-init` binaries have no detached signature, attestation or release
   object for 1.28.2 (`.asc` endpoints return 404, the GitHub tag has no

@@ -101,7 +101,7 @@ func prepareVerified(ctx context.Context, directory string, pin Pin, manifestRaw
 	if err := events.Record("hash-ok " + closure.Bootstrap.URL.Filename()); err != nil {
 		return nil, err
 	}
-	if err := checkELFFile(bootstrap, arch); err != nil {
+	if err := checkELFFile(bootstrap, arch, elfLabels{Prefix: "bootstrap"}); err != nil {
 		return nil, err
 	}
 	// Mode publication: 0755 only after the hash and the ELF identity passed.
@@ -184,7 +184,24 @@ func makePrivate(directory string) error {
 	return adopt(os.Chmod(directory, 0o700))
 }
 
-func checkELFFile(path string, arch Architecture) error {
+// elfLabels are the two prefixes one ELF read reports under. They are the
+// caller's, not the rule's: the installer holds a `bootstrap`, and the writer
+// holds the file it downloaded (`rustup-init`) but still names the platform when
+// the machine is wrong. Both are frozen diagnostics.
+type elfLabels struct {
+	Prefix string
+	// Machine may name the subject differently from Prefix; empty means Prefix.
+	Machine string
+}
+
+func (l elfLabels) machineSubject() string {
+	if l.Machine != "" {
+		return l.Machine
+	}
+	return l.Prefix
+}
+
+func checkELFFile(path string, arch Architecture, labels elfLabels) error {
 	handle, err := os.Open(path)
 	if err != nil {
 		return adopt(err)
@@ -198,15 +215,16 @@ func checkELFFile(path string, arch Architecture) error {
 	machine, err := CheckELF(header[:count])
 	if err != nil {
 		if errors.Is(err, errNotELF) {
-			return refuse("bootstrap: not an ELF binary")
+			return refuse("%s: not an ELF binary", labels.Prefix)
 		}
 		if errors.Is(err, errNotELF64LE) {
-			return refuse("bootstrap: expected a 64-bit little-endian ELF binary")
+			return refuse("%s: expected a 64-bit little-endian ELF binary", labels.Prefix)
 		}
 		return adopt(err)
 	}
 	if machine != arch.ELFMachine() {
-		return refuse("bootstrap: ELF machine is not %s", arch.BootstrapTarget())
+		return refuse("%s: ELF machine is not %s", labels.machineSubject(),
+			arch.BootstrapTarget())
 	}
 	return nil
 }

@@ -13,14 +13,10 @@
 # restored); 2 usage; 3 undecided or incomplete recovery ($work retained and
 # printed); 128+N when a signal arrives and the sources were safely decided.
 set -euo pipefail
-# Ordinary checks must not write generated state into the checkout: every
-# Python child (including the test launcher) inherits this.
-export PYTHONDONTWRITEBYTECODE=1
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=/dev/null
 . "$ROOT/script/build/transactional-publish.sh"
 
-UPDATER=script/dev/rust-toolchain-update.py
 EXAMPLE=examples/layers/rust-dev
 DATA=$EXAMPLE/data/rust-toolchain
 DOCKERFILE=$EXAMPLE/Dockerfile
@@ -37,7 +33,11 @@ transaction. --rustup, --key and the bootstrap-exception review are for the firs
 adoption; later bumps retain the committed rustup version and key. --check
 verifies the committed bytes offline and publishes nothing.
 
-Prerequisites: python3 >= 3.11, gpg, sha256sum, cmp, network access. Never in CI.
+Staging is `avm-pin rust-toolchain` (the layer's own `toolchain` package, reached
+through the root module's replace); this script owns the publication transaction,
+its rollback and the signal state machine. Prerequisites: gpg, sha256sum, cmp, Go
+(a checkout builds the writer; a tree without cmd/ takes `avm-pin` from PATH) and
+network access. Never in CI.
 USAGE
     exit 2
 }
@@ -186,10 +186,26 @@ resolve_tool() {
     esac
     printf '%s\n' "$path"
 }
-PYTHON=$(resolve_tool python3)
+# The writer binary. A checkout builds its own from cmd/avm-pin, so
+# `bash script/dev/upgrade-rust-toolchain.sh CHANNEL` keeps working with nothing
+# installed; a repository tree without cmd/ -- the maintenance suite's temporary
+# copy -- takes the binary its PATH names. Either way the program is the real
+# writer: the layer's toolchain package is what does the work.
+resolve_writer() {
+    if [ -d "$ROOT/cmd/avm-pin" ]; then
+        local build=$ROOT/target/avm-pin-bin
+        mkdir -p "$build"
+        ( cd "$ROOT" && GOFLAGS=-mod=vendor go build -o "$build/avm-pin" ./cmd/avm-pin ) ||
+            { echo 'cannot build avm-pin (the rust-toolchain writer)' >&2; exit 1; }
+        printf '%s\n' "$build/avm-pin"
+        return 0
+    fi
+    resolve_tool avm-pin
+}
 GPG=$(resolve_tool gpg)
+AVM_PIN=$(resolve_writer)
 for tool in sha256sum cmp; do command -v "$tool" >/dev/null || { echo "missing prerequisite: $tool" >&2; exit 1; }; done
-child_path=$(dirname "$PYTHON"):$(dirname "$GPG"):/usr/bin:/bin
+child_path=$(dirname "$AVM_PIN"):$(dirname "$GPG"):/usr/bin:/bin
 
 # --- fixed destination list -------------------------------------------------
 
@@ -226,8 +242,8 @@ build_destinations() {
 if [ "$check_only" = true ]; then
     build_destinations
     [ -d "$ROOT/$DATA" ] || refuse "no committed Rust toolchain data at $DATA"
-    ( cd "$ROOT" && PATH=$child_path "$PYTHON" "$UPDATER" check "$DATA" >/dev/null ) || exit $?
-    current=$( cd "$ROOT" && PATH=$child_path "$PYTHON" "$UPDATER" current "$DATA" )
+    ( cd "$ROOT" && PATH=$child_path "$AVM_PIN" rust-toolchain check "$DATA" >/dev/null ) || exit $?
+    current=$( cd "$ROOT" && PATH=$child_path "$AVM_PIN" rust-toolchain current "$DATA" )
     expected=$(dockerfile_channel)
     for line in $current; do
         case "$line" in
@@ -244,7 +260,7 @@ fi
 
 # --- preflight --------------------------------------------------------------
 
-for tool in "$PYTHON" "$GPG"; do
+for tool in "$AVM_PIN" "$GPG"; do
     [ -x "$tool" ] || { echo "not executable: $tool" >&2; exit 1; }
 done
 
@@ -286,7 +302,7 @@ preflight() {
     done
     if [ -e "$ROOT/$DATA" ] || [ -L "$ROOT/$DATA" ]; then
         [ -d "$ROOT/$DATA" ] || refuse "non-directory destination: $DATA"
-        if ! ( cd "$ROOT" && PATH=$child_path "$PYTHON" "$UPDATER" check "$DATA" >/dev/null ); then
+        if ! ( cd "$ROOT" && PATH=$child_path "$AVM_PIN" rust-toolchain check "$DATA" >/dev/null ); then
             refuse 'partial or unrecognized Rust toolchain data; recover or restore it before publishing'
         fi
     fi
@@ -360,13 +376,14 @@ allocate_work
 preflight
 snapshot_destinations "$work/inputs.before"
 stage_dir=$work/stage
-stage_arguments=(stage --channel "$channel" --current "$ROOT/$DATA" --out "$stage_dir")
+stage_arguments=(rust-toolchain stage --channel "$channel" --current "$ROOT/$DATA"
+    --out "$stage_dir" --dockerfile "$ROOT/$DOCKERFILE")
 if [ -n "$rustup" ]; then stage_arguments+=(--rustup "$rustup"); fi
 if [ -n "$key" ]; then stage_arguments+=(--key "$key"); fi
 if [ -n "$reviewed_on" ]; then stage_arguments+=(--verify-bootstrap-exception "$reviewed_on"); fi
 if [ -n "$reviewer" ]; then stage_arguments+=(--reviewer "$reviewer"); fi
 status=0
-( cd "$ROOT" && PATH=$child_path "$PYTHON" "$UPDATER" "${stage_arguments[@]}" ) \
+( cd "$ROOT" && PATH=$child_path "$AVM_PIN" "${stage_arguments[@]}" ) \
     >"$work/stage.log" 2>&1 || status=$?
 cat "$work/stage.log"
 [ "$status" -eq 0 ] || exit "$status"

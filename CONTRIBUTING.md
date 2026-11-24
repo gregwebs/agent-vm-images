@@ -112,7 +112,8 @@ bash images/build.sh base    # then: bash script/test/node-toolchain.sh agent-vm
 Only `script/dev/upgrade-rust-toolchain.sh` writes
 `examples/layers/rust-dev/data/rust-toolchain/` and the example's
 `ARG RUST_TOOLCHAIN` assertion, on a maintainer host (it refuses
-`GITHUB_ACTIONS=true`; `--check` stays usable offline):
+`GITHUB_ACTIONS=true`; `--check` stays usable offline). Staging is `avm-pin
+rust-toolchain`, so the script compiles the writer from `cmd/avm-pin` in a checkout:
 
 ```bash
 bash script/dev/upgrade-rust-toolchain.sh 1.98.1 --rustup 1.28.2 \
@@ -721,7 +722,13 @@ The fixture tests trace `commit`'s maintenance child, which git 2.30 introduced.
 without dash the gate falls back to `sh -n` with a note, and CI requires dash.
 The Rust fixture suites (`rust-toolchain-pins.py`, `rust-toolchain-maintenance.py`)
 need a real `gpg`, and they run every native child inside an OS boundary instead
-of trusting the Python audit hook. The boundary is the same on both platforms for
+of trusting the Python audit hook. The maintenance suite is also the pin writer's
+differential until slice 4b of #232: every case runs the same tree through `avm-pin
+rust-toolchain` -- which the suite builds itself with `-tags example_fixture`, the
+only way the fixture byte store reaches it -- and through the Python stager, then
+compares status, stdout, stderr and the bytes and modes of every file in the tree.
+It therefore needs `go` before it starts; the `-tags` build is the suite's own act
+and is not reachable from a maintainer run or an image build. The boundary is the same on both platforms for
 the network: off-host traffic is denied and only loopback is usable. Executable
 allowlisting is macOS-only: `sandbox-exec` checks every `exec` against the
 declared paths, so a copy of an allowed binary does not start. Linux needs

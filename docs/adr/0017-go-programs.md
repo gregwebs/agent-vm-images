@@ -120,7 +120,14 @@ helper, and slice 3 (#231) moved `install` as well: the Go helper now fetches th
 seven pinned URLs, preflights the archives with `ulikunitz/xz` `SingleStream` and
 runs rustup, so zero Python runs in the `rust-dev` image build and `python3`
 leaves its apt line. `rust_toolchain.py` stays on disk, byte-identical and never
-mounted into a build, as the host-only oracle and the writer's library until #232.
+mounted into a build, as the host-only oracle until slice 4b of #232. Slice 4a
+already moved the *writer*: `avm-pin rust-toolchain` stages through the layer's
+`toolchain` package, imported by the root module through a local `replace`, so the
+maintainer's writer and the image's installer compile one library. That import is
+what makes the root's `vendor/` carry a copy of the layer's source, so
+`internal/vendordrift` compares the two trees byte for byte offline, and the
+module's import boundary (`os/exec` and `net/http` in one committed list) replaced
+the Python audit hook as the statement of what the writer can reach.
 Two implementations of one rule set is a hazard, so the overlap is held as a
 *differential*: both readers run over the same bytes on every host gate, and a
 differential `install` row runs both from the same fixture bytes, with the Go
