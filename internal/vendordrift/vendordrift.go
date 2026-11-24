@@ -80,10 +80,15 @@ type Options struct {
 // Check derives the closure, asserts it, and compares every file in it.
 func Check(options Options) (Report, error) {
 	var report Report
-	root := options.Root
-	if root == "" {
+	if options.Root == "" {
 		return report, fmt.Errorf("vendordrift: no repository root")
 	}
+	// One spelling for every path this gate compares. `go list` reports resolved
+	// directories, while the caller's root is whatever it typed, so a checkout
+	// reached through a symlinked prefix (`/tmp` and `$HOME` on macOS, t.TempDir
+	// under either) would otherwise be compared against itself and reported as
+	// "not under vendor/". See canonical.
+	root := canonical(options.Root)
 	vendored, layerDir, err := vendoredPackages(root)
 	if err != nil {
 		return report, err
@@ -140,6 +145,21 @@ func Check(options Options) (Report, error) {
 			report.Files, MinFiles)
 	}
 	return report, nil
+}
+
+// canonical is the one spelling of a path this gate compares: absolute, with every
+// symlink resolved. It is the comparison's requirement, not a relaxation -- both
+// sides mean the same file, and only the strings differed.
+func canonical(path string) string {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		absolute = path
+	}
+	resolved, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return absolute
+	}
+	return resolved
 }
 
 // OfflineEnvironment is the gate's environment: vendor mode and no proxy.
@@ -306,7 +326,7 @@ func importedPackages(root string, environment []string, run func(string, []stri
 			!strings.HasPrefix(path, HelperModule) {
 			continue
 		}
-		if !strings.HasPrefix(directory, vendorRoot) {
+		if !strings.HasPrefix(canonical(directory), vendorRoot) {
 			vendorOnly = false
 		}
 	}
