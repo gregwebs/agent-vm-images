@@ -29,7 +29,7 @@ GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp
 # listed file that vanishes fails as `guarded script missing`, and a `.go` file
 # nobody listed fails as `unreviewed helper file`. The vendor tree is deliberately
 # out of this list: its bytes belong to the module's vendor drift gate.
-GUARDED_GO='rust-dev/helper/go.mod rust-dev/helper/go.sum rust-dev/helper/main.go rust-dev/helper/main_test.go rust-dev/helper/imports_test.go rust-dev/helper/seams_fixture.go rust-dev/helper/seams_shipped.go rust-dev/helper/seams_test.go rust-dev/helper/kacheprobe/probe.go rust-dev/helper/kacheprobe/probe_test.go rust-dev/helper/internal/gpg/gpg.go rust-dev/helper/internal/gpg/gpg_test.go rust-dev/helper/internal/strictjson/decode.go rust-dev/helper/internal/strictjson/decode_test.go rust-dev/helper/toolchain/toolchain.go rust-dev/helper/toolchain/policy.go rust-dev/helper/toolchain/types.go rust-dev/helper/toolchain/refusal.go rust-dev/helper/toolchain/decode.go rust-dev/helper/toolchain/pin.go rust-dev/helper/toolchain/inputs.go rust-dev/helper/toolchain/manifest.go rust-dev/helper/toolchain/installed.go rust-dev/helper/toolchain/commands.go rust-dev/helper/toolchain/types_test.go rust-dev/helper/toolchain/decode_test.go rust-dev/helper/toolchain/pin_test.go rust-dev/helper/toolchain/manifest_test.go rust-dev/helper/toolchain/installed_test.go rust-dev/helper/toolchain/fuzz_test.go rust-dev/helper/toolchain/events.go rust-dev/helper/toolchain/preflight.go rust-dev/helper/toolchain/prepare.go rust-dev/helper/toolchain/install.go rust-dev/helper/toolchain/preflight_test.go rust-dev/helper/toolchain/prepare_test.go rust-dev/helper/toolchain/install_test.go rust-dev/helper/toolchain/fuzz_install_test.go rust-dev/helper/helpers_test.go rust-dev/helper/internal/fetch/fetch.go rust-dev/helper/internal/fetch/loopback_fixture.go rust-dev/helper/internal/fetch/fetch_test.go rust-dev/helper/internal/fetch/loopback_fixture_test.go rust-dev/helper/internal/tarwalk/tarwalk.go rust-dev/helper/internal/tarwalk/tarwalk_test.go'
+GUARDED_GO='rust-dev/helper/go.mod rust-dev/helper/go.sum rust-dev/helper/main.go rust-dev/helper/main_test.go rust-dev/helper/imports_test.go rust-dev/helper/seams_fixture.go rust-dev/helper/seams_shipped.go rust-dev/helper/seams_test.go rust-dev/helper/kacheprobe/probe.go rust-dev/helper/kacheprobe/probe_test.go rust-dev/helper/internal/gpg/gpg.go rust-dev/helper/internal/gpg/gpg_test.go rust-dev/helper/internal/strictjson/decode.go rust-dev/helper/internal/strictjson/decode_test.go rust-dev/helper/toolchain/toolchain.go rust-dev/helper/toolchain/policy.go rust-dev/helper/toolchain/types.go rust-dev/helper/toolchain/refusal.go rust-dev/helper/toolchain/decode.go rust-dev/helper/toolchain/pin.go rust-dev/helper/toolchain/inputs.go rust-dev/helper/toolchain/manifest.go rust-dev/helper/toolchain/installed.go rust-dev/helper/toolchain/commands.go rust-dev/helper/toolchain/types_test.go rust-dev/helper/toolchain/decode_test.go rust-dev/helper/toolchain/pin_test.go rust-dev/helper/toolchain/manifest_test.go rust-dev/helper/toolchain/installed_test.go rust-dev/helper/toolchain/fuzz_test.go rust-dev/helper/toolchain/events.go rust-dev/helper/toolchain/preflight.go rust-dev/helper/toolchain/prepare.go rust-dev/helper/toolchain/install.go rust-dev/helper/toolchain/stage.go rust-dev/helper/toolchain/stage_test.go rust-dev/helper/toolchain/preflight_test.go rust-dev/helper/toolchain/prepare_test.go rust-dev/helper/toolchain/install_test.go rust-dev/helper/toolchain/fuzz_install_test.go rust-dev/helper/helpers_test.go rust-dev/helper/internal/fetch/fetch.go rust-dev/helper/internal/fetch/loopback_fixture.go rust-dev/helper/internal/fetch/fetch_test.go rust-dev/helper/internal/fetch/loopback_fixture_test.go rust-dev/helper/internal/tarwalk/tarwalk.go rust-dev/helper/internal/tarwalk/tarwalk_test.go'
 # The rust-dev helper's builder stage. It is a reviewed parent:
 # `images/parent-pins.json` records its digest, and its tag is the root go.mod's
 # toolchain. Both are named by the literals below rather than by a variable, so a
@@ -45,7 +45,7 @@ GUARDED_DATA='chrome-devtools/data/chrome-devtools-mcp.sigstore.json chrome-devt
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=161
+SELF_TEST_CASES=163
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -371,6 +371,30 @@ normalize_instruction() { printf '%s' "$1" | tr -s ' \t' ' ' | sed -e 's/^ //' -
         fail "rust-dev: helper/go.mod's go line ($helper_go) must equal the root go.mod's ($root_go)"
     [ "$helper_toolchain" = "$root_toolchain" ] ||
         fail "rust-dev: helper/go.mod's toolchain ($helper_toolchain) must equal the root go.mod's ($root_toolchain)"
+    # Link 5 -- the root module imports this one (#232), so the root binary and the
+    # layer's build compile one library instead of two copies of the rules. Two
+    # consequences are checked here: the import is a local replace at v0.0.0 (that
+    # is what puts the layer's own source in vendor/, which
+    # internal/vendordrift then compares byte for byte), and every requirement the
+    # two modules share is at one version, because minimal version selection in the
+    # root could otherwise compile the helper against a version the layer's own
+    # build never selects.
+    module_pins() {
+        awk '$1 == "require" && $2 == "(" { block = 1; next }
+             block && $1 == ")" { block = 0; next }
+             block && NF >= 2 { print $1, $2; next }
+             $1 == "require" && NF >= 3 { print $2, $3 }' "$1"
+    }
+    module_pins "$ROOT/go.mod" | grep -qx 'github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper v0.0.0' ||
+        fail 'rust-dev: the root go.mod must require the helper module at v0.0.0'
+    grep -Eq '^replace github\.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper => \./examples/layers/rust-dev/helper$' "$ROOT/go.mod" ||
+        fail 'rust-dev: the root go.mod must replace the helper module with ./examples/layers/rust-dev/helper'
+    shared_mismatch=$(awk 'NR == FNR { rootpins[$1] = $2; next }
+                           $1 in rootpins && rootpins[$1] != $2 {
+                               print "  " $1 ": helper " $2 ", root " rootpins[$1] }' \
+        <(module_pins "$ROOT/go.mod") <(module_pins "$helperdir/go.mod"))
+    [ -z "$shared_mismatch" ] ||
+        fail "rust-dev: the two go.mod files require different versions of a shared module:"$'\n'"$shared_mismatch"
     [ -f "$ROOT/images/parent-pins.json" ] || fail 'rust-dev: missing images/parent-pins.json'
     builder_ref=$(jq -er '.pins["golang-builder"].reference' "$ROOT/images/parent-pins.json") ||
         fail 'rust-dev: images/parent-pins.json carries no golang-builder pin'
@@ -1535,6 +1559,12 @@ INSTRUCTION
             161)
                 printf 'package fetch\n' > "$tree/$LAYERS/rust-dev/helper/internal/fetch/unreviewed.go"
                 expected='unreviewed helper file: rust-dev/helper/internal/fetch/unreviewed.go' ;;
+            162)
+                rewrite "$tree/go.mod" '/^replace github.com\/gregwebs\/agent-vm-images\/examples\/layers\/rust-dev\/helper/d'
+                expected='must replace the helper module with' ;;
+            163)
+                printf '\nrequire (\n\tgithub.com/ulikunitz/xz v0.5.16\n)\n' >> "$tree/go.mod"
+                expected='require different versions of a shared module' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac

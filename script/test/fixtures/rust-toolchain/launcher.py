@@ -93,6 +93,18 @@ def apply_fault(transport, dist) -> None:
     if fault == 'bootstrap-arm64':
         transport.fail(f'https://static.rust-lang.org/rustup/archive/{fixture.RUSTUP_VERSION}'
                        '/aarch64-unknown-linux-gnu/rustup-init', 'fixture endpoint refused')
+    elif fault == 'bootstrap-elf':
+        import hashlib
+        url = (f'https://static.rust-lang.org/rustup/archive/{fixture.RUSTUP_VERSION}'
+               '/aarch64-unknown-linux-gnu/rustup-init')
+        replacement = b'not an elf at all'
+        transport.replace(url, replacement)
+        transport.replace(url + '.sha256',
+                          f'{hashlib.sha256(replacement).hexdigest()} *./rustup-init\n'.encode())
+    elif fault == 'manifest-checksum':
+        transport.replace(
+            f'https://static.rust-lang.org/dist/channel-rust-{fixture.CHANNEL}.toml.sha256',
+            ('0' * 64 + f'  channel-rust-{fixture.CHANNEL}.toml\n').encode())
     elif fault == 'manifest-signature':
         transport.replace(f'https://static.rust-lang.org/dist/channel-rust-'
                           f'{fixture.CHANNEL}.toml.asc', b'not a signature')
@@ -152,9 +164,39 @@ def guard_self_test() -> int:
     return 0 if set(outcomes.values()) == {'denied'} else 1
 
 
+# The publisher now runs `avm-pin rust-toolchain VERB ARGS`. This adapter is the
+# differential's *oracle* side: the maintenance suite puts it on PATH as `avm-pin`
+# when it wants the Python writer, so both writers are reached through the same
+# wrapper, with the same arguments, over the same tree. It translates the verb
+# surface and nothing else -- no staging rule, no argument default.
+ORACLE_VERBS = ('stage', 'check', 'current')
+
+
+def oracle(argv: list[str]) -> int:
+    if argv[:1] != ['rust-toolchain']:
+        print('oracle shim: expected the rust-toolchain verb', file=sys.stderr)
+        return 2
+    argv = argv[1:]
+    if not argv or argv[0] not in ORACLE_VERBS:
+        print('oracle shim: unknown verb', file=sys.stderr)
+        return 2
+    verb, rest, cleaned, index = argv[0], argv[1:], [], 0
+    while index < len(rest):
+        # The Python stager resolves the layer Dockerfile from its own location;
+        # the Go writer is told where it is.
+        if rest[index] == '--dockerfile':
+            index += 2
+            continue
+        cleaned.append(rest[index])
+        index += 1
+    return updater.main([verb] + cleaned, dependencies())
+
+
 def main(argv: list[str]) -> int:
     if argv[:1] == ['--guard-self-test']:
         return guard_self_test()
+    if argv[:1] == ['--oracle']:
+        return oracle(argv[1:])
     if not argv:
         return 2
     if argv[0].endswith('rust-toolchain-update.py'):

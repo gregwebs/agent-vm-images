@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
-"""Fault table for the Rust example's maintenance writer.
+"""Fault table and differential for the Rust example's maintenance writer.
 
-The shell writer and the real stager are driven in temporary repository trees.
+Every case runs the *same tree* through both writers and compares them before it
+asserts anything of its own: the shipped `avm-pin rust-toolchain` (built with the
+`example_fixture` tag, which is how the fixture byte store reaches it) and the
+Python stager it replaced, reached through a test-owned `avm-pin` adapter that
+translates the verb surface and nothing else. Status, stdout, stderr and the bytes
+and modes of every file in the tree must agree.
+
+The oracle is alive only for slice 4a of #187: the intent is that the Python is
+deleted in 4b, at which point these comparisons become frozen golden data and the
+suite loses the ability to disagree with a second implementation. That is weaker
+than this file is today, and the header will say so when it happens.
+
 Only external I/O is substituted: the transport serves the signed fixture
-distribution, and a test-owned ``python3`` launcher (first on the writer's PATH)
-imports the real updater/example modules and supplies those dependencies. The
-publication transaction, its rollback, the refusal rules and the signal states
-are the shipped code.
+distribution, and the launcher supplies those dependencies. The publication
+transaction, its rollback, the refusal rules and the signal states are the shipped
+code.
 """
 from __future__ import annotations
 
@@ -34,7 +44,28 @@ import rust_toolchain as model  # noqa: E402
 
 Failures: list[str] = []
 Passed = 0
+# Comparisons keeps the differential honest the way Passed keeps the cases honest:
+# a suite that compared nothing cannot pass.
+Comparisons = 0
+# FilesCompared is the differential's other half: the comparisons above count
+# calls, this counts the files those calls actually compared, so an emptied
+# snapshot cannot leave the suite green.
+FilesCompared = 0
+RetainedCompared = 0
+# The floors below are reviewed numbers, not minima found by trial: every tree
+# this suite builds starts with the five files tree() copies, and the 28 comparisons
+# compare well over three hundred files between them.
+MIN_TREE_FILES = 5
+# FilesCompared counts *pairs*: one file compared in both trees, not two observations
+# of one file, and recovery material is counted separately below.
+MIN_FILES_COMPARED = 300
+# Recovery material is compared on the rows that retain it: the plan, the marker,
+# the backups and their directory. A snapshot short of these is red, so an emptied
+# recovery snapshot cannot pass.
+MIN_RETAINED_FILES = 4
+MIN_RETAINED_COMPARED = 8
 FAKE_PYTHON = 'python3'
+WRITERS = ('go', 'oracle')
 STAGER = 'script/dev/rust-toolchain-update.py'
 
 
@@ -64,12 +95,17 @@ def tree(root: Path, fixture_root: driver.Fixture, launcher: Path) -> Path:
     return root
 
 
-def environment(fixture_root: driver.Fixture, tree_root: Path, launcher_dir: Path) -> dict:
-    # The launcher directory comes first so the writer's ``resolve_tool python3``
-    # picks the test-owned launcher; the real gpg directory follows it untouched.
-    path = ':'.join([str(launcher_dir), os.path.dirname(fixture.gpg_path()),
-                     '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'])
-    env = {'PATH': path,
+def environment(fixture_root: driver.Fixture, tree_root: Path, writer_dir: Path,
+                path_prefix: Path | None = None) -> dict:
+    # The writer's own directory comes first, so the publisher's
+    # ``resolve_tool avm-pin`` picks this run's writer; the real gpg directory
+    # follows it untouched. A case that needs a host-tool shim (mkdir, cp) puts it
+    # in front of both.
+    entries = [str(writer_dir), os.path.dirname(fixture.gpg_path()),
+               '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin']
+    if path_prefix is not None:
+        entries.insert(0, str(path_prefix))
+    env = {'PATH': ':'.join(entries),
            'HOME': os.environ.get('HOME', '/tmp'),
            'FIXTURE_DIST': str(fixture_root.dist.root.parent),
            'FIXTURE_FIXTURES': str(FIXTURES),
@@ -80,22 +116,167 @@ def environment(fixture_root: driver.Fixture, tree_root: Path, launcher_dir: Pat
     return env
 
 
-def writer_check(fixture_root: driver.Fixture, tree_root: Path, launcher_dir: Path) -> bool:
+def writer_check(fixture_root: driver.Fixture, tree_root: Path, writers: dict[str, Path]) -> bool:
     """The tree holds one complete, self-consistent pinned set."""
-    env = environment(fixture_root, tree_root, launcher_dir)
+    env = environment(fixture_root, tree_root, writers['go'])
     return subprocess.run(['bash', str(tree_root / 'script/dev/upgrade-rust-toolchain.sh'),
                            '--check'], cwd=str(tree_root), env=env, capture_output=True,
                           text=True, timeout=300).returncode == 0
 
 
-def run_writer(fixture_root: driver.Fixture, tree_root: Path, launcher_dir: Path,
-               arguments: list[str], env_extra: dict | None = None,
-               timeout: int = 300) -> subprocess.CompletedProcess:
-    env = environment(fixture_root, tree_root, launcher_dir)
+# --- the differential ---------------------------------------------------------
+# Both writers are reached through the same wrapper, over byte-identical trees, so
+# the wrapper's own diagnostics are compared too. Only the two writers' private
+# scratch names are normalized: they are the one thing a run cannot be asked to
+# reproduce.
+
+VOLATILE = (
+    (re.compile(r'rust-stage-[A-Za-z0-9_]+'), '<STAGE>'),
+    (re.compile(r'upgrade-rust-toolchain\.[A-Za-z0-9]+'), '<WORK>'),
+)
+
+
+def normalize(text: str, tree_root: Path) -> str:
+    text = text.replace(str(tree_root), '<TREE>')
+    for pattern, replacement in VOLATILE:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def oracle_tree(tree_root: Path) -> Path:
+    """A byte copy of the tree as the case left it, for the oracle writer."""
+    copy = tree_root.parent / (tree_root.name + '-oracle')
+    if copy.exists():
+        shutil.rmtree(copy)
+    shutil.copytree(tree_root, copy, symlinks=True)
+    return copy
+
+
+def run_one(writers: dict[str, Path], writer: str, fixture_root: driver.Fixture,
+            tree_root: Path, arguments: list[str], env_extra: dict | None = None,
+            timeout: int = 300, path_prefix: Path | None = None,
+            signal_after: float | None = None) -> subprocess.CompletedProcess:
+    env = environment(fixture_root, tree_root, writers[writer], path_prefix)
     env.update(env_extra or {})
-    return subprocess.run(['bash', str(tree_root / 'script/dev/upgrade-rust-toolchain.sh'),
-                           *arguments], cwd=str(tree_root), env=env, capture_output=True,
-                          text=True, timeout=timeout)
+    argv = ['bash', str(tree_root / 'script/dev/upgrade-rust-toolchain.sh'), *arguments]
+    if signal_after is None:
+        return subprocess.run(argv, cwd=str(tree_root), env=env, capture_output=True,
+                              text=True, timeout=timeout)
+    process = subprocess.Popen(argv, cwd=str(tree_root), env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True)
+    time.sleep(signal_after)
+    process.send_signal(signal.SIGTERM)
+    stdout, stderr = process.communicate(timeout=timeout)
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
+def retained_snapshot(path: Path, tree_root: Path) -> dict[str, tuple[int, str]]:
+    """Bytes and modes of one writer's retained recovery material.
+
+    The two runs' paths differ by construction, and `recovery.json` names them, so
+    each run's own two strings are substituted before hashing. That is the one
+    normalization here; the structure, the modes, the backups and the marker are
+    compared as they are.
+    """
+    snapshot = {}
+    for file in sorted(path.rglob('*')):
+        if not file.is_file():
+            continue
+        raw = file.read_bytes()
+        # The plan is the one file that names the run's own absolute paths. Every
+        # other byte of every other file is compared exactly, so two backups with
+        # different contents cannot compare equal because each carries its own path.
+        if file.name == 'recovery.json':
+            for value, replacement in ((str(path), '<WORK>'), (str(tree_root), '<TREE>')):
+                raw = raw.replace(value.encode(), replacement.encode())
+        snapshot[file.relative_to(path).as_posix()] = (file.stat().st_mode & 0o7777,
+                                                       hashlib.sha256(raw).hexdigest())
+    return snapshot
+
+
+def run_direct(writers: dict[str, Path], writer: str, fixture_root: driver.Fixture,
+               tree_root: Path, argv: list[str]) -> subprocess.CompletedProcess:
+    """One writer's own verb, with no publisher in front of it.
+
+    The two declared divergences below are direct-verb divergences: the shell
+    wrapper refuses before either can be reached, so a case that went through it
+    would compare the wrapper's behaviour instead of the writer's.
+    """
+    env = environment(fixture_root, tree_root, writers[writer])
+    return subprocess.run([str(writers[writer] / 'avm-pin'), *argv], cwd=str(tree_root),
+                          env=env, capture_output=True, text=True, timeout=300)
+
+
+def compare_writers(arguments: list[str], go_tree: Path, go: subprocess.CompletedProcess,
+                    oracle_root: Path, oracle: subprocess.CompletedProcess) -> None:
+    global Comparisons, FilesCompared, RetainedCompared
+    label = ' '.join(arguments) if arguments else '(no arguments)'
+    problems = []
+    if go.returncode != oracle.returncode:
+        problems.append(f'status {go.returncode} != {oracle.returncode}')
+    for stream in ('stdout', 'stderr'):
+        if normalize(getattr(go, stream), go_tree) != normalize(getattr(oracle, stream),
+                                                                oracle_root):
+            problems.append(f'{stream} differs:\n  go:     '
+                            f'{normalize(getattr(go, stream), go_tree)[-400:]!r}\n  oracle: '
+                            f'{normalize(getattr(oracle, stream), oracle_root)[-400:]!r}')
+    go_files, oracle_files = full_snapshot(go_tree), full_snapshot(oracle_root)
+    # A snapshot that is empty, or short of the files every tree starts with, means
+    # the comparison ran over nothing -- which is how an emptied snapshot used to
+    # stay green.
+    for label, snapshot in (('go', go_files), ('oracle', oracle_files)):
+        if len(snapshot) < MIN_TREE_FILES:
+            problems.append(f'the {label} tree snapshot has {len(snapshot)} files, want at '
+                            f'least {MIN_TREE_FILES}')
+    FilesCompared += min(len(go_files), len(oracle_files))
+    differing = sorted(name for name in set(go_files) | set(oracle_files)
+                       if go_files.get(name) != oracle_files.get(name))
+    if differing:
+        problems.append(f'{len(differing)} written file(s) differ: {differing[:4]}')
+    # Retention: a status-3 or interrupted run leaves its recovery material behind,
+    # and both writers must leave the same material -- the map, the backups and the
+    # markers -- not merely the same exit status. The oracle's tree is removed after
+    # the comparison; the shipped writer's is left for the row that owns the case.
+    go_retained, oracle_retained = retained_work(go), retained_work(oracle)
+    if (go_retained is None) != (oracle_retained is None):
+        problems.append(f'one writer retained recovery material and the other did not: '
+                        f'go={go_retained}, oracle={oracle_retained}')
+    elif go_retained is not None:
+        retained_go = retained_snapshot(go_retained, go_tree)
+        retained_oracle = retained_snapshot(oracle_retained, oracle_root)
+        for label, snapshot in (('go', retained_go), ('oracle', retained_oracle)):
+            if len(snapshot) < MIN_RETAINED_FILES:
+                problems.append(f'the {label} recovery snapshot has {len(snapshot)} files, '
+                                f'want at least {MIN_RETAINED_FILES}')
+        RetainedCompared += min(len(retained_go), len(retained_oracle))
+        if retained_go != retained_oracle:
+            names = sorted(name for name in set(retained_go) | set(retained_oracle)
+                           if retained_go.get(name) != retained_oracle.get(name))
+            problems.append(f'{len(names)} retained file(s) differ: {names[:4]}')
+        shutil.rmtree(oracle_retained, ignore_errors=True)
+    check(f'differential [{label}]: the two writers agree', not problems,
+          '; '.join(problems))
+    Comparisons += 1
+
+
+def run_writer(fixture_root: driver.Fixture, tree_root: Path, writers: dict[str, Path],
+               arguments: list[str], env_extra: dict | None = None, timeout: int = 300,
+               path_prefix: Path | None = None,
+               signal_after: float | None = None) -> subprocess.CompletedProcess:
+    """Run both writers over the same tree and return the shipped writer's run.
+
+    The oracle tree is copied *after* the case has set the tree up, so a case that
+    planted a corrupted publisher or a pinned set hands both writers the same
+    input. Every assertion that follows the call is therefore an assertion about
+    the shipped writer, with the comparison already made.
+    """
+    oracle_root = oracle_tree(tree_root)
+    go = run_one(writers, 'go', fixture_root, tree_root, arguments, env_extra, timeout,
+                 path_prefix, signal_after)
+    oracle = run_one(writers, 'oracle', fixture_root, oracle_root, arguments, env_extra,
+                     timeout, path_prefix, signal_after)
+    compare_writers(arguments, tree_root, go, oracle_root, oracle)
+    return go
 
 
 def snapshot(directory: Path) -> dict[str, str]:
@@ -211,15 +392,53 @@ def destination_copies(log: Path, data: Path, dockerfile: Path) -> list[str]:
     return found
 
 
-def write_launcher(launcher_dir: Path) -> None:
-    launcher_dir.mkdir(parents=True, exist_ok=True)
-    (launcher_dir / 'launcher.py').write_text(
-        (Path(__file__).resolve().parent / 'fixtures' / 'rust-toolchain' / 'launcher.py')
-        .read_text())
-    shim = launcher_dir / FAKE_PYTHON
-    shim.write_text('#!/bin/sh\n'
-                    f'exec "{sys.executable}" "$(dirname "$0")/launcher.py" "$@"\n')
-    shim.chmod(0o755)
+def write_writers(root: Path) -> dict[str, Path]:
+    """The two writers, each in a directory the publisher's PATH can name.
+
+    ``go`` is the shipped writer built with the ``example_fixture`` tag -- the tag
+    is what lets the fixture byte store reach it, and it is a deliberate act of
+    this suite, never something a maintainer's run can pass. ``oracle`` is the
+    Python stager behind an adapter that translates the verb surface only.
+    """
+    # The suite builds and runs the Go child directly, so it must consult the
+    # import boundary first: the static gate is what says which sources the shipped
+    # writer may be built from, and an end-to-end runner that skips it would launder
+    # a file the gate rejects (a reviewer's `os/exec` + `init` in `cmd/avm-pin` ran a
+    # program while this suite was green). One offline `go test`, before any writer
+    # is built, and the suite stops here if the boundary is broken.
+    boundary = subprocess.run(
+        ['go', 'test', '-count=1', '-run', 'TestImportsAreReviewed', '.'],
+        cwd=str(driver.REPOSITORY_ROOT / 'examples' / 'layers' / 'rust-dev' / 'helper'),
+        capture_output=True, text=True,
+        env=dict(os.environ, GOFLAGS='-mod=vendor', GOPROXY='off'))
+    if boundary.returncode != 0:
+        raise SystemExit('the writer import boundary is broken; refusing to run the writer:\n'
+                         + boundary.stdout[-2000:] + boundary.stderr[-2000:])
+    writers = {}
+    for name in WRITERS:
+        directory = root / f'bin-{name}'
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / 'launcher.py').write_text(
+            (Path(__file__).resolve().parent / 'fixtures' / 'rust-toolchain'
+             / 'launcher.py').read_text())
+        python = directory / FAKE_PYTHON
+        python.write_text('#!/bin/sh\n'
+                          f'exec "{sys.executable}" "$(dirname "$0")/launcher.py" "$@"\n')
+        python.chmod(0o755)
+        writers[name] = directory
+    binary = writers['go'] / 'avm-pin'
+    build = subprocess.run(['go', 'build', '-trimpath', '-buildvcs=false',
+                            '-tags', 'example_fixture', '-o', str(binary),
+                            './cmd/avm-pin'],
+                           cwd=str(driver.REPOSITORY_ROOT), capture_output=True, text=True,
+                           env=dict(os.environ, GOFLAGS='-mod=vendor', GOPROXY='off'))
+    if build.returncode != 0:
+        raise SystemExit(f'cannot build the fixture avm-pin: {build.stderr[-2000:]}')
+    adapter = writers['oracle'] / 'avm-pin'
+    adapter.write_text('#!/bin/sh\n'
+                       f'exec "{sys.executable}" "$(dirname "$0")/launcher.py" --oracle "$@"\n')
+    adapter.chmod(0o755)
+    return writers
 
 
 # Only caches this suite creates are its concern: contracts.sh runs other suites
@@ -234,18 +453,17 @@ def main() -> int:
     _BYTECODE_BEFORE = {str(path) for relative in BYTECODE_ROOTS
                         for path in (driver.REPOSITORY_ROOT / relative).glob('__pycache__')}
     root = Path(tempfile.mkdtemp(prefix='rust-toolchain-maintenance-')).resolve()
-    launcher_dir = root / 'bin'
+    writers = write_writers(root)
     try:
-        write_launcher(launcher_dir)
         fixture_root = driver.build(root / 'fixture')
         key = str(fixture_root.dist.key)
 
         # --- first adoption ---------------------------------------------------
         print('first adoption')
-        work = tree(root / 'repo-first', fixture_root, launcher_dir)
+        work = tree(root / 'repo-first', fixture_root, writers['go'])
         data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         added = Path(work / 'examples/layers/rust-dev/data/rust-toolchain/evidence')
-        result = run_writer(fixture_root, work, launcher_dir,
+        result = run_writer(fixture_root, work, writers,
                             [fixture.CHANNEL, '--rustup', fixture.RUSTUP_VERSION,
                              '--key', key, '--review-bootstrap-exception', '2026-01-02',
                              '--reviewer', 'fixture-reviewer'])
@@ -263,14 +481,14 @@ def main() -> int:
         # --- idempotent repeat ------------------------------------------------
         print('idempotent repeat')
         before = snapshot(data)
-        result = run_writer(fixture_root, work, launcher_dir, [fixture.CHANNEL])
+        result = run_writer(fixture_root, work, writers, [fixture.CHANNEL])
         check('repeat run reports unchanged', 'unchanged' in result.stdout, result.stdout[-300:])
         check('repeat run changed no committed bytes', snapshot(data) == before)
         check('repeat run exit 0', result.returncode == 0, result.stderr[-300:])
 
         # --- --check is offline and CI-safe ----------------------------------
         print('--check')
-        result = run_writer(fixture_root, work, launcher_dir, ['--check'],
+        result = run_writer(fixture_root, work, writers, ['--check'],
                             {'GITHUB_ACTIONS': 'true'})
         check('--check passes under GITHUB_ACTIONS', result.returncode == 0,
               result.stderr[-300:])
@@ -279,21 +497,21 @@ def main() -> int:
 
         # --- CI refusal, usage ------------------------------------------------
         print('refusals')
-        result = run_writer(fixture_root, work, launcher_dir, [fixture.CHANNEL],
+        result = run_writer(fixture_root, work, writers, [fixture.CHANNEL],
                             {'GITHUB_ACTIONS': 'true'})
         check('publishing under GITHUB_ACTIONS is refused with status 2',
               result.returncode == 2, result.stderr[-200:])
-        result = run_writer(fixture_root, work, launcher_dir, ['latest'])
+        result = run_writer(fixture_root, work, writers, ['latest'])
         check('a floating channel is refused with status 2', result.returncode == 2)
-        result = run_writer(fixture_root, work, launcher_dir, [])
+        result = run_writer(fixture_root, work, writers, [])
         check('missing channel is usage (status 2)', result.returncode == 2)
 
         # --- partial pinned state --------------------------------------------
         print('partial state')
-        broken = tree(root / 'repo-partial', fixture_root, launcher_dir)
+        broken = tree(root / 'repo-partial', fixture_root, writers['go'])
         shutil.copytree(data, broken / 'examples/layers/rust-dev/data/rust-toolchain')
         (broken / 'examples/layers/rust-dev/data/rust-toolchain/pin.json').unlink()
-        result = run_writer(fixture_root, broken, launcher_dir,
+        result = run_writer(fixture_root, broken, writers,
                             [fixture.CHANNEL, '--rustup', fixture.RUSTUP_VERSION,
                              '--key', key, '--review-bootstrap-exception', '2026-01-02',
                              '--reviewer', 'fixture-reviewer'])
@@ -307,18 +525,19 @@ def main() -> int:
                 ('second architecture bootstrap', 'bootstrap-arm64'),
                 ('last component signature', 'last-signature'),
                 ('manifest signature', 'manifest-signature'),
+                ('manifest checksum line', 'manifest-checksum'),
+                ('second architecture bootstrap identity', 'bootstrap-elf'),
                 ('wrong archive digest', 'archive-digest'),
         ):
-            work = tree(root / f'repo-{setup}', fixture_root, launcher_dir)
+            work = tree(root / f'repo-{setup}', fixture_root, writers['go'])
             data = work / 'examples/layers/rust-dev/data/rust-toolchain'
             shutil.copytree(fixture_root.pinned, data)
             before = snapshot(data)
             recovery_before = recovery_material()
             dockerfile_before = (work / 'examples/layers/rust-dev/Dockerfile').read_bytes()
-            result = run_writer(fixture_root, work, launcher_dir,
+            result = run_writer(fixture_root, work, writers,
                                 [fixture.CHANNEL, '--rustup', fixture.RUSTUP_VERSION],
-                                dict(environment(fixture_root, work, launcher_dir),
-                                     FIXTURE_FAULT=setup))
+                                {'FIXTURE_FAULT': setup})
             check(f'{label}: staging fails', result.returncode != 0, result.stdout[-200:])
             check(f'{label}: no destination changed', snapshot(data) == before)
             check(f'{label}: Dockerfile unchanged',
@@ -330,16 +549,13 @@ def main() -> int:
 
         # --- renewed bootstrap review ----------------------------------------
         print('bootstrap exception renewal')
-        work = tree(root / 'repo-renew', fixture_root, launcher_dir)
+        work = tree(root / 'repo-renew', fixture_root, writers['go'])
         data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         shutil.copytree(fixture_root.pinned, data)
         # Upstream bootstrap bytes change: the committed exception no longer
         # describes them, so the writer must demand a renewed review.
-        faulted = dict(environment(fixture_root, work, launcher_dir),
-                       FIXTURE_FAULT='bootstrap-bytes')
-        result = subprocess.run(['bash', str(work / 'script/dev/upgrade-rust-toolchain.sh'),
-                                 fixture.CHANNEL], cwd=str(work), env=faulted,
-                                capture_output=True, text=True)
+        faulted = {'FIXTURE_FAULT': 'bootstrap-bytes'}
+        result = run_writer(fixture_root, work, writers, [fixture.CHANNEL], faulted)
         check('changed bootstrap identity without review is refused',
               result.returncode == 1 and 'hash-only bootstrap exception requires renewed review'
               in result.stdout + result.stderr, result.stdout[-300:] + result.stderr[-300:])
@@ -347,10 +563,9 @@ def main() -> int:
               '-> new' in result.stdout + result.stderr)
         check('refused renewal left the committed pin byte-identical',
               snapshot(data) == driver.digest_tree(fixture_root.pinned))
-        result = subprocess.run(['bash', str(work / 'script/dev/upgrade-rust-toolchain.sh'),
-                                 fixture.CHANNEL, '--review-bootstrap-exception', '2026-02-03',
-                                 '--reviewer', 'second-reviewer'], cwd=str(work), env=faulted,
-                                capture_output=True, text=True)
+        result = run_writer(fixture_root, work, writers,
+                            [fixture.CHANNEL, '--review-bootstrap-exception', '2026-02-03',
+                             '--reviewer', 'second-reviewer'], faulted)
         check('an explicit reviewed renewal publishes a visible proposal',
               result.returncode == 0, result.stdout[-400:] + result.stderr[-300:])
         document = json.loads((data / 'pin.json').read_text())
@@ -362,14 +577,14 @@ def main() -> int:
         print('first adoption publication failure')
         args = [fixture.CHANNEL, '--rustup', fixture.RUSTUP_VERSION, '--key', key,
                 '--review-bootstrap-exception', '2026-01-02', '--reviewer', 'fixture-reviewer']
-        work = tree(root / 'repo-adopt-fail', fixture_root, launcher_dir)
+        work = tree(root / 'repo-adopt-fail', fixture_root, writers['go'])
         data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         dockerfile = work / 'examples/layers/rust-dev/Dockerfile'
         dockerfile_before = dockerfile.read_bytes()
         publisher = work / 'script/build/transactional-publish.sh'
         publisher_original = publisher.read_text()
         publisher.write_text(fail_last_destination(publisher_original))
-        result = run_writer(fixture_root, work, launcher_dir, args)
+        result = run_writer(fixture_root, work, writers, args)
         check('first adoption: failed publication exits 1', result.returncode == 1,
               result.stdout[-300:] + result.stderr[-300:])
         check('first adoption: no pinned file survives the rollback',
@@ -381,7 +596,7 @@ def main() -> int:
         check('first adoption: the Dockerfile is unchanged',
               dockerfile.read_bytes() == dockerfile_before)
         publisher.write_text(publisher_original)
-        result = run_writer(fixture_root, work, launcher_dir, args)
+        result = run_writer(fixture_root, work, writers, args)
         check('first adoption: a clean retry after the failed rollback succeeds',
               result.returncode == 0, result.stdout[-400:] + result.stderr[-300:])
         check('first adoption: the retry published the pin', (data / 'pin.json').is_file())
@@ -389,15 +604,11 @@ def main() -> int:
         # --- interruption and failure during directory creation --------------
         print('interruption during directory creation')
         for label, mode, expected in (('signal', 'signal', 143), ('failure', 'fail', 1)):
-            work = tree(root / f'repo-dirs-{mode}', fixture_root, launcher_dir)
+            work = tree(root / f'repo-dirs-{mode}', fixture_root, writers['go'])
             data = work / 'examples/layers/rust-dev/data/rust-toolchain'
             shim_dir = write_mkdir_shim(root / f'shim-{mode}', mode)
-            env = environment(fixture_root, work, launcher_dir)
             recovery_before = recovery_material()
-            env['PATH'] = f'{shim_dir}:{env["PATH"]}'
-            result = subprocess.run(
-                ['bash', str(work / 'script/dev/upgrade-rust-toolchain.sh'), *args],
-                cwd=str(work), env=env, capture_output=True, text=True, timeout=300)
+            result = run_writer(fixture_root, work, writers, args, path_prefix=shim_dir)
             check(f'directory creation {label}: exits {expected}',
                   result.returncode == expected,
                   f'({result.returncode}) {result.stdout[-200:]}{result.stderr[-300:]}')
@@ -414,7 +625,7 @@ def main() -> int:
         second = root / 'fixture-second'
         fixture.save(second, fixture.respawn(fixture_root.dist, second))
         fixture_second = driver.load_fixture(second, fixture_root.pinned)
-        work = tree(root / 'repo-rollback', fixture_second, launcher_dir)
+        work = tree(root / 'repo-rollback', fixture_second, writers['go'])
         data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         shutil.copytree(fixture_root.pinned, data)
         dockerfile = work / 'examples/layers/rust-dev/Dockerfile'
@@ -429,7 +640,7 @@ def main() -> int:
         # The failing copy truncates its destination first: that is the partial
         # write the publisher must repair, not a copy that never started.
         publisher.write_text(truncate_then_fail(publisher_original))
-        result = run_writer(fixture_second, work, launcher_dir, [fixture.CHANNEL],
+        result = run_writer(fixture_second, work, writers, [fixture.CHANNEL],
                             {'FIXTURE_WRITES_LOG': str(writes)})
         check('failed publication exits 1', result.returncode == 1,
               result.stdout[-400:] + result.stderr[-400:])
@@ -444,7 +655,7 @@ def main() -> int:
 
         # The same fault against a publisher with rollback disabled must fail the
         # assertions above; that is what makes them a rollback oracle.
-        work = tree(root / 'repo-no-rollback', fixture_second, launcher_dir)
+        work = tree(root / 'repo-no-rollback', fixture_second, writers['go'])
         data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         shutil.copytree(fixture_root.pinned, data)
         dockerfile = work / 'examples/layers/rust-dev/Dockerfile'
@@ -454,7 +665,7 @@ def main() -> int:
         publisher.write_text(
             truncate_then_fail(publisher.read_text()).replace(
                 'for ((j=i; j>=0; j--)); do', 'for ((j=-1; j>=0; j--)); do'))
-        result = run_writer(fixture_second, work, launcher_dir, [fixture.CHANNEL],
+        result = run_writer(fixture_second, work, writers, [fixture.CHANNEL],
                             {'FIXTURE_WRITES_LOG': str(writes)})
         check('the no-rollback control still reports a failure', result.returncode != 0)
         check('the rollback oracle rejects a publisher that does not roll back',
@@ -464,7 +675,7 @@ def main() -> int:
 
         # --- incomplete backup: zero writes, zero restoration ----------------
         print('incomplete backup')
-        work = tree(root / 'repo-backup-fail', fixture_second, launcher_dir)
+        work = tree(root / 'repo-backup-fail', fixture_second, writers['go'])
         data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         shutil.copytree(fixture_root.pinned, data)
         dockerfile = work / 'examples/layers/rust-dev/Dockerfile'
@@ -472,12 +683,8 @@ def main() -> int:
         before = full_snapshot(data)
         copies = root / 'backup-copies.log'
         cp_dir = write_cp_shim(root / 'shim-cp')
-        env = environment(fixture_second, work, launcher_dir)
-        env['PATH'] = f'{cp_dir}:{env["PATH"]}'
-        env['FIXTURE_COPIES_LOG'] = str(copies)
-        result = subprocess.run(
-            ['bash', str(work / 'script/dev/upgrade-rust-toolchain.sh'), fixture.CHANNEL],
-            cwd=str(work), env=env, capture_output=True, text=True, timeout=300)
+        result = run_writer(fixture_second, work, writers, [fixture.CHANNEL],
+                            {'FIXTURE_COPIES_LOG': str(copies)}, path_prefix=cp_dir)
         check('a failed backup exits 1', result.returncode == 1,
               result.stdout[-300:] + result.stderr[-300:])
         check('a failed backup copies nothing into a destination',
@@ -489,7 +696,7 @@ def main() -> int:
 
         # --- restoration failure: status 3 with usable recovery evidence -----
         print('restoration failure')
-        work = tree(root / 'repo-restore-fail', fixture_second, launcher_dir)
+        work = tree(root / 'repo-restore-fail', fixture_second, writers['go'])
         data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         shutil.copytree(fixture_root.pinned, data)
         blocked = data / 'evidence/rustup-amd64.sha256'
@@ -497,7 +704,7 @@ def main() -> int:
         os.chmod(blocked, 0o400)
         retained = None
         try:
-            result = run_writer(fixture_second, work, launcher_dir, [fixture.CHANNEL])
+            result = run_writer(fixture_second, work, writers, [fixture.CHANNEL])
             retained = retained_work(result)
             check('a failed restoration exits 3', result.returncode == 3,
                   f'({result.returncode}) {result.stdout[-300:]}{result.stderr[-300:]}')
@@ -535,7 +742,7 @@ def main() -> int:
                        'interrupted while taking backups'),
         }
         for label, (where, needle, replacement, code, message) in windows.items():
-            work = tree(root / f'repo-signal-{label}', fixture_second, launcher_dir)
+            work = tree(root / f'repo-signal-{label}', fixture_second, writers['go'])
             data = work / 'examples/layers/rust-dev/data/rust-toolchain'
             shutil.copytree(fixture_root.pinned, data)
             before = full_snapshot(data)
@@ -547,7 +754,7 @@ def main() -> int:
             target.write_text(original.replace(needle, replacement, 1))
             retained = None
             try:
-                result = run_writer(fixture_second, work, launcher_dir, [fixture.CHANNEL])
+                result = run_writer(fixture_second, work, writers, [fixture.CHANNEL])
                 retained = retained_work(result)
                 check(f'signal {label}: exits {code}', result.returncode == code,
                       f'({result.returncode}) {result.stdout[-200:]}{result.stderr[-300:]}')
@@ -575,7 +782,7 @@ def main() -> int:
                 ('decided-window', 'writer', 'decided=1\npublishing=0',
                  'decided=1\npublishing=0\nkill -TERM $$', 3, 'undecided'),
         ):
-            work = tree(root / f'repo-signal-{label}', fixture_second, launcher_dir)
+            work = tree(root / f'repo-signal-{label}', fixture_second, writers['go'])
             data = work / 'examples/layers/rust-dev/data/rust-toolchain'
             shutil.copytree(fixture_root.pinned, data)
             before = full_snapshot(data)
@@ -588,7 +795,7 @@ def main() -> int:
             target.write_text(original.replace(needle, replacement, 1))
             retained = None
             try:
-                result = run_writer(fixture_second, work, launcher_dir, [fixture.CHANNEL])
+                result = run_writer(fixture_second, work, writers, [fixture.CHANNEL])
                 retained = retained_work(result)
                 check(f'signal {label}: exits {code}', result.returncode == code,
                       f'({result.returncode}) {result.stdout[-200:]}{result.stderr[-400:]}')
@@ -600,7 +807,7 @@ def main() -> int:
                 check(f'signal {label}: sources are unchanged or a complete published set',
                       (full_snapshot(data) == before and
                        (dockerfile.read_bytes(), dockerfile.stat().st_mode) == dockerfile_before)
-                      or writer_check(fixture_second, work, launcher_dir),
+                      or writer_check(fixture_second, work, writers),
                       snapshot_difference(before, full_snapshot(data)))
                 check(f'signal {label}: recovery material is retained',
                       retained is not None and (retained / 'recovery.json').is_file(),
@@ -609,14 +816,102 @@ def main() -> int:
                 if retained is not None:
                     shutil.rmtree(retained, ignore_errors=True)
 
+        # --- declared divergences --------------------------------------------
+        # The two places the Go writer deliberately reads differently from the
+        # Python stager, declared here where the reader looks rather than only in a
+        # PR body. Each witness turns RED when the divergence closes, so a
+        # declaration cannot outlive the difference it describes.
+        #
+        # 1. `current` on an unusable pin directory. The Python entrypoint calls
+        #    `load_pin` with nothing above it, so an `OSError` from the read (a
+        #    directory where a file must be; permission-denied behaves the same way
+        #    for a non-root uid) escapes as a traceback with status 1. The Go verb
+        #    turns `LoadPin`'s refusal into one `rust_toolchain: ` line with status
+        #    1. The *reason* differs for the same class of input, and status agrees.
+        #    The directory case is used because it is deterministic whatever uid the
+        #    suite runs as; permission-denied is the same shape but proves nothing
+        #    as root.
+        # 2. `stage --reviewer ""`. The source writer only treats `None` as absent,
+        #    so an empty reviewer is carried into the exception and the *loader*
+        #    refuses it later (status 1). The Go verb refuses the pair up front
+        #    (status 2), because the flag was given and is empty rather than absent.
+        #    Again a direct-verb divergence: `upgrade-rust-toolchain.sh` refuses an
+        #    empty `--reviewer` as usage before either writer runs.
+        # --- control: the retained comparison is exact outside the plan --------
+        # The claim "only recovery.json is normalized" is worth a test rather than a
+        # comment. Two directories whose plan files name different run paths but
+        # whose backups hold the same bytes must compare EQUAL (the substitution
+        # works), and the same two with one backup byte changed must compare
+        # DIFFERENT (nothing else is substituted). Widening the normalization to
+        # every file makes the second check fail, which is exactly the defect a
+        # reviewer found here.
+        print('retained comparison control')
+        first, second = root / 'retained-a', root / 'retained-b'
+        for directory in (first, second):
+            plan = str(directory.resolve())
+            (directory / 'publish-backup').mkdir(parents=True)
+            (directory / 'recovery.json').write_text(
+                json.dumps({'work': plan, 'destinations': [
+                    {'path': f'{plan}/pin.json', 'existed': 'no', 'backup': '0'}]}))
+            (directory / 'publish-backup' / '0').write_bytes(b'the same backup bytes')
+        same = (retained_snapshot(first, first) == retained_snapshot(second, second))
+        check('retained control: plans naming different run paths compare equal', same)
+        # A backup whose bytes carry its own run path: two runs, so two different
+        # byte strings. They are still different material and must be reported;
+        # substituting the path in every file would call them equal.
+        (first / 'publish-backup' / '0').write_bytes(b'note ' + str(first.resolve()).encode())
+        (second / 'publish-backup' / '0').write_bytes(b'note ' + str(second.resolve()).encode())
+        left, right = retained_snapshot(first, first), retained_snapshot(second, second)
+        differing = sorted(name for name in set(left) | set(right) if left.get(name) != right.get(name))
+        check('retained control: a backup that mentions its own path is compared exactly',
+              differing == ['publish-backup/0'], f'({differing})')
+
+        print('declared divergences')
+        work = tree(root / 'repo-divergence', fixture_root, writers['go'])
+        unusable = work / 'unusable'
+        unusable.mkdir()
+        (unusable / 'pin.json').mkdir()
+        go = run_direct(writers, 'go', fixture_root, work,
+                        ['rust-toolchain', 'current', str(unusable)])
+        oracle = run_direct(writers, 'oracle', fixture_root, work,
+                            ['rust-toolchain', 'current', str(unusable)])
+        check('declared divergence [current on an unusable pin]: both exit 1',
+              go.returncode == 1 and oracle.returncode == 1,
+              f'({go.returncode}, {oracle.returncode}) {go.stderr[-200:]}{oracle.stderr[-200:]}')
+        check('declared divergence [current on an unusable pin]: Go refuses in one line',
+              'rust_toolchain: missing input: pin.json' in go.stderr and
+              'Traceback' not in go.stderr, go.stderr[-300:])
+        check('declared divergence [current on an unusable pin]: the oracle raises',
+              'Traceback' in oracle.stderr, oracle.stderr[-300:])
+        empty_reviewer = [
+            'rust-toolchain', 'stage', '--channel', fixture.CHANNEL,
+            '--rustup', fixture.RUSTUP_VERSION, '--key', str(fixture_root.dist.key),
+            '--current', str(work / 'absent'),
+            '--dockerfile', str(work / 'examples/layers/rust-dev/Dockerfile'),
+            '--verify-bootstrap-exception', '2026-01-02', '--reviewer', '']
+        go = run_direct(writers, 'go', fixture_root, work,
+                        empty_reviewer + ['--out', str(root / 'divergence-go')])
+        oracle = run_direct(writers, 'oracle', fixture_root, work,
+                            empty_reviewer + ['--out', str(root / 'divergence-oracle')])
+        check('declared divergence [empty reviewer]: Go refuses as usage, the oracle stages',
+              go.returncode == 2 and oracle.returncode == 1,
+              f'({go.returncode}, {oracle.returncode}) {go.stderr[-200:]}{oracle.stderr[-200:]}')
+        check('declared divergence [empty reviewer]: Go names the flag pair',
+              '--verify-bootstrap-exception and --reviewer are given together' in go.stderr,
+              go.stderr[-300:])
+        check('declared divergence [empty reviewer]: the oracle reaches the loader',
+              'expected a simple reviewer handle' in oracle.stderr, oracle.stderr[-300:])
+        shutil.rmtree(root / 'divergence-go', ignore_errors=True)
+        shutil.rmtree(root / 'divergence-oracle', ignore_errors=True)
+
         # --- fixture-child guards --------------------------------------------
         # A fixture child must be deny-by-default *before* it imports the modules
         # under test, or a direct urllib/subprocess fallback in the shipped stager
         # would reach the maintainer's network and never show up in a green suite.
         print('fixture child guards')
-        control_env = environment(fixture_root, work, launcher_dir)
+        control_env = environment(fixture_root, work, writers['go'])
         control_env['PYTHONDONTWRITEBYTECODE'] = '1'
-        shipped = subprocess.run([str(launcher_dir / FAKE_PYTHON), '--guard-self-test'],
+        shipped = subprocess.run([str(writers['oracle'] / FAKE_PYTHON), '--guard-self-test'],
                                  env=control_env,
                                  capture_output=True, text=True, timeout=120)
         result = shipped
@@ -675,7 +970,7 @@ def main() -> int:
         # exists; this proves the failure when it does not, which is the difference
         # between a refused claim and a printed diagnostic over unsandboxed work.
         unavailable = dict(control_env, FIXTURE_SANDBOX_UNAVAILABLE='1')
-        result = subprocess.run([str(launcher_dir / FAKE_PYTHON), '--guard-self-test'],
+        result = subprocess.run([str(writers['oracle'] / FAKE_PYTHON), '--guard-self-test'],
                                 env=unavailable, capture_output=True, text=True, timeout=120)
         check('a missing isolation prerequisite exits nonzero', result.returncode != 0,
               f'({result.returncode}) {result.stdout}{result.stderr}')
@@ -686,11 +981,11 @@ def main() -> int:
 
         # --- documented commands write no bytecode ---------------------------
         print('no bytecode in a read-only checkout')
-        work = tree(root / 'repo-bytecode', fixture_root, launcher_dir)
+        work = tree(root / 'repo-bytecode', fixture_root, writers['go'])
         data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         shutil.copytree(fixture_root.pinned, data)
         clean_env = {name: value for name, value in
-                     environment(fixture_root, work, launcher_dir).items()
+                     environment(fixture_root, work, writers['go']).items()
                      if name not in ('PYTHONDONTWRITEBYTECODE', 'PYTHONPYCACHEPREFIX')}
         # The stager is invoked without arguments: argparse then reports usage (2),
         # but the module import that would write bytecode has already run. The
@@ -717,21 +1012,16 @@ def main() -> int:
 
         # --- signal during staging -------------------------------------------
         print('signal during staging')
-        work = tree(root / 'repo-signal-stage', fixture_root, launcher_dir)
+        work = tree(root / 'repo-signal-stage', fixture_root, writers['go'])
         data = work / 'examples/layers/rust-dev/data/rust-toolchain'
         shutil.copytree(fixture_root.pinned, data)
         before = snapshot(data)
-        env = environment(fixture_root, work, launcher_dir)
         recovery_before = recovery_material()
-        env['FIXTURE_FAULT'] = 'slow-manifest'
-        process = subprocess.Popen(['bash', str(work / 'script/dev/upgrade-rust-toolchain.sh'),
-                                    fixture.CHANNEL], cwd=str(work), env=env,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        time.sleep(3.0)
-        process.send_signal(signal.SIGTERM)
-        stdout, stderr = process.communicate(timeout=120)
-        check('signal while staging reports 128+15', process.returncode == 143,
-              f'({process.returncode}) {stderr[-200:]}')
+        result = run_writer(fixture_root, work, writers, [fixture.CHANNEL],
+                            {'FIXTURE_FAULT': 'slow-manifest'}, timeout=120,
+                            signal_after=3.0)
+        check('signal while staging reports 128+15', result.returncode == 143,
+              f'({result.returncode}) {result.stderr[-200:]}')
         check('sources unchanged after a staging signal', snapshot(data) == before)
         check('staging signal left no recovery material',
               not any((work / '.tmp').glob('upgrade-rust-toolchain.*')))
@@ -741,7 +1031,22 @@ def main() -> int:
     if Failures:
         print(f'FAILED {len(Failures)} case(s): {", ".join(Failures)}')
         return 1
-    print(f'rust-toolchain maintenance suite passed ({Passed} checks)')
+    # The differential is the reason this suite exists in slice 4a: a run that
+    # compared nothing would report a green table over one writer.
+    if Comparisons == 0:
+        print('FAILED the differential compared no pair of writers')
+        return 1
+    if FilesCompared < MIN_FILES_COMPARED:
+        print(f'FAILED the differential compared {FilesCompared} file pairs, want at least '
+              f'{MIN_FILES_COMPARED}')
+        return 1
+    if RetainedCompared < MIN_RETAINED_COMPARED:
+        print(f'FAILED the differential compared {RetainedCompared} retained recovery files, '
+              f'want at least {MIN_RETAINED_COMPARED}')
+        return 1
+    print(f'rust-toolchain maintenance suite passed ({Passed} checks, '
+          f'{Comparisons} differential comparisons, {FilesCompared} file pairs, '
+          f'{RetainedCompared} retained recovery files)')
     return 0
 
 

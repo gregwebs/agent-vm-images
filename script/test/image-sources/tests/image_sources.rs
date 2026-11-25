@@ -10057,7 +10057,7 @@ fn check_opencode_parser_boundary(source: &str) -> Result<(), String> {
 /// The exact vendor closure: `modules.txt` plus every file of the three reviewed
 /// modules. The module list, the checksum pin and the files are the provenance
 /// evidence: a vendored file nobody reviewed is a build input nobody reviewed.
-const VENDOR_MODULE_FILES: [&str; 128] = [
+const VENDOR_MODULE_FILES: [&str; 182] = [
     "github.com/alexflint/go-arg/.gitignore",
     "github.com/alexflint/go-arg/LICENSE",
     "github.com/alexflint/go-arg/README.md",
@@ -10122,6 +10122,60 @@ const VENDOR_MODULE_FILES: [&str; 128] = [
     "github.com/failsafe-go/failsafe-go/retrypolicy/doc.go",
     "github.com/failsafe-go/failsafe-go/retrypolicy/retry.go",
     "github.com/failsafe-go/failsafe-go/retrypolicy/retryexecutor.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/fetch/fetch.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/fetch/loopback_fixture.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/gpg/gpg.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/strictjson/decode.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/tarwalk/tarwalk.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain/commands.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain/decode.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain/events.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain/inputs.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain/install.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain/installed.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain/manifest.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain/pin.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain/policy.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain/preflight.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain/prepare.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain/refusal.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain/stage.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain/toolchain.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain/types.go",
+    "github.com/pelletier/go-toml/v2/.dockerignore",
+    "github.com/pelletier/go-toml/v2/.gitattributes",
+    "github.com/pelletier/go-toml/v2/.gitignore",
+    "github.com/pelletier/go-toml/v2/.golangci.toml",
+    "github.com/pelletier/go-toml/v2/.goreleaser.yaml",
+    "github.com/pelletier/go-toml/v2/CONTRIBUTING.md",
+    "github.com/pelletier/go-toml/v2/Dockerfile",
+    "github.com/pelletier/go-toml/v2/LICENSE",
+    "github.com/pelletier/go-toml/v2/README.md",
+    "github.com/pelletier/go-toml/v2/SECURITY.md",
+    "github.com/pelletier/go-toml/v2/ci.sh",
+    "github.com/pelletier/go-toml/v2/decode.go",
+    "github.com/pelletier/go-toml/v2/doc.go",
+    "github.com/pelletier/go-toml/v2/errors.go",
+    "github.com/pelletier/go-toml/v2/internal/characters/ascii.go",
+    "github.com/pelletier/go-toml/v2/internal/characters/utf8.go",
+    "github.com/pelletier/go-toml/v2/internal/danger/danger.go",
+    "github.com/pelletier/go-toml/v2/internal/danger/typeid.go",
+    "github.com/pelletier/go-toml/v2/internal/tracker/key.go",
+    "github.com/pelletier/go-toml/v2/internal/tracker/seen.go",
+    "github.com/pelletier/go-toml/v2/internal/tracker/tracker.go",
+    "github.com/pelletier/go-toml/v2/localtime.go",
+    "github.com/pelletier/go-toml/v2/marshaler.go",
+    "github.com/pelletier/go-toml/v2/strict.go",
+    "github.com/pelletier/go-toml/v2/toml.abnf",
+    "github.com/pelletier/go-toml/v2/types.go",
+    "github.com/pelletier/go-toml/v2/unmarshaler.go",
+    "github.com/pelletier/go-toml/v2/unstable/ast.go",
+    "github.com/pelletier/go-toml/v2/unstable/builder.go",
+    "github.com/pelletier/go-toml/v2/unstable/doc.go",
+    "github.com/pelletier/go-toml/v2/unstable/kind.go",
+    "github.com/pelletier/go-toml/v2/unstable/parser.go",
+    "github.com/pelletier/go-toml/v2/unstable/scanner.go",
+    "github.com/pelletier/go-toml/v2/unstable/unmarshaler.go",
     "github.com/ulikunitz/xz/.gitignore",
     "github.com/ulikunitz/xz/LICENSE",
     "github.com/ulikunitz/xz/README.md",
@@ -10208,6 +10262,20 @@ github.com/failsafe-go/failsafe-go/internal/util
 github.com/failsafe-go/failsafe-go/policy
 github.com/failsafe-go/failsafe-go/priority
 github.com/failsafe-go/failsafe-go/retrypolicy
+# github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper v0.0.0 => ./examples/layers/rust-dev/helper
+## explicit; go 1.27.0
+github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/fetch
+github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/gpg
+github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/strictjson
+github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/tarwalk
+github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain
+# github.com/pelletier/go-toml/v2 v2.2.4
+## explicit; go 1.21.0
+github.com/pelletier/go-toml/v2
+github.com/pelletier/go-toml/v2/internal/characters
+github.com/pelletier/go-toml/v2/internal/danger
+github.com/pelletier/go-toml/v2/internal/tracker
+github.com/pelletier/go-toml/v2/unstable
 # github.com/ulikunitz/xz v0.5.17
 ## explicit; go 1.20
 github.com/ulikunitz/xz
@@ -10217,6 +10285,7 @@ github.com/ulikunitz/xz/lzma
 # go.yaml.in/yaml/v3 v3.0.5
 ## explicit; go 1.16
 go.yaml.in/yaml/v3
+# github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper => ./examples/layers/rust-dev/helper
 ";
 
 const VENDOR_GO_SUM: &str = "\
@@ -10232,6 +10301,8 @@ github.com/failsafe-go/failsafe-go v0.9.8 h1:NzahTEc+vg6FqCJV0Sy9mgwcaCemB81c8iS
 github.com/failsafe-go/failsafe-go v0.9.8/go.mod h1:wMKUFRbxxjWwvwhJttSiim9BaQssrlZV4lk0IwPkwUc=
 github.com/influxdata/tdigest v0.0.1 h1:XpFptwYmnEKUqmkcDjrzffswZ3nvNeevbUSLPP/ZzIY=
 github.com/influxdata/tdigest v0.0.1/go.mod h1:Z0kXnxzbTC2qrx4NaIzYkE1k66+6oEDQTvL95hQFh5Y=
+github.com/pelletier/go-toml/v2 v2.2.4 h1:mye9XuhQ6gvn5h28+VilKrrPoQVanw5PMw/TB0t5Ec4=
+github.com/pelletier/go-toml/v2 v2.2.4/go.mod h1:2gIqNv+qfxSVS7cM2xJQKtLSTLUE9V8t9Stt+h56mCY=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/stretchr/testify v1.2.2/go.mod h1:a8OnRcib4nhh0OaRAV+Yts87kKdq0PP7pXfy6kDkUVs=
@@ -10325,6 +10396,8 @@ fn check_go_mod(text: &str) -> Result<(), String> {
         "github.com/alexflint/go-scalar v1.2.0",
         "github.com/bits-and-blooms/bitset v1.24.4",
         "github.com/failsafe-go/failsafe-go v0.9.8",
+        "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper v0.0.0",
+        "github.com/pelletier/go-toml/v2 v2.2.4",
         "github.com/ulikunitz/xz v0.5.17",
         "go.yaml.in/yaml/v3 v3.0.5",
     ]

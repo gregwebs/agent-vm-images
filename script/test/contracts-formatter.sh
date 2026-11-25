@@ -39,8 +39,16 @@ if [ "${1:-}" = list ]; then
     exit 0
 fi
 # The gate is the last thing before these; failing here bounds a passing run.
+# Each row is named exactly: a gate that changes its argv, or a new one that
+# appears before the formatter check, stops the control instead of passing.
 case "${1:-}" in
-    test) [ "$*" = 'test ./internal/buildcheck' ] && exit 0 ;;
+    test)
+        case "$*" in
+            'test ./internal/buildcheck') exit 0 ;;
+            'test -run TestImportsAreReviewed|TestImportBoundaryControls .') exit 0 ;;
+            'test ./internal/vendordrift') exit 0 ;;
+        esac
+        ;;
     vet) printf 'stop-at-vet\n' >&2; exit 4 ;;
 esac
 exit 99
@@ -129,6 +137,11 @@ for mode in default guard-only; do
     # added beside the module's own and the vet line has to carry both.
     grep -qx 'vet ./internal/... ./images/... ./cmd/... ./script/test/pinsuite/...' "$work/go-log" ||
         fail "$mode/wrong-path: go log: $(cat "$work/go-log")"
+    # The two every-PR gates must have run *before* the vet line, in both modes.
+    grep -qx 'test -run TestImportsAreReviewed|TestImportBoundaryControls .' "$work/go-log" ||
+        fail "$mode/wrong-path: the import-boundary gate did not run: $(cat "$work/go-log")"
+    grep -qx 'test ./internal/vendordrift' "$work/go-log" ||
+        fail "$mode/wrong-path: the vendored-copy drift gate did not run: $(cat "$work/go-log")"
     echo "formatter gate control $mode passed"
 done
 echo 'contracts formatter gate controls passed'

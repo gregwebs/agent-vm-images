@@ -17,6 +17,20 @@ github.com/failsafe-go/failsafe-go/internal/util
 github.com/failsafe-go/failsafe-go/policy
 github.com/failsafe-go/failsafe-go/priority
 github.com/failsafe-go/failsafe-go/retrypolicy
+# github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper v0.0.0 => ./examples/layers/rust-dev/helper
+## explicit; go 1.27.0
+github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/fetch
+github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/gpg
+github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/strictjson
+github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/tarwalk
+github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain
+# github.com/pelletier/go-toml/v2 v2.2.4
+## explicit; go 1.21.0
+github.com/pelletier/go-toml/v2
+github.com/pelletier/go-toml/v2/internal/characters
+github.com/pelletier/go-toml/v2/internal/danger
+github.com/pelletier/go-toml/v2/internal/tracker
+github.com/pelletier/go-toml/v2/unstable
 # github.com/ulikunitz/xz v0.5.17
 ## explicit; go 1.20
 github.com/ulikunitz/xz
@@ -26,3 +40,4 @@ github.com/ulikunitz/xz/lzma
 # go.yaml.in/yaml/v3 v3.0.5
 ## explicit; go 1.16
 go.yaml.in/yaml/v3
+# github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper => ./examples/layers/rust-dev/helper

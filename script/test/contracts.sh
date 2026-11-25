@@ -83,6 +83,23 @@ if format_output=$(cd "$contract_module" && "$formatter" -l ${format_files+"${fo
 fi
 [ -z "$format_output" ] || { printf '%s\n' "$format_output" >&2; exit 1; }
 (cd "$contract_module" && GOTOOLCHAIN=auto go test ./internal/buildcheck)
+# Two gates that must run on every PR, including the guard-only mode that skips
+# the suites below. Both are Go tests with no child process and no network:
+#
+#  * the helper module's import boundary (invariant 32) is the replacement for the
+#    Python audit hook the Rust suites used to install -- `os/exec` and `net/http`
+#    may appear only in the files one committed list names;
+#  * the vendored-copy drift gate: after slice 4a of #187 the root module vendors
+#    the example layer's helper module, so an edit to the layer that is not
+#    re-vendored changes the image while `avm-pin` keeps building the old copy.
+#    It derives the imported closure offline (GOPROXY=off, vendor-only) and
+#    compares the files byte for byte.
+# The helper's filter is repeated in the default mode's `go test ./...`, which is
+# deliberate: the boundary is cheap and it is the one gate a guard-only run must
+# not lose.
+(cd "$helper_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test \
+    -run 'TestImportsAreReviewed|TestImportBoundaryControls' .)
+(cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test ./internal/vendordrift)
 # Vendor mode: dependencies are committed, so the gates never reach a module
 # proxy. A missing vendor tree fails here instead of downloading.
 (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go vet "${go_packages[@]}" "${harness_packages[@]}")
