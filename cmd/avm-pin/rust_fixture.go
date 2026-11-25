@@ -40,6 +40,10 @@ import (
 const (
 	fixtureDistName  = "FIXTURE_DIST"
 	fixtureFaultName = "FIXTURE_FAULT"
+	// fixtureFetchLogName records every URL the store is asked for. A rule that
+	// must refuse *before any fetch* is otherwise unobservable: a silent, successful
+	// fetch leaves nothing behind once the run's scratch directory is removed.
+	fixtureFetchLogName = "FIXTURE_FETCH_LOG"
 )
 
 type rustToolchainSeams struct {
@@ -48,7 +52,7 @@ type rustToolchainSeams struct {
 }
 
 // rustToolchainSeamNames is this build's closed seam list.
-var rustToolchainSeamNames = []string{fixtureDistName, fixtureFaultName}
+var rustToolchainSeamNames = []string{fixtureDistName, fixtureFaultName, fixtureFetchLogName}
 
 type rustToolchainFixtureArguments struct {
 	FixtureSeams bool `arg:"--fixture-seams" help:"print the suite-only inputs this build honours; writes nothing"`
@@ -134,6 +138,21 @@ type fixtureStore struct {
 }
 
 func (s *fixtureStore) Fetch(ctx context.Context, url, destination string, maxBytes int64) error {
+	// Recorded before anything else, so an attempt that is about to fail is still
+	// evidence that the transport was reached.
+	if log := os.Getenv(fixtureFetchLogName); log != "" {
+		handle, err := os.OpenFile(log, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return err
+		}
+		if _, err := handle.WriteString(url + "\n"); err != nil {
+			_ = handle.Close()
+			return err
+		}
+		if err := handle.Close(); err != nil {
+			return err
+		}
+	}
 	if s.slow && strings.HasSuffix(url, ".toml") {
 		// The suite sends SIGTERM while this blocks.
 		time.Sleep(60 * time.Second)

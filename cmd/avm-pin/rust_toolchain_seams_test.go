@@ -22,7 +22,7 @@ import (
 // rustToolchainSeamNames are the suite-only inputs a fixture build honours.
 // Written out rather than imported, because a shipped build cannot compile the
 // tagged file: this list is the contract the test holds.
-var rustToolchainSeamNames = []string{"FIXTURE_DIST", "FIXTURE_FAULT"}
+var rustToolchainSeamNames = []string{"FIXTURE_DIST", "FIXTURE_FAULT", "FIXTURE_FETCH_LOG"}
 
 func buildAVMPin(t *testing.T, tags string) string {
 	t.Helper()

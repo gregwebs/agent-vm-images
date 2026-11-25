@@ -35,12 +35,11 @@ What a drift can no longer be caught by:
 * a rule the two implementations interpreted differently — the class the
   differential existed for. Only Go's behaviour is asserted;
 * **P4/P5**: what is gone is *the other implementation's verdict*, not Go's
-  endpoint. The int64 range is still pinned at both ends — by
-  `TestTOMLIntegerRange` and by the two rows below — so a limit that moved past
-  either end turns them red. Not witnessed: a change strictly inside the range, a
-  go-toml release that starts refusing `\\e` (this row and
-  `TestTOMLGrammar/escape-e` redden for that one), and the recorded reason that Go
-  deviates from TOML 1.0 here at all;
+  endpoint. Witnessed and red: a decoder limit that moves past either end of the
+  int64 range (`TestTOMLIntegerRange` plus the two rows below) and a go-toml
+  release that starts refusing `\\e` (the P4 row below and
+  `TestTOMLGrammar/escape-e`). Not witnessed: a change strictly inside the range,
+  and the recorded reason that Go deviates from TOML 1.0 here at all;
 * the `SingleStream` strictness row states in place that the decoder is
   unreachable, because bytes that are unauthenticated or fail their checksum are
   refused before it sees them. The refusal is asserted; the unreachability is an
@@ -61,6 +60,7 @@ table is `script/test/rust-toolchain-maintenance.py`.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import shutil
@@ -984,84 +984,62 @@ def clean_case(arch: str) -> dict:
             'rustfmt_version': 'rustfmt 1.0.0 (fixture)', 'fail_when': []}
 
 
-# The frozen `--events` vocabulary (`toolchain/events.go`): the whole sequence is
-# asserted, so an invented line or a missing one is red. A writer that stopped
-# recording would otherwise leave the install rows green, which is the failure this
-# block exists to prevent.
-EVENT_PREFIXES = ('fetch', 'hash-ok', 'signature-ok', 'preflight-ok', 'layout-ready',
-                  'execute', 'install-ok')
-VERIFIED_PREFIXES = ('hash-ok', 'signature-ok', 'preflight-ok')
+# The frozen `--events` sequence (`toolchain/prepare.go`, `install.go`): the whole
+# log is compared, line for line, so a suppressed event, an invented one, a
+# reordering and a silent writer are all red. The subjects come from the pin, so
+# the expectation is the pin's own closure rather than a second copy of it.
+def pin_platform(arch: str) -> dict:
+    document = json.loads((fixture_root.pinned / 'pin.json').read_text())
+    return document['platforms'][f'linux/{arch}']
 
 
-def pinned_urls(arch: str) -> list[str]:
-    """Exactly the URLs the pin names for one architecture: bootstrap + closure."""
-    return [bootstrap_url(arch)] + [fixture.url_of_archive(package, target)
-                                    for package, target in fixture.selection(arch)]
+def url_filename(url: str) -> str:
+    return url.rsplit('/', 1)[-1]
 
 
-def bootstrap_url(arch: str) -> str:
-    return (f'https://static.rust-lang.org/rustup/archive/{fixture.RUSTUP_VERSION}/'
-            f'{fixture.HOSTS[arch]}/rustup-init')
+def expected_events(arch: str) -> list[str]:
+    """The complete `--events` log of one clean install, from the pin.
+
+    One bootstrap fetch and hash, then `fetch/hash-ok/signature-ok/preflight-ok` per
+    selected archive in the pin's canonical order, the layout, the five executions
+    of the install order and one `install-ok`.
+    """
+    platform = pin_platform(arch)
+    bootstrap = platform['bootstrap']['url']
+    lines = [f'fetch {bootstrap}', f'hash-ok {url_filename(bootstrap)}']
+    for archive in platform['archives']:
+        name = url_filename(archive['url'])
+        lines += [f'fetch {archive["url"]}', f'hash-ok {name}', f'signature-ok {name}',
+                  f'preflight-ok {name}']
+    lines += [f'layout-ready {arch}', 'execute bootstrap',
+              'execute rustup set auto-self-update',
+              'execute rustup set auto-install',
+              'execute rustup toolchain install', 'execute rustup default',
+              f'install-ok {arch}']
+    return lines
 
 
 def url_paths(urls) -> list[str]:
     return [urllib.parse.urlsplit(url).path for url in urls]
 
 
-def event_problems(lines: list[str], arch: str, expect: int,
-                   fetch_urls: list[str]) -> list[str]:
-    """What the log must say, read from the file rather than from the run.
-
-    Ordering is the claim the frozen log makes: every selected byte is recorded as
-    verified before the layout exists, nothing executes before the layout, and a
-    clean run ends with one `install-ok`. A refusal records no execution at all.
-    """
-    problems = []
-    prefixes = [line.split(' ', 1)[0] for line in lines]
-    unknown = sorted({prefix for prefix in prefixes if prefix not in EVENT_PREFIXES})
-    if unknown:
-        problems.append(f'events carry prefixes outside the frozen vocabulary: {unknown}')
-    if not prefixes:
-        return problems + ['the events log is empty']
-    if prefixes[0] != 'fetch':
-        problems.append(f'the first event is {prefixes[0]!r}, not a fetch')
-    fetched = sorted(line.split(' ', 1)[1] for line in lines if line.startswith('fetch '))
-    if fetched != sorted(fetch_urls):
-        missing = sorted(set(fetch_urls) - set(fetched))
-        extra = sorted(set(fetched) - set(fetch_urls))
-        problems.append(f'the fetch events name the wrong URLs (missing {missing}, '
-                        f'extra {extra})')
-    if len(fetched) != len(set(fetched)):
-        problems.append('a URL is recorded as fetched twice')
-    layout = [index for index, prefix in enumerate(prefixes) if prefix == 'layout-ready']
-    executed = [index for index, prefix in enumerate(prefixes) if prefix == 'execute']
-    verified = [index for index, prefix in enumerate(prefixes) if prefix in VERIFIED_PREFIXES]
-    installed = [index for index, prefix in enumerate(prefixes) if prefix == 'install-ok']
-    if expect == 0:
-        if len(layout) != 1:
-            problems.append(f'{len(layout)} layout-ready events, want 1')
-        if len(installed) != 1:
-            problems.append(f'{len(installed)} install-ok events, want 1')
-        if layout and verified and verified[-1] > layout[0]:
-            problems.append('an event records a verified byte after the layout exists')
-        if layout and executed and executed[0] < layout[0]:
-            problems.append('something executed before the layout was ready')
-        if installed and installed[0] != len(prefixes) - 1:
-            problems.append('install-ok is not the last event')
-        if installed and lines[installed[0]].split(' ', 1)[1:] != [arch]:
-            problems.append(f'install-ok does not name {arch}: {lines[installed[0]]!r}')
-    else:
-        if executed:
-            problems.append(f'something executed on a refused run: {len(executed)} events')
-        if installed:
-            problems.append('a refused run recorded install-ok')
-        if layout:
-            problems.append('a refused run recorded layout-ready')
-    return problems
+def event_problems(lines: list[str], expected: list[str]) -> list[str]:
+    """The log must be exactly what the pin implies — no missing and no extra line."""
+    if lines == expected:
+        return []
+    for index, want in enumerate(expected):
+        if index >= len(lines):
+            return [f'the events log stops after {len(lines)} lines, missing '
+                    f'{expected[index:]!r}']
+        if lines[index] != want:
+            return [f'event {index} is {lines[index]!r}, want {want!r} '
+                    f'(rest: {lines[index + 1:]!r} vs {expected[index + 1:]!r})']
+    return [f'{len(lines) - len(expected)} unexpected event(s) after the frozen sequence: '
+            f'{lines[len(expected):]!r}']
 
 
 def install_row(label: str, arch: str, mutate=None, expect=0, fragments=(),
-                homes_exist=True, fetch_urls: list[str] | None = None) -> None:
+                homes_exist=True, expect_events: list[str] | None = None) -> None:
     row = new_row()
     root = row / 'go'
     (root / 'tmp').mkdir(parents=True)
@@ -1072,7 +1050,10 @@ def install_row(label: str, arch: str, mutate=None, expect=0, fragments=(),
     homes = (root / 'rustup', root / 'cargo')
     events = root / 'events'
     Path(str(homes[0]) + '.case.json').write_text(json.dumps(clean_case(arch)))
-    fetch_urls = fetch_urls if fetch_urls is not None else pinned_urls(arch)
+    expected = expect_events if expect_events is not None else expected_events(arch)
+    # The URLs a row expects are the ones its own frozen log records as fetched:
+    # one source for the HTTP side and the log side, both from the pin.
+    fetch_urls = [line[len('fetch '):] for line in expected if line.startswith('fetch ')]
     problems: list[str] = []
     with driver.LoopbackDistribution(files) as server:
         argv = ['--fixture-trust', fixture_root.dist.fingerprint,
@@ -1087,18 +1068,14 @@ def install_row(label: str, arch: str, mutate=None, expect=0, fragments=(),
                        'HOME': str(root), 'TMPDIR': str(root / 'tmp'),
                        'LANG': 'C.UTF-8', 'LC_ALL': 'C', 'TZ': 'UTC'}
         status, out, err = driver.run_go(HELPER_FIXTURE, argv, environment)
-        fetched = url_paths([server.origin + path for path in server.paths()])
+        served = [server.origin + path for path in server.paths()]
     problems.extend(verdict(status, out, err, expect, fragments))
-    # The HTTP side and the log's own fetch events must both name exactly the
-    # pinned URLs: a count alone cannot tell which origin was asked for.
-    expected_paths = url_paths(fetch_urls)
-    if sorted(fetched) != sorted(expected_paths):
-        missing = sorted(set(expected_paths) - set(fetched))
-        extra = sorted(set(fetched) - set(expected_paths))
-        problems.append(f'the listener served the wrong URLs (missing {missing}, '
-                        f'extra {extra})')
-    if len(fetched) != len(set(fetched)):
-        problems.append(f'a URL was fetched twice: {fetched}')
+    # The HTTP side and the log's own fetch events must both name the pin's URLs:
+    # the listener sees paths, because the origin is rewritten onto loopback, and
+    # the log carries the canonical URLs. Both lists come from the pin.
+    if url_paths(served) != url_paths(fetch_urls):
+        problems.append(f'the listener served {url_paths(served)!r}, want '
+                        f'{url_paths(fetch_urls)!r}')
     present = [path.name for path in homes if path.exists()]
     if homes_exist and len(present) != 2:
         problems.append(f'homes missing: {present}')
@@ -1108,13 +1085,11 @@ def install_row(label: str, arch: str, mutate=None, expect=0, fragments=(),
         left = sorted(entry.name for entry in (root / 'work').iterdir())
         if left:
             problems.append(f'the work directory left {left}')
-    # `--events` was given, so the log must exist: "if the file is there" is what
-    # let a writer that stopped recording pass this row.
+    # `--events` was given, so the log must exist *and* hold the exact sequence.
     if not events.is_file():
         problems.append('no --events log was written')
     else:
-        problems.extend(event_problems(events.read_text().splitlines(), arch, expect,
-                                       fetch_urls))
+        problems.extend(event_problems(events.read_text().splitlines(), expected))
     check(f'install {label}', not problems, '(' + '; '.join(problems) + ')' if problems else '')
 
 
@@ -1124,17 +1099,24 @@ def test_install() -> None:
         install_row(f'clean {arch}', arch)
 
     def corrupt_bootstrap(files):
-        files[bootstrap_url('amd64')] = files[bootstrap_url('amd64')] + b'x'
+        url = pin_platform('amd64')['bootstrap']['url']
+        files[url] = files[url] + b'x'
+    # The digest refusal happens right after the bootstrap fetch, so that is the
+    # whole log: `hash-ok` is never recorded.
     install_row('refuses a bad bootstrap digest', 'amd64', mutate=corrupt_bootstrap,
                 expect=1, fragments=('do not match the committed digest',),
-                homes_exist=False, fetch_urls=pinned_urls('amd64')[:1])
+                homes_exist=False, expect_events=expected_events('amd64')[:1])
 
     def corrupt_archive(files):
         url = fixture.url_of_archive('rustfmt-preview', fixture.HOSTS['amd64'])
         files[url] = files[url] + b'\x00'
+    # The last selected archive is the corrupted one, so every fetch is recorded and
+    # its `hash-ok` is the first line that is not.
+    full = expected_events('amd64')
+    last_fetch = max(index for index, line in enumerate(full) if line.startswith('fetch '))
     install_row('refuses a late archive hash', 'amd64', mutate=corrupt_archive,
                 expect=1, fragments=('do not match the signed manifest hash',),
-                homes_exist=False)
+                homes_exist=False, expect_events=full[:last_fetch + 1])
 
 
 # --- the deleted oracle ------------------------------------------------------
@@ -1159,16 +1141,11 @@ DELETED_NAMES = (
     'sandbox-self-control.py',
     'rust-toolchain/launcher.py',
 )
-# A re-imported oracle does not have to spell the extension. The frozen
-# `rust_toolchain: ` diagnostic prefix is not a module reference, so the module
-# forms are spelled out rather than the bare name.
-DELETED_MODULES = (
-    'import rust_toolchain',
-    'from rust_toolchain',
-    'rust_toolchain_update',
-    'import differential',
-    'from differential',
-)
+# A re-imported oracle does not have to spell the extension, and a literal search
+# cannot see every legal form of an import (`import \` + newline + `differential`,
+# `from x import (differential)`). So every tracked Python file is parsed and its
+# import graph read: any of these module names, however imported, is a failure.
+DELETED_MODULES = ('rust_toolchain', 'rust_toolchain_update', 'differential')
 MACHINERY_TABLE_START = '# --- the deleted oracle'
 MACHINERY_TABLE_END = '\ndef test_deleted_oracle_is_absent'
 # The machinery below existed only to run and guard the deleted files: the audit
@@ -1204,20 +1181,48 @@ def without_prohibition_table(path: Path, body: str) -> str:
     return body[:start] + body[end:]
 
 
+def imported_modules(body: str) -> set[str]:
+    """Every top-level module name one Python file imports, however spelled."""
+    names = set()
+    for node in ast.walk(ast.parse(body)):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split('.')[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split('.')[0])
+    return names
+
+
 def test_deleted_oracle_is_absent() -> None:
     """The two proofs: the files are gone, and nothing names them again.
 
     A reference that comes back — a doc line, a comment, a fixture that re-imports
     the oracle — is what this row is for. It is the only place the claim "no
     consumer reads the deleted files" is executed rather than asserted.
+
+    What each mechanism covers, so the claim is not wider than the check:
+
+    * the six paths must not exist;
+    * every tracked file is searched for the deleted *names* as text, so a path, a
+      doc line and a comment are covered — including a path passed to
+      `spec_from_file_location`;
+    * every tracked Python file is parsed and its import graph read, so every legal
+      spelling of an import of the deleted modules is covered (a line-continued
+      import, `from differential import x`, `import rust_toolchain as model`), and a
+      file that stops parsing is itself a failure rather than a silent skip;
+    * the machinery names are searched in the two suites and the whole fixture
+      tree, because the gopls fixtures legitimately still carry them.
+
+    Not covered, and not claimed: a module path assembled at run time from
+    fragments, and an exec of a program whose name is computed.
     """
     print('deleted oracle: absent, and unnamed anywhere in the tree')
     for relative in DELETED_FILES:
         check(f'{relative} is absent', not (REPOSITORY_ROOT / relative).exists())
     tracked = subprocess.run(['git', 'ls-files', '-z'], cwd=str(REPOSITORY_ROOT),
                              capture_output=True, check=True).stdout.split(b'\0')
-    patterns = DELETED_NAMES + DELETED_MODULES
     offenders: dict[str, list[str]] = {}
+    imports: dict[str, list[str]] = {}
+    unreadable: list[str] = []
     for raw in tracked:
         if not raw:
             continue
@@ -1228,14 +1233,30 @@ def test_deleted_oracle_is_absent() -> None:
         except OSError:
             continue
         body = without_prohibition_table(path, body)
-        # A text search: a name in a comment or a doc line counts, which is the
-        # point.
-        for pattern in patterns:
-            if pattern in body:
-                offenders.setdefault(pattern, []).append(relative)
-    for pattern in patterns:
-        found = offenders.get(pattern, [])
-        check(f'no tracked file names {pattern!r}', found == [], f'({found[:6]})')
+        # A text search over every tracked file: a name in a comment or a doc line
+        # counts, which is the point.
+        for name in DELETED_NAMES:
+            if name in body:
+                offenders.setdefault(name, []).append(relative)
+        # Imports are read from the syntax tree, not from the text, so every legal
+        # form of an import is covered.
+        if relative.endswith('.py'):
+            try:
+                module_names = imported_modules(body)
+            except SyntaxError:
+                unreadable.append(relative)
+                continue
+            for name in DELETED_MODULES:
+                if name in module_names:
+                    imports.setdefault(name, []).append(relative)
+    for name in DELETED_NAMES:
+        found = offenders.get(name, [])
+        check(f'no tracked file names {name!r}', found == [], f'({found[:6]})')
+    for name in DELETED_MODULES:
+        found = imports.get(name, [])
+        check(f'no tracked Python file imports {name!r}', found == [], f'({found[:6]})')
+    check('every tracked Python file parses, so the import scan covers it',
+          unreadable == [], f'({unreadable[:6]})')
     machinery: dict[str, list[str]] = {}
     for path in machinery_files():
         body = without_prohibition_table(path, path.read_text(errors='replace'))
