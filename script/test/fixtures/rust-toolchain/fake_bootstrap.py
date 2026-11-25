@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The fixture bootstrap the Go install row executes.
 
-The differential runs the shipped Go binary, so its bootstrap call cannot be
+The install rows run the shipped Go binary, so its bootstrap call cannot be
 intercepted in-process. ``--fixture-bootstrap-exec`` names this program; the Go
 side then runs ``[fake-bootstrap, <verified rustup-init>, <argv...>]``. This
 program validates the bootstrap the caller is about to run, writes the rustup

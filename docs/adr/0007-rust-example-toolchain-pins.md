@@ -76,8 +76,9 @@ Commit a reviewed finite closure and let rustup install only from it.
   vendored `ulikunitz/xz` v0.5.17 `SingleStream` preflight is stricter than the
   deleted reader's decompressor was about trailing bytes; it is a declared
   strictness note, not a reachable behaviour change, because an archive's checksum
-  is compared before the decoder sees it. Nothing measures that claim any more:
-  the row is a frozen assertion (`TestXZStreamIntegrity`). The image build runs no Python. It then builds
+  is compared before the decoder sees it. The refusal is asserted
+  (`TestXZStreamIntegrity`); the unreachability is an argument, and with the oracle
+  gone nothing measures it. The image build runs no Python. It then builds
   an invocation-private `file://` dist layout from the original manifest bytes and
   runs rustup with automatic installation and self-update disabled. Ordinary builds never resolve, rewrite
   or repair a pin. The transport's whole-request deadline is a watchdog that
@@ -138,10 +139,12 @@ Commit a reviewed finite closure and let rustup install only from it.
 ## Verification
 
 Hermetic: `script/test/rust-toolchain-pins.py` (pin/install faults against a
-signed synthetic distribution, with the production transport exercised through
-a controlled opener) and `script/test/rust-toolchain-maintenance.py` (staging,
-publication and signal faults of the real writer). Static:
-`script/test/example-layers.sh` (150 cases). The native harness
+signed synthetic distribution, with the production HTTP client exercised through
+a harness-owned loopback listener) and `script/test/rust-toolchain-maintenance.py`
+(staging, publication and signal faults of the real writer). Neither compares two
+implementations since #245 and neither runs inside an OS boundary any more: each
+suite's header states what it now claims. Static: `script/test/example-layers.sh`
+(163 self-test cases). The native harness
 `script/test/rust-example.sh` bounds every command, supervises the suite, owns its
 cleanup and has `--self-test` controls that need no daemon. Real adoption of
 channel 1.98.1 /

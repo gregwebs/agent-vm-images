@@ -15,8 +15,8 @@ package main
 //     `--fixture-seams`.
 //
 // The store is the same `dist.json` the Python fixture writes
-// (`script/test/fixtures/rust-toolchain/fixture.py`), so the differential drives
-// both writers over literally the same bytes.
+// (`script/test/fixtures/rust-toolchain/fixture.py`), so the surviving Rust suites
+// drive this writer over the bytes their signed distribution describes.
 
 import (
 	"context"

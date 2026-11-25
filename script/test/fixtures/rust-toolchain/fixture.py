@@ -255,9 +255,9 @@ def armored_sign(path: Path, env: dict[str, str],
                  extra: Sequence[str] = ()) -> bytes:
     """An armored detached signature, with any extra gpg options before the input.
 
-    `extra` is how the differential suite signs a manifest with a one-day
-    signature expiry (`--default-sig-expire 1d`); the default is the pinned
-    signing invocation, unchanged.
+    `extra` is how the pins suite signs a manifest with a one-day signature
+    expiry (`--default-sig-expire 1d`); the default is the pinned signing
+    invocation, unchanged.
     """
     return subprocess.run([gpg_path(), '--batch', '--no-options', '--armor', '--detach-sign',
                            *extra, '--output', '-', str(path)], env=env, check=True,

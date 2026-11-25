@@ -156,9 +156,11 @@ The `\e` acceptance is a declared deviation from TOML 1.0, and
 the value is `U+001B`) rather than describing it. The measurement was taken with
 `tomllib` as the reference column, probed rather than version-sniffed, because
 `tomllib` is TOML 1.1 from CPython 3.15. That reference is gone: #245 deleted the
-Python reader, so the column is now a committed claim and a go-toml upgrade that
-starts refusing `\e` would change behaviour silently rather than fail a
-comparison. The same measurement found a second, independent reference deviation,
+Python reader, so the column is a committed claim. A go-toml upgrade that starts
+refusing `\e` still fails `TestTOMLGrammar/escape-e` and the pins suite's P4 row;
+what is gone is the second implementation's opposite verdict and the measurement
+that was taken from it. The same measurement found a second, independent
+reference deviation,
 ruled **P5** on #230: `tomllib` accepts an integer beyond ±2^63, which TOML 1.0
 requires to be an error. Go refuses it, which is also what the producer does —
 `settings.toml` is written and read by `rustup`, through Rust's int64 `toml`
@@ -169,8 +171,9 @@ does not vary. While the reference existed the row asserted both directions, so 
 deleted rather than inherited. That second direction died with the reference:
 after #245 P5 is a one-directional assertion over Go's refusal
 (`TestTOMLIntegerRange`, and the pins suite's frozen rows for the two ends of the
-range) plus this argument. Nothing turns red if the vendored decoder's limit
-moves.
+range) plus this argument. A limit that moves past either endpoint is red; a
+change strictly inside the range is unwitnessed, and so is the second
+implementation's verdict on the same document.
 
 **Conventions for new commands.** Arguments are parsed with go-arg and logs go
 through slog, vendored like `yaml/v3`. Every HTTP client goes through

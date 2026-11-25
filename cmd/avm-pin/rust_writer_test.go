@@ -71,3 +71,53 @@ func TestStageRefusesAnEmptyReviewerPair(t *testing.T) {
 		t.Fatalf("the refused invocation created a candidate directory: %v", err)
 	}
 }
+
+// TestStageRefusesInGitHubActionsBeforeAnyFetch holds the CLI's own CI rule.
+//
+// The maintenance suite's `publishing under GITHUB_ACTIONS is refused` row goes
+// through the shell wrapper, which refuses first: a writer whose `GitHubActions`
+// dependency were no longer supplied by this CLI would leave that row green, and
+// `TestStageRefusesGitHubActions` in the layer's package tests the dependency when
+// a caller supplies it, not whether the CLI supplies it. So this row drives the
+// direct verb against a fixture store that holds no bytes: the only way to get the
+// CI message is to refuse before staging, because a staging run would report
+// `refused endpoint` first.
+func TestStageRefusesInGitHubActionsBeforeAnyFetch(t *testing.T) {
+	binary := buildAVMPin(t, "example_fixture")
+	root := t.TempDir()
+	dist := filepath.Join(root, "dist")
+	if err := os.MkdirAll(dist, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A store holding one URL that is not the pin's: the fixture build needs a
+	// non-empty store to build its transport, and a staging run would report
+	// `refused endpoint` for every fetch instead of the CI text.
+	document := `{"key":"","fingerprint":"` + strings.Repeat("A", 40) +
+		`","files":{"https://example.invalid/decoy":"eA=="}}`
+	if err := os.WriteFile(filepath.Join(dist, "dist.json"), []byte(document), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(root, "candidate")
+	output, status := runAVMPinEnv(t, binary, []string{
+		"GITHUB_ACTIONS=true",
+		"FIXTURE_DIST=" + dist,
+	}, "rust-toolchain", "stage",
+		"--channel", "1.98.1",
+		"--rustup", "1.28.2",
+		"--key", filepath.Join(root, "absent.asc"),
+		"--current", filepath.Join(root, "absent"),
+		"--out", out,
+		"--dockerfile", filepath.Join(root, "Dockerfile"))
+	if status != 1 {
+		t.Fatalf("status is %d, want 1: %s", status, output)
+	}
+	if !strings.Contains(output, "stage mode is refused in GitHub Actions") {
+		t.Fatalf("the refusal is not the CI rule: %q", output)
+	}
+	if strings.Contains(output, "refused endpoint") || strings.Contains(output, "connection") {
+		t.Fatalf("the refusal names a transport failure, so staging started: %q", output)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Fatalf("the refused invocation created a candidate directory: %v", err)
+	}
+}

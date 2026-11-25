@@ -105,8 +105,8 @@ esac
 # The binary keeps the layer's name so a caller never has to know Go's default
 # (the module directory's base name would be `helper`). A fixture build gets its
 # own name, so the two builds cannot overwrite each other: a gate that runs the
-# shipped binary while a differential suite builds the fixture one would otherwise
-# race on one path, and the loser would run the wrong program.
+# shipped binary while a suite builds the fixture one would otherwise race on one
+# path, and the loser would run the wrong program.
 default_binary=$layer-helper
 if [ "$fixture" = true ]; then
     default_binary=$layer-helper-fixture

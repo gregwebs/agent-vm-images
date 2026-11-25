@@ -16,8 +16,10 @@ import (
 //
 // One row is a declared acceptance: no go-toml/v2 release refuses `"\e"` (see
 // docs/adr/0017-go-programs.md for the measurement), so this test pins the
-// acceptance *and the value it produces* instead of describing it. Nothing fails
-// if a go-toml upgrade starts refusing that escape; the row is a claim.
+// acceptance *and the value it produces* instead of describing it. A go-toml
+// upgrade that starts refusing the escape fails here and in the pins suite's P4
+// row; what is gone with the oracle is the record that Go deviates from TOML 1.0
+// here for a measured reason.
 func TestTOMLGrammar(t *testing.T) {
 	cases := []struct {
 		label string
@@ -99,9 +101,10 @@ func TestTOMLRefusesBeforeDecoding(t *testing.T) {
 // ruling that made the range a refusal: `settings.toml` is written and read by
 // rustup through Rust's `toml` crate, which is int64, so agreement with that
 // reader is the claim. The bidirectional witness that sat beside this row -- the
-// deleted Python oracle accepting the same document -- is gone (#245). What
-// remains is a one-directional assertion over this decoder's refusal plus the
-// argument above; nothing turns red if the vendored limit moves.
+// deleted Python oracle accepting the same document -- is gone (#245), so what
+// remains is this test plus the pins suite's two frozen rows: a limit that moves
+// past either endpoint is red here, and a change strictly inside the range is not
+// witnessed at all.
 func TestTOMLIntegerRange(t *testing.T) {
 	if _, err := decodeTOML([]byte("x = 9223372036854775807\n"), "settings.toml"); err != nil {
 		t.Fatalf("the largest int64 was refused: %v", err)

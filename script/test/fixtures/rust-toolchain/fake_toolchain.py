@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Standalone rustup/cargo/rustc/rustfmt emulator for the Go/Python differential.
+"""Standalone rustup/cargo/rustc/rustfmt emulator for the frozen install rows.
 
-Why it is a program and not a Python seam: the differential runs the shipped Go
-binary, which cannot be given a fake runner. Both implementations must therefore
-execute the *same* child and be asked the same questions, so this is a copy of one
-tool name (rustup, cargo, rustc or rustfmt) that answers from a case file and
-records what it was asked.
+Why it is a program and not a Python seam: the rows run the shipped Go binary,
+which cannot be given a fake runner, so this is a copy of one tool name (rustup,
+cargo, rustc or rustfmt) that answers from a case file and records what it was
+asked. Until #245 a differential ran both implementations against it and compared
+the two call logs; only this program is left, so the log is evidence a reader can
+inspect rather than something a row compares.
 
 Rules, all of them fail-closed:
 
@@ -16,9 +17,8 @@ Rules, all of them fail-closed:
   emulator, decides the components, the targets, the toolchains and the failures;
   `verify-installed` only reads, so nothing here writes ``settings.toml`` or the
   toolchain tree.
-* Every call appends ``{argv, env}`` to ``$RUSTUP_HOME/calls.jsonl``, which is how
-  the differential compares what each implementation asked and what environment it
-  asked with.
+* Every call appends ``{argv, env}`` to ``$RUSTUP_HOME/calls.jsonl``, so what the
+  binary asked for, and with what environment, is on disk after a row.
 * Anything outside the table exits 97 with ``fixture emulator: unrecognized
   command``, so a command the shipped checks grew cannot pass by accident.
 
@@ -80,8 +80,8 @@ def create_toolchain(rustup_home: str, channel: str, host: str, musl: str) -> No
 
 
 def record(rustup_home: str, argv: list[str]) -> None:
-    # One line per call: the differential compares the two logs of one row, so the
-    # writer must not reorder or rewrite them.
+    # One line per call: append-only, so a row's log is the order the binary ran
+    # in.
     with open(rustup_home + '/calls.jsonl', 'a', encoding='utf-8') as handle:
         handle.write(json.dumps({'argv': argv, 'env': dict(os.environ),
                                  'cwd': os.getcwd()},

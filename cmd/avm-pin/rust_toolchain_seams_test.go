@@ -42,8 +42,15 @@ func buildAVMPin(t *testing.T, tags string) string {
 
 func runAVMPin(t *testing.T, binary string, args ...string) (string, int) {
 	t.Helper()
+	return runAVMPinEnv(t, binary, []string{"GITHUB_ACTIONS="}, args...)
+}
+
+// runAVMPinEnv runs the binary with extra environment entries appended, so a test
+// can state the variable under test instead of inheriting the runner's.
+func runAVMPinEnv(t *testing.T, binary string, extra []string, args ...string) (string, int) {
+	t.Helper()
 	command := exec.Command(binary, args...)
-	command.Env = append(os.Environ(), "GITHUB_ACTIONS=")
+	command.Env = append(os.Environ(), extra...)
 	var output bytes.Buffer
 	command.Stdout = &output
 	command.Stderr = &output

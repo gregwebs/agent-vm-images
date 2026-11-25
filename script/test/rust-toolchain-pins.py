@@ -1,39 +1,63 @@
 #!/usr/bin/env python3
-"""Hermetic interface table for the Rust toolchain pins, over the shipped programs.
+"""Interface table for the Rust toolchain pins, over the shipped programs.
 
 Every row drives a built program — the layer's `rust-dev-helper` or `avm-pin
 rust-toolchain` — as a child process over a signed synthetic distribution: real
 gpg, real strict decoding, real canonical-origin derivation, real archive
 preflight, the real install order. Only external I/O is substituted, and it is
 substituted *outside* the programs (a loopback byte store, an emulated rustup).
+Nothing here reaches the network. The suite no longer runs inside an OS boundary
+either: that went with the Python child tree (#245), so the programs this suite
+starts are confined by nothing but this process.
 
 ## What this suite is, and is not, since #245
 
-Until slice 4b of #232 these rows ran twice: once through the Python source
-reader and once through the Go reader, and a disagreement failed the suite. The
-Python is deleted, and nothing here compares two implementations any more. Every expectation
-below is a **claim** about the Go reader, frozen on `VERIFIED_ON`: status, the
-refusal text, the accepted value, the fetch count, the file set on disk.
+Most rows were differential rows until slice 4b of #232: they ran twice, once
+through the Python source reader and once through the Go reader, and a
+disagreement failed the suite. The Python is deleted. Each row below is now one
+**claim** about one program, frozen on `VERIFIED_ON`.
+
+Provenance is not uniform, and the freeze is only as good as it:
+
+* most rows are former differential rows, so their claim was once measured against
+  a second verdict;
+* **P4** was never such a row. The old suite recorded a declaration string and
+  printed it; it never ran that document through both binaries. Its claim rests on
+  the measurement made when the TOML decoder was chosen
+  (`docs/adr/0017-go-programs.md`);
+* the `2^63-1` acceptance row is new here. Its source is the layer's Go unit test
+  `TestTOMLIntegerRange`, not a former comparison;
+* the `installed rustup absent` row's Python arm crashed (`python_crashes=True` in
+  the deleted comparator), so only the status ever agreed between the two.
 
 What a drift can no longer be caught by:
 
-* a rule that Go and Python interpreted differently — the class the differential
-  existed for — is invisible here; only Go's own behaviour is asserted;
-* the TOML grammar column and the int64 range (P4, P5) were *bidirectional*
-  witnesses: Go's verdict on one side, the oracle's opposite verdict on the
-  other. Go's side is asserted; the opposite side is now an argument (rustup, the
-  program that reads `settings.toml`, is a 64-bit `toml` crate), not a test;
-* the `SingleStream` strictness row states in place that an authenticated archive
-  cannot reach the decoder. Nothing measures that claim;
-* rows about what a *second* implementation asked gpg, and about which
-  programs a Python child could execute, died with the interpreter.
+* a rule the two implementations interpreted differently — the class the
+  differential existed for. Only Go's behaviour is asserted;
+* **P4/P5**: what is gone is *the other implementation's verdict*, not Go's
+  endpoint. The int64 range is still pinned at both ends — by
+  `TestTOMLIntegerRange` and by the two rows below — so a limit that moved past
+  either end turns them red. Not witnessed: a change strictly inside the range, a
+  go-toml release that starts refusing `\\e` (this row and
+  `TestTOMLGrammar/escape-e` redden for that one), and the recorded reason that Go
+  deviates from TOML 1.0 here at all;
+* the `SingleStream` strictness row states in place that the decoder is
+  unreachable, because bytes that are unauthenticated or fail their checksum are
+  refused before it sees them. The refusal is asserted; the unreachability is an
+  argument, and nothing measures it;
+* rows about what a *second* implementation asked gpg, and about which programs a
+  Python child could execute, died with the interpreter. The one row that caught an
+  executable outside the suite's own allowlist (`installed with an unlisted rustup
+  copy`) is **deleted**: its refusal came from the OS boundary and the audit hook,
+  not from a rule of this program, so with the boundary gone it had no subject. A
+  copy of a tool is now executed like any other, and no row here vetoes an exec.
 
 The rules that lived only here and are asserted in the layer's own Go tests are
 listed per row in the PR body; those tests are the authority now, and this suite
-holds the interface: the binaries' statuses, streams and outputs.
+holds the interface: the binaries' statuses, streams, fetch sets and event logs.
 
-Native acceptance is `script/test/rust-example.sh`; the writer's end-to-end
-fault table is `script/test/rust-toolchain-maintenance.py`.
+Native acceptance is `script/test/rust-example.sh`; the writer's end-to-end fault
+table is `script/test/rust-toolchain-maintenance.py`.
 """
 from __future__ import annotations
 
@@ -43,6 +67,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 # A documented check must not write generated bytecode into the checkout, so
@@ -878,10 +903,12 @@ def test_settings_toml() -> None:
         else:
             go_row(f'TOML {label}', argv)
     # P4: the TOML 1.1 `\e` escape. No go-toml/v2 release refuses it, so the reader
-    # accepts the document. It was a declared divergence while the Python oracle
-    # refused it; the oracle is gone (#245), so what remains is this acceptance row
-    # and `TestTOMLGrammar/escape-e` in the layer's Go tests, which pins the value.
-    # Nothing catches a go-toml release that starts refusing the escape.
+    # accepts the document. This was a *recorded declaration* while the Python
+    # oracle refused it -- never a compared row -- and the oracle is gone (#245).
+    # What is left is this acceptance row plus `TestTOMLGrammar/escape-e`, which
+    # pins the decoded value; both redden if a go-toml release starts refusing the
+    # escape. What is gone is the measurement that Go deviates from TOML 1.0 here
+    # for a recorded reason.
     escape_row = settings_row(clean + 'a = "\\e"\n')
     go_row('P4: the TOML 1.1 \\e escape is accepted',
            ['verify-installed', str(fixture_root.pinned), '--arch', 'amd64',
@@ -895,9 +922,11 @@ def test_p5_integer_range() -> None:
     TOML 1.0 requires the error, and `settings.toml` is written and read by
     `rustup` -- a Rust program using the `toml` crate, which is int64. Until #245
     the row was witnessed in both directions: this reader refused the document and
-    the Python oracle accepted it. The second direction died with the oracle, so
-    what is left is one assertion over Go's own refusal plus that argument; nothing
-    now catches a decoder change that widens or narrows the range.
+    the Python oracle accepted it. The second direction died with the oracle. Both
+    ends of the range are still pinned here and in `TestTOMLIntegerRange`, so a
+    limit that moved outward or inward past an endpoint turns them red; what is not
+    witnessed is any change between the endpoints, and the second implementation's
+    verdict on either document.
     """
     print('verify-installed: P5, the TOML integer range')
     toolchain = f'{fixture.CHANNEL}-{fixture.HOSTS["amd64"]}'
@@ -955,8 +984,84 @@ def clean_case(arch: str) -> dict:
             'rustfmt_version': 'rustfmt 1.0.0 (fixture)', 'fail_when': []}
 
 
+# The frozen `--events` vocabulary (`toolchain/events.go`): the whole sequence is
+# asserted, so an invented line or a missing one is red. A writer that stopped
+# recording would otherwise leave the install rows green, which is the failure this
+# block exists to prevent.
+EVENT_PREFIXES = ('fetch', 'hash-ok', 'signature-ok', 'preflight-ok', 'layout-ready',
+                  'execute', 'install-ok')
+VERIFIED_PREFIXES = ('hash-ok', 'signature-ok', 'preflight-ok')
+
+
+def pinned_urls(arch: str) -> list[str]:
+    """Exactly the URLs the pin names for one architecture: bootstrap + closure."""
+    return [bootstrap_url(arch)] + [fixture.url_of_archive(package, target)
+                                    for package, target in fixture.selection(arch)]
+
+
+def bootstrap_url(arch: str) -> str:
+    return (f'https://static.rust-lang.org/rustup/archive/{fixture.RUSTUP_VERSION}/'
+            f'{fixture.HOSTS[arch]}/rustup-init')
+
+
+def url_paths(urls) -> list[str]:
+    return [urllib.parse.urlsplit(url).path for url in urls]
+
+
+def event_problems(lines: list[str], arch: str, expect: int,
+                   fetch_urls: list[str]) -> list[str]:
+    """What the log must say, read from the file rather than from the run.
+
+    Ordering is the claim the frozen log makes: every selected byte is recorded as
+    verified before the layout exists, nothing executes before the layout, and a
+    clean run ends with one `install-ok`. A refusal records no execution at all.
+    """
+    problems = []
+    prefixes = [line.split(' ', 1)[0] for line in lines]
+    unknown = sorted({prefix for prefix in prefixes if prefix not in EVENT_PREFIXES})
+    if unknown:
+        problems.append(f'events carry prefixes outside the frozen vocabulary: {unknown}')
+    if not prefixes:
+        return problems + ['the events log is empty']
+    if prefixes[0] != 'fetch':
+        problems.append(f'the first event is {prefixes[0]!r}, not a fetch')
+    fetched = sorted(line.split(' ', 1)[1] for line in lines if line.startswith('fetch '))
+    if fetched != sorted(fetch_urls):
+        missing = sorted(set(fetch_urls) - set(fetched))
+        extra = sorted(set(fetched) - set(fetch_urls))
+        problems.append(f'the fetch events name the wrong URLs (missing {missing}, '
+                        f'extra {extra})')
+    if len(fetched) != len(set(fetched)):
+        problems.append('a URL is recorded as fetched twice')
+    layout = [index for index, prefix in enumerate(prefixes) if prefix == 'layout-ready']
+    executed = [index for index, prefix in enumerate(prefixes) if prefix == 'execute']
+    verified = [index for index, prefix in enumerate(prefixes) if prefix in VERIFIED_PREFIXES]
+    installed = [index for index, prefix in enumerate(prefixes) if prefix == 'install-ok']
+    if expect == 0:
+        if len(layout) != 1:
+            problems.append(f'{len(layout)} layout-ready events, want 1')
+        if len(installed) != 1:
+            problems.append(f'{len(installed)} install-ok events, want 1')
+        if layout and verified and verified[-1] > layout[0]:
+            problems.append('an event records a verified byte after the layout exists')
+        if layout and executed and executed[0] < layout[0]:
+            problems.append('something executed before the layout was ready')
+        if installed and installed[0] != len(prefixes) - 1:
+            problems.append('install-ok is not the last event')
+        if installed and lines[installed[0]].split(' ', 1)[1:] != [arch]:
+            problems.append(f'install-ok does not name {arch}: {lines[installed[0]]!r}')
+    else:
+        if executed:
+            problems.append(f'something executed on a refused run: {len(executed)} events')
+        if installed:
+            problems.append('a refused run recorded install-ok')
+        if layout:
+            problems.append('a refused run recorded layout-ready')
+    return problems
+
+
 def install_row(label: str, arch: str, mutate=None, expect=0, fragments=(),
-                homes_exist=True, expect_fetches=None) -> None:
+                homes_exist=True, fetch_urls: list[str] | None = None) -> None:
     row = new_row()
     root = row / 'go'
     (root / 'tmp').mkdir(parents=True)
@@ -967,6 +1072,7 @@ def install_row(label: str, arch: str, mutate=None, expect=0, fragments=(),
     homes = (root / 'rustup', root / 'cargo')
     events = root / 'events'
     Path(str(homes[0]) + '.case.json').write_text(json.dumps(clean_case(arch)))
+    fetch_urls = fetch_urls if fetch_urls is not None else pinned_urls(arch)
     problems: list[str] = []
     with driver.LoopbackDistribution(files) as server:
         argv = ['--fixture-trust', fixture_root.dist.fingerprint,
@@ -981,10 +1087,16 @@ def install_row(label: str, arch: str, mutate=None, expect=0, fragments=(),
                        'HOME': str(root), 'TMPDIR': str(root / 'tmp'),
                        'LANG': 'C.UTF-8', 'LC_ALL': 'C', 'TZ': 'UTC'}
         status, out, err = driver.run_go(HELPER_FIXTURE, argv, environment)
-        fetched = [path for path in server.paths()]
+        fetched = url_paths([server.origin + path for path in server.paths()])
     problems.extend(verdict(status, out, err, expect, fragments))
-    if expect_fetches is not None and len(fetched) != expect_fetches:
-        problems.append(f'{len(fetched)} fetches, expected {expect_fetches}: {fetched}')
+    # The HTTP side and the log's own fetch events must both name exactly the
+    # pinned URLs: a count alone cannot tell which origin was asked for.
+    expected_paths = url_paths(fetch_urls)
+    if sorted(fetched) != sorted(expected_paths):
+        missing = sorted(set(expected_paths) - set(fetched))
+        extra = sorted(set(fetched) - set(expected_paths))
+        problems.append(f'the listener served the wrong URLs (missing {missing}, '
+                        f'extra {extra})')
     if len(fetched) != len(set(fetched)):
         problems.append(f'a URL was fetched twice: {fetched}')
     present = [path.name for path in homes if path.exists()]
@@ -996,42 +1108,33 @@ def install_row(label: str, arch: str, mutate=None, expect=0, fragments=(),
         left = sorted(entry.name for entry in (root / 'work').iterdir())
         if left:
             problems.append(f'the work directory left {left}')
-    if events.exists():
-        lines = events.read_text().splitlines()
-        verified = [index for index, line in enumerate(lines)
-                    if line.startswith(('hash-ok', 'signature-ok', 'preflight-ok'))]
-        executed = [index for index, line in enumerate(lines) if line.startswith('execute')]
-        if executed and verified and executed[0] < verified[-1]:
-            problems.append('something executed before the last byte was verified')
-        if expect == 0 and not any(line.startswith('install-ok') for line in lines):
-            problems.append('no install-ok event')
+    # `--events` was given, so the log must exist: "if the file is there" is what
+    # let a writer that stopped recording pass this row.
+    if not events.is_file():
+        problems.append('no --events log was written')
+    else:
+        problems.extend(event_problems(events.read_text().splitlines(), arch, expect,
+                                       fetch_urls))
     check(f'install {label}', not problems, '(' + '; '.join(problems) + ')' if problems else '')
-    if expect == 0:
-        fetched_selection = len(fixture.selection(arch)) + 1
-        check(f'install {label}: exactly the selected closure was fetched',
-              len(fetched) == fetched_selection,
-              f'({len(fetched)} of {fetched_selection})')
 
 
 def test_install() -> None:
     print('install rows')
     for arch in ('amd64', 'arm64'):
-        install_row(f'clean {arch}', arch, expect_fetches=7)
+        install_row(f'clean {arch}', arch)
 
     def corrupt_bootstrap(files):
-        url = (f'https://static.rust-lang.org/rustup/archive/{fixture.RUSTUP_VERSION}/'
-               f'{fixture.HOSTS["amd64"]}/rustup-init')
-        files[url] = files[url] + b'x'
+        files[bootstrap_url('amd64')] = files[bootstrap_url('amd64')] + b'x'
     install_row('refuses a bad bootstrap digest', 'amd64', mutate=corrupt_bootstrap,
                 expect=1, fragments=('do not match the committed digest',),
-                homes_exist=False, expect_fetches=1)
+                homes_exist=False, fetch_urls=pinned_urls('amd64')[:1])
 
     def corrupt_archive(files):
         url = fixture.url_of_archive('rustfmt-preview', fixture.HOSTS['amd64'])
         files[url] = files[url] + b'\x00'
     install_row('refuses a late archive hash', 'amd64', mutate=corrupt_archive,
                 expect=1, fragments=('do not match the signed manifest hash',),
-                homes_exist=False, expect_fetches=7)
+                homes_exist=False)
 
 
 # --- the deleted oracle ------------------------------------------------------
@@ -1044,29 +1147,61 @@ DELETED_FILES = (
     'script/test/fixtures/rust-toolchain/guard-self-control.py',
     'script/test/fixtures/rust-toolchain/sandbox-self-control.py',
 )
-# Basenames that name one of the deleted files wherever they appear. `launcher.py`
-# is deliberately absent: the gopls suites still write a shim by that name.
+# Names banned in every tracked file. A file name that exists nowhere else in the
+# repository is banned bare; the two that survive under another owner are banned by
+# path. `launcher.py` and `sandbox.py` are still written by the gopls suites, so
+# only the Rust fixture paths are banned here.
 DELETED_NAMES = (
     'rust_toolchain.py',
     'rust-toolchain-update.py',
+    'differential.py',
+    'guard-self-control.py',
+    'sandbox-self-control.py',
     'rust-toolchain/launcher.py',
-    'rust-toolchain/differential.py',
-    'rust-toolchain/sandbox-self-control.py',
-    'rust-toolchain/guard-self-control.py',
 )
-# Machinery deleted from *these* two suites. The gopls fixtures keep their own
-# copies, so the names are checked in the Rust suites and their fixture tree only.
+# A re-imported oracle does not have to spell the extension. The frozen
+# `rust_toolchain: ` diagnostic prefix is not a module reference, so the module
+# forms are spelled out rather than the bare name.
+DELETED_MODULES = (
+    'import rust_toolchain',
+    'from rust_toolchain',
+    'rust_toolchain_update',
+    'import differential',
+    'from differential',
+)
+MACHINERY_TABLE_START = '# --- the deleted oracle'
+MACHINERY_TABLE_END = '\ndef test_deleted_oracle_is_absent'
+# The machinery below existed only to run and guard the deleted files: the audit
+# hook, the OS re-exec and the program list it allowlisted. The gopls fixtures keep
+# their own copies, so these names are checked in the Rust suites and their fixture
+# tree, not repo-wide.
 DELETED_MACHINERY = (
     'guards.install',
     'sandbox.reexec_into_sandbox',
     'PROGRAMS',
 )
-DELETED_MACHINERY_FILES = (
-    # This file is the list, so it is not scanned for its own entries.
-    'script/test/rust-toolchain-maintenance.py',
-    'script/test/fixtures/rust-toolchain/driver.py',
-    'script/test/fixtures/rust-toolchain/fake_gpg.py',
-)
+
+
+def machinery_files() -> list[Path]:
+    fixtures = REPOSITORY_ROOT / 'script' / 'test' / 'fixtures' / 'rust-toolchain'
+    return sorted([path for path in fixtures.rglob('*') if path.is_file()] +
+                  [REPOSITORY_ROOT / 'script' / 'test' / 'rust-toolchain-pins.py',
+                   REPOSITORY_ROOT / 'script' / 'test' / 'rust-toolchain-maintenance.py'])
+
+
+def without_prohibition_table(path: Path, body: str) -> str:
+    """This file's own exemption: the table of names, and nothing else.
+
+    A prohibition list has to spell what it prohibits, so the table is cut out
+    before this file is scanned. Everything outside it — a docstring, a row, a
+    comment — is scanned like any other file, which is what the whole-file
+    exemption used to miss.
+    """
+    if path.resolve() != Path(__file__).resolve():
+        return body
+    start = body.index(MACHINERY_TABLE_START)
+    end = body.index(MACHINERY_TABLE_END)
+    return body[:start] + body[end:]
 
 
 def test_deleted_oracle_is_absent() -> None:
@@ -1081,32 +1216,37 @@ def test_deleted_oracle_is_absent() -> None:
         check(f'{relative} is absent', not (REPOSITORY_ROOT / relative).exists())
     tracked = subprocess.run(['git', 'ls-files', '-z'], cwd=str(REPOSITORY_ROOT),
                              capture_output=True, check=True).stdout.split(b'\0')
+    patterns = DELETED_NAMES + DELETED_MODULES
     offenders: dict[str, list[str]] = {}
     for raw in tracked:
         if not raw:
             continue
         relative = raw.decode()
-        # This file is the one place the names must appear: it is the list. Every
-        # other tracked file is a consumer, and a mention there is the failure.
-        if relative == str(Path(__file__).resolve().relative_to(REPOSITORY_ROOT)):
-            continue
         path = REPOSITORY_ROOT / relative
         try:
-            body = path.read_bytes()
+            body = path.read_bytes().decode('utf-8', 'replace')
         except OSError:
             continue
-        # A text search over bytes: a name in a comment or a doc line counts, which
-        # is the point.
-        for name in DELETED_NAMES:
-            if name.encode() in body:
-                offenders.setdefault(name, []).append(relative)
-    for name in DELETED_NAMES:
-        found = offenders.get(name, [])
-        check(f'no tracked file names {name!r}', found == [], f'({found[:6]})')
-    for relative in DELETED_MACHINERY_FILES:
-        body = (REPOSITORY_ROOT / relative).read_text()
+        body = without_prohibition_table(path, body)
+        # A text search: a name in a comment or a doc line counts, which is the
+        # point.
+        for pattern in patterns:
+            if pattern in body:
+                offenders.setdefault(pattern, []).append(relative)
+    for pattern in patterns:
+        found = offenders.get(pattern, [])
+        check(f'no tracked file names {pattern!r}', found == [], f'({found[:6]})')
+    machinery: dict[str, list[str]] = {}
+    for path in machinery_files():
+        body = without_prohibition_table(path, path.read_text(errors='replace'))
         for name in DELETED_MACHINERY:
-            check(f'{relative} does not name {name}', name not in body)
+            if name in body:
+                machinery.setdefault(name, []).append(
+                    str(path.relative_to(REPOSITORY_ROOT)))
+    for name in DELETED_MACHINERY:
+        found = machinery.get(name, [])
+        check(f'the Rust suites and fixtures do not name {name!r}', found == [],
+              f'({found[:6]})')
 
 
 # --- main --------------------------------------------------------------------

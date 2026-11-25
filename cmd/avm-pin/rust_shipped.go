@@ -9,9 +9,9 @@ package main
 // honouring one: the grammar that would accept it is not compiled in.
 //
 // The writer's fixture transport is a build tag for the same reason the rust-dev
-// helper's is (ADR 0017, decision D1): the differential suite must drive the
-// *shipped* writer over the same bytes the Python writer sees, and a flag would
-// let a maintainer run a pin from fixture bytes by accident.
+// helper's is (ADR 0017, decision D1): the pin suites must drive *this* writer's
+// code over the fixture's bytes, and a flag would let a maintainer run a pin from
+// fixture bytes by accident.
 
 import (
 	"github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain"
