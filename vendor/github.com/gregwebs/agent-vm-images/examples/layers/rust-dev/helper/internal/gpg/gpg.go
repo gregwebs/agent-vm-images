@@ -4,8 +4,8 @@
 // There is no bypass mode. A signature is authenticated only when gpg exits zero
 // *and* every status line agrees: the exit status alone, or a VALIDSIG line
 // alone, is not a verdict. The argv, the child environment and the keyring's
-// permissions are byte-for-byte the source reader's, because the differential
-// oracle compares gpg's transcript between the two implementations.
+// permissions are byte-for-byte the source reader's: the suites match gpg's
+// transcript, and the Python that produced it is deleted (#245).
 package gpg
 
 import (
@@ -75,8 +75,8 @@ type Policy struct {
 }
 
 // Exec is the one process seam this package has. Production passes ExecProcess;
-// a unit test passes a recorder. A prefix wrapper (the differential suite's
-// recording gpg) is a *program*, not a seam: it is reached through PATH.
+// a unit test passes a recorder. A prefix wrapper (the suites' recording gpg) is
+// a *program*, not a seam: it is reached through PATH.
 type Exec func(ctx context.Context, argv []string, env []string) (Result, error)
 
 // ExecProcess runs one child with exactly env and no inherited variable.

@@ -17,8 +17,9 @@ package main
 // because they are not in the shipped binary; vendor and testdata are excluded
 // because they are not sources this repository owns.
 //
-// What an import-level guard cannot see, and why the Python audit hook it replaces
-// was a different kind of statement (R2 of #232): `os.StartProcess`, a socket made
+// What an import-level guard cannot see, and why the Python audit hook it replaced
+// (deleted with its interpreter, #245) was a different kind of statement (R2 of
+// #232): `os.StartProcess`, a socket made
 // through `syscall`, code reached through cgo or `plugin`, and any of the above
 // inside a dependency someone adds later. The hook vetoed those at run time in one
 // interpreter; this rejects them at review time in the sources we compile. It is

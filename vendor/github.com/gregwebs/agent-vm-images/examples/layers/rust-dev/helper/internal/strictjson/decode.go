@@ -13,7 +13,7 @@
 //     P1 divergence, status 1 either way);
 //   - the diagnostic fragments are the source reader's ("not valid JSON",
 //     "not valid UTF-8", "duplicate key", "leading UTF-8 BOM"), because the
-//     suites and the differential oracle match them.
+//     suites match them.
 //
 // encoding/json keeps the last of two identical keys, so a pin could name one
 // version to a reviewer's reader and another to the loader that acts on it. This

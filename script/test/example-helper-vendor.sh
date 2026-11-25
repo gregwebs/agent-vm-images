@@ -37,7 +37,7 @@ trap cleanup EXIT
 # the scalar decoder go-arg uses, the TOML decoder the pin reader was measured
 # against (docs/adr/0017-go-programs.md): go-toml/v2 v2.2.4, the newest release
 # that matches TOML 1.0 with strict tables on eight of the nine grammar vectors
-# (the ninth, the TOML 1.1 `\e` escape, is a declared divergence with a test), and
+# (the ninth, the TOML 1.1 `\e` escape, is a declared acceptance with a test), and
 # ulikunitz/xz v0.5.17 for the single-stream archive preflight. The xz version is
 # the one the root go.mod already pins, so slice 4's shared-dependency check has
 # no MVS skew. This is the second vendored dependency under examples/; the three

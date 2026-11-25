@@ -6,7 +6,7 @@ package toolchain
 // publisher (`script/dev/upgrade-rust-toolchain.sh`) copies that candidate as one
 // transaction; nothing here touches the source tree.
 //
-// Slice 4a of #187 moved this out of `script/dev/rust-toolchain-update.py`. Every
+// Slice 4a of #187 moved this out of the Python stager, which #245 deleted. Every
 // rule it applies already lives in this package, so the port is a sequence of
 // calls: the manifest grammar and the selection are `decodeTOML`,
 // `DeriveSelection` and `manifestEntry`; the canonical origins are
@@ -404,13 +404,17 @@ func stageInto(ctx context.Context, request StageRequest, dependencies StageDepe
 	// The candidate is held to the reader before it is offered: a proposal the
 	// image would refuse fails here, not after publication.
 	//
-	// Declared: this re-read is *not* witnessed by deletion. No fixture the suites
-	// have today distinguishes these two calls from their absence, so no test turns
-	// red when they are removed, and this comment is where that is stated rather
-	// than only in a PR body. It stays because a writer regression is exactly what
-	// it is for -- the document, the evidence file set and the digests are the only
-	// part of this path that is written rather than called, and this is the one
-	// check that reads them back from disk with the reader the image runs.
+	// Declared: this re-read is *not* witnessed. No fixture the suites have today
+	// distinguishes these two calls from their absence, so no test turns red when
+	// they are removed, and this comment is where that is stated rather than only
+	// in a PR body. Until #245 a differential implied it -- the Python writer's
+	// candidate was re-read by the same Python loader every run -- and that
+	// implication is gone with the oracle, so this is a claim: a deleted re-read
+	// changes nothing any gate can see. It stays because a writer regression is
+	// exactly what it is for -- the document, the evidence file set and the
+	// digests are the only part of this path that is written rather than called,
+	// and this is the one check that reads them back from disk with the reader the
+	// image runs.
 	candidate, err := LoadPin(data, dependencies.Trust)
 	if err != nil {
 		return proposal, err

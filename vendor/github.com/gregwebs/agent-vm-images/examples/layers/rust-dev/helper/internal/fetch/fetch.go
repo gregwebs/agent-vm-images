@@ -1,12 +1,12 @@
 // Package fetch downloads one pinned URL to one scratch path.
 //
-// It is a deliberate, measured port of `rust_toolchain.py`'s HttpsTransport
-// (slice 3 of #187), not the root module's internal/fetch: an example layer is a
-// self-contained Go module (ADR 0017) and cannot import it. The differences are
-// policy, and each one is stated where it lives:
+// It is a deliberate, measured port of the source reader's HttpsTransport (slice
+// 3 of #187, the Python deleted in #245), not the root module's internal/fetch:
+// an example layer is a self-contained Go module (ADR 0017) and cannot import it.
+// The differences are policy, and each one is stated where it lives:
 //
 //   - one attempt, no retry (the pin names exact bytes; a retry would break the
-//     "no URL fetched twice" oracle);
+//     "no URL fetched twice" row);
 //   - no redirect is followed (the source reader refuses any 3xx as an
 //     unexpected status);
 //   - HTTPS only in the shipped client, no `file://` transport;

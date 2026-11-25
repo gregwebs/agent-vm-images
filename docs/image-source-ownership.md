@@ -412,10 +412,11 @@ verbs landed in #187 slice 2 and its `install` verb in #231. It applies the same
 rules in the same order with the same diagnostics, and it fetches only the seven
 URLs the pin names with one attempt, no redirects and the Python bounds. The
 `rust-dev` image build runs no Python and its apt line carries no `python3`.
-`rust_toolchain.py` stays on disk, never mounted into a build, as the host-only
-differential oracle the pins suite compares against until slice 4b of #232
-deletes it. The writer is `avm-pin rust-toolchain`, which stages through the same
-`toolchain` package the image's helper compiles (#232 slice 4a).
+The Python reader that was the host-only differential oracle until slice 4b of
+#232 is deleted (#245), so this helper is the only implementation and the pins
+suite asserts its behaviour alone. The writer is `avm-pin rust-toolchain`, which
+stages through the same `toolchain` package the image's helper compiles (#232
+slice 4a).
 The `rustup-init` binaries carry no detached signature for 1.28.2, so `pin.json`
 records a **scoped, dated, per-architecture hash-only exception** with exact
 URLs/digests, upstream `.sha256` and installation-document evidence, reviewer and

@@ -2,8 +2,8 @@ package toolchain
 
 // The frozen `--events` log. Each line is written at the operation site, never
 // reconstructed afterwards, so an interrupted run records exactly what had
-// happened when it stopped. The differential `install` rows compare the whole
-// sequence against the Python oracle.
+// happened when it stopped. The frozen `install` rows assert the whole sequence;
+// nothing compares it against a second implementation any more (#245).
 
 import (
 	"os"

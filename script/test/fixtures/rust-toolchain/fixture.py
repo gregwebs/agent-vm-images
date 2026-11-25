@@ -4,10 +4,10 @@
 Upstream payloads are hundreds of megabytes and private to no one, so the tests
 build a tiny but *validly signed* two-architecture distribution: real xz
 archives with real rust-installer version-3 metadata, real detached OpenPGP
-signatures from an invocation-owned key, and a manifest in the signed schema
-``rust_toolchain.py`` validates. Nothing here is a production key or upstream
-byte, and nothing here relaxes a production check: the tests drive the real
-model through its documented transport/runner/dependency seams.
+signatures from an invocation-owned key, and a manifest in the signed schema the
+layer's Go reader validates. Nothing here is a production key or upstream byte,
+and nothing here relaxes a production check: the suites drive the shipped programs
+over these bytes as child processes.
 """
 from __future__ import annotations
 

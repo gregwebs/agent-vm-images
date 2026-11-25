@@ -22,7 +22,7 @@ REVIEWED_ARGS_FILE=${CHECKER%/*}/reviewed-args.txt
 HELPER_BUILD=${CHECKER%/*}/../build/example-helper.sh
 # Known space-free paths, explicitly moved from agent-vm's ci-contracts.sh:
 # deletion/rename must fail rather than silently leave lint coverage.
-GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp.sh go-dev/gopls_closure.py go-dev/install-go.sh go-dev/install-golangci-lint.sh go-dev/install-gopls.sh go-dev/verify-toolchain.sh rust-dev/install-kache.sh rust-dev/install-rust.sh rust-dev/install-verus.sh rust-dev/rust_toolchain.py rust-dev/verify-toolchain.sh'
+GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp.sh go-dev/gopls_closure.py go-dev/install-go.sh go-dev/install-golangci-lint.sh go-dev/install-gopls.sh go-dev/verify-toolchain.sh rust-dev/install-kache.sh rust-dev/install-rust.sh rust-dev/install-verus.sh rust-dev/verify-toolchain.sh'
 # A layer may also carry its own Go module under `helper/` (ADR 0017, example
 # layers stay self-contained). Its non-vendor files are named here one entry per
 # file, like GUARDED_DATA: a reviewer of a new source file sees it in the diff, a
@@ -324,7 +324,6 @@ check() {
     # before the helper is invoked so a whole missing directory reports itself;
     # the missing files inside it are the helper's own `missing input: ...`.
     rustdir=$LAYERS/rust-dev
-    helper=$rustdir/rust_toolchain.py
     datadir=$rustdir/data/rust-toolchain
     [ -d "$datadir" ] || fail 'rust-dev: missing Rust input directory'
     rust_arg=$(sed -nE 's/^ARG RUST_TOOLCHAIN=(.*)$/\1/p' "$rustdir/Dockerfile")
@@ -354,9 +353,6 @@ normalize_instruction() { printf '%s' "$1" | tr -s ' \t' ' ' | sed -e 's/^ //' -
     # source bytes, so a comment-only edit under helper/ changes nothing any gate
     # sees.
     #
-    # Link 5 -- every requirement the two go.mod files share is at one version, so
-    # MVS cannot raise a version in the root -- arrives with slice 4, when the root
-    # module imports this one.
     helperdir=$rustdir/helper
     [ -f "$helperdir/vendor/modules.txt" ] ||
         fail 'rust-dev: helper/vendor is the build closure; it must stay committed'
@@ -462,24 +458,17 @@ RUN --network=none --mount=type=bind,source=helper,target=/src,ro cd /src && { [
 HELPER_BUILDER
     [ "$(normalize_instruction "$builder_stage")" = "$reviewed_helper_builder" ] ||
         fail "rust-dev: the helper stage RUN must be exactly: $reviewed_helper_builder (got: $(normalize_instruction "$builder_stage"))"
-    # Two readers, one answer. `check` moved to the layer's own Go helper
-    # (#187 slice 2) and `rust_toolchain.py` stays as the differential oracle
-    # until #232 deletes it, so every input is read twice here: a refusal either
-    # reader reports alone fails as a disagreement, and a shared refusal is
-    # reported with the Go text so the fragments below stay the Go text's.
+    # One reader. `check` moved to the layer's own Go helper in #187 slice 2 and
+    # the Python oracle is deleted (#245), so this gate holds the Go answer: a
+    # refusal is reported with its own text, and the channel assertion must match
+    # the Dockerfile's ARG. Nothing compares two implementations any more.
     host_os=$(uname -s | tr '[:upper:]' '[:lower:]')
     go_helper=$(bash "$HELPER_BUILD" rust-dev --root "$ROOT" \
         --os "$host_os") || fail 'rust-dev pins: cannot build the host helper'
     go_out='' go_status=0
     go_out=$("$go_helper" check "$ROOT/$datadir" --expect-channel "$rust_arg" 2>&1) || go_status=$?
-    py_out='' py_status=0
-    py_out=$(PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/$helper" check "$ROOT/$datadir" \
-        --expect-channel "$rust_arg" 2>&1) || py_status=$?
-    [ "$go_status" -eq "$py_status" ] ||
-        fail "rust-dev pins: the Go and Python readers disagree (go $go_status: $go_out; python $py_status: $py_out)"
     [ "$go_status" -eq 0 ] || fail "rust-dev pins: $go_out"
     [ "$go_out" = "$rust_arg" ] || fail "rust-dev pins: channel disagreement"
-    [ "$py_out" = "$rust_arg" ] || fail "rust-dev pins: the Python reader's channel disagrees"
     selected=$go_out
 reviewed_installer='RUN --mount=type=bind,source=install-rust.sh,target=/tmp/install-rust.sh,ro --mount=type=bind,from=rust-dev-helper,source=/out/rust-dev-helper,target=/tmp/rust-dev-helper,ro --mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro bash /tmp/install-rust.sh'
 reviewed_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/rust-verify/verify-toolchain.sh,ro --mount=type=bind,from=rust-dev-helper,source=/out/rust-dev-helper,target=/run/rust-verify/rust-dev-helper,ro --mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro RUST_TOOLCHAIN=$RUST_TOOLCHAIN KACHE_VERSION=$KACHE_VERSION VERUS_DIR=/opt/verus /bin/bash /run/rust-verify/verify-toolchain.sh'
@@ -520,8 +509,7 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     grep -qF '"$VERIFY_DIR/rust-dev-helper" verify-installed "$VERIFY_DIR/rust-toolchain"' \
         "$rustdir/verify-toolchain.sh" ||
         fail 'rust-dev: verify-toolchain.sh must run the Go verifier'
-    if grep -qE 'python3|PYTHONDONTWRITEBYTECODE|rust_toolchain\.py' \
-        "$rustdir/verify-toolchain.sh"; then
+    if grep -qE 'python3|PYTHONDONTWRITEBYTECODE' "$rustdir/verify-toolchain.sh"; then
         fail 'rust-dev: the verifier step must run no Python'
     fi
     # The install leg is Go too (#231): python3 leaves this layer's apt line (the
@@ -540,8 +528,7 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     grep -qF '"$HERE/rust-dev-helper" install "$HERE/rust-toolchain"' \
         "$rustdir/install-rust.sh" ||
         fail 'rust-dev: install-rust.sh must run rust-dev-helper install'
-    if grep -qE 'python3|PYTHONDONTWRITEBYTECODE|rust_toolchain\.py' \
-        "$rustdir/install-rust.sh"; then
+    if grep -qE 'python3|PYTHONDONTWRITEBYTECODE' "$rustdir/install-rust.sh"; then
         fail 'rust-dev: the install step must run no Python'
     fi
     grep -qxF 'ENV RUSTUP_AUTO_INSTALL=0' "$rustdir/Dockerfile" ||
@@ -1185,8 +1172,8 @@ self_test() {
                 mv "$rusttool/evidence" "$SCRATCH/evidence-away"
                 ln -s "$SCRATCH/evidence-away" "$rusttool/evidence"
                 expected='symlink evidence' ;;
-            75) rm "$tree/$LAYERS/rust-dev/rust_toolchain.py"
-                expected='guarded script missing: rust-dev/rust_toolchain.py' ;;
+            75) rm "$tree/$LAYERS/rust-dev/verify-toolchain.sh"
+                expected='guarded script missing: rust-dev/verify-toolchain.sh' ;;
             76)
                 awk 'BEGIN { skip = 0 }
                      /^if \[ "\$arch" = amd64 \]; then$/ { skip = 1 }
@@ -1503,22 +1490,20 @@ INSTRUCTION
                 grep -qF "$(printf 'ARG\vBASE_IMAGE=debian:13')" "$godocker" ||
                     fail 'self-test: case 150 did not write a vertical-tab-delimited ARG'
                 expected='parent pin: ARG shape: go-dev redefinition' ;;
-            # 151-154: the two readers, and the verifier RUN's two removed
-            # Python halves (#187 slice 2). 151 and 152 change one reader's
-            # compiled trust root so exactly one side refuses: the disagreement
-            # must be reported, not reconciled in code. 153 restores the Python
-            # mount and 154 the bytecode variable; both must fail the exact RUN
-            # shape.
+            # 151-154: one reader (#245 deleted the Python oracle). 151 changes
+            # the compiled trust root, so the reader must refuse the committed
+            # data. 152 re-adds a reader file to the layer: it is not in GUARDED,
+            # so the sweep names it. 153 restores a Python mount and 154 the
+            # bytecode variable; both must fail the exact RUN shape.
             151)
                 rewrite "$tree/$LAYERS/rust-dev/helper/toolchain/policy.go" \
                     's|108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE|108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FF|'
-                expected='the Go and Python readers disagree' ;;
+                expected='is not the reviewed primary key' ;;
             152)
-                rewrite "$tree/$LAYERS/rust-dev/rust_toolchain.py" \
-                    "s|^REVIEWED_PRIMARY_FINGERPRINT = '108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE'|REVIEWED_PRIMARY_FINGERPRINT = '108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FF'|"
-                expected='the Go and Python readers disagree' ;;
+                printf '#!/bin/sh\nexit 0\n' > "$tree/$LAYERS/rust-dev/legacy-reader.py"
+                expected='unguarded example script: rust-dev/legacy-reader.py' ;;
             153)
-                rewrite "$rustdocker" 's|--mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro|--mount=type=bind,source=rust_toolchain.py,target=/run/rust-verify/rust_toolchain.py,ro --mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro|'
+                rewrite "$rustdocker" 's|--mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro|--mount=type=bind,source=legacy-reader.py,target=/run/rust-verify/legacy-reader.py,ro --mount=type=bind,source=data/rust-toolchain,target=/run/rust-verify/rust-toolchain,ro|'
                 expected='verifier RUN must be exactly' ;;
             154)
                 rewrite "$rustdocker" 's|^    /bin/bash /run/rust-verify/verify-toolchain.sh|    PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/rust-verify/verify-toolchain.sh|'
@@ -1551,10 +1536,10 @@ INSTRUCTION
                 expected='apt install line must keep gnupg' ;;
             159)
                 rewrite "$tree/$LAYERS/rust-dev/install-rust.sh" \
-                    's|"\$HERE/rust-dev-helper" install|python3 "$HERE/rust_toolchain.py" install|'
+                    's|"\$HERE/rust-dev-helper" install|python3 "$HERE/legacy-reader.py" install|'
                 expected='install-rust.sh must run rust-dev-helper install' ;;
             160)
-                rewrite "$rustdocker" 's|--mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro|--mount=type=bind,source=rust_toolchain.py,target=/tmp/rust_toolchain.py,ro --mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro|'
+                rewrite "$rustdocker" 's|--mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro|--mount=type=bind,source=legacy-reader.py,target=/tmp/legacy-reader.py,ro --mount=type=bind,source=data/rust-toolchain,target=/tmp/rust-toolchain,ro|'
                 expected='installer RUN must be exactly' ;;
             161)
                 printf 'package fetch\n' > "$tree/$LAYERS/rust-dev/helper/internal/fetch/unreviewed.go"

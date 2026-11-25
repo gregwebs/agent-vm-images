@@ -721,44 +721,37 @@ The fixture tests trace `commit`'s maintenance child, which git 2.30 introduced.
 `#!/bin/sh` scripts are syntax-checked with `dash -n` (macOS ships `/bin/dash`);
 without dash the gate falls back to `sh -n` with a note, and CI requires dash.
 The Rust fixture suites (`rust-toolchain-pins.py`, `rust-toolchain-maintenance.py`)
-need a real `gpg`, and they run every native child inside an OS boundary instead
-of trusting the Python audit hook. The maintenance suite is also the pin writer's
-differential until slice 4b of #232: every case runs the same tree through `avm-pin
-rust-toolchain` -- which the suite builds itself with `-tags example_fixture`, the
-only way the fixture byte store reaches it -- and through the Python stager, then
-compares status, stdout, stderr and the bytes and modes of every file in the tree.
-It therefore needs `go` before it starts; the `-tags` build is the suite's own act
-and is not reachable from a maintainer run or an image build. The boundary is the same on both platforms for
-the network: off-host traffic is denied and only loopback is usable. Executable
-allowlisting is macOS-only: `sandbox-exec` checks every `exec` against the
-declared paths, so a copy of an allowed binary does not start. Linux needs
-`bubblewrap` (`apt-get install bubblewrap`) and a kernel with Landlock
+need a real `gpg` and `go`: both drive the layer's helper and the `avm-pin` writer
+as child processes over a signed synthetic distribution, and the maintenance suite
+builds the writer itself with `-tags example_fixture` -- the only way the fixture
+byte store reaches it, and not something a maintainer run or an image build can
+pass. They run no Python under test and install no audit hook: the programs under
+test are Go and shell. Since #245 they no longer compare two implementations
+either; each suite's header states which claims it froze and what a drift can no
+longer be caught by. gpg-agent's socket path is a unix socket of at most 104 bytes
+on macOS, so each row gets a short `TMPDIR` of its own; a deep temp path fails with
+`can't connect to the gpg-agent: File name too long`.
+
+The OS boundary in `script/test/fixtures/rust-toolchain/sandbox.py` -- network
+isolation, a filesystem view and, on macOS, an executable allowlist -- is used by
+the **gopls closure** suites, which run the real `go` inside it: a native child is
+not covered by the Python audit hook in `guards.py` beside it. Off-host traffic is
+denied and only loopback is usable on both platforms. Executable allowlisting is
+macOS-only: `sandbox-exec` checks every `exec` against the declared paths, so a
+copy of an allowed binary does not start. Linux needs `bubblewrap`
+(`apt-get install bubblewrap`) and a kernel with Landlock
 (`CONFIG_SECURITY_LANDLOCK`, 5.13+). Ubuntu 24.04 also restricts unprivileged
 user namespaces; on a disposable runner that needs
 `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (the contracts
 job sets it) or bubblewrap cannot configure its network namespace. The network
-namespace and the filesystem view
-are the OS layer's guarantee, and Landlock's `EXECUTE` rules refuse a *direct*
-`exec` outside the list — but a listed ELF loader can start another program
-without a kernel `exec` of that file, so this is not an executable allowlist. On
-Linux the in-process audit hook in `guards.py` (installed in every fixture child
-before the modules under test are imported) is the authority for which programs
-run. The kernel-side gap is follow-up work, not a property the suite claims. On a
-host with neither sandbox tool, the suites exit nonzero before running anything
-under test.
-
-The pins suite also runs the rust-dev layer's **Go** reader against the same
-bytes as Python's loader, so it needs `go` and builds the layer's helper twice in a
-first pass, *before* it enters the boundary: the sandbox's exec allowlist is a list
-of literal paths fixed at entry, and a binary built after that point could not be
-executed by the Go child at all. That first pass also writes the emulated
-toolchain and the three gpg wrappers it allowlists. The Go child's execs are then
-bound by the same two layers as a Python child's — `sandbox-exec` on macOS,
-Landlock plus the audit hook for its own children on Linux — and by the suite's
-own assertion that a copy of an allowed program in writable scratch does not
-start. gpg-agent's socket path is a unix socket of at most 104 bytes on macOS, so
-each differential row gets a short `TMPDIR` of its own; a deep temp path fails with
-`can't connect to the gpg-agent: File name too long`.
+namespace and the filesystem view are the OS layer's guarantee, and Landlock's
+`EXECUTE` rules refuse a *direct* `exec` outside the list -- but a listed ELF
+loader can start another program without a kernel `exec` of that file, so this is
+not an executable allowlist. On Linux the in-process audit hook in `guards.py`
+(installed in every fixture child before the modules under test are imported) is
+the authority for which programs run. The kernel-side gap is follow-up work, not a
+property the suites claim. On a host with neither sandbox tool, the gopls suites
+exit nonzero before running anything under test.
 On macOS:
 
 ```bash

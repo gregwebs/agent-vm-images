@@ -10,13 +10,14 @@ import (
 // The verdicts in `want` are the TOML 1.0 column measured from `tomllib` on
 // Python 3.12–3.14 — the grammars the image (trixie, 3.13) and CI (ubuntu-24.04,
 // 3.12) ship, and the one rustup itself reads. They are asserted unconditionally,
-// so a host whose own `tomllib` is TOML 1.1 cannot weaken this test; the pins
-// suite is what compares the two implementations, and it says how many rows it
-// compared and against which measured grammar.
+// so a host whose own `tomllib` is TOML 1.1 cannot weaken this test. These
+// verdicts are claims since #245: the Python oracle that would have disagreed is
+// deleted, so no second reader checks the column.
 //
-// One row is a declared divergence: no go-toml/v2 release refuses `"\e"` (see
+// One row is a declared acceptance: no go-toml/v2 release refuses `"\e"` (see
 // docs/adr/0017-go-programs.md for the measurement), so this test pins the
-// acceptance *and the value it produces* instead of describing it.
+// acceptance *and the value it produces* instead of describing it. Nothing fails
+// if a go-toml upgrade starts refusing that escape; the row is a claim.
 func TestTOMLGrammar(t *testing.T) {
 	cases := []struct {
 		label string
@@ -56,10 +57,10 @@ func TestTOMLGrammar(t *testing.T) {
 					}
 					return
 				}
-				// The declared divergence: the document is accepted, and this is
+				// The declared acceptance: the document is accepted, and this is
 				// the value it produces.
 				if err != nil {
-					t.Fatalf("the declared divergence changed: %v", err)
+					t.Fatalf("the declared acceptance changed: %v", err)
 				}
 				if document["a"] != test.value {
 					t.Fatalf("a is %#v, want %#v", document["a"], test.value)
@@ -94,10 +95,13 @@ func TestTOMLRefusesBeforeDecoding(t *testing.T) {
 	}
 }
 
-// TestTOMLIntegerRange pins the decoder's measured int64 limit. Python's int has
-// no range, so this is the one TOML row where the vendored decoder refuses a
-// document the oracle accepts: a library differential the plan's stop rule
-// reserves for the owner's ruling (reported on #230, not reconciled in code).
+// TestTOMLIntegerRange pins the decoder's measured int64 limit, and with it the
+// ruling that made the range a refusal: `settings.toml` is written and read by
+// rustup through Rust's `toml` crate, which is int64, so agreement with that
+// reader is the claim. The bidirectional witness that sat beside this row -- the
+// deleted Python oracle accepting the same document -- is gone (#245). What
+// remains is a one-directional assertion over this decoder's refusal plus the
+// argument above; nothing turns red if the vendored limit moves.
 func TestTOMLIntegerRange(t *testing.T) {
 	if _, err := decodeTOML([]byte("x = 9223372036854775807\n"), "settings.toml"); err != nil {
 		t.Fatalf("the largest int64 was refused: %v", err)

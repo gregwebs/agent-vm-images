@@ -119,8 +119,9 @@ slice 2` moved the rust-dev layer's `check` and `verify-installed` to its Go
 helper, and slice 3 (#231) moved `install` as well: the Go helper now fetches the
 seven pinned URLs, preflights the archives with `ulikunitz/xz` `SingleStream` and
 runs rustup, so zero Python runs in the `rust-dev` image build and `python3`
-leaves its apt line. `rust_toolchain.py` stays on disk, byte-identical and never
-mounted into a build, as the host-only oracle until slice 4b of #232. Slice 4a
+leaves its apt line. The Python reader stayed on disk, byte-identical and never
+mounted into a build, as the host-only oracle until slice 4b of #232; #245
+deleted it. Slice 4a
 already moved the *writer*: `avm-pin rust-toolchain` stages through the layer's
 `toolchain` package, imported by the root module through a local `replace`, so the
 maintainer's writer and the image's installer compile one library. That import is
@@ -128,17 +129,16 @@ what makes the root's `vendor/` carry a copy of the layer's source, so
 `internal/vendordrift` compares the two trees byte for byte offline, and the
 module's import boundary (`os/exec` and `net/http` in one committed list) replaced
 the Python audit hook as the statement of what the writer can reach.
-Two implementations of one rule set is a hazard, so the overlap is held as a
-*differential*: both readers run over the same bytes on every host gate, and a
-differential `install` row runs both from the same fixture bytes, with the Go
-side driving the real HTTP client through a harness-owned loopback listener. A
-disagreement fails the gate. Python is the oracle, never a fallback; nothing
-chooses between them at run time. The image build no longer compares the two
-implementations because it no longer runs Python; the host suites do.
-`script/test/example-layers.sh` runs both readers over the committed pin
-directory and each of its self-test mutants, and the pins suite runs the
-`install` rows side by side. A differential disagreement is a stop reported on
-the issue, never reconciled in code.
+Two implementations of one rule set is a hazard, so the overlap was held as a
+*differential* while both existed: both readers ran over the same bytes on every
+host gate, and a differential `install` row ran both from the same fixture bytes,
+with the Go side driving the real HTTP client through a harness-owned loopback
+listener. A disagreement failed the gate, and it was a stop reported on the issue,
+never reconciled in code. #245 deleted the Python, which ends the arrangement: the
+suites now assert the Go reader's own behaviour, frozen on a fixed date, and each
+suite's header states what such a drift can no longer be caught by. The remaining
+self-check is `TestImportsAreReviewed` and the vendored-copy drift gate — static
+statements about what the shipped binary compiles, not comparisons of behaviour.
 
 **A TOML decoder is chosen by measurement, not by name.** The pin reader's TOML
 target is **TOML 1.0 with strict table semantics**, because that is what decides
@@ -151,22 +151,26 @@ lets a later key extend an already-sealed inline table, which is a *semantic*
 acceptance, and v1.4.0 also switches to TOML 1.1 when `BURNTSUSHI_TOML_110` is in
 the environment.
 
-The `\e` acceptance is a declared divergence, and
+The `\e` acceptance is a declared deviation from TOML 1.0, and
 `TestTOMLGrammar/escape-e` pins the behaviour it accepts (the document decodes, and
-the value is `U+001B`) rather than describing it. The suite's oracle is probed,
-never version-sniffed: `tomllib` is TOML 1.1 from CPython 3.15, so a 3.15 host
-compares the five 1.1-only rows against the measured TOML 1.0 column and prints how
-many rows it compared and against which grammar, making a thin run visible. The
-same measurement found a second, independent oracle deviation, ruled **P5** on
-#230: `tomllib` accepts an integer beyond ±2^63, which TOML 1.0 requires to be an
-error. Go refuses it, which is also what the producer does — `settings.toml` is
-written and read by `rustup`, through Rust's int64 `toml` crate — so the Go
-reader agrees with the program that opens the file and the oracle is the odd one
-out. P5 is its own entry because P4 was scoped to grammar that varies by Python
-version; this does not vary. A declared divergence must fail when it stops being
-true, so the row asserts both directions: Go refuses at the int64 limit *and* the
-oracle still accepts, so the day `tomllib` enforces int64 the suite goes red and
-the declaration is deleted rather than inherited.
+the value is `U+001B`) rather than describing it. The measurement was taken with
+`tomllib` as the reference column, probed rather than version-sniffed, because
+`tomllib` is TOML 1.1 from CPython 3.15. That reference is gone: #245 deleted the
+Python reader, so the column is now a committed claim and a go-toml upgrade that
+starts refusing `\e` would change behaviour silently rather than fail a
+comparison. The same measurement found a second, independent reference deviation,
+ruled **P5** on #230: `tomllib` accepts an integer beyond ±2^63, which TOML 1.0
+requires to be an error. Go refuses it, which is also what the producer does —
+`settings.toml` is written and read by `rustup`, through Rust's int64 `toml`
+crate — so the Go reader agrees with the program that opens the file. P5 is its
+own entry because P4 was scoped to grammar that varies by Python version; this
+does not vary. While the reference existed the row asserted both directions, so a
+`tomllib` that started enforcing int64 would go red and the declaration would be
+deleted rather than inherited. That second direction died with the reference:
+after #245 P5 is a one-directional assertion over Go's refusal
+(`TestTOMLIntegerRange`, and the pins suite's frozen rows for the two ends of the
+range) plus this argument. Nothing turns red if the vendored decoder's limit
+moves.
 
 **Conventions for new commands.** Arguments are parsed with go-arg and logs go
 through slog, vendored like `yaml/v3`. Every HTTP client goes through
