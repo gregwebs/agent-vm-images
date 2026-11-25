@@ -13,7 +13,7 @@ package main
 //
 // The diagnostic prefix is frozen at `rust-toolchain-update: `, the prefix of the
 // Python writer this replaces: the shell wrapper and the maintenance suite match
-// it, and the differential compares it byte for byte until the Python is deleted.
+// it, and since #245 they are what holds it.
 
 import (
 	"context"

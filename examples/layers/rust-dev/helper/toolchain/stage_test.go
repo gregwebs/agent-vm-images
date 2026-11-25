@@ -1,9 +1,9 @@
 package toolchain
 
-// Unit tests for the staging side. The end-to-end differential against the Python
-// writer is `script/test/rust-toolchain-maintenance.py`; these hold the pieces
-// that can be checked without a distribution, and one that needs the committed
-// pin: the document the writer emits must be the committed bytes.
+// Unit tests for the staging side. The end-to-end table over the writer binary is
+// `script/test/rust-toolchain-maintenance.py`; these hold the pieces that can be
+// checked without a distribution, and one that needs the committed pin: the
+// document the writer emits must be the committed bytes.
 
 import (
 	"bytes"
@@ -253,8 +253,8 @@ func TestStageHandsTheManifestToItsOwner(t *testing.T) {
 		{name: "checksum line for other bytes",
 			want:     "upstream manifest does not match its published .sha256 line",
 			manifest: good,
-			// Kept, not re-read: the source writer refuses there before gpg, and the
-			// differential compares that order (the `manifest-checksum` fault row).
+			// Kept, not re-read: this writer refuses there before gpg, and the
+			// maintenance suite's `manifest-checksum` fault row holds that order.
 			checksum: strings.Repeat("0", 64) + "  channel-rust-9.9.9.toml\n"},
 	} {
 		checksum := testCase.checksum

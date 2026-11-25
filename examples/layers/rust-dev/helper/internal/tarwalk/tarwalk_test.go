@@ -133,11 +133,12 @@ func TestDecodedStreamLimit(t *testing.T) {
 	}
 }
 
-// TestXZStreamIntegrity is row 10, with Q3's strictness stated in place: Python's
-// LZMADecompressor stops at the first stream's EOF and ignores trailing bytes;
-// SingleStream refuses them. An authenticated archive cannot carry trailing bytes
-// (its checksum is compared before this decoder sees it), so this is defence in
-// depth rather than a reachable behaviour difference.
+// TestXZStreamIntegrity is row 10, with Q3's strictness stated in place: the
+// deleted Python reader stopped at the first stream's EOF and ignored trailing
+// bytes; SingleStream refuses them. An authenticated archive cannot carry
+// trailing bytes (its checksum is compared before this decoder sees it), so this
+// is unreachable defence rather than a reachable behaviour difference -- a claim
+// now, with no second implementation to make it measurable (#245).
 func TestXZStreamIntegrity(t *testing.T) {
 	valid := tarBytes(t, tar.FormatUSTAR, []tar.Header{
 		{Name: "file", Typeflag: tar.TypeReg, Mode: 0o644, Size: 4},

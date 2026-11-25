@@ -22,7 +22,7 @@ import (
 // rustToolchainSeamNames are the suite-only inputs a fixture build honours.
 // Written out rather than imported, because a shipped build cannot compile the
 // tagged file: this list is the contract the test holds.
-var rustToolchainSeamNames = []string{"FIXTURE_DIST", "FIXTURE_FAULT"}
+var rustToolchainSeamNames = []string{"FIXTURE_DIST", "FIXTURE_FAULT", "FIXTURE_FETCH_LOG"}
 
 func buildAVMPin(t *testing.T, tags string) string {
 	t.Helper()
@@ -42,8 +42,15 @@ func buildAVMPin(t *testing.T, tags string) string {
 
 func runAVMPin(t *testing.T, binary string, args ...string) (string, int) {
 	t.Helper()
+	return runAVMPinEnv(t, binary, []string{"GITHUB_ACTIONS="}, args...)
+}
+
+// runAVMPinEnv runs the binary with extra environment entries appended, so a test
+// can state the variable under test instead of inheriting the runner's.
+func runAVMPinEnv(t *testing.T, binary string, extra []string, args ...string) (string, int) {
+	t.Helper()
 	command := exec.Command(binary, args...)
-	command.Env = append(os.Environ(), "GITHUB_ACTIONS=")
+	command.Env = append(os.Environ(), extra...)
 	var output bytes.Buffer
 	command.Stdout = &output
 	command.Stderr = &output

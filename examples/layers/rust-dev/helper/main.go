@@ -6,8 +6,7 @@
 // from ./internal can reach it. Slice 1 of #187 moved the one verb no other
 // program imports; slice 2 added the two offline reads; slice 3 (#231) adds the
 // downloading installer, so zero Python runs in the rust-dev image build. The
-// Python loader stays on the host, byte-identical, as the differential oracle
-// until #232 replaces the writer.
+// Python loader it replaced is deleted (#245): this program is the only reader.
 package main
 
 import (
@@ -28,9 +27,8 @@ import (
 // script it replaced: the verifier's log lines and the shell suites match on it.
 const prefix = kacheprobe.Prefix
 
-// toolchainPrefix is the frozen prefix for the two verbs that move here from
-// `rust_toolchain.py`. The suites match `rust_toolchain: ` and the differential
-// oracle requires it on every refusal.
+// toolchainPrefix is the frozen prefix the moved reader verbs keep: the shell
+// suites and the pins suite match `rust_toolchain: ` on every refusal.
 const toolchainPrefix = "rust_toolchain"
 
 type arguments struct {
@@ -259,14 +257,14 @@ func refuse(message string) int {
 }
 
 // refuseToolchain reports one `rust_toolchain: ` line: the frozen prefix of the
-// two verbs that moved here, and the one the differential oracle requires.
+// reader verbs, and the one the suites match.
 func refuseToolchain(err error) int {
 	fmt.Fprintf(os.Stderr, "%s: %s\n", toolchainPrefix, err)
 	return 1
 }
 
-// isToolchainVerb reports whether the parsed subcommand chain names a verb this
-// slice ported from `rust_toolchain.py`.
+// isToolchainVerb reports whether the parsed subcommand chain names one of the
+// reader verbs ported from the deleted Python loader.
 func isToolchainVerb(names []string) bool {
 	return len(names) > 0 && (names[0] == "check" || names[0] == "install" ||
 		names[0] == "verify-installed")

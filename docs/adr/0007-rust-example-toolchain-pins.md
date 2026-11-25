@@ -69,15 +69,16 @@ Commit a reviewed finite closure and let rustup install only from it.
   fingerprint, bounded streaming HTTPS, hash-before-chmod/exec, ELF architecture
   checks, and rust-installer format-3 metadata/coverage preflight. Its `check`
   and `verify-installed` verbs landed in #187 slice 2 and its `install` verb in
-  #231; the rules, order and diagnostics are Python's, and `rust_toolchain.py`
-  stays on disk as the host-only differential oracle until #232 slice 4b deletes
-  it. The *writer* is already Go: `avm-pin rust-toolchain` stages through this
-  package, and the vendor copy of it is held to the layer's source byte for byte
-  by `internal/vendordrift`. The
-  vendored `ulikunitz/xz` v0.5.17 `SingleStream` preflight is stricter than
-  Python's `LZMADecompressor` about trailing bytes; it is a declared strictness
-  note, not a reachable behaviour change, because an archive's checksum is
-  compared before the decoder sees it. The image build runs no Python. It then builds
+  #231; the rules, order and diagnostics are the Python reader's, and that reader
+  is deleted (#245): this package is the only implementation. The *writer* is Go
+  too: `avm-pin rust-toolchain` stages through this package, and the vendor copy
+  of it is held to the layer's source byte for byte by `internal/vendordrift`. The
+  vendored `ulikunitz/xz` v0.5.17 `SingleStream` preflight is stricter than the
+  deleted reader's decompressor was about trailing bytes; it is a declared
+  strictness note, not a reachable behaviour change, because an archive's checksum
+  is compared before the decoder sees it. The refusal is asserted
+  (`TestXZStreamIntegrity`); the unreachability is an argument, and with the oracle
+  gone nothing measures it. The image build runs no Python. It then builds
   an invocation-private `file://` dist layout from the original manifest bytes and
   runs rustup with automatic installation and self-update disabled. Ordinary builds never resolve, rewrite
   or repair a pin. The transport's whole-request deadline is a watchdog that
@@ -94,9 +95,9 @@ Commit a reviewed finite closure and let rustup install only from it.
   two-architecture closure (never executing the foreign bootstrap) into scratch
   and publishes the fixed destination list as one transaction with the existing
   publisher. An incomplete download, a bad signature or a refused endpoint leaves
-  the committed sources byte-identical. `script/dev/rust-toolchain-update.py`
-  survives only as the differential oracle the maintenance suite compares against
-  until slice 4b deletes it.
+  the committed sources byte-identical. The Python stager that did this until
+  slice 4a of #232 is deleted (#245); the maintenance suite asserts this writer's
+  behaviour alone, so its expectations are frozen claims rather than comparisons.
 - Signed archives are verified with OpenPGP, so they need no exception. The
   `rustup-init` binaries have no detached signature, attestation or release
   object for 1.28.2 (`.asc` endpoints return 404, the GitHub tag has no
@@ -138,10 +139,12 @@ Commit a reviewed finite closure and let rustup install only from it.
 ## Verification
 
 Hermetic: `script/test/rust-toolchain-pins.py` (pin/install faults against a
-signed synthetic distribution, with the production transport exercised through
-a controlled opener) and `script/test/rust-toolchain-maintenance.py` (staging,
-publication and signal faults of the real writer). Static:
-`script/test/example-layers.sh` (150 cases). The native harness
+signed synthetic distribution, with the production HTTP client exercised through
+a harness-owned loopback listener) and `script/test/rust-toolchain-maintenance.py`
+(staging, publication and signal faults of the real writer). Neither compares two
+implementations since #245 and neither runs inside an OS boundary any more: each
+suite's header states what it now claims. Static: `script/test/example-layers.sh`
+(163 self-test cases). The native harness
 `script/test/rust-example.sh` bounds every command, supervises the suite, owns its
 cleanup and has `--self-test` controls that need no daemon. Real adoption of
 channel 1.98.1 /

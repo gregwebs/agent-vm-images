@@ -458,7 +458,7 @@ cat <<'EOF'
 
 Next gates for this change:
   bash script/dev/upgrade-rust-toolchain.sh --check
-  python3 examples/layers/rust-dev/rust_toolchain.py check \
+  bash script/build/example-helper.sh rust-dev --root . --os "$(uname -s | tr A-Z a-z)" check \
     examples/layers/rust-dev/data/rust-toolchain --expect-channel CHANNEL
   python3 script/test/rust-toolchain-pins.py
   python3 script/test/rust-toolchain-maintenance.py

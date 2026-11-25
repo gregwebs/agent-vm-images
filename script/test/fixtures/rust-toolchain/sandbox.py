@@ -31,7 +31,12 @@ What each platform actually enforces, because they are not the same thing:
   stated in ``CONTRIBUTING.md`` and tracked as follow-up work, not claimed here.
 * With neither tool available it raises ``SandboxUnavailable`` with the exact
   prerequisite. Callers must exit nonzero **before** importing or running
-  anything under test: see ``launcher.py`` and ``sandbox-self-control.py``.
+  anything under test: see ``fixtures/gopls-closure/launcher.py`` and
+  ``fixtures/gopls-closure/sandbox-feasibility.py``.
+
+Its consumers are the gopls closure suites. The Rust toolchain suites used it
+while they ran a Python child tree; #245 deleted that child and the Rust suites
+are black-box now, so they run no boundary of their own.
 """
 from __future__ import annotations
 
@@ -71,24 +76,6 @@ IFF_UP = 0x1
 
 class SandboxUnavailable(RuntimeError):
     """The host cannot provide the required isolation boundary."""
-
-
-# The helpers a real gpg starts from its own bin directory. `gpg --import` starts
-# gpg-agent and speaks to it over a unix socket, so an allowlist that names only
-# `gpg` would refuse the real tool the fixtures must still be able to call.
-GPG_HELPERS = ('gpg-agent', 'gpgconf', 'gpg-connect-agent', 'dirmngr', 'pinentry')
-
-
-def gpg_executables(gpg: str) -> list[str]:
-    """The real gpg plus the helpers it starts, resolved and deduplicated."""
-    real = os.path.realpath(gpg)
-    result = [real]
-    directory = os.path.dirname(real)
-    for name in GPG_HELPERS:
-        candidate = os.path.join(directory, name)
-        if os.access(candidate, os.X_OK) and candidate not in result:
-            result.append(candidate)
-    return result
 
 
 def tool() -> str | None:

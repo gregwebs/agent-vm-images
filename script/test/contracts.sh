@@ -86,9 +86,9 @@ fi
 # Two gates that must run on every PR, including the guard-only mode that skips
 # the suites below. Both are Go tests with no child process and no network:
 #
-#  * the helper module's import boundary (invariant 32) is the replacement for the
-#    Python audit hook the Rust suites used to install -- `os/exec` and `net/http`
-#    may appear only in the files one committed list names;
+#  * the helper module's import boundary (invariant 32) replaces the Python audit
+#    hook the Rust suites installed until #245 -- `os/exec` and `net/http` may
+#    appear only in the files one committed list names;
 #  * the vendored-copy drift gate: after slice 4a of #187 the root module vendors
 #    the example layer's helper module, so an edit to the layer that is not
 #    re-vendored changes the image while `avm-pin` keeps building the old copy.
@@ -175,9 +175,12 @@ if [ "$guard_only" = false ]; then
     # credential rules. Both replay the production functions/config offline.
     bash script/test/shipped-installer-network.sh --self-test
     python3 script/test/installer-egress-addon.py
-    # The Rust example's pinned toolchain closure (#102): the offline pin/install
-    # table and the maintenance writer's staging/publication faults. Both are
-    # hermetic; the real updater and the native installer are never run here.
+    # The Rust example's pinned toolchain closure (#102): the interface table over
+    # the shipped reader and the maintenance writer's staging/publication faults.
+    # Both are hermetic and drive built Go programs; the real updater and the
+    # native installer are never run here. Since #245 each is a frozen table of
+    # claims about one implementation -- see each suite's header for what that
+    # costs -- and the pins suite refuses a reference to a deleted reader.
     python3 script/test/rust-toolchain-pins.py
     python3 script/test/rust-toolchain-maintenance.py
     # The Go example's gopls closure (#103): the real-go pin/install table and the

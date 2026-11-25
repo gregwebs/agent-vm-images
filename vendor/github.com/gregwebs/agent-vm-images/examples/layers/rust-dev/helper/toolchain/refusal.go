@@ -3,9 +3,9 @@ package toolchain
 import "fmt"
 
 // Refusal is a pin, manifest, trust or installed-state rule this layer will not
-// act on. The message is the contract: the shell suites and the differential
-// oracle match diagnostic fragments, and after "rust_toolchain: " it is the
-// source reader's text.
+// act on. The message is the contract: the shell suites and the pins suite match
+// diagnostic fragments, and after "rust_toolchain: " it is the source reader's
+// text.
 type Refusal struct{ Message string }
 
 func (r *Refusal) Error() string { return r.Message }

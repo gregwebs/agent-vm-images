@@ -1,8 +1,8 @@
 // Package tarwalk reads a component archive: a single xz stream containing one
 // tar, bounded before anything is allocated.
 //
-// It is a port of `rust_toolchain.py`'s `_DecodedArchive`,
-// `_bound_extended_headers` and tar walk (slice 3 of #187). The two rules that
+// It is a port of the source reader's decoded-archive walk (slice 3 of #187, the
+// Python deleted in #245). The two rules that
 // are Go's own, and not Python's, are stated where the next reader looks:
 //
 //   - PAX records are merged latest-wins, matching Go's `archive/tar` (the second
@@ -58,7 +58,7 @@ func (l Limits) withDefaults() Limits {
 }
 
 // Refusal is one archive-policy rule. The message is the contract: the shell
-// suites and the differential oracle match its fragments.
+// suites match its fragments.
 type Refusal struct{ Message string }
 
 func (r *Refusal) Error() string { return r.Message }
