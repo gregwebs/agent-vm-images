@@ -837,6 +837,35 @@ def main() -> int:
         #    (status 2), because the flag was given and is empty rather than absent.
         #    Again a direct-verb divergence: `upgrade-rust-toolchain.sh` refuses an
         #    empty `--reviewer` as usage before either writer runs.
+        # --- control: the retained comparison is exact outside the plan --------
+        # The claim "only recovery.json is normalized" is worth a test rather than a
+        # comment. Two directories whose plan files name different run paths but
+        # whose backups hold the same bytes must compare EQUAL (the substitution
+        # works), and the same two with one backup byte changed must compare
+        # DIFFERENT (nothing else is substituted). Widening the normalization to
+        # every file makes the second check fail, which is exactly the defect a
+        # reviewer found here.
+        print('retained comparison control')
+        first, second = root / 'retained-a', root / 'retained-b'
+        for directory in (first, second):
+            plan = str(directory.resolve())
+            (directory / 'publish-backup').mkdir(parents=True)
+            (directory / 'recovery.json').write_text(
+                json.dumps({'work': plan, 'destinations': [
+                    {'path': f'{plan}/pin.json', 'existed': 'no', 'backup': '0'}]}))
+            (directory / 'publish-backup' / '0').write_bytes(b'the same backup bytes')
+        same = (retained_snapshot(first, first) == retained_snapshot(second, second))
+        check('retained control: plans naming different run paths compare equal', same)
+        # A backup whose bytes carry its own run path: two runs, so two different
+        # byte strings. They are still different material and must be reported;
+        # substituting the path in every file would call them equal.
+        (first / 'publish-backup' / '0').write_bytes(b'note ' + str(first.resolve()).encode())
+        (second / 'publish-backup' / '0').write_bytes(b'note ' + str(second.resolve()).encode())
+        left, right = retained_snapshot(first, first), retained_snapshot(second, second)
+        differing = sorted(name for name in set(left) | set(right) if left.get(name) != right.get(name))
+        check('retained control: a backup that mentions its own path is compared exactly',
+              differing == ['publish-backup/0'], f'({differing})')
+
         print('declared divergences')
         work = tree(root / 'repo-divergence', fixture_root, writers['go'])
         unusable = work / 'unusable'
