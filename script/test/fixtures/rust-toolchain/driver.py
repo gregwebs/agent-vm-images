@@ -101,13 +101,18 @@ def build(root: Path, writer: Path) -> Fixture:
     dockerfile = root / 'Dockerfile'
     dockerfile.write_text(f'ARG RUST_TOOLCHAIN={fixture.CHANNEL}\nFROM fixture\n')
     out = root / 'pinned'
+    # GITHUB_ACTIONS is cleared for this one run: the writer refuses staging in CI
+    # because pin maintenance is maintainer-host work, and this is a suite staging
+    # from fixture bytes -- the CI refusal has its own row in the maintenance
+    # suite, which sets the variable itself. Without this a CI run of either suite
+    # stops here, before any row.
     completed = subprocess.run(
         [str(writer), 'rust-toolchain', 'stage',
          '--channel', fixture.CHANNEL, '--rustup', fixture.RUSTUP_VERSION,
          '--key', str(dist.key), '--current', str(root / 'absent'),
          '--out', str(out), '--dockerfile', str(dockerfile),
          '--verify-bootstrap-exception', STAGED_ON, '--reviewer', STAGED_BY],
-        env=dict(os.environ, FIXTURE_DIST=str(upstream)),
+        env=dict(os.environ, FIXTURE_DIST=str(upstream), GITHUB_ACTIONS=''),
         cwd=str(root), capture_output=True, text=True, timeout=600)
     if completed.returncode != 0:
         raise SystemExit('cannot stage the fixture pin: '
