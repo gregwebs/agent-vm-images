@@ -51,11 +51,19 @@ Comparisons = 0
 # calls, this counts the files those calls actually compared, so an emptied
 # snapshot cannot leave the suite green.
 FilesCompared = 0
+RetainedCompared = 0
 # The floors below are reviewed numbers, not minima found by trial: every tree
 # this suite builds starts with the five files tree() copies, and the 28 comparisons
 # compare well over three hundred files between them.
 MIN_TREE_FILES = 5
-MIN_FILES_COMPARED = 400
+# FilesCompared counts *pairs*: one file compared in both trees, not two observations
+# of one file, and recovery material is counted separately below.
+MIN_FILES_COMPARED = 300
+# Recovery material is compared on the rows that retain it: the plan, the marker,
+# the backups and their directory. A snapshot short of these is red, so an emptied
+# recovery snapshot cannot pass.
+MIN_RETAINED_FILES = 4
+MIN_RETAINED_COMPARED = 8
 FAKE_PYTHON = 'python3'
 WRITERS = ('go', 'oracle')
 STAGER = 'script/dev/rust-toolchain-update.py'
@@ -175,8 +183,12 @@ def retained_snapshot(path: Path, tree_root: Path) -> dict[str, tuple[int, str]]
         if not file.is_file():
             continue
         raw = file.read_bytes()
-        for value, replacement in ((str(path), '<WORK>'), (str(tree_root), '<TREE>')):
-            raw = raw.replace(value.encode(), replacement.encode())
+        # The plan is the one file that names the run's own absolute paths. Every
+        # other byte of every other file is compared exactly, so two backups with
+        # different contents cannot compare equal because each carries its own path.
+        if file.name == 'recovery.json':
+            for value, replacement in ((str(path), '<WORK>'), (str(tree_root), '<TREE>')):
+                raw = raw.replace(value.encode(), replacement.encode())
         snapshot[file.relative_to(path).as_posix()] = (file.stat().st_mode & 0o7777,
                                                        hashlib.sha256(raw).hexdigest())
     return snapshot
@@ -197,7 +209,7 @@ def run_direct(writers: dict[str, Path], writer: str, fixture_root: driver.Fixtu
 
 def compare_writers(arguments: list[str], go_tree: Path, go: subprocess.CompletedProcess,
                     oracle_root: Path, oracle: subprocess.CompletedProcess) -> None:
-    global Comparisons, FilesCompared
+    global Comparisons, FilesCompared, RetainedCompared
     label = ' '.join(arguments) if arguments else '(no arguments)'
     problems = []
     if go.returncode != oracle.returncode:
@@ -216,7 +228,7 @@ def compare_writers(arguments: list[str], go_tree: Path, go: subprocess.Complete
         if len(snapshot) < MIN_TREE_FILES:
             problems.append(f'the {label} tree snapshot has {len(snapshot)} files, want at '
                             f'least {MIN_TREE_FILES}')
-    FilesCompared += len(go_files) + len(oracle_files)
+    FilesCompared += min(len(go_files), len(oracle_files))
     differing = sorted(name for name in set(go_files) | set(oracle_files)
                        if go_files.get(name) != oracle_files.get(name))
     if differing:
@@ -232,6 +244,11 @@ def compare_writers(arguments: list[str], go_tree: Path, go: subprocess.Complete
     elif go_retained is not None:
         retained_go = retained_snapshot(go_retained, go_tree)
         retained_oracle = retained_snapshot(oracle_retained, oracle_root)
+        for label, snapshot in (('go', retained_go), ('oracle', retained_oracle)):
+            if len(snapshot) < MIN_RETAINED_FILES:
+                problems.append(f'the {label} recovery snapshot has {len(snapshot)} files, '
+                                f'want at least {MIN_RETAINED_FILES}')
+        RetainedCompared += min(len(retained_go), len(retained_oracle))
         if retained_go != retained_oracle:
             names = sorted(name for name in set(retained_go) | set(retained_oracle)
                            if retained_go.get(name) != retained_oracle.get(name))
@@ -383,6 +400,20 @@ def write_writers(root: Path) -> dict[str, Path]:
     this suite, never something a maintainer's run can pass. ``oracle`` is the
     Python stager behind an adapter that translates the verb surface only.
     """
+    # The suite builds and runs the Go child directly, so it must consult the
+    # import boundary first: the static gate is what says which sources the shipped
+    # writer may be built from, and an end-to-end runner that skips it would launder
+    # a file the gate rejects (a reviewer's `os/exec` + `init` in `cmd/avm-pin` ran a
+    # program while this suite was green). One offline `go test`, before any writer
+    # is built, and the suite stops here if the boundary is broken.
+    boundary = subprocess.run(
+        ['go', 'test', '-count=1', '-run', 'TestImportsAreReviewed', '.'],
+        cwd=str(driver.REPOSITORY_ROOT / 'examples' / 'layers' / 'rust-dev' / 'helper'),
+        capture_output=True, text=True,
+        env=dict(os.environ, GOFLAGS='-mod=vendor', GOPROXY='off'))
+    if boundary.returncode != 0:
+        raise SystemExit('the writer import boundary is broken; refusing to run the writer:\n'
+                         + boundary.stdout[-2000:] + boundary.stderr[-2000:])
     writers = {}
     for name in WRITERS:
         directory = root / f'bin-{name}'
@@ -977,11 +1008,16 @@ def main() -> int:
         print('FAILED the differential compared no pair of writers')
         return 1
     if FilesCompared < MIN_FILES_COMPARED:
-        print(f'FAILED the differential compared {FilesCompared} files, want at least '
+        print(f'FAILED the differential compared {FilesCompared} file pairs, want at least '
               f'{MIN_FILES_COMPARED}')
         return 1
+    if RetainedCompared < MIN_RETAINED_COMPARED:
+        print(f'FAILED the differential compared {RetainedCompared} retained recovery files, '
+              f'want at least {MIN_RETAINED_COMPARED}')
+        return 1
     print(f'rust-toolchain maintenance suite passed ({Passed} checks, '
-          f'{Comparisons} differential comparisons, {FilesCompared} files compared)')
+          f'{Comparisons} differential comparisons, {FilesCompared} file pairs, '
+          f'{RetainedCompared} retained recovery files)')
     return 0
 
 

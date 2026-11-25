@@ -19,8 +19,8 @@ package toolchain
 // Two properties are deliberate and load-bearing:
 //
 //   - the candidate is re-read through the reader before it is returned
-//     (`LoadPin` + `VerifyInputs`), so a writer bug cannot propose bytes the image
-//     would refuse; and
+//     (`LoadPin` + `VerifyInputs`), which is defence in depth rather than a rule a
+//     test can reach: see the declaration at that call for what that costs; and
 //   - the document is emitted in the committed key order with two-space indent
 //     (`encodePinDocument`), so re-staging the committed pin reproduces it byte
 //     for byte instead of churning the review diff.
@@ -404,14 +404,13 @@ func stageInto(ctx context.Context, request StageRequest, dependencies StageDepe
 	// The candidate is held to the reader before it is offered: a proposal the
 	// image would refuse fails here, not after publication.
 	//
-	// Declared: this re-read is *not* witnessed by deletion. Nothing a fixture can
-	// reach makes the writer emit a candidate the loader rejects (both are built
-	// from one model, in one package), so no test turns red when these two calls
-	// are removed, and this comment is where that is stated rather than only in a
-	// PR body. It stays because a writer bug is exactly the thing it is for: the
-	// document, the evidence file set and the digests are the only part of this
-	// path that is written rather than called, and this is the only check on them
-	// that reads them back from disk.
+	// Declared: this re-read is *not* witnessed by deletion. No fixture the suites
+	// have today distinguishes these two calls from their absence, so no test turns
+	// red when they are removed, and this comment is where that is stated rather
+	// than only in a PR body. It stays because a writer regression is exactly what
+	// it is for -- the document, the evidence file set and the digests are the only
+	// part of this path that is written rather than called, and this is the one
+	// check that reads them back from disk with the reader the image runs.
 	candidate, err := LoadPin(data, dependencies.Trust)
 	if err != nil {
 		return proposal, err

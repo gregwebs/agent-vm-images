@@ -235,16 +235,6 @@ func fixtureManifest(t *testing.T, channel, version, manifestVersion string) str
 // restate are the owner's now: a release version or manifest version this writer
 // cannot adopt is refused by `manifest`-prefixed owner code, and the stager's own
 // wording for those two rules is gone.
-//
-// Declared limit: the *early* `VerifyManifestClosure` call is not separately
-// witnessed by deletion. Every manifest that reaches the owner's header rules has
-// to derive a selection first (the pin it is checked against comes from that
-// selection), so a table the owner cannot derive is refused by `DeriveSelection`
-// before the header rules run -- and a table it *can* derive needs the full
-// per-package target rows of a real distribution, which is a fixture, not a unit
-// test. `manifest-checksum` below is the one rule whose deletion this test does
-// turn red, and it is a rule the stager still owns. The canonical-`xz_url` half is
-// covered where it lives: the pins suite's reader tables call the same owner.
 func TestStageHandsTheManifestToItsOwner(t *testing.T) {
 	const channel = "9.9.9"
 	const manifestURL = "https://static.rust-lang.org/dist/channel-rust-" + channel + ".toml"
@@ -364,5 +354,55 @@ func TestStageRefusesGitHubActions(t *testing.T) {
 		Rustup: "9.9.9"}, StageDependencies{}); err == nil ||
 		!strings.Contains(err.Error(), "is not an audited installer") {
 		t.Fatalf("want the audited-installer refusal, got %v", err)
+	}
+}
+
+// TestStageRefusesANonCanonicalArchiveURL is the witness for the one manifest rule
+// only the owner can apply before anything is fetched: a selected row's `xz_url`
+// must be the canonical dated origin. The manifest is the *committed* one, which
+// the owner can derive a full selection from, with one selected URL changed and the
+// published `.sha256` recomputed -- and nothing else in the transport, so if the
+// early `VerifyManifestClosure` call is deleted this fails at the first bootstrap
+// fetch (a refused endpoint) instead of refusing a manifest.
+func TestStageRefusesANonCanonicalArchiveURL(t *testing.T) {
+	committed := committedDataDir(t)
+	pin, err := LoadPin(committed, ReviewedTrust)
+	if err != nil {
+		t.Fatalf("load the committed pin: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(committed, ManifestPath))
+	if err != nil {
+		t.Fatalf("read the committed manifest: %v", err)
+	}
+	canonical := string(pin.Closure(AMD64).Archives[0].Content.URL)
+	replacement := strings.Replace(canonical, ".tar.xz", "-elsewhere.tar.xz", 1)
+	manifest := strings.Replace(string(raw), canonical, replacement, 1)
+	if manifest == string(raw) {
+		// The committed manifest is the fixture here; if it stops naming the pin's
+		// own archive URL the witness would pass for the wrong reason.
+		t.Fatalf("the committed manifest does not name %s", canonical)
+	}
+	checksum := string(shaOfBytes([]byte(manifest))) + "  " +
+		strings.TrimSuffix(filepath.Base(string(pin.Manifest.URL)), "") + "\n"
+	manifestURL := string(pin.Manifest.URL)
+	key := filepath.Join(t.TempDir(), "key.asc")
+	if err := os.WriteFile(key, []byte("a key"), 0o644); err != nil {
+		t.Fatalf("write the key: %v", err)
+	}
+	dockerfile := filepath.Join(t.TempDir(), "Dockerfile")
+	if err := os.WriteFile(dockerfile, []byte("ARG RUST_TOOLCHAIN=1.0.0\n"), 0o644); err != nil {
+		t.Fatalf("write the Dockerfile: %v", err)
+	}
+	_, err = Stage(context.Background(), StageRequest{
+		Channel: pin.Channel, Rustup: pin.RustupVersion, KeyFile: key, Current: committed,
+		Out: filepath.Join(t.TempDir(), "candidate"), Dockerfile: dockerfile,
+	}, StageDependencies{
+		Transport: mapTransport{manifestURL: []byte(manifest),
+			manifestURL + ".sha256": []byte(checksum),
+			manifestURL + ".asc":    []byte("a signature")},
+		Trust:    ReviewedTrust,
+		Verifier: func(string, string) SignatureVerifier { return acceptingVerifier{} }})
+	if err == nil || !strings.Contains(err.Error(), "xz_url for") {
+		t.Fatalf("want the owner's xz_url refusal before any fetch, got %v", err)
 	}
 }
