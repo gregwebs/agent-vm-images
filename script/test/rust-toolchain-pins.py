@@ -1182,13 +1182,21 @@ def without_prohibition_table(path: Path, body: str) -> str:
 
 
 def imported_modules(body: str) -> set[str]:
-    """Every top-level module name one Python file imports, however spelled."""
+    """Every module *and* imported name one Python file references, however spelled.
+
+    `ImportFrom` contributes two things: the module it imports from (`from
+    differential import x` — `differential`) and each name it binds (`from x import
+    (differential)` — `differential`). Recording both is what makes the parenthesised
+    and the bare form equivalent here, and it is why an alias changes nothing.
+    """
     names = set()
     for node in ast.walk(ast.parse(body)):
         if isinstance(node, ast.Import):
             names.update(alias.name.split('.')[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            names.add(node.module.split('.')[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module:
+                names.add(node.module.split('.')[0])
+            names.update(alias.name.split('.')[0] for alias in node.names)
     return names
 
 
@@ -1205,15 +1213,23 @@ def test_deleted_oracle_is_absent() -> None:
     * every tracked file is searched for the deleted *names* as text, so a path, a
       doc line and a comment are covered — including a path passed to
       `spec_from_file_location`;
-    * every tracked Python file is parsed and its import graph read, so every legal
-      spelling of an import of the deleted modules is covered (a line-continued
-      import, `from differential import x`, `import rust_toolchain as model`), and a
-      file that stops parsing is itself a failure rather than a silent skip;
+    * every tracked Python file is parsed and its imports read, so every legal
+      spelling is covered — the imported module (`from differential import x`,
+      `import rust_toolchain`), a line-continued import, the parenthesised form
+      (`from x import (differential)`), and any `as` alias, because the local name is
+      what is bound. A tracked `.py` that stops parsing is itself a failure rather
+      than a silent skip;
     * the machinery names are searched in the two suites and the whole fixture
       tree, because the gopls fixtures legitimately still carry them.
 
-    Not covered, and not claimed: a module path assembled at run time from
-    fragments, and an exec of a program whose name is computed.
+    The split is deliberate: the text search covers qualified *paths* wherever they
+    appear (a string passed to `spec_from_file_location`, a doc line, a comment), and
+    the AST half covers *imported names*, which a text search cannot enumerate
+    reliably.
+
+    Not covered, and not claimed: a module path assembled at run time from fragments
+    (`__import__("differ" + "ential")`), and an exec of a program whose name is
+    computed.
     """
     print('deleted oracle: absent, and unnamed anywhere in the tree')
     for relative in DELETED_FILES:
