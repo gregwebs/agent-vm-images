@@ -4,23 +4,32 @@
 # directly from a checkout whose /opt layout matches the image's.
 #
 # The first thing it does is verify the *installed* gopls against the committed
-# closure (gopls-closure/): the binary's own build info must pair the pinned
-# compiler with this image's architecture and report exactly the reviewed
-# modules and their sums, the installed third-party licence file must carry the
-# reviewed bytes, and the mode must be the world-readable one. A gopls built
-# from a different selection, or one whose licence evidence drifted, fails here.
-# The bundle always sits beside this script -- the read-only mount in the image,
-# the checkout when it is run standalone -- so there is no mode that skips it.
+# closure (gopls-closure/), through the layer's own `go-dev-helper
+# verify-installed` (#250): the binary at exactly that absolute path must carry
+# the world-readable mode, the installed third-party licence file must be the
+# reviewed bytes at the reviewed mode, the pinned compiler must answer for itself
+# and this image's architecture, and the binary's own build info must report
+# exactly the reviewed modules and their sums. A gopls built from a different
+# selection, or one whose licence evidence drifted, fails here. The bundle always
+# sits beside this script -- the read-only mount in the image, the checkout when
+# it is run standalone -- so there is no mode that skips it.
+#
+# What that check is not: authentication of the binary. The build info is
+# metadata the binary carries; the pinned `go` child reads it and never executes
+# the candidate, and a candidate that lies coherently with the pin is not caught.
 #
 # It then invokes every tool as the guest PATH resolves it (bare name, not an
 # absolute path), so a tool missing from the Dockerfile's ENV PATH fails the
-# build here rather than surfacing as command-not-found in the guest. Beyond
-# the versions, each tool analyses a real throwaway module: `go` builds, vets
-# and race-tests it (the race run is also what proves the C toolchain is
-# usable, since `-race` needs cgo), `gofmt` must report it formatted,
-# `golangci-lint` lints it, and `gopls check` reports its diagnostics. A binary
-# that prints a version but cannot analyse code -- a truncated download, a
-# missing shared library, a module-cache misconfiguration -- fails the build.
+# build here rather than surfacing as command-not-found in the guest. This half is
+# deliberately separate from the absolute-path verification above: it answers a
+# different question (does the guest's PATH find these tools, and can they analyse
+# code), and the Go verifier does not absorb it. Beyond the versions, each tool
+# analyses a real throwaway module: `go` builds, vets and race-tests it (the race
+# run is also what proves the C toolchain is usable, since `-race` needs cgo),
+# `gofmt` must report it formatted, `golangci-lint` lints it, and `gopls check`
+# reports its diagnostics. A binary that prints a version but cannot analyse code
+# -- a truncated download, a missing shared library, a module-cache
+# misconfiguration -- fails the build.
 #
 # HOME/GOCACHE/GOPATH point at a temporary tree so the smoke module's build
 # cache is not baked into the image (the guest gets its own, under its own
@@ -36,17 +45,19 @@ set -euo pipefail
 : "${GOLANGCI_LINT_VERSION:?GOLANGCI_LINT_VERSION must be set to the pinned release}"
 : "${GOPLS_VERSION:?GOPLS_VERSION must be set to the pinned module version}"
 VERIFY_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-export PYTHONDONTWRITEBYTECODE=1
 
 # Validated by the helper: it refuses anything but the two Linux target names the
 # closure is cross-built for, rather than treating `dpkg` output as a value it can
-# pass through.
+# pass through. GO_PREFIX and GO_TOOLS_BIN are the recipe's ARGs, which match these
+# fixed paths in the image and in a checkout whose /opt layout is the image's.
 arch=$(dpkg --print-architecture)
-/usr/bin/python3 "$VERIFY_DIR/gopls_closure.py" verify-installed "$VERIFY_DIR/gopls-closure" \
+"$VERIFY_DIR/go-dev-helper" verify-installed "$VERIFY_DIR/gopls-closure" \
     --expect-gopls "$GOPLS_VERSION" --expect-go "$GO_VERSION" \
     --go-root /opt/go --arch "$arch" \
     --binary /opt/go-tools/bin/gopls --share-dir /opt/go-tools/share/gopls
 
+# The guest PATH half, which the verifier does not cover: `go` is resolved by name
+# here, not by the absolute root the check above was given.
 test "$(go version | cut -d' ' -f3)" = "go${GO_VERSION}"
 
 # Each tool's output is captured before it is matched, never piped into

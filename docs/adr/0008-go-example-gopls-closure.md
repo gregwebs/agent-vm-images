@@ -51,6 +51,29 @@ Commit the selection, then let one deep helper compile from it.
   slice at a time and its differences are recorded per case in
   `script/test/gopls-closure-parity.py`; the defects that reader fixes (#188 G3)
   are listed there too.
+- Since #250 the installed-state verification is the helper's as well:
+  `verify-installed` reads the same five files, checks exactly the named binary
+  path, its mode and the installed notice file, proves the pinned compiler and Go
+  root with `go env`, and compares the binary's own build info with the reviewed
+  selection and Linux target settings. The verifier runs it under
+  `--network=none`; the Python reader stays the oracle on the host for the
+  installed state too, compared per case in
+  `script/test/gopls-closure-pins.py`, and the two defects this verb owns (a mode
+  compared with its special bits, and the notice file's mode) are declared
+  divergences with both verdicts asserted; the strict build-info decoder is a third
+  and a fourth (a duplicate key whose value agrees, a non-JSON constant in a member
+  the oracle does not read), asserted from both sides on the same document. The verb
+  uses the caller's path spelling rather than a lexical clean, because `..` after a
+  symlink resolves at the kernel: cleaning would inspect a file the caller did not
+  name. Non-execution is observed by the candidate's own side effect — a marker the
+  inspected program writes if it is started — alongside the `go` shim's argv record,
+  because neither observer can see what the other can. Inspecting reported build info
+  is not authentication: nothing signs the metadata, the pinned `go` child is a
+  metadata reader, the candidate is never executed, and a self-report that agrees
+  with the pin is accepted whether or not the code is the reviewed code. The guest PATH
+  smoke in `verify-toolchain.sh` stays a separate check, because an
+  absolute-path verification answers a different question than "does the guest's
+  `PATH` resolve these tools and can they analyse code".
 - The Python helper:
   1. checks the committed data **offline** — exact file set, per-file digests,
      canonical `go.mod`, both checksum kinds for every pinned module, the root

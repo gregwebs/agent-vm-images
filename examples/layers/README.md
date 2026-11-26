@@ -600,10 +600,36 @@ deleted. The helper's builder is the pinned `golang:` stage, its vendor tree is
 the build closure, and `script/test/gopls-closure-parity.py` compares the two
 readers over the committed bytes and a mutant corpus.
 
+`verify-installed` is the helper's second verb (#250). The `--network=none`
+verifier step runs `go-dev-helper verify-installed` over the same closure and the
+installed tree: the binary at exactly `/opt/go-tools/bin/gopls` (no sibling
+substitution), its mode, the installed notice file's bytes and mode, `go env
+GOVERSION`/`GOROOT` from the pinned root, and the candidate's own build info.
+The pinned `go` child is a metadata reader and the candidate is never executed:
+`go version -m -json` is the only command that names it. That is not
+authentication — nothing signs those bytes, and a candidate that lies coherently
+with the pin is not caught; the check is a contradiction test against the
+committed selection, compiler and Linux target settings. What it cannot see: a
+binary whose metadata matches the pin while its code does not, a network request
+made by the verifier itself (the boundary is the RUN's `--network=none`), and any
+ambient-state question, because the child environment is constructed rather than
+inherited. The verifier bundle ships this row's Linux helper binary — the ELF
+`e_machine` is checked against the target, not just the magic — built from the
+digested `helper/` tree, and `verify-toolchain.sh` keeps the guest PATH smoke as a
+separate shell check: an absolute-path verification says nothing about whether the
+guest's `PATH` resolves the tools or whether they can analyse code.
+
+The verifier inspects the path it was given in the spelling it was given: `..`
+after a symlink resolves at the kernel, so `a/link/../gopls` is not `a/gopls`.
+Cleaning the argument would verify a file the caller did not name.
+
 What a build proves: the committed bytes are the reviewed ones, the compiler is
 the pinned one, and the finished binary's own build info reports exactly the
 reviewed modules and sums — after which `gopls` and its licence file are
-published. The `go build` runs as `-mod=readonly` in an environment
+published, and the `--network=none` verifier re-reads that state through the Go
+helper. It does not prove the binary's code matches its reported metadata: build
+info is a self-report, and the comparison only catches a report that contradicts
+the pin. The `go build` runs as `-mod=readonly` in an environment
 `gopls_closure.py` constructs (no inherited `GOFLAGS`/`GOPROXY`/`GONOSUMDB`,
 `GOTOOLCHAIN=local`, `CGO_ENABLED=0`, `GOOS=linux` and the image's `GOARCH`,
 private caches), so a new sum can only enter through a reviewed writer proposal.

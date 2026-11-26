@@ -126,7 +126,12 @@ for new ports.
 go-dev example is in that state for its reader (`#249`): `go-dev-helper check`
 ships in the image and `gopls_closure.py check` remains the host-only oracle,
 compared case by case in `script/test/gopls-closure-parity.py` with floors and a
-case counter, and with each difference declared by name. Python is still the only
+case counter, and with each difference declared by name. `verify-installed`
+joined it in `#250`: the image's `--network=none` verifier runs the Go verb, the
+native verifier bundle ships the Linux-target binary instead of a copy of the
+Python reader, and `script/test/gopls-closure-pins.py` runs both readers over the
+same installation on both targets, with the two defects the Go verb fixes
+declared as divergences and asserted from both sides. Python is still the only
 installer there until `#251`, so the layer's apt line still carries `python3`.
 `#187
 slice 2` moved the rust-dev layer's `check` and `verify-installed` to its Go

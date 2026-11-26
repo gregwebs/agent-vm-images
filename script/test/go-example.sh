@@ -508,6 +508,9 @@ self_test() {
     echo 'self-test: the LSP client discriminates every named defect'
     lsp_smoke_controls "$scratch" "$scratch/lsp-smoke.log"
 
+    echo 'self-test: the verifier bundle must be the row machine'
+    helper_target_controls "$scratch"
+
     echo 'self-test: the closure mutator is coherent and only then reaches Go'
     mutate_closure_controls "$scratch" "$scratch/mutate-closure.log"
 
@@ -521,6 +524,42 @@ self_test() {
     input_digest_controls "$scratch/input-digests.log"
 
     echo 'self-test: passed'
+}
+
+# The bundle target rule, driven with the two real cross-builds and a non-ELF file:
+# an arm64 helper must not pass an amd64 row, and a four-byte magic is not enough.
+helper_target_controls() { # SCRATCH
+    local scratch=$1 amd64_helper arm64_helper not_elf verdict
+    local log="$scratch/target.log"
+    amd64_helper=$(bash "$ROOT/script/build/example-helper.sh" go-dev --root "$ROOT" \
+        --os linux --arch amd64 --binary go-dev-helper-amd64) || {
+        selftest_expect 0 1 'the amd64 helper builds for the target control' "$log"
+        return
+    }
+    arm64_helper=$(bash "$ROOT/script/build/example-helper.sh" go-dev --root "$ROOT" \
+        --os linux --arch arm64 --binary go-dev-helper-arm64) || {
+        selftest_expect 0 1 'the arm64 helper builds for the target control' "$log"
+        return
+    }
+    not_elf="$scratch/not-an-elf"
+    printf '#!/bin/sh\n' >"$not_elf"
+    # Each case records the predicate's verdict and compares it, so a predicate that
+    # refuses every helper fails the two positive controls instead of skipping them.
+    verdict=0
+    elf_machine_matches "$amd64_helper" amd64 && verdict=1
+    selftest_expect "$verdict" 1 'an amd64 helper passes an amd64 row' "$log"
+    verdict=0
+    elf_machine_matches "$arm64_helper" arm64 && verdict=1
+    selftest_expect "$verdict" 1 'an arm64 helper passes an arm64 row' "$log"
+    verdict=0
+    elf_machine_matches "$arm64_helper" amd64 && verdict=1
+    selftest_expect "$verdict" 0 'an arm64 helper is refused for an amd64 row' "$log"
+    verdict=0
+    elf_machine_matches "$amd64_helper" arm64 && verdict=1
+    selftest_expect "$verdict" 0 'an amd64 helper is refused for an arm64 row' "$log"
+    verdict=0
+    elf_machine_matches "$not_elf" amd64 && verdict=1
+    selftest_expect "$verdict" 0 'a non-ELF file is refused' "$log"
 }
 
 # The first-use, negative-build and cleanup rules as pure functions: each wrong
@@ -1130,6 +1169,25 @@ require_clean_diagnostics() { # FILE
 FUNCTION
 }
 
+# --- the verifier bundle's target ------------------------------------------
+# A four-byte ELF magic says "Linux ELF"; it does not say which machine, so a host
+# binary or the other architecture's cross-build would pass a magic-only check. The
+# ELF header's e_machine (offset 18, two bytes little-endian) does: 0x3e for amd64,
+# 0xb7 for arm64. This is the bundle's own contract — the image runs this row's
+# target — not a claim about the binary's code.
+elf_machine_matches() { # BINARY ARCH
+    local binary=$1 arch=$2 magic machine
+    [ -f "$binary" ] || return 1
+    magic=$(head -c 4 "$binary" | od -An -tx1 | tr -d ' \n')
+    machine=$(od -An -j18 -N2 -tx1 "$binary" | tr -d ' \n')
+    [ "$magic" = 7f454c46 ] || return 1
+    case "$arch" in
+        amd64) [ "$machine" = 3e00 ] ;;
+        arm64) [ "$machine" = b700 ] ;;
+        *) return 1 ;;
+    esac
+}
+
 # --- the bytes this run actually builds ------------------------------------
 # `source <sha> dirty=<n>` binds a commit, not a working copy: the closure, the
 # helper and the adapters can be uncommitted (they are, until the PR lands), and
@@ -1603,14 +1661,30 @@ fi
 # --- phase 2: verifier, no network ------------------------------------------
 # The same contract the Dockerfile runs, mounted read-only. The three version
 # ARGs are not persisted ENV in the image, so they are passed explicitly.
+#
+# The installed-state check is the layer's own `go-dev-helper`, built here for this
+# row's Linux target with the builder's flags and shipped in place of the Python
+# reader it replaced (#250). It is a Linux ELF, so a bundle that carried host bytes
+# is refused rather than silently proving something the image never runs. Python
+# stays the installer and the oracle; it is not in this bundle.
 PHASE=verifier
 mkdir -p "$BUNDLE"
-cp "$ROOT/$EXAMPLE/verify-toolchain.sh" "$ROOT/$EXAMPLE/gopls_closure.py" "$BUNDLE/"
+cp "$ROOT/$EXAMPLE/verify-toolchain.sh" "$BUNDLE/"
 cp -R "$DATA" "$BUNDLE/gopls-closure"
+linux_helper=$(bash "$ROOT/script/build/example-helper.sh" go-dev --root "$ROOT" \
+    --os linux --arch "$ARCH" --binary go-dev-helper) ||
+    { fail 'cannot build the Linux-target go-dev helper for the verifier bundle'; exit 1; }
+if elf_machine_matches "$linux_helper" "$ARCH"; then
+    pass "the verifier bundle ships $ARCH Linux bytes (e_machine checked)"
+else
+    fail "the verifier bundle would ship host bytes or another machine than $ARCH"
+fi
+cp "$linux_helper" "$BUNDLE/go-dev-helper"
+log "verifier helper $(sha256_file "$linux_helper") arch=$ARCH"
 if run_bounded verifier "$RUN_SECONDS" "$LOG_DIR/verifier.log" \
         "$DOCKER" run --rm --network none --label "$LABEL" \
         -e "GO_VERSION=$GO_VERSION" -e "GOLANGCI_LINT_VERSION=$GOLANGCI_LINT_VERSION" \
-        -e "GOPLS_VERSION=$GOPLS_VERSION" -e PYTHONDONTWRITEBYTECODE=1 \
+        -e "GOPLS_VERSION=$GOPLS_VERSION" \
         -v "$BUNDLE:/run/go-verify:ro" --entrypoint /bin/bash "$TAG" \
         /run/go-verify/verify-toolchain.sh; then
     pass 'network-none installed-state verifier passed'

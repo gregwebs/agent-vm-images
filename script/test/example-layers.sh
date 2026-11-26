@@ -31,7 +31,7 @@ GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp
 # listed file that vanishes fails as `guarded script missing`, and a `.go` file
 # nobody listed fails as `unreviewed helper file`. The vendor tree is deliberately
 # out of this list: its bytes belong to the module's vendor drift gate.
-GUARDED_GO='rust-dev/helper/go.mod rust-dev/helper/go.sum rust-dev/helper/main.go rust-dev/helper/main_test.go rust-dev/helper/imports_test.go rust-dev/helper/seams_fixture.go rust-dev/helper/seams_shipped.go rust-dev/helper/seams_test.go rust-dev/helper/kacheprobe/probe.go rust-dev/helper/kacheprobe/probe_test.go rust-dev/helper/internal/gpg/gpg.go rust-dev/helper/internal/gpg/gpg_test.go rust-dev/helper/internal/strictjson/decode.go rust-dev/helper/internal/strictjson/decode_test.go rust-dev/helper/toolchain/toolchain.go rust-dev/helper/toolchain/policy.go rust-dev/helper/toolchain/types.go rust-dev/helper/toolchain/refusal.go rust-dev/helper/toolchain/decode.go rust-dev/helper/toolchain/pin.go rust-dev/helper/toolchain/inputs.go rust-dev/helper/toolchain/manifest.go rust-dev/helper/toolchain/installed.go rust-dev/helper/toolchain/commands.go rust-dev/helper/toolchain/types_test.go rust-dev/helper/toolchain/decode_test.go rust-dev/helper/toolchain/pin_test.go rust-dev/helper/toolchain/manifest_test.go rust-dev/helper/toolchain/installed_test.go rust-dev/helper/toolchain/fuzz_test.go rust-dev/helper/toolchain/events.go rust-dev/helper/toolchain/preflight.go rust-dev/helper/toolchain/prepare.go rust-dev/helper/toolchain/install.go rust-dev/helper/toolchain/stage.go rust-dev/helper/toolchain/stage_test.go rust-dev/helper/toolchain/preflight_test.go rust-dev/helper/toolchain/prepare_test.go rust-dev/helper/toolchain/install_test.go rust-dev/helper/toolchain/fuzz_install_test.go rust-dev/helper/helpers_test.go rust-dev/helper/internal/fetch/fetch.go rust-dev/helper/internal/fetch/loopback_fixture.go rust-dev/helper/internal/fetch/fetch_test.go rust-dev/helper/internal/fetch/loopback_fixture_test.go rust-dev/helper/internal/tarwalk/tarwalk.go rust-dev/helper/internal/tarwalk/tarwalk_test.go go-dev/helper/go.mod go-dev/helper/go.sum go-dev/helper/main.go go-dev/helper/main_test.go go-dev/helper/closure/constants.go go-dev/helper/closure/document.go go-dev/helper/closure/gomods.go go-dev/helper/closure/gosum.go go-dev/helper/closure/grammar_test.go go-dev/helper/closure/helpers_test.go go-dev/helper/closure/inputs_test.go go-dev/helper/closure/licenses.go go-dev/helper/closure/load.go go-dev/helper/closure/model_test.go go-dev/helper/closure/notice_test.go go-dev/helper/closure/pin.go go-dev/helper/closure/source.go go-dev/helper/closure/values.go go-dev/helper/internal/strictjson/decode.go go-dev/helper/internal/strictjson/decode_test.go go-dev/helper/internal/strictjson/drift_test.go'
+GUARDED_GO='rust-dev/helper/go.mod rust-dev/helper/go.sum rust-dev/helper/main.go rust-dev/helper/main_test.go rust-dev/helper/imports_test.go rust-dev/helper/seams_fixture.go rust-dev/helper/seams_shipped.go rust-dev/helper/seams_test.go rust-dev/helper/kacheprobe/probe.go rust-dev/helper/kacheprobe/probe_test.go rust-dev/helper/internal/gpg/gpg.go rust-dev/helper/internal/gpg/gpg_test.go rust-dev/helper/internal/strictjson/decode.go rust-dev/helper/internal/strictjson/decode_test.go rust-dev/helper/toolchain/toolchain.go rust-dev/helper/toolchain/policy.go rust-dev/helper/toolchain/types.go rust-dev/helper/toolchain/refusal.go rust-dev/helper/toolchain/decode.go rust-dev/helper/toolchain/pin.go rust-dev/helper/toolchain/inputs.go rust-dev/helper/toolchain/manifest.go rust-dev/helper/toolchain/installed.go rust-dev/helper/toolchain/commands.go rust-dev/helper/toolchain/types_test.go rust-dev/helper/toolchain/decode_test.go rust-dev/helper/toolchain/pin_test.go rust-dev/helper/toolchain/manifest_test.go rust-dev/helper/toolchain/installed_test.go rust-dev/helper/toolchain/fuzz_test.go rust-dev/helper/toolchain/events.go rust-dev/helper/toolchain/preflight.go rust-dev/helper/toolchain/prepare.go rust-dev/helper/toolchain/install.go rust-dev/helper/toolchain/stage.go rust-dev/helper/toolchain/stage_test.go rust-dev/helper/toolchain/preflight_test.go rust-dev/helper/toolchain/prepare_test.go rust-dev/helper/toolchain/install_test.go rust-dev/helper/toolchain/fuzz_install_test.go rust-dev/helper/helpers_test.go rust-dev/helper/internal/fetch/fetch.go rust-dev/helper/internal/fetch/loopback_fixture.go rust-dev/helper/internal/fetch/fetch_test.go rust-dev/helper/internal/fetch/loopback_fixture_test.go rust-dev/helper/internal/tarwalk/tarwalk.go rust-dev/helper/internal/tarwalk/tarwalk_test.go go-dev/helper/go.mod go-dev/helper/go.sum go-dev/helper/main.go go-dev/helper/main_test.go go-dev/helper/closure/constants.go go-dev/helper/closure/document.go go-dev/helper/closure/gomods.go go-dev/helper/closure/gosum.go go-dev/helper/closure/grammar_test.go go-dev/helper/closure/helpers_test.go go-dev/helper/closure/inputs_test.go go-dev/helper/closure/licenses.go go-dev/helper/closure/load.go go-dev/helper/closure/model_test.go go-dev/helper/closure/notice_test.go go-dev/helper/closure/pin.go go-dev/helper/buildinfo/buildinfo.go go-dev/helper/buildinfo/buildinfo_test.go go-dev/helper/gotool/exec.go go-dev/helper/gotool/gotool.go go-dev/helper/gotool/gotool_test.go go-dev/helper/installed/installed.go go-dev/helper/installed/installed_test.go go-dev/helper/closure/source.go go-dev/helper/closure/values.go go-dev/helper/internal/pathjoin/pathjoin.go go-dev/helper/internal/pathjoin/pathjoin_test.go go-dev/helper/internal/strictjson/decode.go go-dev/helper/internal/strictjson/decode_test.go go-dev/helper/internal/strictjson/drift_test.go'
 # The rust-dev helper's builder stage. It is a reviewed parent:
 # `images/parent-pins.json` records its digest, and its tag is the root go.mod's
 # toolchain. Both are named by the literals below rather than by a variable, so a
@@ -47,7 +47,7 @@ GUARDED_DATA='chrome-devtools/data/chrome-devtools-mcp.sigstore.json chrome-devt
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=172
+SELF_TEST_CASES=176
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -720,7 +720,7 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     [ "$go_selected" = "$selected" ] ||
         fail "go-dev pins: the two readers disagree: Go $go_selected, Python $selected"
     reviewed_gopls_installer='RUN --mount=type=bind,source=install-gopls.sh,target=/tmp/install-gopls.sh,ro --mount=type=bind,source=gopls_closure.py,target=/tmp/gopls_closure.py,ro --mount=type=bind,source=data/gopls-closure,target=/tmp/gopls-closure,ro bash /tmp/install-gopls.sh'
-    reviewed_go_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/go-verify/verify-toolchain.sh,ro --mount=type=bind,source=gopls_closure.py,target=/run/go-verify/gopls_closure.py,ro --mount=type=bind,source=data/gopls-closure,target=/run/go-verify/gopls-closure,ro PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/go-verify/verify-toolchain.sh'
+    reviewed_go_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/go-verify/verify-toolchain.sh,ro --mount=type=bind,from=go-dev-helper,source=/out/go-dev-helper,target=/run/go-verify/go-dev-helper,ro --mount=type=bind,source=data/gopls-closure,target=/run/go-verify/gopls-closure,ro /bin/bash /run/go-verify/verify-toolchain.sh'
     gopls_installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-gopls.sh' || true)
     [ "$gopls_installer_runs" -eq 1 ] || fail 'go-dev: the gopls installer RUN must appear exactly once'
     gopls_installer_line=$(printf '%s\n' "$instructions" | grep -F 'install-gopls.sh')
@@ -744,8 +744,8 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
         *) fail 'go-dev: verifier must run with --network=none' ;;
     esac
     for token in 'verify-toolchain.sh,target=/run/go-verify/verify-toolchain.sh,ro' \
-        'gopls_closure.py,target=/run/go-verify/gopls_closure.py,ro' \
-        'data/gopls-closure,target=/run/go-verify/gopls-closure,ro' 'PYTHONDONTWRITEBYTECODE=1'; do
+        'from=go-dev-helper,source=/out/go-dev-helper,target=/run/go-verify/go-dev-helper,ro' \
+        'data/gopls-closure,target=/run/go-verify/gopls-closure,ro'; do
         case "$gopls_verifier_line" in
             *"$token"*) ;;
             *) fail "go-dev: verifier RUN lacks the reviewed delivery: $token" ;;
@@ -753,6 +753,20 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     done
     [ "$(normalize_instruction "$gopls_verifier_line")" = "$reviewed_go_verifier" ] ||
         fail "go-dev: verifier RUN must be exactly: $reviewed_go_verifier (got: $(normalize_instruction "$gopls_verifier_line"))"
+    # The verifier script's own two halves (#250): the installed state is read by the
+    # layer's Go binary at the fixed absolute paths, and the guest PATH smoke stays a
+    # separate shell check. Neither may absorb the other: the first proves a named
+    # file against the closure, the second proves the guest's PATH resolves and can
+    # analyse code. The verifier step runs no Python at all.
+    grep -qF '"$VERIFY_DIR/go-dev-helper" verify-installed "$VERIFY_DIR/gopls-closure"' \
+        "$godir/verify-toolchain.sh" ||
+        fail 'go-dev: verify-toolchain.sh must run the Go verifier'
+    grep -qF 'test "$(go version | cut -d'"'"' '"'"' -f3)" = "go${GO_VERSION}"' \
+        "$godir/verify-toolchain.sh" ||
+        fail 'go-dev: verify-toolchain.sh must keep the independent guest PATH smoke'
+    if grep -qE 'python3|PYTHONDONTWRITEBYTECODE' "$godir/verify-toolchain.sh"; then
+        fail 'go-dev: the verifier step must run no Python'
+    fi
     # The one offline `check`: the layer's own binary, the same five committed
     # files the installer and verifier read, no network, and both ARG assertions.
     # Exact shape, so a disabled or extended command is not the reviewed check, and
@@ -1679,6 +1693,22 @@ INSTRUCTION
             172)
                 printf 'package closure\n' > "$godir/helper/closure/unreviewed.go"
                 expected='unreviewed helper file: go-dev/helper/closure/unreviewed.go' ;;
+            # 173-176: the installed-state verifier (#250). The verifier RUN must
+            # deliver the layer's own binary (a Python copy would be a different
+            # mechanism with the same name), the script must run that verb, and the
+            # guest PATH smoke must stay a separate check rather than being absorbed.
+            173)
+                rewrite "$godocker" 's#--mount=type=bind,from=go-dev-helper,source=/out/go-dev-helper,target=/run/go-verify/go-dev-helper,ro ##'
+                expected='go-dev: verifier RUN lacks the reviewed delivery' ;;
+            174)
+                rewrite "$godir/verify-toolchain.sh" '/^test "$(go version | cut/d'
+                expected='go-dev: verify-toolchain.sh must keep the independent guest PATH smoke' ;;
+            175)
+                printf 'python3 /tmp/legacy-reader.py\n' >> "$godir/verify-toolchain.sh"
+                expected='go-dev: the verifier step must run no Python' ;;
+            176)
+                rewrite "$godir/verify-toolchain.sh" 's#go-dev-helper" verify-installed#go-dev-helper" verify#g'
+                expected='go-dev: verify-toolchain.sh must run the Go verifier' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Hermetic table for the go-dev example's committed gopls closure (#103).
 
-Every case drives the shipped helper ``examples/layers/go-dev/gopls_closure.py``:
-the real strict decoding, the real wrapper/root/sum rules, the real license
+Every case drives the shipped helper ``examples/layers/go-dev/gopls_closure.py``
+(and, from #250, the layer's Go reader beside it where a row is about the installed
+state): the real strict decoding, the real wrapper/root/sum rules, the real license
 framing, the real constructed child environment, and — from P2 on — one real
 ``go build`` against a loopback GOPROXY. Only the transport (loopback instead of
 proxy.golang.org) and the sum database (off for synthetic modules) are
@@ -14,6 +15,14 @@ before importing anything under test: a native ``go`` child is not covered by a
 Python audit hook. A host that cannot provide the boundary exits 3
 ``ISOLATION-UNAVAILABLE`` rather than running unconfined.
 
+From #250 on, the suite also drives the layer's own Go reader as a child: the
+host-built ``go-dev-helper``, allowlisted before the boundary goes up. The
+installed-state rows run *both* readers over the same installation and compare their
+verdicts per case, including the two declared divergences this verb owns (a binary
+mode with its special bits, and the installed notice file's mode) and the three
+build-info documents whose decoders disagree. A row that only one side runs would
+not be a comparison, so the counters advance only inside the calls that execute.
+
 Native acceptance is ``script/test/go-example.sh``; a Linux binary built here is
 inspected, never executed.
 """
@@ -21,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import dataclasses
 import hashlib
 import json
 import os
@@ -35,6 +45,10 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 FIXTURES = Path(__file__).resolve().parent / 'fixtures' / 'gopls-closure'
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+# The one host build of the layer's own reader (#250). It is built before the OS
+# boundary goes up, because the guarded suite may only exec the executables it
+# allowlisted, and this binary is one of them.
+HELPER_BUILDER = REPOSITORY_ROOT / 'script' / 'build' / 'example-helper.sh'
 RUST_FIXTURES = Path(__file__).resolve().parent / 'fixtures' / 'rust-toolchain'
 sys.path.insert(0, str(FIXTURES))
 # Appended: the Rust fixtures also ship a ``fixture`` module and this suite means
@@ -84,6 +98,45 @@ def refuses(name: str, action, expected: str) -> None:
 
 def h1_of(text: str) -> str:
     return 'h1:' + base64.b64encode(hashlib.sha256(text.encode()).digest()).decode()
+
+
+# --- the layer's own reader, as a child ---------------------------------------
+def build_go_dev_helper() -> Path:
+    """Build the layer's reader for this host with the stage's flags.
+
+    Before the sandbox and the audit hook: the binary the suite execs has to exist
+    and be allowlisted before either boundary is installed, and a build that cannot
+    produce it is an error here rather than a silently missing reader.
+    """
+    os_name = 'linux' if sys.platform.startswith('linux') else 'darwin'
+    result = subprocess.run(
+        ['bash', str(HELPER_BUILDER), 'go-dev', '--root', str(REPOSITORY_ROOT),
+         '--os', os_name],
+        capture_output=True, text=True, check=False, cwd=str(REPOSITORY_ROOT))
+    if result.returncode != 0:
+        raise SystemExit(f'gopls-closure-pins: cannot build the go-dev helper:\n'
+                         f'{result.stdout}{result.stderr}')
+    binary = Path(result.stdout.strip().splitlines()[-1])
+    if not binary.is_absolute() or not binary.is_file() or not os.access(binary, os.X_OK):
+        raise SystemExit(f'gopls-closure-pins: the helper build printed {binary}, which is '
+                         f'not an absolute executable')
+    return binary
+
+
+def run_helper(helper: Path, argv: Sequence[str]) -> subprocess.CompletedProcess:
+    """Run the shipped reader once and return its finished process."""
+    return subprocess.run([str(helper), *argv], capture_output=True, text=True,
+                          check=False, cwd=str(REPOSITORY_ROOT))
+
+
+def verify_installed_argv(closure, arch, *, binary: Path, share_dir: Path,
+                          go_root: Path) -> list[str]:
+    """The one invocation shape every installed-state row uses."""
+    return ['verify-installed', str(closure.directory),
+            '--expect-gopls', closure.pin.gopls.value,
+            '--expect-go', closure.pin.go.value,
+            '--go-root', str(go_root), '--arch', arch.value,
+            '--binary', str(binary), '--share-dir', str(share_dir)]
 
 
 # --- hand-written minimal records ---------------------------------------------
@@ -1231,33 +1284,708 @@ def test_notice_cache(fixture, closure) -> None:
         dep_dir.chmod(0o555)
 
 
-def test_verify_installed_faults(fixture, closure, root: Path) -> None:
+# BUILD_INFO_EXPECTATIONS is the independent register for the paired build-info
+# rows: it is keyed by case name, and the case table below supplies bytes only. The
+# table cannot state an expectation, so a row cannot "pass" by declaring itself. A
+# side is (status, fragment): 0 accepts (fragment must be None), 1 refuses, and
+# 'raises' means the oracle has no verdict at all (the fragment is the exception
+# type it raised). The two sides are held to the register in both directions before
+# a row runs.
+BUILD_INFO_EXPECTATIONS = {
+    'a coherent build-info document': (0, None, 0, None),
+    'unparseable build info': (1, 'not valid JSON', 1, 'not valid JSON'),
+    'the wrong compiler in the build info': (1, 'compiler is go1.26.5, want go1.27.3',
+                                             1, 'compiler is go1.26.5, want go1.27.3'),
+    'another selected closure': (1, 'not in the reviewed closure',
+                                 1, 'not in the reviewed closure'),
+    'another Linux target': (1, 'build settings differ', 1, 'build settings differ'),
+    'a Darwin build': (1, 'build settings differ', 1, 'build settings differ'),
+    # Declared divergences (#188 G3): the oracle's permissive decoder accepts a
+    # duplicate key whose value agrees and a non-JSON constant in a member it does not
+    # read; the strict decoder refuses both.
+    'a duplicate build-info key': (1, 'duplicate key', 0, None),
+    'a non-JSON constant in an optional member': (1, 'NaN is not valid JSON', 0, None),
+    # The converse: Python converts every number literal and has a 4,300-digit limit,
+    # so this document has no oracle verdict at all while the ported reader accepts it
+    # (the member is optional and unread). Declared, not silently skipped.
+    'an integer literal beyond the oracle digit limit': (0, None, 'raises', 'ValueError'),
+}
+
+# BUILD_INFO_DIVERGENCES is derived from the register, not maintained beside it, so
+# the two cannot disagree.
+BUILD_INFO_DIVERGENCES = frozenset(
+    name for name, entry in BUILD_INFO_EXPECTATIONS.items()
+    if (entry[0] == 0) != (entry[2] == 0))
+
+
+@dataclasses.dataclass(frozen=True)
+class Verdict:
+    """One reader's verdict, constructed only by the code that ran it.
+
+    `status` is 0 (accept), 1 (refuse) or 'raises' (the reader had no verdict at
+    all). A callable that returns anything else — `None` in particular — has not
+    observed a verdict, and `Corpus.compare` refuses it instead of counting it.
+    """
+
+    status: int | str
+    fragment: str | None = None
+
+    @property
+    def accepted(self) -> bool:
+        return self.status == 0
+
+    @property
+    def crashed(self) -> bool:
+        return self.status == 'raises'
+
+
+class Corpus:
+    """Bookkeeping that can only advance when both executions happened.
+
+    Both readers are called *inside* compare(), and each observation inside
+    observe(), so a row that stops running one side is a shortfall in that side's
+    count rather than a silently smaller agreement total. The agreement and
+    divergence counts are read-only properties over the comparison count, so a
+    single-observer row cannot reach them at all: `agreements += 1` there raises.
+    """
+
+    def __init__(self) -> None:
+        self.comparisons = 0
+        self.observations = 0
+        self.go_runs = 0
+        self.python_runs = 0
+        self.go_accepts = 0
+        # equal is written only by compare(), under the verdict checks below.
+        self.equal = 0
+
+    @property
+    def agreements(self) -> int:
+        return self.equal
+
+    @property
+    def divergences(self) -> int:
+        return self.comparisons - self.equal
+
+    def compare(self, inspect, run):
+        oracle = inspect()
+        if not isinstance(oracle, Verdict):
+            raise AssertionError(
+                f'the oracle callable returned {oracle!r}, which is not an observed '
+                f'verdict: a side that did not run cannot be counted')
+        result = run()
+        if not isinstance(result, subprocess.CompletedProcess):
+            raise AssertionError(
+                f'the reader callable returned {result!r}, which is not a finished '
+                f'process: a side that did not run cannot be counted')
+        self.comparisons += 1
+        self.go_runs += 1
+        self.python_runs += 1
+        if result.returncode == 0:
+            self.go_accepts += 1
+        if oracle.accepted == (result.returncode == 0):
+            self.equal += 1
+        return oracle, result
+
+    def observe(self, run):
+        result = run()
+        if not isinstance(result, subprocess.CompletedProcess):
+            raise AssertionError(
+                f'the reader callable returned {result!r}, which is not a finished '
+                f'process')
+        self.observations += 1
+        self.go_runs += 1
+        if result.returncode == 0:
+            self.go_accepts += 1
+        return result
+
+
+def corpus_control() -> None:
+    """The counter's own control, driven once before any corpus runs.
+
+    A comparison whose oracle callable returns no verdict must fail rather than
+    shrink the totals, and a single-observer row must not be able to reach the
+    agreement count. Both are the failure modes this mechanism exists to prevent, so
+    both are exercised directly instead of being assumed.
+    """
+    corpus = Corpus()
+    finished = subprocess.CompletedProcess([], 0, 'v0.0.1\n', '')
+    try:
+        corpus.compare(lambda: None, lambda: finished)
+    except AssertionError:
+        pass
+    else:
+        raise SystemExit('gopls-closure-pins: a comparison over no verdict was counted')
+    if corpus.comparisons or corpus.python_runs or corpus.agreements:
+        raise SystemExit('gopls-closure-pins: a comparison over no verdict advanced the '
+                         'counters')
+    corpus.observe(lambda: finished)
+    try:
+        corpus.agreements += 1
+    except AttributeError:
+        pass
+    else:
+        raise SystemExit('gopls-closure-pins: a single-observer row can reach the '
+                         'agreement count')
+    if corpus.agreements != 0 or corpus.divergences != 0:
+        raise SystemExit('gopls-closure-pins: an observation moved the paired counters')
+    print('corpus: no verdict is not counted, and an observation cannot reach the '
+          'paired counters')
+
+
+def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
+                                 witnesses: Witnesses) -> None:
+    """Paired installed-state rows: the Python oracle and the ported reader.
+
+    Every row runs both readers over the same installation and declares both
+    verdicts. Five rows are declared divergences — the reader compares a binary mode
+    with its special bits and checks the notice file's mode, which the oracle does
+    not (#188 G3), and three build-info documents where the two decoders disagree
+    (see BUILD_INFO_EXPECTATIONS) — and each asserts *both* sides, so a change on
+    either side turns the row red. Each accepted row is preceded by the oracle's own
+    acceptance, so the corpus cannot pass by every case refusing.
+    """
+    import dataclasses
+
     import gopls_closure as model
 
+    corpus = Corpus()
+
+    def in_process(runner=None, inspected=None) -> Verdict:
+        """The oracle's verdict, as a typed observation.
+
+        A refusal is (1, text), an acceptance (0), and an exception is ('raises',
+        type): the third is data, not a crash, because `json.loads` converts number
+        literals and so a document the ported reader accepts can be one the oracle
+        cannot parse. A case that expects it declares 'raises' in the register.
+        """
+        try:
+            model.verify_installed(closure, inspected or target, runner=runner)
+        except model.ClosureError as error:
+            return Verdict(1, str(error))
+        except Exception as error:  # noqa: BLE001 - "no verdict" is an outcome here
+            return Verdict('raises', type(error).__name__)
+        return Verdict(0)
+
+    print('verify-installed: both readers on both Linux targets')
+    for arch in model.Architecture:
+        target, _paths = run_install(fixture, closure, f'verify-installed-{arch.value}', arch)
+        oracle, result = corpus.compare(
+            lambda: in_process(),
+            lambda: run_helper(helper, verify_installed_argv(
+                closure, arch, binary=target.bin_dir / 'gopls',
+                share_dir=target.share_dir, go_root=fixture.go_root)))
+        check(f'{arch.value}: the installed-state verifier accepts the installation',
+              oracle.accepted and result.returncode == 0 and result.stdout == 'v0.0.1\n'
+              and result.stderr == '',
+              f'(oracle {oracle!r}, reader {result.returncode}, {result.stdout!r}, '
+              f'{result.stderr!r})')
+
+        # The binary the verifier inspects is named, absolute, and never executed: the
+        # only child that reads it is `go version -m -json`. Three observations, and
+        # what each one can see:
+        #
+        #   * the `go` shim record sees the invocations that go **through that shim** —
+        #     program, argv, order — and refuses any argv outside the three exact
+        #     shapes. It cannot see a program the reader starts directly;
+        #   * the candidate's own marker file (below) sees the candidate being started,
+        #     wherever from, which the shim record cannot;
+        #   * the loopback proxy recorder sees requests **to that recorder**, which is
+        #     the only origin this fixture offers.
+        #
+        # No single observer is trusted for more than that, and none of them sees every
+        # possible Go invocation or every possible request.
+        witnesses.clear()
+        shimmed = corpus.observe(lambda: run_helper(helper, verify_installed_argv(
+            closure, arch, binary=target.bin_dir / 'gopls', share_dir=target.share_dir,
+            go_root=witnesses.record_root)))
+        lines = witnesses.argv()
+        binary_path = str(target.bin_dir / 'gopls')
+        check(f'{arch.value}: the verifier ran exactly the three closed commands',
+              shimmed.returncode == 0 and lines == ['env GOVERSION', 'env GOROOT',
+                                                    f'version -m -json {binary_path}'],
+              f'({shimmed.returncode}, {lines!r}, {shimmed.stderr!r})')
+        check(f'{arch.value}: the candidate binary is never started as a program',
+              all(not line.startswith(binary_path) for line in lines), f'({lines!r})')
+
+        # No request to the recorder: the loopback proxy is the only origin this
+        # fixture offers, and its request log must stay empty across a verification.
+        fixture.proxy.clear_requests()
+        quiet = corpus.observe(lambda: run_helper(helper, verify_installed_argv(
+            closure, arch, binary=target.bin_dir / 'gopls', share_dir=target.share_dir,
+            go_root=fixture.go_root)))
+        requested = fixture.proxy.requested_paths()
+        check(f'{arch.value}: the verifier made no proxy request',
+              quiet.returncode == 0 and requested == [], f'({quiet.returncode}, {requested})')
+
     print('verify-installed: the installed bytes are proved, not assumed')
-    target, _paths = run_install(fixture, closure, 'verify-installed',
+    target, _paths = run_install(fixture, closure, 'verify-installed-faults',
                                  model.Architecture.ARM64)
-    model.verify_installed(closure, target)
-    check('a correct installation verifies', True)
-
+    oracle, control = corpus.compare(
+        lambda: in_process(),
+        lambda: run_helper(helper, verify_installed_argv(
+            closure, target.arch, binary=target.bin_dir / 'gopls',
+            share_dir=target.share_dir, go_root=fixture.go_root)))
+    check('a correct installation verifies in both readers',
+          oracle.accepted and control.returncode == 0 and control.stdout == 'v0.0.1\n',
+          f'(oracle {oracle!r}, reader {control.returncode}/{control.stderr.strip()!r})')
     license_path = target.share_dir / 'THIRD_PARTY_LICENSES'
-    original = license_path.read_bytes()
-    license_path.write_bytes(original + b'\n')
-    refuses('an edited license file is refused',
-            lambda: model.verify_installed(closure, target), 'pinned license digest')
-    license_path.write_bytes(original)
-
+    original_license = license_path.read_bytes()
     binary = target.bin_dir / 'gopls'
-    binary.chmod(0o644)
-    refuses('a non-executable mode is refused',
-            lambda: model.verify_installed(closure, target), 'want 755')
-    binary.chmod(0o755)
+    original_binary = binary.read_bytes()
+    # The real build-info document, read once by the pinned go: the mode rows need it
+    # for the oracle's injected runner, and the build-info rows mutate copies of it.
+    real = subprocess.run([str(fixture.go_root / 'bin' / 'go'), 'version', '-m', '-json',
+                           str(binary)], capture_output=True, text=True, check=True)
+    document = json.loads(real.stdout)
+    elsewhere = fixture.workspace / 'verify-elsewhere'
+    elsewhere.mkdir(parents=True, exist_ok=True)
+    sibling = elsewhere / 'gopls'
+    shutil.copyfile(binary, sibling)
+    os.chmod(sibling, 0o755)
 
-    saved = binary.read_bytes()
-    binary.write_bytes(b'not the reviewed binary\n')
-    refuses('a swapped binary is refused',
-            lambda: model.verify_installed(closure, target), 'go version -m -json failed')
-    binary.write_bytes(saved)
+    def canned_runner(document):
+        """The oracle's runner seam: the three closed answers, one document.
+
+        The document is passed through verbatim, as text, because these rows are about
+        what each decoder makes of the same bytes.
+        """
+        text = document if isinstance(document, str) else json.dumps(document)
+
+        def runner(command, extra, env, cwd):
+            if command is model.GoCommand.GOVERSION:
+                return subprocess.CompletedProcess([], 0, 'go1.27.3\n', '')
+            if command is model.GoCommand.GOROOT:
+                return subprocess.CompletedProcess([], 0, str(target.go_root) + '\n', '')
+            return subprocess.CompletedProcess([], 0, text, '')
+        return runner
+
+    def go_reader(*, binary_path: Path | None = None) -> subprocess.CompletedProcess:
+        return run_helper(helper, verify_installed_argv(
+            closure, target.arch, binary=binary_path or binary, share_dir=target.share_dir,
+            go_root=fixture.go_root))
+
+    def row(label: str, mutate, restore, *, go_fragment: str, python_fragment: str | None,
+            oracle_runner=None) -> None:
+        """One paired case. python_fragment None declares an oracle acceptance."""
+        try:
+            mutate()
+        except BaseException:
+            # A mutation that could not be applied is not a comparison: undo what it
+            # managed to change and report it, instead of letting the restore hide it.
+            restore()
+            raise
+        try:
+            message, result = corpus.compare(lambda: in_process(oracle_runner), go_reader)
+        finally:
+            restore()
+        if python_fragment is None:
+            check(f'{label}: the oracle accepts, the reader refuses (declared divergence)',
+                  message.accepted and result.returncode == 1
+                  and go_fragment in result.stderr and result.stdout == '',
+                  f'(oracle {message!r}, reader {result.returncode}/{result.stderr.strip()!r})')
+            return
+        check(f'{label}: both readers refuse it',
+              message.status == 1 and python_fragment in (message.fragment or '')
+              and result.returncode == 1 and go_fragment in result.stderr
+              and result.stdout == '',
+              f'(oracle {message!r}, reader {result.returncode}/{result.stderr.strip()!r})')
+
+    def mode_of(path: Path, mode: int) -> tuple:
+        def mutate() -> None:
+            path.chmod(mode)
+
+        def restore() -> None:
+            path.chmod(0o755 if path == binary else 0o644)
+        return mutate, restore
+
+    edited, restore_edited = mode_of(license_path, 0o644)
+    row('an edited license file',
+        lambda: (edited(), license_path.write_bytes(original_license + b'\n')),
+        lambda: (restore_edited(), license_path.write_bytes(original_license)),
+        go_fragment='pinned license digest', python_fragment='pinned license digest')
+    row('a different notice body of the same length',
+        lambda: license_path.write_bytes(original_license.replace(b'dep license text',
+                                                                 b'dep licence text')),
+        lambda: license_path.write_bytes(original_license),
+        go_fragment='pinned license digest', python_fragment='pinned license digest')
+    mutate_mode, restore_mode = mode_of(binary, 0o644)
+    row('a non-executable binary mode', mutate_mode, restore_mode,
+        go_fragment='want 755', python_fragment='want 755')
+    mutate_group, restore_group = mode_of(license_path, 0o664)
+    row('a group-writable notice mode', mutate_group, restore_group,
+        go_fragment='want 644', python_fragment=None)
+    # A setuid bit cannot be set inside the boundary (it is stripped), so the witness
+    # file is prepared outside it and both readers are pointed at *that* file. The
+    # reader gets the document shim, so if the mode rule were deleted the run would
+    # reach the shim and *accept*: the row fails on the verdict, not on a message. The
+    # oracle's injected runner answers the same document for the same reason.
+    witnesses.answer(document)
+    setuid_target = dataclasses.replace(target, binary=witnesses.setuid_binary)
+    oracle, setuid_result = corpus.compare(
+        lambda: in_process(canned_runner(document), setuid_target),
+        lambda: run_helper(helper, verify_installed_argv(
+            closure, target.arch, binary=witnesses.setuid_binary,
+            share_dir=target.share_dir, go_root=witnesses.document_root)))
+    check('a setuid binary mode: the oracle accepts, the reader refuses (declared '
+          'divergence)',
+          oracle.accepted and setuid_result.returncode == 1 and setuid_result.stdout == ''
+          and 'has mode 4755, want 755' in setuid_result.stderr,
+          f'(oracle {oracle!r}, reader {setuid_result.returncode}/'
+          f'{setuid_result.stderr.strip()!r})')
+    row('a binary that is not a Go program',
+        lambda: binary.write_bytes(b'not the reviewed binary\n'),
+        lambda: binary.write_bytes(original_binary),
+        go_fragment='go version -m -json failed', python_fragment='go version -m -json failed')
+    row('a missing notice file',
+        lambda: license_path.unlink(),
+        lambda: license_path.write_bytes(original_license),
+        go_fragment='installed: missing', python_fragment='installed: missing')
+    # The requested path is the one inspected: a sibling with the expected name is
+    # not a substitute, in either reader.
+    sibling_target = dataclasses.replace(target, binary=elsewhere / 'absent' / 'gopls')
+    try:
+        sibling_message, sibling_result = corpus.compare(
+            lambda: in_process(inspected=sibling_target),
+            lambda: go_reader(binary_path=elsewhere / 'absent' / 'gopls'))
+    finally:
+        sibling.unlink()
+    check('a requested binary path with no file is not substituted from a sibling',
+          sibling_message.status == 1
+          and 'installed: missing' in (sibling_message.fragment or '')
+          and sibling_result.returncode == 1
+          and 'installed: missing' in sibling_result.stderr,
+          f'(oracle {sibling_message!r}, reader {sibling_result.stderr.strip()!r})')
+
+    print('verify-installed: the build info is read, not authenticated')
+    # Every case here runs *both* readers over the same document: the Go reader through
+    # the document shim (a real child process), the oracle through its runner seam. The
+    # two decoders are the point — the oracle's json.loads is permissive, the ported
+    # reader's is strict — so a case is only counted when both sides ran, and the two
+    # cases where their verdicts differ are named here.
+
+    def document_for(value) -> str:
+        return value if isinstance(value, str) else json.dumps(value)
+
+    def emit() -> subprocess.CompletedProcess:
+        return run_helper(helper, verify_installed_argv(
+            closure, target.arch, binary=binary, share_dir=target.share_dir,
+            go_root=witnesses.document_root))
+
+    def mutate_document(change) -> dict:
+        edited_document = json.loads(json.dumps(document))
+        change(edited_document)
+        return edited_document
+
+    def set_setting(key: str, value: str):
+        def change(document_: dict) -> None:
+            for item in document_['Settings']:
+                if item['Key'] == key:
+                    item['Value'] = value
+                    return
+            raise AssertionError(f'the document carries no {key} setting')
+        return change
+
+    def replace_once(text: str, old: str, new: str) -> str:
+        if old not in text:
+            raise AssertionError(f'the build-info document does not carry {old!r}')
+        return text.replace(old, new, 1)
+
+    # The case table supplies bytes and nothing else: the expectation for each name
+    # is in BUILD_INFO_EXPECTATIONS, so a row cannot declare its own verdict.
+    build_answers = {
+        'a coherent build-info document': real.stdout,
+        'unparseable build info': 'not a document',
+        'the wrong compiler in the build info':
+            json.dumps(mutate_document(lambda d: d.update({'GoVersion': 'go1.26.5'}))),
+        'another selected closure':
+            json.dumps(mutate_document(lambda d: d['Deps'][0].update(
+                {'Path': 'example.test/evil'}))),
+        'another Linux target': json.dumps(mutate_document(set_setting('GOARM64', 'v9.0'))),
+        'a Darwin build': json.dumps(mutate_document(set_setting('GOOS', 'darwin'))),
+        'a duplicate build-info key':
+            replace_once(real.stdout, '"GoVersion": "go1.27.3"',
+                         '"GoVersion": "go1.27.3", "GoVersion": "go1.27.3"'),
+        'a non-JSON constant in an optional member':
+            replace_once(real.stdout, '"Path": "golang.org/x/tools/gopls"', '"Path": NaN'),
+        # 5,000 digits in a member neither reader reads: the strict decoder keeps the
+        # literal as written, while Python converts every number it parses and refuses
+        # beyond 4,300 digits. The port accepts a document the oracle cannot parse at
+        # all; that is declared in the register, not hidden.
+        'an integer literal beyond the oracle digit limit':
+            replace_once(real.stdout, '"Path": "golang.org/x/tools/gopls"',
+                         '"Path": ' + '9' * 5000),
+    }
+    # The register and the table are held equal in both directions before a row runs:
+    # a deleted case leaves a registered name with no bytes, and a new case without an
+    # entry is refused rather than silently unchecked.
+    if set(build_answers) != set(BUILD_INFO_EXPECTATIONS):
+        missing = sorted(set(BUILD_INFO_EXPECTATIONS) - set(build_answers))
+        extra = sorted(set(build_answers) - set(BUILD_INFO_EXPECTATIONS))
+        check('the build-info register and case table agree', False,
+              f'(no bytes for {missing}, no expectation for {extra})')
+    else:
+        check('the build-info register and case table agree', True)
+    for name, entry in BUILD_INFO_EXPECTATIONS.items():
+        go_status, go_fragment, python_status, python_fragment = entry
+        if (go_status == 0) != (python_status == 0):
+            continue
+        if go_status == python_status and go_fragment != python_fragment:
+            check(f'the register entry for {name!r} declares one verdict with two '
+                  f'fragments', False, f'({entry})')
+    for name, answer in build_answers.items():
+        entry = BUILD_INFO_EXPECTATIONS.get(name)
+        if entry is None:
+            continue
+        go_status, go_fragment, python_status, python_fragment = entry
+        witnesses.answer(answer)
+        oracle, result = corpus.compare(
+            lambda: in_process(canned_runner(answer)), emit)
+        problems = []
+        if (result.returncode == 0) != (go_status == 0):
+            problems.append(f'reader status {result.returncode}, want {go_status} '
+                            f'({result.stderr.strip()!r})')
+        elif go_status == 0 and (result.stdout != 'v0.0.1\n' or result.stderr != ''):
+            problems.append(f'reader accepted with {result.stdout!r}/{result.stderr!r}')
+        elif go_status == 1 and (result.stdout != '' or go_fragment not in result.stderr):
+            problems.append(f'reader refusal {result.stderr.strip()!r} does not name '
+                            f'{go_fragment!r}')
+        if python_status == 'raises':
+            if not oracle.crashed or oracle.fragment != python_fragment:
+                problems.append(f'oracle {oracle!r}, want it to raise {python_fragment}')
+        elif oracle.accepted != (python_status == 0):
+            problems.append(f'oracle verdict {oracle!r}, want status {python_status}')
+        elif python_status == 1 and python_fragment not in (oracle.fragment or ''):
+            problems.append(f'oracle refusal {oracle!r} does not name {python_fragment!r}')
+        check(f'{name}: both readers declare their own verdict', not problems,
+              '; '.join(problems))
+
+    # The shim's own control: it must refuse an argv outside the three exact shapes,
+    # or "the shim refuses everything else" is a claim its source does not keep.
+    stray = subprocess.run([str(witnesses.record_root / 'bin' / 'go'), 'version', '-m',
+                            '-json', 'a', 'b'], capture_output=True, text=True, check=False)
+    check('the go shim refuses an argv outside the three closed shapes',
+          stray.returncode == 9 and 'the review forbids this command' in stray.stderr,
+          f'({stray.returncode}, {stray.stderr.strip()!r})')
+
+    # The candidate's own side effect, not a log from a child the verifier chose to
+    # start: a `go` shim record cannot see `os.StartProcess`, and this marker can see
+    # nothing else. The *allowlisted* witness program is the verified candidate, so if
+    # the reader ever started it the boundary would permit it and the marker would
+    # appear; its absence is the reader's choice, not the sandbox's refusal. The bytes
+    # are a marker program, and the build info comes from the document shim, so the
+    # run must reach acceptance to make "never executed" meaningful.
+    print('verify-installed: the candidate is never executed')
+    witnesses.answer(real.stdout)
+    marker = witnesses.candidate.parent / 'executed'
+    if marker.exists():
+        marker.unlink()
+    marker_run = corpus.observe(lambda: run_helper(helper, verify_installed_argv(
+        closure, target.arch, binary=witnesses.candidate, share_dir=target.share_dir,
+        go_root=witnesses.document_root)))
+    check('a verifiable candidate that would write a marker is never started',
+          marker_run.returncode == 0 and marker_run.stdout == 'v0.0.1\n'
+          and not marker.exists(),
+          f'({marker_run.returncode}, {marker_run.stderr.strip()!r}, '
+          f'marker {marker.exists()})')
+    # The control that the marker would appear: start the same allowlisted file
+    # directly and require its side effect, so the absence above cannot be a program
+    # that writes nothing.
+    control = subprocess.run([str(witnesses.candidate)], capture_output=True, check=False)
+    check('the marker candidate writes its side effect when it is executed',
+          control.returncode == 0 and marker.exists(),
+          f'(status {control.returncode}, marker {marker.exists()})')
+    marker.unlink()
+
+    # Floors, deliberately below today's counts: a comparison only counts when both
+    # executions happened, so a shrinking table — or a side that stopped running — is a
+    # failure rather than a quieter pass (ruling R-a).
+    check('the paired installed-state corpus is nonempty and both verdicts are exercised',
+          corpus.comparisons >= 20 and corpus.agreements >= 15
+          and corpus.divergences == len(BUILD_INFO_DIVERGENCES) + 2
+          and corpus.observations >= 5
+          and corpus.go_runs == corpus.comparisons + corpus.observations
+          and corpus.python_runs == corpus.comparisons
+          and corpus.go_accepts >= 10,
+          f'(comparisons {corpus.comparisons}, agreements {corpus.agreements}, '
+          f'divergences {corpus.divergences}, observations {corpus.observations}, '
+          f'go runs {corpus.go_runs}, python runs {corpus.python_runs}, '
+          f'go accepts {corpus.go_accepts})')
+
+
+class Witnesses:
+    """Test-side children and files that must exist before the OS boundary.
+
+    Two `go` shims and one setuid binary are prepared in the unconfined pass: the
+    guarded suite may only exec the executables it allowlisted, and inside the
+    boundary a setuid bit is stripped. Each is still a real child or file at run
+    time -- the shims record their argv and answer only the closed command set, and
+    the setuid binary is hard-linked into the installation so the verified file's
+    own mode is 4755.
+    """
+
+    def __init__(self, directory: Path, record_root: Path, document_root: Path,
+                 setuid_binary: Path, candidate: Path) -> None:
+        self.directory = directory
+        self.record_root = record_root
+        self.document_root = document_root
+        self.setuid_binary = setuid_binary
+        self.candidate = candidate
+
+    def executables(self) -> list[str]:
+        return [str(self.record_root / 'bin' / 'go'),
+                str(self.document_root / 'bin' / 'go'), str(self.candidate)]
+
+    def record(self) -> Path:
+        return self.record_root / 'record'
+
+    def argv(self) -> list[str]:
+        return [line for line in self.record().read_text().splitlines() if line]
+
+    def clear(self) -> None:
+        self.record().write_text('')
+
+    def answer(self, document) -> None:
+        """Set the build-info answer of the document shim: a string or a document."""
+        value = document if isinstance(document, str) else json.dumps(document)
+        (self.document_root / 'document').write_text(value)
+
+
+# SHIM_SOURCE is the test shim's whole program: the closed command set, exact.
+#
+# It is compiled by the pinned go in the unconfined pass, because an executable the
+# OS boundary allowlists must be a program rather than a shell script: allowing
+# /bin/sh to interpret one would hand the fixture a general shell and weaken the
+# boundary for everything else.
+SHIM_SOURCE = r"""package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+)
+
+// A test shim: it answers exactly the verifier's three closed invocations, records
+// every argv, and refuses anything else with status 9 — a fourth command, an extra
+// argument or a different verb cannot make a verification pass. The *order* of the
+// three is the caller's business and is asserted by the suite's row, not here.
+// `go version -m -json PATH` is answered by exec'ing the pinned go named in
+// <root>/forward, or by printing <root>/document.
+func main() {
+	exe, err := os.Executable()
+	if err != nil {
+		os.Exit(9)
+	}
+	root := filepath.Dir(filepath.Dir(exe))
+	if record, err := os.OpenFile(filepath.Join(root, "record"),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		fmt.Fprintln(record, strings.Join(os.Args[1:], " "))
+		record.Close()
+	}
+	argv := os.Args[1:]
+	switch {
+	case len(argv) == 2 && argv[0] == "env" && argv[1] == "GOVERSION":
+		fmt.Println("go1.27.3")
+	case len(argv) == 2 && argv[0] == "env" && argv[1] == "GOROOT":
+		fmt.Println(root)
+	case len(argv) == 4 && argv[0] == "version" && argv[1] == "-m" && argv[2] == "-json":
+		if forward, err := os.ReadFile(filepath.Join(root, "forward")); err == nil &&
+			len(forward) > 0 {
+			invocation := append([]string{strings.TrimSpace(string(forward))}, argv...)
+			if err := syscall.Exec(invocation[0], invocation, os.Environ()); err != nil {
+				os.Exit(9)
+			}
+		}
+		document, err := os.ReadFile(filepath.Join(root, "document"))
+		if err != nil {
+			os.Exit(9)
+		}
+		os.Stdout.Write(document)
+	default:
+		fmt.Fprintf(os.Stderr, "the review forbids this command: %q\n", argv)
+		os.Exit(9)
+	}
+}
+"""
+
+# MARKER_SOURCE is the candidate a non-execution row installs: when it starts, it
+# writes a file next to itself. That side effect is the observation, because it has
+# exactly one possible writer — the candidate — so it sees a direct execution the
+# runner record and the `go` shim cannot.
+MARKER_SOURCE = r"""package main
+
+import (
+	"os"
+	"path/filepath"
+)
+
+func main() {
+	exe, err := os.Executable()
+	if err != nil {
+		os.Exit(1)
+	}
+	_ = os.WriteFile(filepath.Join(filepath.Dir(exe), "executed"), []byte("executed\n"),
+		0o644)
+}
+"""
+
+
+def compile_go(directory: Path, name: str, source: str, real_go: Path) -> Path:
+    """Compile one test program with the pinned go, before the boundary exists."""
+    path = directory / f'{name}.go'
+    path.write_text(source)
+    binary = directory / name
+    environment = dict(os.environ)
+    environment.update({'GOTOOLCHAIN': 'local', 'GOFLAGS': '', 'GOPROXY': 'off'})
+    result = subprocess.run([str(real_go), 'build', '-trimpath', '-buildvcs=false',
+                             '-o', str(binary), str(path)],
+                            capture_output=True, text=True, check=False,
+                            env=environment, cwd=str(directory))
+    if result.returncode != 0 or not binary.is_file():
+        raise SystemExit(f'gopls-closure-pins: cannot compile {name}:\n'
+                         f'{result.stdout}{result.stderr}')
+    return binary
+
+
+def prepare_witnesses(directory: Path, real_go: Path) -> Witnesses:
+    """Build the shims, the marker candidate and the setuid witness before the boundary."""
+    directory = directory.resolve()
+    directory.mkdir(parents=True)
+    shim = compile_go(directory, 'go-shim', SHIM_SOURCE, real_go)
+    record_root = directory / 'record'
+    document_root = directory / 'document'
+    for root in (record_root, document_root):
+        (root / 'bin').mkdir(parents=True)
+        shutil.copyfile(shim, root / 'bin' / 'go')
+        os.chmod(root / 'bin' / 'go', 0o755)
+        (root / 'record').touch()
+        (root / 'document').write_text('')
+    # The forwarding shim answers from the pinned go; the document shim from the file
+    # the installed-state rows write.
+    (record_root / 'forward').write_text(str(real_go))
+    # The candidate a non-execution row installs, and the setuid witness. Both are
+    # allowlisted: the boundary must *permit* starting them, or their absence would
+    # prove only that the sandbox refused.
+    # The candidate is named `gopls` because the verifier refuses any other name: a
+    # witness that could not be the inspected file would prove nothing.
+    (directory / 'candidate').mkdir()
+    candidate = directory / 'candidate' / 'gopls'
+    shutil.copyfile(compile_go(directory, 'marker-candidate', MARKER_SOURCE, real_go),
+                    candidate)
+    os.chmod(candidate, 0o755)
+    (directory / 'setuid').mkdir()
+    setuid_binary = directory / 'setuid' / 'gopls'
+    setuid_binary.write_bytes(b'\x7fELF placeholder\n')
+    os.chmod(setuid_binary, 0o755 | 0o4000)
+    if not os.lstat(setuid_binary).st_mode & 0o4000:
+        raise SystemExit('gopls-closure-pins: the host will not keep a setuid bit, so '
+                         'the special-bit witness cannot be produced')
+    return Witnesses(directory, record_root, document_root, setuid_binary, candidate)
+
+
+def sh_quote(text: str) -> str:
+    return "'" + text.replace("'", "'\\''") + "'"
 
 
 def test_verified_bytes_and_binary(fixture, closure, root: Path) -> None:
@@ -1284,28 +2012,9 @@ def test_verified_bytes_and_binary(fixture, closure, root: Path) -> None:
     check('the refused install shipped nothing',
           not (fixture.workspace / 'install-license-drift' / 'bin' / 'gopls').exists())
 
-    # An installed notice file must match the pin, not a fresh source read.
-    (directory / 'THIRD_PARTY_LICENSES').write_bytes(shipped)
-    license_path = target.share_dir / 'THIRD_PARTY_LICENSES'
-    original = license_path.read_bytes()
-    license_path.write_bytes(original.replace(b'dep license text', b'dep licence text'))
-    refuses('an installed notice file that differs from the pin is refused',
-            lambda: model.verify_installed(closure, target), 'pinned license digest')
-    license_path.write_bytes(original)
-
-    print('verify-installed: exactly the requested binary')
-    base = fixture.workspace / 'verify-binary'
-    (base / 'bin').mkdir(parents=True, exist_ok=True)
-    (base / 'elsewhere').mkdir(parents=True, exist_ok=True)
-    argv = ['verify-installed', str(closure.directory), '--expect-gopls', 'v0.0.1',
-            '--expect-go', '1.27.3', '--go-root', str(fixture.go_root), '--arch', 'arm64',
-            '--share-dir', str(target.share_dir), '--binary']
-    check('a binary argument with another name is refused',
-          model.main(argv + [str(base / 'bin' / 'not-gopls')]) == 1)
-    check('a missing requested binary is not substituted from a sibling',
-          model.main(argv + [str(base / 'elsewhere' / 'gopls')]) == 1)
-    check('the real installed path still verifies',
-          model.main(argv + [str(target.bin_dir / 'gopls')]) == 0)
+    # The installed-state rows live in test_verify_installed_faults, where both
+    # readers run: this test is about what publication writes, not about the verb
+    # that reads it back.
 
 
 def mutant_module(name: str, replacements: Sequence[tuple[str, str]], directory: Path):
@@ -1371,7 +2080,7 @@ def test_metadata_failure_rollback(fixture, closure, root: Path) -> None:
     remove_tree(root / 'mutants')
 
 
-def test_wrong_selection_binary(fixture, closure, root: Path) -> None:
+def test_wrong_selection_binary(fixture, closure, root: Path, helper: Path) -> None:
     import gopls_closure as model
 
     print('verify-installed: a valid Go binary with the wrong selection is refused')
@@ -1408,10 +2117,23 @@ def test_wrong_selection_binary(fixture, closure, root: Path) -> None:
     installed = target.bin_dir / 'gopls'
     original = installed.read_bytes()
     installed.write_bytes(wrong_binary.read_bytes())
-    refuses('a valid binary with another selection is refused',
-            lambda: model.verify_installed(closure, target),
-            'not in the reviewed closure')
-    installed.write_bytes(original)
+    try:
+        oracle = ''
+        try:
+            model.verify_installed(closure, target)
+        except model.ClosureError as error:
+            oracle = str(error)
+        result = run_helper(helper, verify_installed_argv(
+            closure, target.arch, binary=installed, share_dir=target.share_dir,
+            go_root=fixture.go_root))
+    finally:
+        installed.write_bytes(original)
+    # Both readers must refuse: the ported one is the shipped answer, and the oracle
+    # agreeing is what makes the row a comparison rather than an expectation.
+    check('a valid binary with another selection is refused by both readers',
+          'not in the reviewed closure' in oracle and result.returncode == 1
+          and 'not in the reviewed closure' in result.stderr,
+          f'(oracle {oracle!r}, reader {result.returncode}/{result.stderr.strip()!r})')
 
 
 def test_carry_matrix(fixture) -> None:
@@ -1549,9 +2271,41 @@ def main() -> int:
 
     from executables import go_executables
 
+    # The layer's own reader is built before the boundary exists and added to the
+    # allowlist with the pinned Go: the installed-state rows exec it, and everything
+    # the boundary allows is named here rather than discovered later. The re-exec
+    # runs this function again from the top, where a compiler is not on the
+    # allowlist, so the second pass reuses the path the first pass recorded.
+    # Both the reader and the installed-state witnesses are made in the unconfined
+    # pass and carried across the re-exec by environment: inside the boundary a
+    # compiler is not allowlisted and a setuid bit is stripped.
+    if os.environ.get(sandbox.SANDBOXED_ENV) == '1':
+        helper = Path(os.environ['GO_DEV_HELPER'])
+        root = Path(os.environ['GO_DEV_PINS_ROOT'])
+        directory, record, document, setuid, candidate = (
+            Path(path) for path in os.environ['GO_DEV_WITNESSES'].split(os.pathsep))
+        witnesses = Witnesses(directory, record, document, setuid, candidate)
+        if not helper.is_file() or not witnesses.setuid_binary.is_file():
+            print('gopls-closure-pins: the sandboxed pass is missing the helper or the '
+                  'witnesses the first pass prepared', file=sys.stderr)
+            return 1
+    else:
+        helper = build_go_dev_helper()
+        # The scratch root is created here, before the boundary, because the re-exec
+        # runs this function again: a second mkdtemp would strand the witnesses under
+        # the first one and the fixture would write into a tree no check names.
+        root = Path(tempfile.mkdtemp(prefix='gopls-closure-pins-')).resolve()
+        witnesses = prepare_witnesses(root / 'witnesses', go_root / 'bin' / 'go')
+        os.environ['GO_DEV_HELPER'] = str(helper)
+        os.environ['GO_DEV_PINS_ROOT'] = str(root)
+        os.environ['GO_DEV_WITNESSES'] = os.pathsep.join(
+            str(path) for path in (witnesses.directory, witnesses.record_root,
+                                   witnesses.document_root, witnesses.setuid_binary,
+                                   witnesses.candidate))
+
     # The writer's children are not the only tree that needs the boundary: this
     # suite's real Go builds run under it too.
-    executables = go_executables(go_root)
+    executables = go_executables(go_root) + [str(helper), *witnesses.executables()]
     try:
         sandbox.reexec_into_sandbox(
             executables,
@@ -1567,10 +2321,11 @@ def main() -> int:
 
     import gopls_closure as model  # noqa: F401 - imported after confinement
 
+    corpus_control()
+
     sys.path.insert(0, str(FIXTURES))
     import fixture as fixture_module
 
-    root = Path(tempfile.mkdtemp(prefix='gopls-closure-pins-')).resolve()
     fixture = None
     try:
         test_constants()
@@ -1594,10 +2349,10 @@ def main() -> int:
         test_wrong_compiler(fixture, closure, root)
         test_unexpected_toolchain(fixture, closure, root)
         test_notice_cache(fixture, closure)
-        test_verify_installed_faults(fixture, closure, root)
+        test_verify_installed_faults(fixture, closure, root, helper, witnesses)
         test_verified_bytes_and_binary(fixture, closure, root)
         test_metadata_failure_rollback(fixture, closure, root)
-        test_wrong_selection_binary(fixture, closure, root)
+        test_wrong_selection_binary(fixture, closure, root, helper)
         test_carry_matrix(fixture)
     finally:
         if fixture is not None:
