@@ -25,11 +25,12 @@
 #
 # Two further paths are build-only inputs, mounted read-only for the steps that
 # need them and never copied into the image: `gopls_closure.py` (until #251 the
-# program that installs the gopls closure and verifies the installed binary) and
-# `data/gopls-closure/` (the reviewed module selection, its sums, its licences and
-# the record that binds them). See docs/adr/0008-go-example-gopls-closure.md. The
-# layer's own `go-dev-helper` reads the same five files offline; the Python
-# install, verifier and writer are unchanged by #249.
+# program that installs the gopls closure) and `data/gopls-closure/` (the reviewed
+# module selection, its sums, its licences and the record that binds them). See
+# docs/adr/0008-go-example-gopls-closure.md. The layer's own `go-dev-helper` reads
+# the same five files offline: `check` proves them (#249) and `verify-installed`
+# proves the installed binary against them (#250). Python is the installer and the
+# live oracle; it is no longer on the verification path.
 #
 # The `ARG BASE_IMAGE`/`FROM ${BASE_IMAGE}` pair lets `--build-arg BASE_IMAGE=…`
 # retarget the build, and every `ENV` keeps `PATH` additive
@@ -193,10 +194,15 @@ ENV GOTOOLCHAIN=local
 # scratch, so a present-but-broken binary fails the build here instead of
 # surfacing as command-not-found in the guest. The first thing it does is check
 # the *installed* gopls against the committed closure (build info, module/sum
-# identity, licence bytes) with the proxy off. The verifier bundle is mounted
-# read-only for this step and nothing is copied into the image.
+# identity, licence bytes) with the proxy off, through the layer's own
+# `go-dev-helper verify-installed`: the candidate is an argument to
+# `go version -m -json`, never executed. The guest PATH smoke that follows is
+# separate and stays in shell — it asks whether each tool resolves and analyses
+# code as the guest's PATH finds it, which is not what an absolute-path
+# verification answers. The verifier bundle is mounted read-only for this step and
+# nothing is copied into the image.
 RUN --network=none \
     --mount=type=bind,source=verify-toolchain.sh,target=/run/go-verify/verify-toolchain.sh,ro \
-    --mount=type=bind,source=gopls_closure.py,target=/run/go-verify/gopls_closure.py,ro \
+    --mount=type=bind,from=go-dev-helper,source=/out/go-dev-helper,target=/run/go-verify/go-dev-helper,ro \
     --mount=type=bind,source=data/gopls-closure,target=/run/go-verify/gopls-closure,ro \
-    PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/go-verify/verify-toolchain.sh
+    /bin/bash /run/go-verify/verify-toolchain.sh

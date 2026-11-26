@@ -1603,14 +1603,30 @@ fi
 # --- phase 2: verifier, no network ------------------------------------------
 # The same contract the Dockerfile runs, mounted read-only. The three version
 # ARGs are not persisted ENV in the image, so they are passed explicitly.
+#
+# The installed-state check is the layer's own `go-dev-helper`, built here for this
+# row's Linux target with the builder's flags and shipped in place of the Python
+# reader it replaced (#250). It is a Linux ELF, so a bundle that carried host bytes
+# is refused rather than silently proving something the image never runs. Python
+# stays the installer and the oracle; it is not in this bundle.
 PHASE=verifier
 mkdir -p "$BUNDLE"
-cp "$ROOT/$EXAMPLE/verify-toolchain.sh" "$ROOT/$EXAMPLE/gopls_closure.py" "$BUNDLE/"
+cp "$ROOT/$EXAMPLE/verify-toolchain.sh" "$BUNDLE/"
 cp -R "$DATA" "$BUNDLE/gopls-closure"
+linux_helper=$(bash "$ROOT/script/build/example-helper.sh" go-dev --root "$ROOT" \
+    --os linux --arch "$ARCH" --binary go-dev-helper) ||
+    { fail 'cannot build the Linux-target go-dev helper for the verifier bundle'; exit 1; }
+if [ "$(head -c 4 "$linux_helper" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ]; then
+    pass "the verifier bundle ships Linux bytes for $ARCH"
+else
+    fail "the verifier bundle would ship host bytes, not a Linux helper for $ARCH"
+fi
+cp "$linux_helper" "$BUNDLE/go-dev-helper"
+log "verifier helper $(sha256_file "$linux_helper") arch=$ARCH"
 if run_bounded verifier "$RUN_SECONDS" "$LOG_DIR/verifier.log" \
         "$DOCKER" run --rm --network none --label "$LABEL" \
         -e "GO_VERSION=$GO_VERSION" -e "GOLANGCI_LINT_VERSION=$GOLANGCI_LINT_VERSION" \
-        -e "GOPLS_VERSION=$GOPLS_VERSION" -e PYTHONDONTWRITEBYTECODE=1 \
+        -e "GOPLS_VERSION=$GOPLS_VERSION" \
         -v "$BUNDLE:/run/go-verify:ro" --entrypoint /bin/bash "$TAG" \
         /run/go-verify/verify-toolchain.sh; then
     pass 'network-none installed-state verifier passed'

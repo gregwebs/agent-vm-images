@@ -19,7 +19,7 @@ import sys
 # The floor and the required set are enforced *here*, on the path the evidence run
 # takes, not only in go-example.sh's self-test: a walk that stopped seeing the helper
 # module, or a layer that lost an adapter, must fail the derivation itself. The
-# number is below today's total (44) so an honest edit is a diff, and the named
+# number is below today's total (52) so an honest edit is a diff, and the named
 # paths are the ones whose loss would silently shrink what the run binds.
 MINIMUM_INPUTS = 40
 REQUIRED_INPUTS = (
@@ -35,6 +35,12 @@ REQUIRED_INPUTS = (
     'helper/go.mod',
     'helper/go.sum',
     'helper/vendor/modules.txt',
+    # The installed-state verifier the recipe and the native bundle run (#250): its
+    # sources are digested by the helper walk, and these three name the packages
+    # whose loss would leave the verb unable to load, run, or judge.
+    'helper/installed/installed.go',
+    'helper/gotool/gotool.go',
+    'helper/buildinfo/buildinfo.go',
 )
 
 

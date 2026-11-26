@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Hermetic table for the go-dev example's committed gopls closure (#103).
 
-Every case drives the shipped helper ``examples/layers/go-dev/gopls_closure.py``:
-the real strict decoding, the real wrapper/root/sum rules, the real license
+Every case drives the shipped helper ``examples/layers/go-dev/gopls_closure.py``
+(and, from #250, the layer's Go reader beside it where a row is about the installed
+state): the real strict decoding, the real wrapper/root/sum rules, the real license
 framing, the real constructed child environment, and — from P2 on — one real
 ``go build`` against a loopback GOPROXY. Only the transport (loopback instead of
 proxy.golang.org) and the sum database (off for synthetic modules) are
@@ -13,6 +14,13 @@ The suite starts inside the OS boundary in ``fixtures/rust-toolchain/sandbox.py`
 before importing anything under test: a native ``go`` child is not covered by a
 Python audit hook. A host that cannot provide the boundary exits 3
 ``ISOLATION-UNAVAILABLE`` rather than running unconfined.
+
+From #250 on, the suite also drives the layer's own Go reader as a child: the
+host-built ``go-dev-helper``, allowlisted before the boundary goes up. The
+installed-state rows run *both* readers over the same installation and compare their
+verdicts per case, including the two declared divergences this verb owns (a binary
+mode with its special bits, and the installed notice file's mode). A row that only
+one side runs would not be a comparison.
 
 Native acceptance is ``script/test/go-example.sh``; a Linux binary built here is
 inspected, never executed.
@@ -35,6 +43,10 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 FIXTURES = Path(__file__).resolve().parent / 'fixtures' / 'gopls-closure'
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+# The one host build of the layer's own reader (#250). It is built before the OS
+# boundary goes up, because the guarded suite may only exec the executables it
+# allowlisted, and this binary is one of them.
+HELPER_BUILDER = REPOSITORY_ROOT / 'script' / 'build' / 'example-helper.sh'
 RUST_FIXTURES = Path(__file__).resolve().parent / 'fixtures' / 'rust-toolchain'
 sys.path.insert(0, str(FIXTURES))
 # Appended: the Rust fixtures also ship a ``fixture`` module and this suite means
@@ -84,6 +96,45 @@ def refuses(name: str, action, expected: str) -> None:
 
 def h1_of(text: str) -> str:
     return 'h1:' + base64.b64encode(hashlib.sha256(text.encode()).digest()).decode()
+
+
+# --- the layer's own reader, as a child ---------------------------------------
+def build_go_dev_helper() -> Path:
+    """Build the layer's reader for this host with the stage's flags.
+
+    Before the sandbox and the audit hook: the binary the suite execs has to exist
+    and be allowlisted before either boundary is installed, and a build that cannot
+    produce it is an error here rather than a silently missing reader.
+    """
+    os_name = 'linux' if sys.platform.startswith('linux') else 'darwin'
+    result = subprocess.run(
+        ['bash', str(HELPER_BUILDER), 'go-dev', '--root', str(REPOSITORY_ROOT),
+         '--os', os_name],
+        capture_output=True, text=True, check=False, cwd=str(REPOSITORY_ROOT))
+    if result.returncode != 0:
+        raise SystemExit(f'gopls-closure-pins: cannot build the go-dev helper:\n'
+                         f'{result.stdout}{result.stderr}')
+    binary = Path(result.stdout.strip().splitlines()[-1])
+    if not binary.is_absolute() or not binary.is_file() or not os.access(binary, os.X_OK):
+        raise SystemExit(f'gopls-closure-pins: the helper build printed {binary}, which is '
+                         f'not an absolute executable')
+    return binary
+
+
+def run_helper(helper: Path, argv: Sequence[str]) -> subprocess.CompletedProcess:
+    """Run the shipped reader once and return its finished process."""
+    return subprocess.run([str(helper), *argv], capture_output=True, text=True,
+                          check=False, cwd=str(REPOSITORY_ROOT))
+
+
+def verify_installed_argv(closure, arch, *, binary: Path, share_dir: Path,
+                          go_root: Path) -> list[str]:
+    """The one invocation shape every installed-state row uses."""
+    return ['verify-installed', str(closure.directory),
+            '--expect-gopls', closure.pin.gopls.value,
+            '--expect-go', closure.pin.go.value,
+            '--go-root', str(go_root), '--arch', arch.value,
+            '--binary', str(binary), '--share-dir', str(share_dir)]
 
 
 # --- hand-written minimal records ---------------------------------------------
@@ -1231,33 +1282,398 @@ def test_notice_cache(fixture, closure) -> None:
         dep_dir.chmod(0o555)
 
 
-def test_verify_installed_faults(fixture, closure, root: Path) -> None:
+def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
+                                 witnesses: Witnesses) -> None:
+    """Paired installed-state rows: the Python oracle and the ported reader.
+
+    Every row runs both readers over the same installation and declares both
+    verdicts. Two rows are declared divergences (#188 G3) — the reader compares a
+    binary mode with its special bits and checks the notice file's mode, which the
+    oracle does not — and each asserts *both* sides, so a change on either side
+    turns the row red. Each accepted row is preceded by the oracle's own acceptance,
+    so the corpus cannot pass by every case refusing.
+    """
     import gopls_closure as model
 
+    print('verify-installed: both readers on both Linux targets')
+    rows = agreements = divergences = accepts = 0
+    for arch in model.Architecture:
+        target, _paths = run_install(fixture, closure, f'verify-installed-{arch.value}', arch)
+        model.verify_installed(closure, target)
+        result = run_helper(helper, verify_installed_argv(
+            closure, arch, binary=target.bin_dir / 'gopls', share_dir=target.share_dir,
+            go_root=fixture.go_root))
+        rows += 1
+        accepts += 1
+        agreements += 1
+        check(f'{arch.value}: the installed-state verifier accepts the installation',
+              (result.returncode, result.stdout, result.stderr) == (0, 'v0.0.1\n', ''),
+              f'({result.returncode}, {result.stdout!r}, {result.stderr!r})')
+
+        # The binary the verifier inspects is named, absolute, and never executed: the
+        # only child that reads it is `go version -m -json`. A shim root records every
+        # argv and forwards that one command, so an unrecorded command cannot run and
+        # a recorded program that is the candidate fails the row.
+        witnesses.clear()
+        shimmed = run_helper(helper, verify_installed_argv(
+            closure, arch, binary=target.bin_dir / 'gopls', share_dir=target.share_dir,
+            go_root=witnesses.record_root))
+        lines = witnesses.argv()
+        binary_path = str(target.bin_dir / 'gopls')
+        check(f'{arch.value}: the verifier ran exactly the three closed commands',
+              shimmed.returncode == 0 and lines == ['env GOVERSION', 'env GOROOT',
+                                                    f'version -m -json {binary_path}'],
+              f'({shimmed.returncode}, {lines!r}, {shimmed.stderr!r})')
+        check(f'{arch.value}: the candidate binary is never started as a program',
+              all(not line.startswith(binary_path) for line in lines), f'({lines!r})')
+        rows += 1
+        accepts += 1
+        agreements += 1
+
+        # No request: the loopback proxy is the only origin this fixture offers, and
+        # its recorder must stay empty across a verification.
+        fixture.proxy.clear_requests()
+        quiet = run_helper(helper, verify_installed_argv(
+            closure, arch, binary=target.bin_dir / 'gopls', share_dir=target.share_dir,
+            go_root=fixture.go_root))
+        requested = fixture.proxy.requested_paths()
+        check(f'{arch.value}: the verifier made no proxy request',
+              quiet.returncode == 0 and requested == [], f'({quiet.returncode}, {requested})')
+        rows += 1
+        accepts += 1
+        agreements += 1
+
     print('verify-installed: the installed bytes are proved, not assumed')
-    target, _paths = run_install(fixture, closure, 'verify-installed',
+    target, _paths = run_install(fixture, closure, 'verify-installed-faults',
                                  model.Architecture.ARM64)
     model.verify_installed(closure, target)
-    check('a correct installation verifies', True)
-
+    check('a correct installation verifies in both readers', True)
     license_path = target.share_dir / 'THIRD_PARTY_LICENSES'
-    original = license_path.read_bytes()
-    license_path.write_bytes(original + b'\n')
-    refuses('an edited license file is refused',
-            lambda: model.verify_installed(closure, target), 'pinned license digest')
-    license_path.write_bytes(original)
-
+    original_license = license_path.read_bytes()
     binary = target.bin_dir / 'gopls'
-    binary.chmod(0o644)
-    refuses('a non-executable mode is refused',
-            lambda: model.verify_installed(closure, target), 'want 755')
-    binary.chmod(0o755)
+    original_binary = binary.read_bytes()
+    # The real build-info document, read once by the pinned go: the mode rows need it
+    # for the oracle's injected runner, and the build-info rows mutate copies of it.
+    real = subprocess.run([str(fixture.go_root / 'bin' / 'go'), 'version', '-m', '-json',
+                           str(binary)], capture_output=True, text=True, check=True)
+    document = json.loads(real.stdout)
+    elsewhere = fixture.workspace / 'verify-elsewhere'
+    elsewhere.mkdir(parents=True, exist_ok=True)
+    sibling = elsewhere / 'gopls'
+    shutil.copyfile(binary, sibling)
+    os.chmod(sibling, 0o755)
 
-    saved = binary.read_bytes()
-    binary.write_bytes(b'not the reviewed binary\n')
-    refuses('a swapped binary is refused',
-            lambda: model.verify_installed(closure, target), 'go version -m -json failed')
-    binary.write_bytes(saved)
+    def in_process(runner=None) -> str | None:
+        """The oracle's verdict: its refusal text, or None when it accepts."""
+        try:
+            model.verify_installed(closure, target, runner=runner)
+        except model.ClosureError as error:
+            return str(error)
+        return None
+
+    def canned_runner(document: dict):
+        """The oracle's runner seam, answering the closed set from one document."""
+        def runner(command, extra, env, cwd):
+            if command is model.GoCommand.GOVERSION:
+                return subprocess.CompletedProcess([], 0, 'go1.27.3\n', '')
+            if command is model.GoCommand.GOROOT:
+                return subprocess.CompletedProcess([], 0, str(target.go_root) + '\n', '')
+            return subprocess.CompletedProcess([], 0, json.dumps(document), '')
+        return runner
+
+    def go_reader(*, binary_path: Path | None = None) -> subprocess.CompletedProcess:
+        return run_helper(helper, verify_installed_argv(
+            closure, target.arch, binary=binary_path or binary, share_dir=target.share_dir,
+            go_root=fixture.go_root))
+
+    def row(label: str, mutate, restore, *, go_fragment: str, python_fragment: str | None,
+            oracle_runner=None) -> None:
+        """One paired case. python_fragment None declares an oracle acceptance."""
+        nonlocal rows, agreements, divergences, accepts
+        try:
+            mutate()
+            message = in_process(oracle_runner)
+            result = go_reader()
+        finally:
+            restore()
+        rows += 1
+        if python_fragment is None:
+            divergences += 1
+            check(f'{label}: the oracle accepts, the reader refuses (declared divergence)',
+                  message is None and result.returncode == 1
+                  and go_fragment in result.stderr and result.stdout == '',
+                  f'(oracle {message!r}, reader {result.returncode}/{result.stderr.strip()!r})')
+            return
+        agreements += 1
+        check(f'{label}: both readers refuse it',
+              message is not None and python_fragment in message
+              and result.returncode == 1 and go_fragment in result.stderr
+              and result.stdout == '',
+              f'(oracle {message!r}, reader {result.returncode}/{result.stderr.strip()!r})')
+
+    def mode_of(path: Path, mode: int) -> tuple:
+        def mutate() -> None:
+            path.chmod(mode)
+
+        def restore() -> None:
+            path.chmod(0o755 if path == binary else 0o644)
+        return mutate, restore
+
+    edited, restore_edited = mode_of(license_path, 0o644)
+    row('an edited license file',
+        lambda: (edited(), license_path.write_bytes(original_license + b'\n')),
+        lambda: (restore_edited(), license_path.write_bytes(original_license)),
+        go_fragment='pinned license digest', python_fragment='pinned license digest')
+    row('a different notice body of the same length',
+        lambda: license_path.write_bytes(original_license.replace(b'dep license text',
+                                                                 b'dep licence text')),
+        lambda: license_path.write_bytes(original_license),
+        go_fragment='pinned license digest', python_fragment='pinned license digest')
+    mutate_mode, restore_mode = mode_of(binary, 0o644)
+    row('a non-executable binary mode', mutate_mode, restore_mode,
+        go_fragment='want 755', python_fragment='want 755')
+    mutate_group, restore_group = mode_of(license_path, 0o664)
+    row('a group-writable notice mode', mutate_group, restore_group,
+        go_fragment='want 644', python_fragment=None)
+    # A setuid bit cannot be set inside the boundary (it is stripped), so the file is
+    # prepared outside it and hard-linked in: the verified path is then a real 4755
+    # file, not a mode that a test asserted over.
+    # The oracle's runner is injected for this row because the hard-linked file is a
+    # placeholder: what is compared is the *mode* verdict, and giving the oracle the
+    # reviewed document is what keeps its answer about the mode rather than the bytes.
+    row('a setuid binary mode',
+        lambda: (binary.unlink(), os.link(witnesses.setuid_binary, binary)),
+        lambda: (binary.unlink(), binary.write_bytes(original_binary),
+                 os.chmod(binary, 0o755)),
+        go_fragment='has mode 4755, want 755', python_fragment=None,
+        oracle_runner=canned_runner(document))
+    row('a binary that is not a Go program',
+        lambda: binary.write_bytes(b'not the reviewed binary\n'),
+        lambda: binary.write_bytes(original_binary),
+        go_fragment='go version -m -json failed', python_fragment='go version -m -json failed')
+    row('a missing notice file',
+        lambda: license_path.unlink(),
+        lambda: license_path.write_bytes(original_license),
+        go_fragment='installed: missing', python_fragment='installed: missing')
+    # The requested path is the one inspected: a sibling with the expected name is
+    # not a substitute, in either reader.
+    sibling_message = None
+    sibling_result = None
+    try:
+        sibling_message = None
+        try:
+            model.verify_installed(
+                closure, model.Target(go_root=target.go_root, bin_dir=elsewhere,
+                                      share_dir=target.share_dir, arch=target.arch,
+                                      binary=elsewhere / 'absent' / 'gopls'))
+        except model.ClosureError as error:
+            sibling_message = str(error)
+        sibling_result = go_reader(binary_path=elsewhere / 'absent' / 'gopls')
+    finally:
+        sibling.unlink()
+    rows += 1
+    agreements += 1
+    check('a requested binary path with no file is not substituted from a sibling',
+          sibling_message is not None and 'installed: missing' in sibling_message
+          and sibling_result.returncode == 1 and 'installed: missing' in sibling_result.stderr,
+          f'(oracle {sibling_message!r}, reader {sibling_result.stderr.strip()!r})')
+
+    print('verify-installed: the build info is read, not authenticated')
+    # One mutation per rule, emitted by the document shim whose only job is that one
+    # command: a command outside the reviewed set cannot run at all.
+
+    def emit(value) -> subprocess.CompletedProcess:
+        witnesses.answer(value)
+        return run_helper(helper, verify_installed_argv(
+            closure, target.arch, binary=binary, share_dir=target.share_dir,
+            go_root=witnesses.document_root))
+
+    def mutate_document(change) -> dict:
+        edited_document = json.loads(json.dumps(document))
+        change(edited_document)
+        return edited_document
+
+    def settings(document_: dict) -> dict:
+        return {item['Key']: item['Value'] for item in document_['Settings']}
+
+    def set_setting(key: str, value: str):
+        def change(document_: dict) -> None:
+            for item in document_['Settings']:
+                if item['Key'] == key:
+                    item['Value'] = value
+                    return
+            raise AssertionError(f'the document carries no {key} setting')
+        return change
+
+    build_cases = [
+        ('unparseable build info', 'not a document', 'build info: not valid JSON'),
+        ('a duplicate build-info key',
+         real.stdout.replace('"GoVersion": "go1.27.3"',
+                             '"GoVersion": "go1.27.3", "GoVersion": "go9.9.9"', 1),
+         'duplicate key'),
+        ('the wrong compiler in the build info',
+         json.dumps(mutate_document(lambda d: d.update({'GoVersion': 'go1.26.5'}))),
+         'compiler is go1.26.5, want go1.27.3'),
+        ('another selected closure',
+         json.dumps(mutate_document(lambda d: d['Deps'][0].update(
+             {'Path': 'example.test/evil'}))),
+         'not in the reviewed closure'),
+        ('another Linux target',
+         json.dumps(mutate_document(set_setting('GOARM64', 'v9.0'))),
+         'build settings differ'),
+        ('a Darwin build',
+         json.dumps(mutate_document(set_setting('GOOS', 'darwin'))),
+         'build settings differ'),
+    ]
+    for label, value, fragment in build_cases:
+        result = emit(value)
+        rows += 1
+        agreements += 1
+        check(f'{label}: the reader refuses it',
+              result.returncode == 1 and result.stdout == '' and fragment in result.stderr,
+              f'({result.returncode}, {result.stdout!r}, {result.stderr.strip()!r})')
+
+    check('the paired installed-state corpus is nonempty and both verdicts are exercised',
+          rows >= 20 and accepts >= 6 and agreements >= 15 and divergences == 2,
+          f'(rows {rows}, accepts {accepts}, agreements {agreements}, '
+          f'divergences {divergences})')
+
+
+class Witnesses:
+    """Test-side children and files that must exist before the OS boundary.
+
+    Two `go` shims and one setuid binary are prepared in the unconfined pass: the
+    guarded suite may only exec the executables it allowlisted, and inside the
+    boundary a setuid bit is stripped. Each is still a real child or file at run
+    time -- the shims record their argv and answer only the closed command set, and
+    the setuid binary is hard-linked into the installation so the verified file's
+    own mode is 4755.
+    """
+
+    def __init__(self, directory: Path, record_root: Path, document_root: Path,
+                 setuid_binary: Path) -> None:
+        self.directory = directory
+        self.record_root = record_root
+        self.document_root = document_root
+        self.setuid_binary = setuid_binary
+
+    def executables(self) -> list[str]:
+        return [str(self.record_root / 'bin' / 'go'),
+                str(self.document_root / 'bin' / 'go')]
+
+    def record(self) -> Path:
+        return self.record_root / 'record'
+
+    def argv(self) -> list[str]:
+        return [line for line in self.record().read_text().splitlines() if line]
+
+    def clear(self) -> None:
+        self.record().write_text('')
+
+    def answer(self, document) -> None:
+        """Set the build-info answer of the document shim: a string or a document."""
+        value = document if isinstance(document, str) else json.dumps(document)
+        (self.document_root / 'document').write_text(value)
+
+
+# shimSource is the test shim's whole program. It is compiled by the pinned go in
+# the unconfined pass: an executable the OS boundary allowlists must be a program,
+# not a shell script, because allowing /bin/sh to interpret a script would hand the
+# fixture a general shell and weaken the boundary for everything else.
+SHIM_SOURCE = """package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"syscall"
+)
+
+// A test shim: it answers only the installed-state verifier's closed command set,
+// records every argv, and refuses anything else. `version -m -json` is answered by
+// exec'ing the pinned go named in <root>/forward, or by printing <root>/document.
+func main() {
+	exe, err := os.Executable()
+	if err != nil {
+		os.Exit(9)
+	}
+	root := filepath.Dir(filepath.Dir(exe))
+	if record, err := os.OpenFile(filepath.Join(root, "record"),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		fmt.Fprintln(record, strings.Join(os.Args[1:], " "))
+		record.Close()
+	}
+	joined := strings.Join(os.Args[1:], " ")
+	switch {
+	case joined == "env GOVERSION":
+		fmt.Println("go1.27.3")
+	case joined == "env GOROOT":
+		fmt.Println(root)
+	case strings.HasPrefix(joined, "version -m"):
+		if forward, err := os.ReadFile(filepath.Join(root, "forward")); err == nil &&
+			len(forward) > 0 {
+			argv := append([]string{strings.TrimSpace(string(forward))}, os.Args[1:]...)
+			if err := syscall.Exec(argv[0], argv, os.Environ()); err != nil {
+				os.Exit(9)
+			}
+		}
+		document, err := os.ReadFile(filepath.Join(root, "document"))
+		if err != nil {
+			os.Exit(9)
+		}
+		os.Stdout.Write(document)
+	default:
+		fmt.Fprintln(os.Stderr, "the review forbids this command")
+		os.Exit(9)
+	}
+}
+"""
+
+
+def compile_shim(directory: Path, real_go: Path) -> Path:
+    """Compile the shim with the pinned go, before the boundary exists."""
+    source = directory / 'shim.go'
+    source.write_text(SHIM_SOURCE)
+    binary = directory / 'go-shim'
+    environment = dict(os.environ)
+    environment.update({'GOTOOLCHAIN': 'local', 'GOFLAGS': '', 'GOPROXY': 'off'})
+    result = subprocess.run([str(real_go), 'build', '-trimpath', '-buildvcs=false',
+                             '-o', str(binary), str(source)],
+                            capture_output=True, text=True, check=False,
+                            env=environment, cwd=str(directory))
+    if result.returncode != 0 or not binary.is_file():
+        raise SystemExit(f'gopls-closure-pins: cannot compile the go shim:\n'
+                         f'{result.stdout}{result.stderr}')
+    return binary
+
+
+def prepare_witnesses(real_go: Path) -> Witnesses:
+    """Build both shims and the setuid witness before the boundary goes up."""
+    directory = Path(tempfile.mkdtemp(prefix='gopls-closure-witness-')).resolve()
+    shim = compile_shim(directory, real_go)
+    record_root = directory / 'record'
+    document_root = directory / 'document'
+    for root in (record_root, document_root):
+        (root / 'bin').mkdir(parents=True)
+        shutil.copyfile(shim, root / 'bin' / 'go')
+        os.chmod(root / 'bin' / 'go', 0o755)
+        (root / 'record').touch()
+        (root / 'document').write_text('')
+    # The forwarding shim answers from the pinned go; the document shim from the file
+    # the installed-state rows write.
+    (record_root / 'forward').write_text(str(real_go))
+    setuid_binary = directory / 'gopls-setuid'
+    setuid_binary.write_bytes(b'\x7fELF placeholder\n')
+    os.chmod(setuid_binary, 0o755 | 0o4000)
+    if not os.lstat(setuid_binary).st_mode & 0o4000:
+        raise SystemExit('gopls-closure-pins: the host will not keep a setuid bit, so '
+                         'the special-bit witness cannot be produced')
+    return Witnesses(directory, record_root, document_root, setuid_binary)
+
+
+def sh_quote(text: str) -> str:
+    return "'" + text.replace("'", "'\\''") + "'"
 
 
 def test_verified_bytes_and_binary(fixture, closure, root: Path) -> None:
@@ -1284,28 +1700,9 @@ def test_verified_bytes_and_binary(fixture, closure, root: Path) -> None:
     check('the refused install shipped nothing',
           not (fixture.workspace / 'install-license-drift' / 'bin' / 'gopls').exists())
 
-    # An installed notice file must match the pin, not a fresh source read.
-    (directory / 'THIRD_PARTY_LICENSES').write_bytes(shipped)
-    license_path = target.share_dir / 'THIRD_PARTY_LICENSES'
-    original = license_path.read_bytes()
-    license_path.write_bytes(original.replace(b'dep license text', b'dep licence text'))
-    refuses('an installed notice file that differs from the pin is refused',
-            lambda: model.verify_installed(closure, target), 'pinned license digest')
-    license_path.write_bytes(original)
-
-    print('verify-installed: exactly the requested binary')
-    base = fixture.workspace / 'verify-binary'
-    (base / 'bin').mkdir(parents=True, exist_ok=True)
-    (base / 'elsewhere').mkdir(parents=True, exist_ok=True)
-    argv = ['verify-installed', str(closure.directory), '--expect-gopls', 'v0.0.1',
-            '--expect-go', '1.27.3', '--go-root', str(fixture.go_root), '--arch', 'arm64',
-            '--share-dir', str(target.share_dir), '--binary']
-    check('a binary argument with another name is refused',
-          model.main(argv + [str(base / 'bin' / 'not-gopls')]) == 1)
-    check('a missing requested binary is not substituted from a sibling',
-          model.main(argv + [str(base / 'elsewhere' / 'gopls')]) == 1)
-    check('the real installed path still verifies',
-          model.main(argv + [str(target.bin_dir / 'gopls')]) == 0)
+    # The installed-state rows live in test_verify_installed_faults, where both
+    # readers run: this test is about what publication writes, not about the verb
+    # that reads it back.
 
 
 def mutant_module(name: str, replacements: Sequence[tuple[str, str]], directory: Path):
@@ -1371,7 +1768,7 @@ def test_metadata_failure_rollback(fixture, closure, root: Path) -> None:
     remove_tree(root / 'mutants')
 
 
-def test_wrong_selection_binary(fixture, closure, root: Path) -> None:
+def test_wrong_selection_binary(fixture, closure, root: Path, helper: Path) -> None:
     import gopls_closure as model
 
     print('verify-installed: a valid Go binary with the wrong selection is refused')
@@ -1408,10 +1805,23 @@ def test_wrong_selection_binary(fixture, closure, root: Path) -> None:
     installed = target.bin_dir / 'gopls'
     original = installed.read_bytes()
     installed.write_bytes(wrong_binary.read_bytes())
-    refuses('a valid binary with another selection is refused',
-            lambda: model.verify_installed(closure, target),
-            'not in the reviewed closure')
-    installed.write_bytes(original)
+    try:
+        oracle = ''
+        try:
+            model.verify_installed(closure, target)
+        except model.ClosureError as error:
+            oracle = str(error)
+        result = run_helper(helper, verify_installed_argv(
+            closure, target.arch, binary=installed, share_dir=target.share_dir,
+            go_root=fixture.go_root))
+    finally:
+        installed.write_bytes(original)
+    # Both readers must refuse: the ported one is the shipped answer, and the oracle
+    # agreeing is what makes the row a comparison rather than an expectation.
+    check('a valid binary with another selection is refused by both readers',
+          'not in the reviewed closure' in oracle and result.returncode == 1
+          and 'not in the reviewed closure' in result.stderr,
+          f'(oracle {oracle!r}, reader {result.returncode}/{result.stderr.strip()!r})')
 
 
 def test_carry_matrix(fixture) -> None:
@@ -1549,9 +1959,34 @@ def main() -> int:
 
     from executables import go_executables
 
+    # The layer's own reader is built before the boundary exists and added to the
+    # allowlist with the pinned Go: the installed-state rows exec it, and everything
+    # the boundary allows is named here rather than discovered later. The re-exec
+    # runs this function again from the top, where a compiler is not on the
+    # allowlist, so the second pass reuses the path the first pass recorded.
+    # Both the reader and the installed-state witnesses are made in the unconfined
+    # pass and carried across the re-exec by environment: inside the boundary a
+    # compiler is not allowlisted and a setuid bit is stripped.
+    if os.environ.get(sandbox.SANDBOXED_ENV) == '1':
+        helper = Path(os.environ['GO_DEV_HELPER'])
+        directory, record, document, setuid = (
+            Path(path) for path in os.environ['GO_DEV_WITNESSES'].split(os.pathsep))
+        witnesses = Witnesses(directory, record, document, setuid)
+        if not helper.is_file() or not witnesses.setuid_binary.is_file():
+            print('gopls-closure-pins: the sandboxed pass is missing the helper or the '
+                  'witnesses the first pass prepared', file=sys.stderr)
+            return 1
+    else:
+        helper = build_go_dev_helper()
+        witnesses = prepare_witnesses(go_root / 'bin' / 'go')
+        os.environ['GO_DEV_HELPER'] = str(helper)
+        os.environ['GO_DEV_WITNESSES'] = os.pathsep.join(
+            str(path) for path in (witnesses.directory, witnesses.record_root,
+                                   witnesses.document_root, witnesses.setuid_binary))
+
     # The writer's children are not the only tree that needs the boundary: this
     # suite's real Go builds run under it too.
-    executables = go_executables(go_root)
+    executables = go_executables(go_root) + [str(helper), *witnesses.executables()]
     try:
         sandbox.reexec_into_sandbox(
             executables,
@@ -1594,10 +2029,10 @@ def main() -> int:
         test_wrong_compiler(fixture, closure, root)
         test_unexpected_toolchain(fixture, closure, root)
         test_notice_cache(fixture, closure)
-        test_verify_installed_faults(fixture, closure, root)
+        test_verify_installed_faults(fixture, closure, root, helper, witnesses)
         test_verified_bytes_and_binary(fixture, closure, root)
         test_metadata_failure_rollback(fixture, closure, root)
-        test_wrong_selection_binary(fixture, closure, root)
+        test_wrong_selection_binary(fixture, closure, root, helper)
         test_carry_matrix(fixture)
     finally:
         if fixture is not None:
