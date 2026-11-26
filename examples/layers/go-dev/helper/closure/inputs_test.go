@@ -108,11 +108,13 @@ func TestInputShapeRulesRefuse(t *testing.T) {
 			},
 		},
 		{
-			// The presence pass is not the same rule as the read: Python reports the
-			// missing input before it looks at the extra one, and this case is the
-			// only one that distinguishes the two orders. Without it, deleting the
-			// presence loop leaves the suite green because the read refuses the same
-			// file with the same message.
+			// This witness is about *ordering*, not about acceptance: the read refuses
+			// a missing input with the same message, so the presence pass only decides
+			// which defect is named when both are present (Python names the missing
+			// one first). Deliberately kept, and deliberately described: a rule whose
+			// removal changes no verdict is not an acceptance boundary, and the
+			// verdict-level witnesses for this family are the missing-input,
+			// extra-input and symlink cases.
 			name:     "a missing input outranks an unreviewed one",
 			fragment: "missing input: go.sum",
 			apply: func(t *testing.T, directory string) {

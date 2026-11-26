@@ -213,10 +213,27 @@ func TestRootEvidenceGrammarRefuses(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			directory := copyCommitted(t)
 			testCase.apply(t, directory)
-			repin(t, directory)
+			// The evidence h1 and the pin's digests are re-bound, so the grammar rule
+			// is the only thing that can refuse these bytes. Otherwise the h1 rule
+			// fires first and deleting a grammar rule here would be invisible: the
+			// mutation run found exactly that, and this is the fix.
+			repinRootEvidence(t, directory)
 			requireRefusal(t, directory, testCase.fragment)
 		})
 	}
+	// The verdict half: with the grammar rule deleted these mutants *accept*, so
+	// the case is a verdict witness and not only a message witness.
+	t.Run("a wrong module directive is accepted by nothing else", func(t *testing.T) {
+		directory := copyCommitted(t)
+		rewrite(t, directory, FileRootGoMod, func(raw []byte) []byte {
+			return []byte(strings.Replace(string(raw), "module "+Gopls,
+				"module golang.org/x/tools/goplsx", 1))
+		})
+		repinRootEvidence(t, directory)
+		if _, err := load(t, directory); err == nil {
+			t.Fatal("a wrong module directive was accepted")
+		}
+	})
 }
 
 // TestRootEvidenceReadsTabSeparatedDirectives is the other side of the same
@@ -225,9 +242,12 @@ func TestRootEvidenceGrammarRefuses(t *testing.T) {
 // parity suite records as a divergence with both verdicts named.
 func TestRootEvidenceReadsTabSeparatedDirectives(t *testing.T) {
 	directory := copyCommitted(t)
+	// The real form, not a tab inside a block entry: the `require` *keyword* is
+	// separated from its operands by a tab, which is legal go.mod and which the
+	// Python reader's one-space split could not see at all.
 	rewrite(t, directory, FileRootGoMod, func(raw []byte) []byte {
-		return []byte(strings.Replace(string(raw), "\tgithub.com/fsnotify/fsnotify v1.9.0",
-			"\tgithub.com/fsnotify/fsnotify\tv1.9.0", 1))
+		text := strings.Replace(string(raw), "\tgithub.com/fsnotify/fsnotify v1.9.0\n", "", 1)
+		return []byte(text + "\nrequire\tgithub.com/fsnotify/fsnotify v1.9.0\n")
 	})
 	repinRootEvidence(t, directory)
 	data, err := load(t, directory)

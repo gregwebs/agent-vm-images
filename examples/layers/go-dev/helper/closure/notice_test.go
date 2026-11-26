@@ -102,6 +102,16 @@ func TestNoticeFramingRefuses(t *testing.T) {
 			}(),
 		},
 		{
+			// The count used to be accumulated into an int and then used as a slice
+			// bound, so this panicked (status 2) instead of refusing. It is a
+			// truncated section: there are not that many bytes left.
+			name:     "a frame count larger than the file",
+			fragment: "truncated section for ",
+			content: append(append([]byte{}, header...),
+				[]byte(strings.Replace(string(joinFrames(frames)), "bytes=1",
+					"bytes=18446744073709551615", 1))...),
+		},
+		{
 			name:     "the header is not the reviewed one",
 			fragment: "unexpected header",
 			content:  []byte("# Third-party license files for somewhere else\n"),
@@ -216,6 +226,17 @@ func TestNoticeIdentityRefuses(t *testing.T) {
 			},
 		},
 		{
+			// The regression for the overflow: a coherent, re-pinned tree whose first
+			// frame carries a 20-digit byte count. The refusal is the truncated
+			// section, not a panic and not a digest disagreement.
+			name:     "a frame count larger than the file, re-pinned",
+			fragment: "truncated section for ",
+			apply: func(t *testing.T, directory string) {
+				t.Helper()
+				rewrite(t, directory, FileLicenses, replaceFirstSize)
+			},
+		},
+		{
 			name:     "the header names another release",
 			fragment: "license evidence header disagrees with the pinned release",
 			apply: func(t *testing.T, directory string) {
@@ -234,6 +255,21 @@ func TestNoticeIdentityRefuses(t *testing.T) {
 			requireRefusal(t, directory, testCase.fragment)
 		})
 	}
+}
+
+// replaceFirstSize swaps the first framed byte count for a 20-digit one, leaving
+// every other byte alone: the frame then claims more bytes than the file has.
+func replaceFirstSize(raw []byte) []byte {
+	text := string(raw)
+	start := strings.Index(text, "bytes=")
+	if start < 0 {
+		return raw
+	}
+	end := start + len("bytes=")
+	for end < len(text) && text[end] >= '0' && text[end] <= '9' {
+		end++
+	}
+	return []byte(text[:start] + "bytes=18446744073709551615" + text[end:])
 }
 
 // appendTo2 appends raw bytes to an input.

@@ -30,6 +30,19 @@ func TestAdoptionRuleRefuses(t *testing.T) {
 		repin(t, directory)
 		requireRefusal(t, directory, "is not required by the root module; review required")
 	})
+	// The verdict-level witness: a requirement removed from the root's own evidence,
+	// with its h1, the pin's digests and the scope all re-bound. Nothing else can
+	// refuse these bytes, so deleting the adoption rule accepts them -- which is what
+	// the Go test and the parity case both assert.
+	t.Run("a root requirement removed from the evidence", func(t *testing.T) {
+		directory := copyCommitted(t)
+		rewrite(t, directory, FileRootGoMod, func(raw []byte) []byte {
+			return []byte(strings.Replace(string(raw),
+				"\tgithub.com/fatih/structtag v1.2.0 // indirect\n", "", 1))
+		})
+		repinRootEvidence(t, directory)
+		requireRefusal(t, directory, "is not required by the root module; review required")
+	})
 	// The remediation text is part of the contract: a maintainer acts on it.
 	t.Run("the refusal carries the remediation", func(t *testing.T) {
 		directory := copyCommitted(t)
@@ -81,6 +94,11 @@ func TestModuleUniquenessRefuses(t *testing.T) {
 		repin(t, directory)
 		requireRefusal(t, directory, "is selected at both")
 	})
+	// The duplicate-row rule names the defect earlier than the duplicate-notice rule
+	// would; both refuse, so deleting it changes the message, not the verdict. The
+	// verdict-level witness for the uniqueness block is the two-versions case above
+	// (and the parity row for it). Stated because a rule that only reorders a
+	// refusal must not be presented as an acceptance boundary.
 	t.Run("the same module row twice", func(t *testing.T) {
 		directory := copyCommitted(t)
 		editPin(t, directory, func(document map[string]any) {
@@ -296,8 +314,18 @@ func addSecondVersion(t *testing.T, directory, path, version, second string) {
 			duplicate[key] = value
 		}
 		duplicate["version"] = second
+		// Immediately before the real row: the path order the reader also checks stays
+		// untouched, so the one-version-per-path rule is the only one in question.
 		modules := document["modules"].([]any)
-		document["modules"] = append([]any{duplicate}, modules...)
+		for index, raw := range modules {
+			module := raw.(map[string]any)
+			if module["path"] == path && module["version"] == version {
+				document["modules"] = append(append(append([]any{}, modules[:index]...),
+					duplicate), modules[index:]...)
+				return
+			}
+		}
+		t.Fatalf("the committed pin does not select %s@%s", path, version)
 	})
 	// The frames move with the version, or the notice set refuses first.
 	rewrite(t, directory, FileLicenses, func(raw []byte) []byte {

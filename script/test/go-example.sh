@@ -1342,13 +1342,16 @@ trap cleanup EXIT
 
 log "=== go-example $RUN_ID platform=$PLATFORM arch=$ARCH ==="
 log "source $(git -C "$ROOT" rev-parse HEAD) dirty=$(git -C "$ROOT" status --porcelain | grep -cv '^?? ' || true)"
-# Add-only self-binding: the digests of the bytes this run builds (recipe, both
-# adapters, the helper, the five closure files) and one over the set. A digest that
-# cannot be computed is logged as unavailable rather than becoming a new failure.
+# Self-binding: the digests of the bytes this run builds (the recipe, three
+# adapters, the reader, the five closure files and the builder stage's whole helper
+# tree) and one over the set. A required artefact that is missing is red, never
+# skipped (#188 R-d): the derivation itself refuses a short walk, and a run without
+# it would record "which commit" instead of "which bytes".
 if input_listing=$(input_digests "$ROOT" "$EXAMPLE" 2>"$LOG_DIR/input-digests.err"); then
     while IFS= read -r digest_line; do log "$digest_line"; done <<<"$input_listing"
 else
-    log 'inputs-set unavailable (see input-digests.err)'
+    cat "$LOG_DIR/input-digests.err" >&2 || true
+    fail 'the build-input digest is unavailable; this run cannot bind the bytes it builds'
 fi
 run_bounded daemon "$DAEMON_SECONDS" "$LOG_DIR/daemon.log" "$DOCKER" version || true
 run_bounded context "$DAEMON_SECONDS" "$LOG_DIR/context.log" "$DOCKER" context show || true

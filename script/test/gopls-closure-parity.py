@@ -403,6 +403,11 @@ def corpus() -> list[Case]:
              REFUSE, "differs from the root module's requirement"))
     add(Case('a selected module the root does not name', adoption_absent, REFUSE, REFUSE,
              'is not required by the root module'))
+    # The verdict-level adoption witness: the *root's own evidence* loses a real
+    # requirement and every digest is re-bound, so only the adoption rule can refuse
+    # these bytes. Deleting that rule accepts them (Go 0 / Python 1).
+    add(Case('a root requirement removed from the evidence', adoption_removed, REFUSE,
+             REFUSE, 'is not required by the root module'))
     add(Case('a wrapper go directive that disagrees', wrapper_go_mismatch, REFUSE, REFUSE,
              'does not equal the root module'))
     add(Case('a language newer than the compiler', language_too_new, REFUSE, REFUSE,
@@ -421,6 +426,10 @@ def corpus() -> list[Case]:
              'header disagrees with the pinned release'))
     add(Case('a truncated final notice frame', notice_truncated, REFUSE, REFUSE,
              'section is not newline-terminated'))
+    # The regression for a 20-digit frame count: it used to overflow the length
+    # arithmetic and panic (status 2) where the Python reader refuses.
+    add(Case('a frame count larger than the file', notice_count_overflow, REFUSE, REFUSE,
+             'truncated section for '))
 
     # The dated, scoped review.
     for name, mutate, fragment in [
@@ -457,47 +466,67 @@ def corpus() -> list[Case]:
 
     # The declared divergences: #188 G3, reproduced and fixed here.
     add(Case('DIVERGE: root evidence names another module', root_evidence_module,
-             REFUSE, ACCEPT, divergent=DECLARED_DIVERGENCES['root module directive'],
-             args=()))
+             REFUSE, ACCEPT, divergent=divergence('DIVERGE: root evidence names another module')))
     add(Case('DIVERGE: root evidence has an unfinished require block',
              root_evidence_unfinished, REFUSE, ACCEPT,
-             divergent=DECLARED_DIVERGENCES['unfinished require block']))
-    add(Case('DIVERGE: root evidence carries a tab-separated require entry',
+             divergent=divergence('DIVERGE: root evidence has an unfinished require block')))
+    add(Case('DIVERGE: root evidence carries a tab-separated require directive',
              root_evidence_tab, ACCEPT, REFUSE,
-             divergent=DECLARED_DIVERGENCES['tab-separated directive']))
+             divergent=divergence(
+                 'DIVERGE: root evidence carries a tab-separated require directive')))
     add(Case('DIVERGE: a duplicated framed notice', notice_duplicate_frame, REFUSE,
-             ACCEPT, divergent=DECLARED_DIVERGENCES['duplicate framed notice']))
+             ACCEPT, divergent=divergence('DIVERGE: a duplicated framed notice')))
     add(Case('DIVERGE: a duplicate notice name in one module', notice_duplicate_name,
-             REFUSE, ACCEPT, divergent=DECLARED_DIVERGENCES['duplicate notice name']))
+             REFUSE, ACCEPT,
+             divergent=divergence('DIVERGE: a duplicate notice name in one module')))
     add(Case('DIVERGE: two versions of one module path', module_two_versions, REFUSE,
-             ACCEPT, divergent=DECLARED_DIVERGENCES['two versions of one path']))
+             ACCEPT, divergent=divergence('DIVERGE: two versions of one module path')))
     add(Case('DIVERGE: an explicitly empty gopls assertion', lambda directory: None,
              REFUSE, ACCEPT, args=('--expect-gopls', ''),
-             divergent=DECLARED_DIVERGENCES['empty assertion']))
+             divergent=divergence('DIVERGE: an explicitly empty gopls assertion')))
     return cases
 
 
-DECLARED_DIVERGENCES = {
-    'root module directive': 'the Python evidence reader never reads the module '
-                             'directive, so a wrong one passed; this reader refuses it (#188 G3)',
-    'unfinished require block': 'the Python evidence reader never checks that a require '
-                                'block was closed; this reader refuses it (#188 G3)',
-    'tab-separated directive': 'the Python evidence reader split the directive on one '
-                              'space, so a tab-separated require entry was invisible '
-                              'and its module was then refused as unadopted; this reader '
-                              'reads it as Go does (#188 G3)',
-    'duplicate framed notice': 'the Python loader indexed framed notices by identity, so '
-                               'a duplicate frame collapsed and the set still balanced; '
-                               'this reader refuses the duplicate (#188 G3)',
-    'duplicate notice name': 'the Python loader keyed a module\'s notice rows by name, so '
-                             'a repeated row collapsed; this reader refuses it (#188 G3)',
-    'two versions of one path': 'the Python loader keyed the selection by module path, so '
-                                'a second version of one path vanished before the version '
-                                'comparisons; this reader refuses it (#188 G3)',
-    'empty assertion': 'argparse defaults --expect-gopls to None and the Python reader '
-                       'tests truthiness, so an explicitly empty value means "unset"; '
-                       'the Go flag is a pointer, so an empty assertion fails closed',
+# The declared divergences, registered by case name: this dictionary is the
+# authority, not a set derived from whichever cases survive in `corpus()`. Both
+# directions are compared, so a deleted witness is a missing identity (red) and a
+# case whose verdicts stopped differing is a witness that no longer witnesses
+# (also red). Every reason is a sentence a reviewer can act on; they die with the
+# Python oracle in #254.
+REQUIRED_DIVERGENCES = {
+    'DIVERGE: root evidence names another module':
+        'the Python evidence reader never reads the module directive, so a wrong one '
+        'passed; this reader refuses it (#188 G3)',
+    'DIVERGE: root evidence has an unfinished require block':
+        'the Python evidence reader never checks that a require block was closed; '
+        'this reader refuses it (#188 G3)',
+    'DIVERGE: root evidence carries a tab-separated require directive':
+        'the Python evidence reader split the directive on one space, so a '
+        'tab-separated require directive was invisible and its module was then '
+        'refused as unadopted; this reader reads it as Go does (#188 G3)',
+    'DIVERGE: a duplicated framed notice':
+        'the Python loader indexed framed notices by identity, so a duplicate frame '
+        'collapsed and the notice set still balanced; this reader refuses the '
+        'duplicate (#188 G3)',
+    'DIVERGE: a duplicate notice name in one module':
+        "the Python loader keyed a module's notice rows by name, so a repeated row "
+        'collapsed; this reader refuses it (#188 G3)',
+    'DIVERGE: two versions of one module path':
+        'the Python loader keyed the selection by module path, so a second version '
+        'of one path vanished before the version comparisons; this reader refuses '
+        'it (#188 G3)',
+    'DIVERGE: an explicitly empty gopls assertion':
+        'argparse defaults --expect-gopls to None and the Python reader tests '
+        'truthiness, so an explicitly empty value means "unset"; the Go flag is a '
+        'pointer, so an empty assertion fails closed',
 }
+
+
+def divergence(name: str) -> str:
+    """The registered reason for one divergent case name."""
+    if name not in REQUIRED_DIVERGENCES:
+        raise SystemExit(f'{name}: divergent case without a registered reason')
+    return REQUIRED_DIVERGENCES[name]
 
 
 def scope_root(directory: pathlib.Path) -> None:
@@ -509,6 +538,8 @@ def scope_root(directory: pathlib.Path) -> None:
 
 
 def scope_sums(directory: pathlib.Path) -> None:
+    """The scope digest *is* the mutation, so this one does not re-pin: a re-pin
+    would restore the value under test."""
     def edit(document):
         document['authentication']['scope']['go.sum'] = '0' * 64
 
@@ -767,10 +798,39 @@ def root_evidence_unfinished(directory: pathlib.Path) -> None:
 
 
 def root_evidence_tab(directory: pathlib.Path) -> None:
-    rewrite(directory, ROOT_EVIDENCE_FILE,
-            lambda raw: raw.replace(b'\tgithub.com/fsnotify/fsnotify v1.9.0',
-                                    b'\tgithub.com/fsnotify/fsnotify\tv1.9.0', 1))
+    """The real form: a `require` *directive* whose keyword is tab-separated from
+    its operands, which is legal go.mod and invisible to a one-space split."""
+    def mutate(raw: bytes) -> bytes:
+        text = raw.decode().replace('\tgithub.com/fsnotify/fsnotify v1.9.0\n', '', 1)
+        return (text + '\nrequire\tgithub.com/fsnotify/fsnotify v1.9.0\n').encode()
+
+    rewrite(directory, ROOT_EVIDENCE_FILE, mutate)
     repin_root_evidence(directory)
+
+
+def adoption_removed(directory: pathlib.Path) -> None:
+    """Remove a real requirement from the root evidence and re-bind everything.
+
+    The wrapper still selects it, `go.sum` still carries it and the pin still lists
+    it, so the adoption restriction is the only rule that can refuse these bytes.
+    """
+    rewrite(directory, ROOT_EVIDENCE_FILE,
+            lambda raw: raw.replace(b'\tgithub.com/fatih/structtag v1.2.0 // indirect\n',
+                                    b'', 1))
+    repin_root_evidence(directory)
+
+
+def notice_count_overflow(directory: pathlib.Path) -> None:
+    """Set the first frame's byte count to a 20-digit number, coherently."""
+    def mutate(raw: bytes) -> bytes:
+        start = raw.index(b'bytes=') + len(b'bytes=')
+        end = start
+        while raw[end:end + 1].isdigit():
+            end += 1
+        return raw[:start] + b'18446744073709551615' + raw[end:]
+
+    rewrite(directory, LICENSE_FILE, mutate)
+    repin(directory)
 
 
 def notice_duplicate_frame(directory: pathlib.Path) -> None:
@@ -870,12 +930,16 @@ def failures_for(case: Case, go: Observation, python: Observation) -> list[str]:
     return problems
 
 
-def check_comparator_control(helper: pathlib.Path, scratch: pathlib.Path) -> str:
-    """The comparison must be able to fail.
+def check_wrong_expectation_control(helper: pathlib.Path, scratch: pathlib.Path) -> str:
+    """The comparator must be able to report a disagreement.
 
-    A comparator that reports "agree" for two readings it was told to expect
-    differently is measuring nothing, so one case is run with a deliberately wrong
-    expectation and must produce a failure listing.
+    This control runs one case whose expected verdicts contradict *both* readers and
+    requires the comparator to report it. It proves the comparison can fail; it does
+    **not** prove the runner is the program it claims to be. What catches a runner
+    substitution is the corpus itself: every case asserts each side's own status and
+    its own diagnostic fragment, so a table that ran one binary twice would fail the
+    first case where the two readers must disagree, and the Python invocations name
+    `sys.executable` and the committed path in this file.
     """
     directory = scratch / 'control'
     shutil.copytree(DATA, directory)
@@ -886,7 +950,8 @@ def check_comparator_control(helper: pathlib.Path, scratch: pathlib.Path) -> str
         raise SystemExit('gopls-closure-parity: the comparator accepted a case whose '
                          'expectations contradict both readers; it cannot fail, so it '
                          'cannot pass')
-    return 'control: the comparator reports a disagreement against a wrong expectation'
+    return ('control: a wrong expected verdict is reported (the corpus, not this '
+            'control, is what catches a runner substitution)')
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -905,13 +970,24 @@ def main(argv: list[str] | None = None) -> int:
     names = [case.name for case in cases]
     if len(set(names)) != len(names):
         raise SystemExit('gopls-closure-parity: duplicate case names')
-    declared = {case.name for case in cases if case.divergent}
-    reasons = set(DECLARED_DIVERGENCES.values())
+    # The register is the authority for the divergences, and the corpus is held to
+    # it by identity in both directions: a deleted witness leaves a registered name
+    # with no case, and a case that stopped diverging leaves a case with no
+    # witness. A count cannot do either job, because a count can agree with a set
+    # derived from whatever survived.
+    registered = set(REQUIRED_DIVERGENCES)
+    present = {case.name for case in cases if case.divergent}
+    for missing in sorted(registered - present):
+        raise SystemExit(f'gopls-closure-parity: the registered divergence {missing!r} has '
+                         f'no case: a witness was deleted')
+    for extra in sorted(present - registered):
+        raise SystemExit(f'gopls-closure-parity: {extra!r} declares a divergence that is not '
+                         f'in REQUIRED_DIVERGENCES')
     for case in cases:
-        if case.divergent and case.divergent not in reasons:
-            raise SystemExit(f'{case.name}: divergence reason is not in the register')
+        if case.divergent and case.divergent != REQUIRED_DIVERGENCES[case.name]:
+            raise SystemExit(f'{case.name}: the case and the register disagree about its reason')
     try:
-        control = check_comparator_control(helper, scratch)
+        control = check_wrong_expectation_control(helper, scratch)
         comparisons = 0
         agreements = 0
         divergences = 0
@@ -963,10 +1039,13 @@ def main(argv: list[str] | None = None) -> int:
         if accepts < MINIMUM_ACCEPTS:
             problems.append(f'{accepts} Go accepts, want at least {MINIMUM_ACCEPTS}: a corpus '
                             f'whose every case refuses proves only that both refuse')
-        if divergences != len(declared) or len(declared) < MINIMUM_DIVERGENCES:
-            problems.append(f'{divergences} divergences observed, {len(declared)} declared, '
-                            f'want at least {MINIMUM_DIVERGENCES}: the #188 G3 witnesses must '
-                            f'both still diverge')
+        if divergences != len(REQUIRED_DIVERGENCES):
+            problems.append(f'{divergences} divergences observed, '
+                            f'{len(REQUIRED_DIVERGENCES)} registered: the #188 G3 witnesses '
+                            f'must both still diverge')
+        if len(REQUIRED_DIVERGENCES) < MINIMUM_DIVERGENCES:
+            problems.append(f'{len(REQUIRED_DIVERGENCES)} registered divergences, want at '
+                            f'least {MINIMUM_DIVERGENCES}')
         if problems:
             print('gopls-closure-parity: FAIL', file=sys.stderr)
             for problem in problems:

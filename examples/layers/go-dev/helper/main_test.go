@@ -109,13 +109,40 @@ func TestStatusMatrix(t *testing.T) {
 	}
 }
 
-// TestCheckMakesNoRequest is the statement the recipe relies on: `check` needs no
-// Go toolchain and no network, so it runs with only the binary and the data
-// mounted under `--network=none`.
-func TestCheckMakesNoRequest(t *testing.T) {
+// TestCheckRunsWithoutAToolchainOrEnvironment is the observable half of the claim
+// the recipe rests on: `check` needs no Go toolchain and no inherited module
+// policy, so it runs with only the binary and the data mounted. An empty PATH and a
+// hostile GO* environment are what makes that observable — a reader that exec'd
+// `go`, or read GOFLAGS/GOPROXY/GOTOOLCHAIN, cannot produce the selected release
+// under them.
+//
+// It deliberately does not claim to observe a *network request*: no host-side test
+// can, because nothing is mounted to observe with. What forbids the request is the
+// recipe's `--network=none` for that RUN, and what forbids the code from making one
+// is this module's import register (no `net`, `net/http` or `os/exec` in any
+// shipped file — see `TestImportsAreReviewed` in the rust-dev helper, which
+// classifies this module).
+func TestCheckRunsWithoutAToolchainOrEnvironment(t *testing.T) {
 	binary := build(t)
-	stdout, stderr, status := runBinary(t, binary, "check", committedData(t))
-	if status != 0 || stderr != "" || stdout != "v0.23.0\n" {
-		t.Fatalf("status %d, stdout %q, stderr %q", status, stdout, stderr)
+	committed := committedData(t)
+	emptyPath := "PATH=" + t.TempDir()
+	for _, environment := range [][]string{
+		{emptyPath},
+		{emptyPath, "GOFLAGS=-mod=mod", "GOPROXY=direct", "GOTOOLCHAIN=auto",
+			"GOOS=windows", "GOARCH=386", "GOENV=off", "GOFLAGS=-tags=example_fixture"},
+	} {
+		command := exec.Command(binary, "check", committed)
+		// Later entries win for a duplicated variable, so these replace the host's.
+		command.Env = append(os.Environ(), environment...)
+		var stdout, stderr bytes.Buffer
+		command.Stdout = &stdout
+		command.Stderr = &stderr
+		if err := command.Run(); err != nil {
+			t.Fatalf("check with %v: %v (stderr %q)", environment, err, stderr.String())
+		}
+		if stdout.String() != "v0.23.0\n" || stderr.String() != "" {
+			t.Fatalf("check with %v printed %q / %q", environment, stdout.String(),
+				stderr.String())
+		}
 	}
 }

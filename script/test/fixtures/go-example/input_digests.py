@@ -16,6 +16,27 @@ import hashlib
 import pathlib
 import sys
 
+# The floor and the required set are enforced *here*, on the path the evidence run
+# takes, not only in go-example.sh's self-test: a walk that stopped seeing the helper
+# module, or a layer that lost an adapter, must fail the derivation itself. The
+# number is below today's total (44) so an honest edit is a diff, and the named
+# paths are the ones whose loss would silently shrink what the run binds.
+MINIMUM_INPUTS = 40
+REQUIRED_INPUTS = (
+    'Dockerfile',
+    'install-gopls.sh',
+    'verify-toolchain.sh',
+    'gopls_closure.py',
+    'data/gopls-closure/go.mod',
+    'data/gopls-closure/go.sum',
+    'data/gopls-closure/gopls.go.mod',
+    'data/gopls-closure/pin.json',
+    'data/gopls-closure/THIRD_PARTY_LICENSES',
+    'helper/go.mod',
+    'helper/go.sum',
+    'helper/vendor/modules.txt',
+)
+
 
 def main() -> int:
     if len(sys.argv) != 3:
@@ -36,9 +57,15 @@ def main() -> int:
                     if path.is_file())
     helper = layer / 'helper'
     paths += sorted(path for path in helper.rglob('*') if path.is_file())
-    if len(paths) < 30:
-        print(f'input_digests: found {len(paths)} inputs, want at least 30: the walk is '
-              f'not looking at the helper module', file=sys.stderr)
+    missing = [name for name in REQUIRED_INPUTS if not (layer / name).is_file()]
+    if missing:
+        print(f'input_digests: missing required input(s): {", ".join(missing)}',
+              file=sys.stderr)
+        return 1
+    if len(paths) < MINIMUM_INPUTS:
+        print(f'input_digests: found {len(paths)} inputs, want at least '
+              f'{MINIMUM_INPUTS}: the walk is not looking at the whole layer',
+              file=sys.stderr)
         return 1
     lines = [f'{hashlib.sha256(path.read_bytes()).hexdigest()}  '
              f'{path.relative_to(root)}' for path in paths]

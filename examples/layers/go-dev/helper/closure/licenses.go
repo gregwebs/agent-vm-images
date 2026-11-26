@@ -96,15 +96,17 @@ func parseLicenses(raw []byte, what string) ([]LicenseSection, error) {
 		if !asciiDigits(sizeText) {
 			return nil, refuse("%s: malformed byte count: %s", what, repr(marker))
 		}
-		size := 0
-		for _, digit := range sizeText {
-			size = size*10 + int(digit-'0')
-		}
+		// The count is read against the bytes that remain, not accumulated into an
+		// int and then used as a slice bound. Two versions of this line were wrong
+		// before: the sum and the bound both overflowed, so a 20-digit count panicked
+		// with a slice-bounds error (status 2) where the Python reader refuses. A
+		// count larger than the remaining bytes is the same truncated section.
+		size, fits := parseBoundedSize(sizeText, len(raw)-position)
 		digest, err := parseSHA256(strings.TrimPrefix(fields[5], "sha256="), what+" section")
 		if err != nil {
 			return nil, err
 		}
-		if position+size > len(raw) {
+		if !fits {
 			return nil, refuse("%s: truncated section for %s %s", what, path, name)
 		}
 		body := raw[position : position+size]
@@ -131,6 +133,20 @@ func parseLicenses(raw []byte, what string) ([]LicenseSection, error) {
 		return nil, refuse("%s: no license sections", what)
 	}
 	return sections, nil
+}
+
+// parseBoundedSize reads a decimal byte count that may not exceed limit. It
+// saturates at the first digit that would pass the limit, so no arithmetic here
+// can overflow whatever the file says.
+func parseBoundedSize(text string, limit int) (int, bool) {
+	value := 0
+	for _, digit := range text {
+		value = value*10 + int(digit-'0')
+		if value > limit {
+			return 0, false
+		}
+	}
+	return value, true
 }
 
 // asciiDigits is Python's isdigit for the ASCII digits a byte count may use. The

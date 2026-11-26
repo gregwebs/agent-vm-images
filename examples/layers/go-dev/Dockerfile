@@ -57,12 +57,16 @@ ARG BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca3
 #      inventory binds to this stage.
 #
 # The chain binds a compiler version and this recipe/inventory relationship. It
-# does not bind source bytes: a comment-only edit under helper/ changes nothing any
-# gate sees. That question is #233's, and it is a different one. What does bind the
-# bytes is the host check in `script/test/example-layers.sh` (the same binary, from
-# the same module, over the same data the image mounts) and the parity suite
-# (`script/test/gopls-closure-parity.py`), which runs this reader against the Python
-# oracle over the committed bytes and a mutant corpus.
+# does not bind source bytes, and neither does anything else here: a comment-only
+# edit under helper/ changes nothing any gate sees.
+#
+# The host check in `script/test/example-layers.sh` (the same module, built with the
+# same flags, over the same data the image mounts) and the parity suite
+# (`script/test/gopls-closure-parity.py`, this reader against the Python oracle over
+# the committed bytes and a mutant corpus) bind the reader's *behaviour*, not its
+# source: they fail when the rules or their verdicts change, and they stay green for
+# an edit that changes neither. Binding source bytes for a product image is #233's
+# question, and it is a different one.
 #
 # This stage is a closed instruction set: exactly the FROM below and the RUN below,
 # and `script/test/example-layers.sh` refuses every other instruction class. That
