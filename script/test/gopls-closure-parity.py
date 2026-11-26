@@ -81,9 +81,9 @@ class Case:
     # readers word the same refusal differently; both are then visible here.
     go_fragment: str = ''
     python_fragment: str = ''
-    # Declared divergence: both verdicts are asserted and the reason is recorded in
-    # DECLARED_DIVERGENCES. An undeclared difference fails the case.
-    divergent: str = ''
+    # The registered divergence this case witnesses, if any: its entry supplies both
+    # expected verdicts and the reason, so neither can be restated (or reversed) here.
+    divergent: 'Divergence | None' = None
     args: tuple[str, ...] = ()
 
     @property
@@ -464,69 +464,79 @@ def corpus() -> list[Case]:
              '--expect-gopls: expected an exact vX.Y.Z release version',
              args=('--expect-gopls', 'v0.23')))
 
-    # The declared divergences: #188 G3, reproduced and fixed here.
-    add(Case('DIVERGE: root evidence names another module', root_evidence_module,
-             REFUSE, ACCEPT, divergent=divergence('DIVERGE: root evidence names another module')))
-    add(Case('DIVERGE: root evidence has an unfinished require block',
-             root_evidence_unfinished, REFUSE, ACCEPT,
-             divergent=divergence('DIVERGE: root evidence has an unfinished require block')))
-    add(Case('DIVERGE: root evidence carries a tab-separated require directive',
-             root_evidence_tab, ACCEPT, REFUSE,
-             divergent=divergence(
-                 'DIVERGE: root evidence carries a tab-separated require directive')))
-    add(Case('DIVERGE: a duplicated framed notice', notice_duplicate_frame, REFUSE,
-             ACCEPT, divergent=divergence('DIVERGE: a duplicated framed notice')))
-    add(Case('DIVERGE: a duplicate notice name in one module', notice_duplicate_name,
-             REFUSE, ACCEPT,
-             divergent=divergence('DIVERGE: a duplicate notice name in one module')))
-    add(Case('DIVERGE: two versions of one module path', module_two_versions, REFUSE,
-             ACCEPT, divergent=divergence('DIVERGE: two versions of one module path')))
-    add(Case('DIVERGE: an explicitly empty gopls assertion', lambda directory: None,
-             REFUSE, ACCEPT, args=('--expect-gopls', ''),
-             divergent=divergence('DIVERGE: an explicitly empty gopls assertion')))
+    # The declared divergences: #188 G3, reproduced and fixed here. Their verdicts
+    # come from REQUIRED_DIVERGENCES by name, so a swapped direction is a mismatch
+    # with the register rather than an edited expectation.
+    add(diverge('DIVERGE: root evidence names another module', root_evidence_module))
+    add(diverge('DIVERGE: root evidence has an unfinished require block',
+                root_evidence_unfinished))
+    add(diverge('DIVERGE: root evidence carries a tab-separated require directive',
+                root_evidence_tab))
+    add(diverge('DIVERGE: a duplicated framed notice', notice_duplicate_frame))
+    add(diverge('DIVERGE: a duplicate notice name in one module', notice_duplicate_name))
+    add(diverge('DIVERGE: two versions of one module path', module_two_versions))
+    add(diverge('DIVERGE: an explicitly empty gopls assertion', lambda directory: None,
+                args=('--expect-gopls', '')))
     return cases
 
 
-# The declared divergences, registered by case name: this dictionary is the
-# authority, not a set derived from whichever cases survive in `corpus()`. Both
-# directions are compared, so a deleted witness is a missing identity (red) and a
-# case whose verdicts stopped differing is a witness that no longer witnesses
-# (also red). Every reason is a sentence a reviewer can act on; they die with the
-# Python oracle in #254.
+# The declared divergences, registered by case name. This dictionary is the
+# authority, not a set derived from whichever cases survive in `corpus()`, and each
+# entry carries the *expected Go and Python verdict*, not only prose: a swapped
+# direction or a swapped mutant is then a data mismatch rather than a paragraph
+# that still reads correctly. The entry is what `diverge()` hands the case, so a
+# divergent case cannot state its own verdicts at all.
+@dataclasses.dataclass(frozen=True)
+class Divergence:
+    go: int
+    python: int
+    reason: str
+
+
 REQUIRED_DIVERGENCES = {
-    'DIVERGE: root evidence names another module':
+    'DIVERGE: root evidence names another module': Divergence(
+        REFUSE, ACCEPT,
         'the Python evidence reader never reads the module directive, so a wrong one '
-        'passed; this reader refuses it (#188 G3)',
-    'DIVERGE: root evidence has an unfinished require block':
+        'passed; this reader refuses it (#188 G3)'),
+    'DIVERGE: root evidence has an unfinished require block': Divergence(
+        REFUSE, ACCEPT,
         'the Python evidence reader never checks that a require block was closed; '
-        'this reader refuses it (#188 G3)',
-    'DIVERGE: root evidence carries a tab-separated require directive':
+        'this reader refuses it (#188 G3)'),
+    'DIVERGE: root evidence carries a tab-separated require directive': Divergence(
+        ACCEPT, REFUSE,
         'the Python evidence reader split the directive on one space, so a '
         'tab-separated require directive was invisible and its module was then '
-        'refused as unadopted; this reader reads it as Go does (#188 G3)',
-    'DIVERGE: a duplicated framed notice':
+        'refused as unadopted; this reader reads it as Go does (#188 G3)'),
+    'DIVERGE: a duplicated framed notice': Divergence(
+        REFUSE, ACCEPT,
         'the Python loader indexed framed notices by identity, so a duplicate frame '
         'collapsed and the notice set still balanced; this reader refuses the '
-        'duplicate (#188 G3)',
-    'DIVERGE: a duplicate notice name in one module':
+        'duplicate (#188 G3)'),
+    'DIVERGE: a duplicate notice name in one module': Divergence(
+        REFUSE, ACCEPT,
         "the Python loader keyed a module's notice rows by name, so a repeated row "
-        'collapsed; this reader refuses it (#188 G3)',
-    'DIVERGE: two versions of one module path':
+        'collapsed; this reader refuses it (#188 G3)'),
+    'DIVERGE: two versions of one module path': Divergence(
+        REFUSE, ACCEPT,
         'the Python loader keyed the selection by module path, so a second version '
         'of one path vanished before the version comparisons; this reader refuses '
-        'it (#188 G3)',
-    'DIVERGE: an explicitly empty gopls assertion':
+        'it (#188 G3)'),
+    'DIVERGE: an explicitly empty gopls assertion': Divergence(
+        REFUSE, ACCEPT,
         'argparse defaults --expect-gopls to None and the Python reader tests '
         'truthiness, so an explicitly empty value means "unset"; the Go flag is a '
-        'pointer, so an empty assertion fails closed',
+        'pointer, so an empty assertion fails closed'),
 }
 
 
-def divergence(name: str) -> str:
-    """The registered reason for one divergent case name."""
+def diverge(name: str, mutate: 'Callable[[pathlib.Path], None]',
+            args: tuple[str, ...] = ()) -> Case:
+    """One registered divergence: its verdicts come from the register, not here."""
     if name not in REQUIRED_DIVERGENCES:
-        raise SystemExit(f'{name}: divergent case without a registered reason')
-    return REQUIRED_DIVERGENCES[name]
+        raise SystemExit(f'{name}: divergent case without a registered entry')
+    entry = REQUIRED_DIVERGENCES[name]
+    return Case(name=name, mutate=mutate, go=entry.go, python=entry.python,
+                divergent=entry, args=args)
 
 
 def scope_root(directory: pathlib.Path) -> None:
@@ -984,8 +994,21 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f'gopls-closure-parity: {extra!r} declares a divergence that is not '
                          f'in REQUIRED_DIVERGENCES')
     for case in cases:
-        if case.divergent and case.divergent != REQUIRED_DIVERGENCES[case.name]:
-            raise SystemExit(f'{case.name}: the case and the register disagree about its reason')
+        if case.divergent is None:
+            if case.name in REQUIRED_DIVERGENCES:
+                raise SystemExit(f'{case.name}: registered as a divergence but the case '
+                                 f'does not declare one')
+            continue
+        entry = REQUIRED_DIVERGENCES[case.name]
+        # The case's verdicts are the register's, so this can only fail if a case
+        # were built by hand instead of through diverge(). Kept because that is the
+        # mutation this check exists for.
+        if (case.go, case.python) != (entry.go, entry.python):
+            raise SystemExit(f'{case.name}: expected verdicts Go {case.go}/Python '
+                             f'{case.python} differ from the register\'s Go {entry.go}/'
+                             f'Python {entry.python}: the direction was swapped')
+        if case.divergent is not entry:
+            raise SystemExit(f'{case.name}: the case carries a different register entry')
     try:
         control = check_wrong_expectation_control(helper, scratch)
         comparisons = 0

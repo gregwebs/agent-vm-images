@@ -1350,8 +1350,13 @@ log "source $(git -C "$ROOT" rev-parse HEAD) dirty=$(git -C "$ROOT" status --por
 if input_listing=$(input_digests "$ROOT" "$EXAMPLE" 2>"$LOG_DIR/input-digests.err"); then
     while IFS= read -r digest_line; do log "$digest_line"; done <<<"$input_listing"
 else
+    # `fail` records and continues by design (a phase can have several independent
+    # assertions), so this one exits: a run that cannot bind its inputs must not go
+    # on to reach a build, even though it could never pass. The EXIT trap runs the
+    # owned-resource cleanup, and nothing has been created yet.
     cat "$LOG_DIR/input-digests.err" >&2 || true
     fail 'the build-input digest is unavailable; this run cannot bind the bytes it builds'
+    exit 1
 fi
 run_bounded daemon "$DAEMON_SECONDS" "$LOG_DIR/daemon.log" "$DOCKER" version || true
 run_bounded context "$DAEMON_SECONDS" "$LOG_DIR/context.log" "$DOCKER" context show || true

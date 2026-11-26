@@ -109,28 +109,32 @@ func TestStatusMatrix(t *testing.T) {
 	}
 }
 
-// TestCheckRunsWithoutAToolchainOrEnvironment is the observable half of the claim
-// the recipe rests on: `check` needs no Go toolchain and no inherited module
-// policy, so it runs with only the binary and the data mounted. An empty PATH and a
-// hostile GO* environment are what makes that observable — a reader that exec'd
-// `go`, or read GOFLAGS/GOPROXY/GOTOOLCHAIN, cannot produce the selected release
-// under them.
+// TestCheckRunsWithoutAToolchainOrEnvironment proves two things about `check` and
+// stops there.
 //
-// It deliberately does not claim to observe a *network request*: no host-side test
-// can, because nothing is mounted to observe with. What forbids the request is the
-// recipe's `--network=none` for that RUN, and what forbids the code from making one
-// is this module's import register (no `net`, `net/http` or `os/exec` in any
-// shipped file — see `TestImportsAreReviewed` in the rust-dev helper, which
-// classifies this module).
+// It proves that the reader needs no inherited GO* policy and no usable toolchain:
+// with an empty PATH, and with GOFLAGS/GOPROXY/GOTOOLCHAIN/GOOS/GOARCH set to
+// values the image would never accept, it still prints the selected release. So a
+// reader that read any of those variables, or that needed a `go` on PATH to
+// succeed, fails here.
+//
+// It also observes that no `go` is *run*: the PATH holds one executable, a shim
+// that records being invoked, and the record must stay empty. That catches a
+// reader which exec's a toolchain and ignores the error, which a merely failing
+// PATH would not.
+//
+// It does not claim more. The environment and PATH assertions cannot see a network
+// request, and this module's static import register is not a veto either: it is one
+// review-time list over the files we compile, and its header states what it cannot
+// see (a socket made through `syscall`, `os.StartProcess`, cgo, `plugin`, a
+// dependency's internals, anything in a child). The boundary that forbids a request
+// being made or succeeding at build time is the recipe's `--network=none` on that
+// RUN, which no host-side test can exercise.
 func TestCheckRunsWithoutAToolchainOrEnvironment(t *testing.T) {
 	binary := build(t)
 	committed := committedData(t)
-	emptyPath := "PATH=" + t.TempDir()
-	for _, environment := range [][]string{
-		{emptyPath},
-		{emptyPath, "GOFLAGS=-mod=mod", "GOPROXY=direct", "GOTOOLCHAIN=auto",
-			"GOOS=windows", "GOARCH=386", "GOENV=off", "GOFLAGS=-tags=example_fixture"},
-	} {
+	check := func(t *testing.T, environment []string, wantShim bool) {
+		t.Helper()
 		command := exec.Command(binary, "check", committed)
 		// Later entries win for a duplicated variable, so these replace the host's.
 		command.Env = append(os.Environ(), environment...)
@@ -144,5 +148,46 @@ func TestCheckRunsWithoutAToolchainOrEnvironment(t *testing.T) {
 			t.Fatalf("check with %v printed %q / %q", environment, stdout.String(),
 				stderr.String())
 		}
+		if wantShim {
+			return
+		}
+		if invoked, err := os.Stat(shimRecord(t, environment)); err == nil {
+			t.Fatalf("check ran a `go` from PATH (%v bytes recorded); it must run no "+
+				"toolchain at all", invoked.Size())
+		}
 	}
+	t.Run("no toolchain on PATH", func(t *testing.T) {
+		shim := goShim(t)
+		check(t, []string{"PATH=" + shim}, false)
+	})
+	t.Run("hostile GO environment", func(t *testing.T) {
+		shim := goShim(t)
+		check(t, []string{"PATH=" + shim, "GOFLAGS=-mod=mod", "GOPROXY=direct",
+			"GOTOOLCHAIN=auto", "GOOS=windows", "GOARCH=386", "GOENV=off"}, false)
+	})
+}
+
+// goShim is a directory whose only entry is a `go` that records being run. It is
+// what makes "the reader exec'd nothing" observable rather than assumed.
+func goShim(t *testing.T) string {
+	t.Helper()
+	directory := t.TempDir()
+	record := filepath.Join(directory, "invoked")
+	body := "#!/bin/sh\n: > '" + record + "'\n"
+	if err := os.WriteFile(filepath.Join(directory, "go"), []byte(body), 0o755); err != nil {
+		t.Fatalf("write the go shim: %v", err)
+	}
+	return directory
+}
+
+// shimRecord is the file the shim writes when it runs.
+func shimRecord(t *testing.T, environment []string) string {
+	t.Helper()
+	for _, entry := range environment {
+		if path, found := strings.CutPrefix(entry, "PATH="); found {
+			return filepath.Join(path, "invoked")
+		}
+	}
+	t.Fatal("the environment names no PATH")
+	return ""
 }
