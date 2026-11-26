@@ -490,39 +490,53 @@ def corpus() -> list[Case]:
 class Divergence:
     go: int
     python: int
+    # The fragment the refusing side's own diagnostic must name, and None where that
+    # side accepts (an accepting side writes no diagnostic, which is asserted
+    # separately). Registering the fragment is what binds the *mutant*: a case whose
+    # name promises one rule cannot quietly carry another rule that happens to share
+    # the verdict pair.
+    go_fragment: 'str | None'
+    python_fragment: 'str | None'
     reason: str
 
 
 REQUIRED_DIVERGENCES = {
     'DIVERGE: root evidence names another module': Divergence(
         REFUSE, ACCEPT,
+        'the module directive must be ' + ROOT_MODULE, None,
         'the Python evidence reader never reads the module directive, so a wrong one '
         'passed; this reader refuses it (#188 G3)'),
     'DIVERGE: root evidence has an unfinished require block': Divergence(
         REFUSE, ACCEPT,
+        'unterminated require block', None,
         'the Python evidence reader never checks that a require block was closed; '
         'this reader refuses it (#188 G3)'),
     'DIVERGE: root evidence carries a tab-separated require directive': Divergence(
         ACCEPT, REFUSE,
+        None, 'is not required by the root module',
         'the Python evidence reader split the directive on one space, so a '
         'tab-separated require directive was invisible and its module was then '
         'refused as unadopted; this reader reads it as Go does (#188 G3)'),
     'DIVERGE: a duplicated framed notice': Divergence(
         REFUSE, ACCEPT,
+        'duplicate notice section for ', None,
         'the Python loader indexed framed notices by identity, so a duplicate frame '
         'collapsed and the notice set still balanced; this reader refuses the '
         'duplicate (#188 G3)'),
     'DIVERGE: a duplicate notice name in one module': Divergence(
         REFUSE, ACCEPT,
+        'pin.json: duplicate notice ', None,
         "the Python loader keyed a module's notice rows by name, so a repeated row "
         'collapsed; this reader refuses it (#188 G3)'),
     'DIVERGE: two versions of one module path': Divergence(
         REFUSE, ACCEPT,
+        'is selected at both', None,
         'the Python loader keyed the selection by module path, so a second version '
         'of one path vanished before the version comparisons; this reader refuses '
         'it (#188 G3)'),
     'DIVERGE: an explicitly empty gopls assertion': Divergence(
         REFUSE, ACCEPT,
+        '--expect-gopls: expected an exact vX.Y.Z release version', None,
         'argparse defaults --expect-gopls to None and the Python reader tests '
         'truthiness, so an explicitly empty value means "unset"; the Go flag is a '
         'pointer, so an empty assertion fails closed'),
@@ -929,7 +943,14 @@ def failures_for(case: Case, go: Observation, python: Observation) -> list[str]:
         else:
             if observation.stdout != '':
                 problems.append(f'{side} refused but wrote stdout {observation.stdout!r}')
-    go_fragment, python_fragment = case.fragments
+    if case.divergent is not None:
+        # The register's fragments, not the case's: this is what makes the identity of
+        # the *rule* bound, so a case cannot describe one rule in its name and carry
+        # another rule that shares the same verdict pair.
+        go_fragment = case.divergent.go_fragment or ''
+        python_fragment = case.divergent.python_fragment or ''
+    else:
+        go_fragment, python_fragment = case.fragments
     if case.go == REFUSE and go_fragment and go_fragment not in go.stderr:
         problems.append(f'go refusal {go.stderr.strip()!r} does not name {go_fragment!r}')
     if case.python == REFUSE and python_fragment and python_fragment not in python.stderr:
@@ -993,6 +1014,18 @@ def main(argv: list[str] | None = None) -> int:
     for extra in sorted(present - registered):
         raise SystemExit(f'gopls-closure-parity: {extra!r} declares a divergence that is not '
                          f'in REQUIRED_DIVERGENCES')
+    for name, entry in REQUIRED_DIVERGENCES.items():
+        if entry.go == entry.python:
+            raise SystemExit(f'{name}: a registered divergence must differ between the '
+                             f'sides, and both read {entry.go}')
+        for side, verdict, fragment in (('go', entry.go, entry.go_fragment),
+                                        ('python', entry.python, entry.python_fragment)):
+            if verdict == REFUSE and not fragment:
+                raise SystemExit(f'{name}: the {side} side refuses but registers no '
+                                 f'diagnostic fragment, so the rule is unnamed')
+            if verdict == ACCEPT and fragment is not None:
+                raise SystemExit(f'{name}: the {side} side accepts and must register '
+                                 f'None, not {fragment!r}')
     for case in cases:
         if case.divergent is None:
             if case.name in REQUIRED_DIVERGENCES:
