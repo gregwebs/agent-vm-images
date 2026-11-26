@@ -41,11 +41,16 @@ import (
 // inventory's scope is one rule and lives in the review test.
 // Data is a validated closure: the record, the bytes it binds, and the selection.
 type Data struct {
-	Pin     Pin
-	Wrapper WrapperGoMod
-	Sums    GoSum
-	Root    RootGoMod
-	Notices []LicenseSection
+	// Directory is where these bytes were read from, in the caller's spelling, when
+	// the source can name one. The installer re-reads the committed inputs from it
+	// and re-checks their digests before it copies or publishes them, so the copy it
+	// builds from cannot be a different tree than the one that was verified here.
+	Directory string
+	Pin       Pin
+	Wrapper   WrapperGoMod
+	Sums      GoSum
+	Root      RootGoMod
+	Notices   []LicenseSection
 }
 
 // Selection is the validated module set, in pin order.
@@ -152,7 +157,11 @@ func Load(ctx context.Context, request Request, source Source) (*Data, error) {
 	if err := requireExpectations(request, pin); err != nil {
 		return nil, err
 	}
-	return &Data{Pin: pin, Wrapper: wrapper, Sums: sums, Root: root, Notices: notices}, nil
+	data := &Data{Pin: pin, Wrapper: wrapper, Sums: sums, Root: root, Notices: notices}
+	if locator, ok := source.(Locator); ok {
+		data.Directory = locator.Directory()
+	}
+	return data, nil
 }
 
 // readInputs enforces the exact input set: every committed name present, nothing

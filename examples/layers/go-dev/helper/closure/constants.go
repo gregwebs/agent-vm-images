@@ -107,6 +107,13 @@ var KnownSignatures = []SignatureRecord{
 	},
 }
 
+// NoticeNamePattern is the reviewed notice-file name set, anchored whole. It is an
+// evidence transport, never a claim of legal completeness: the installer matches the
+// module cache with it to find the files the committed evidence should describe.
+// Python spells the same set as NOTICE_NAME_RE (gopls_closure.py:137) and scans the
+// cache with re.fullmatch.
+const NoticeNamePattern = `(?i)^(LICEN[CS]E|COPYING|NOTICE|PATENTS)([.-].*)?$`
+
 // ReviewedNestedNotices are the notice files the adoption review inspected
 // beyond each module's root file. A nonempty nested set that is not listed here
 // is refused: the layout needs interpretation, and silently blessing an

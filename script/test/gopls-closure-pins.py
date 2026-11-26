@@ -101,18 +101,26 @@ def h1_of(text: str) -> str:
 
 
 # --- the layer's own reader, as a child ---------------------------------------
-def build_go_dev_helper() -> Path:
+def build_go_dev_helper(fixture: bool = False) -> Path:
     """Build the layer's reader for this host with the stage's flags.
 
     Before the sandbox and the audit hook: the binary the suite execs has to exist
     and be allowlisted before either boundary is installed, and a build that cannot
     produce it is an error here rather than a silently missing reader.
+
+    `fixture=True` is the `-tags example_fixture` build, the only variant that
+    honours a loopback proxy, an off sum database or an injected publication
+    failure. It is a separate binary with its own name, so a seam run can never be
+    mistaken for the shipped program — and seams_test.go in the module holds that the
+    shipped bytes carry none of it.
     """
     os_name = 'linux' if sys.platform.startswith('linux') else 'darwin'
-    result = subprocess.run(
-        ['bash', str(HELPER_BUILDER), 'go-dev', '--root', str(REPOSITORY_ROOT),
-         '--os', os_name],
-        capture_output=True, text=True, check=False, cwd=str(REPOSITORY_ROOT))
+    argv = ['bash', str(HELPER_BUILDER), 'go-dev', '--root', str(REPOSITORY_ROOT),
+            '--os', os_name]
+    if fixture:
+        argv.append('--fixture')
+    result = subprocess.run(argv, capture_output=True, text=True, check=False,
+                            cwd=str(REPOSITORY_ROOT))
     if result.returncode != 0:
         raise SystemExit(f'gopls-closure-pins: cannot build the go-dev helper:\n'
                          f'{result.stdout}{result.stderr}')
@@ -127,6 +135,20 @@ def run_helper(helper: Path, argv: Sequence[str]) -> subprocess.CompletedProcess
     """Run the shipped reader once and return its finished process."""
     return subprocess.run([str(helper), *argv], capture_output=True, text=True,
                           check=False, cwd=str(REPOSITORY_ROOT))
+
+
+def install_argv(closure, arch, *, bin_dir: Path, share_dir: Path, go_root: Path,
+                 fixture_proxy: str | None = None,
+                 directory: Path | None = None) -> list[str]:
+    """The one installation shape every Go-side row uses."""
+    argv = ['install', str(directory or closure.directory),
+            '--expect-gopls', closure.pin.gopls.value,
+            '--expect-go', closure.pin.go.value,
+            '--go-root', str(go_root), '--arch', arch.value,
+            '--bin-dir', str(bin_dir), '--share-dir', str(share_dir)]
+    if fixture_proxy is not None:
+        argv += ['--fixture-proxy', fixture_proxy, '--fixture-sumdb', 'off']
+    return argv
 
 
 def verify_installed_argv(closure, arch, *, binary: Path, share_dir: Path,
@@ -1017,6 +1039,310 @@ def test_install(fixture, closure) -> None:
           outputs[-600:])
     check('the failed substitution published nothing',
           not (fixture.workspace / 'install-substituted-mod' / 'bin' / 'gopls').exists())
+
+
+# --- the Go installer, against the same real Go and the same recorder ---------
+def go_install(fixture_helper: Path, closure, fixture, name: str, arch, *,
+               extra: Sequence[str] = (), proxy: str | None = None,
+               directory: Path | None = None) -> tuple[Path, subprocess.CompletedProcess]:
+    """Run the fixture build's `install` once, in this suite's workspace."""
+    import gopls_closure as model
+
+    base = fixture.workspace / name
+    argv = install_argv(closure, arch, bin_dir=base / 'bin', directory=directory,
+                        share_dir=base / 'share' / 'gopls', go_root=fixture.go_root,
+                        fixture_proxy=proxy if proxy is not None else fixture.proxy.url())
+    return base, run_helper(fixture_helper, argv + list(extra))
+
+
+def published_digest(base: Path) -> tuple[str, int, str, int]:
+    """The four observations a published tree is compared on."""
+    import gopls_closure as model
+
+    binary = base / 'bin' / 'gopls'
+    notice = base / 'share' / 'gopls' / model.LICENSE_FILE
+    return (hashlib.sha256(binary.read_bytes()).hexdigest(),
+            binary.stat().st_mode & 0o777,
+            hashlib.sha256(notice.read_bytes()).hexdigest(),
+            notice.stat().st_mode & 0o777)
+
+
+def test_go_install_differential(fixture, closure, root: Path, helper: Path,
+                                 fixture_helper: Path) -> None:
+    """The Go installer against the Python oracle, over the same real Go and proxy.
+
+    One real loopback build per Linux target, then the negative controls the issue
+    names. Both sides run the same mutation on the same recorder, and the counters
+    only advance inside a call that executed: a row where neither side observed
+    anything is red, not vacuously green (ruling R-a).
+    """
+    import gopls_closure as model
+
+    print('go install: one real build per Linux target, same requests as the oracle')
+    minimum_requests = 3
+    requests_by_arch: dict[str, list[str]] = {}
+    for arch in model.Architecture:
+        fixture.proxy.clear_requests()
+        base, result = go_install(fixture_helper, closure, fixture,
+                                  f'go-install-{arch.value}', arch)
+        check(f'{arch.value}: the Go installer accepts the candidate',
+              result.returncode == 0 and result.stdout == closure.pin.gopls.value + '\n',
+              f'({result.returncode}: {result.stderr.strip()!r})')
+        binary = base / 'bin' / 'gopls'
+        check(f'{arch.value}: the Go installer publishes a 0755 Linux ELF',
+              binary.is_file() and binary.stat().st_mode & 0o777 == 0o755
+              and binary.read_bytes()[:4] == b'\x7fELF')
+        check(f'{arch.value}: the Go installer publishes the committed notices',
+              (base / 'share' / 'gopls' / model.LICENSE_FILE).read_bytes()
+              == (closure.directory / model.LICENSE_FILE).read_bytes()
+              and (base / 'share' / 'gopls' / model.LICENSE_FILE).stat().st_mode & 0o777
+              == 0o644)
+        go_requests = fixture.proxy.requested_paths()
+        # The positive control on the recorder: not merely non-empty, but the exact
+        # URL grammar of a module transport, over exact reviewed identities.
+        selected_paths = {model.escape_module(module.id.path.value)
+                          for module in closure.pin.modules}
+        observed_paths = {path.split('/@v/')[0].lstrip('/') for path in go_requests}
+        check(f'{arch.value}: the Go build requested module objects and nothing else',
+              len(go_requests) >= minimum_requests
+              and all('/@v/' in path and path.rsplit('.', 1)[-1] in {'info', 'mod', 'zip'}
+                      for path in go_requests),
+              f'({len(go_requests)}: {go_requests[:4]})')
+        check(f'{arch.value}: every requested identity is a reviewed module',
+              observed_paths <= selected_paths and bool(observed_paths),
+              f'({sorted(observed_paths - selected_paths)})')
+        check(f'{arch.value}: the Go build asked for no list, sumdb or toolchain module',
+              fixture.proxy.forbidden_requests() == [],
+              f'({fixture.proxy.forbidden_requests()})')
+        requests_by_arch[arch.value] = go_requests
+
+        # The oracle, on a fresh tree, against the same recorder: the same URL set
+        # and the same published bytes are what make this a differential.
+        fixture.proxy.clear_requests()
+        python_target, _paths = run_install(fixture, closure, f'py-install-{arch.value}',
+                                            arch)
+        python_requests = fixture.proxy.requested_paths()
+        check(f'{arch.value}: both installers requested exactly the same URLs',
+              sorted(python_requests) == sorted(go_requests)
+              and len(python_requests) >= minimum_requests,
+              f'(Go {sorted(go_requests)} vs Python {sorted(python_requests)})')
+        check(f'{arch.value}: both installers published the same bytes and modes',
+              published_digest(base) == published_digest(fixture.workspace
+                                                         / f'py-install-{arch.value}'),
+              f'(Go {published_digest(base)} vs Python '
+              f'{published_digest(fixture.workspace / f"py-install-{arch.value}")})')
+        # The oracle's own verifier reads the Go installer's tree: the two verbs
+        # agree about what a valid installation is.
+        state = model.Target(go_root=fixture.go_root, bin_dir=base / 'bin',
+                             share_dir=base / 'share' / 'gopls', arch=arch,
+                             binary=base / 'bin' / 'gopls')
+        refuses_ok = False
+        try:
+            model.verify_installed(closure, state)
+            refuses_ok = True
+        except model.ClosureError as error:  # pragma: no cover - a failure path
+            check(f'{arch.value}: verify-installed accepts the Go installation', False,
+                  str(error))
+        if refuses_ok:
+            check(f'{arch.value}: verify-installed accepts the Go installation', True)
+    check('both Linux targets requested a nonempty, identical object grammar',
+          all(requests_by_arch[arch.value] for arch in model.Architecture))
+
+    print('go install: replaced content is refused by the checksum layer, not the checker')
+    for kind, fragment in (('zip', 'checksum mismatch'), ('mod', 'checksum mismatch')):
+        import fixture as fixture_module
+
+        if kind == 'zip':
+            original = fixture_module.module_zip('example.test/dep', 'v1.0.0',
+                                                 {'go.mod': b'module example.test/dep\n',
+                                                  'dep.go': b'package dep\n'})
+        else:
+            original = b'module example.test/dep\n\ngo 1.26.0\n'
+        fixture.proxy.replace('example.test/dep', 'v1.0.0', kind, original)
+        try:
+            fixture.proxy.clear_requests()
+            base, result = go_install(fixture_helper, closure, fixture,
+                                      f'go-install-replaced-{kind}',
+                                      model.Architecture.ARM64)
+            model_result = None
+            try:
+                run_install(fixture, closure, f'py-install-replaced-{kind}',
+                            model.Architecture.ARM64)
+            except model.ClosureError as error:
+                model_result = str(error)
+            check(f'a replaced {kind} is refused by both installers',
+                  result.returncode == 1 and fragment in result.stderr
+                  and model_result is not None and fragment in model_result,
+                  f'(Go {result.returncode}/{result.stderr.strip()!r}, Python {model_result!r})')
+            check(f'the replaced {kind} published nothing on either side',
+                  not (base / 'bin' / 'gopls').exists()
+                  and not (fixture.workspace / f'py-install-replaced-{kind}' / 'bin'
+                            / 'gopls').exists())
+            if kind == 'mod':
+                check('the refusal names the substituted /go.mod identity',
+                      'verifying example.test/dep@v1.0.0/go.mod: checksum mismatch'
+                      in result.stderr, result.stderr[-600:])
+        finally:
+            fixture.proxy.faults.pop(f'/example.test/dep/@v/v1.0.0.{kind}', None)
+
+    print('go install: a missing sum is refused before any request, on both sides')
+    dep = model.ModuleId(model.ModulePath('example.test/dep'),
+                         model.ModuleVersion('v1.0.0'))
+    directory = copy_candidate(closure, root / 'candidate-absent-h1-go')
+    bind_go_sum(directory, {dep: (None, closure.go_sum.mod[dep])})
+    fixture.proxy.clear_requests()
+    base, result = go_install(fixture_helper, closure, fixture, 'go-install-absent',
+                              model.Architecture.ARM64, directory=directory)
+    oracle = ''
+    try:
+        model.load_closure(directory)
+    except model.ClosureError as error:
+        oracle = str(error)
+    check('a go.sum without the zip h1 is refused by both sides',
+          result.returncode == 1 and 'go.sum lacks h1 for example.test/dep'
+          in result.stderr and 'go.sum lacks h1 for example.test/dep' in oracle,
+          f'(Go {result.stderr.strip()!r}, Python {oracle!r})')
+    check('the missing sum cost no request', fixture.proxy.requested_paths() == [],
+          f'({fixture.proxy.requested_paths()})')
+    check('the refused candidate published nothing', not (base / 'bin').exists())
+
+    print('go install: a wrong compiler is refused before the first request')
+    wrong = copy_candidate(closure, root / 'candidate-wrong-compiler')
+    document = json.loads((wrong / 'pin.json').read_text())
+    document['go'] = '1.27.9'
+    (wrong / 'pin.json').write_text(json.dumps(document, indent=2) + '\n')
+    repin(wrong)
+    wrong_closure = model.load_closure(wrong)
+    fixture.proxy.clear_requests()
+    base, result = go_install(fixture_helper, wrong_closure, fixture,
+                              'go-install-wrong-compiler', model.Architecture.ARM64)
+    oracle = ''
+    try:
+        run_install(fixture, wrong_closure, 'py-install-wrong-compiler',
+                    model.Architecture.ARM64)
+    except model.ClosureError as error:
+        oracle = str(error)
+    check('both installers refuse a compiler that is not the pinned one',
+          result.returncode == 1 and 'compiler is go1.27.3, want go1.27.9' in result.stderr
+          and 'compiler is go1.27.3, want go1.27.9' in oracle,
+          f'(Go {result.stderr.strip()!r}, Python {oracle!r})')
+    check('the wrong compiler cost no request at all',
+          fixture.proxy.requested_paths() == [], f'({fixture.proxy.requested_paths()})')
+
+    print('go install: the cache notices must equal the committed evidence')
+    drift = copy_candidate(closure, root / 'candidate-notice-drift')
+    # The committed evidence is rewritten consistently — framing, section digest and
+    # pin — so the loader accepts it and the *cache* is what disagrees. A record the
+    # loader refused would test the loader, not the installer's cache proof.
+    body = b'DEP license text\n'
+    sections = []
+    changed = False
+    for section in model.parse_licenses((drift / model.LICENSE_FILE).read_bytes()):
+        if (section.id.path.value, section.name.value) == ('example.test/dep', 'LICENSE'):
+            changed = True
+            sections.append(model.LicenseSection(
+                section.id, section.name,
+                model.Sha256(hashlib.sha256(body).hexdigest()), body))
+        else:
+            sections.append(section)
+    if not changed:
+        raise AssertionError('the notice drift case found no dep LICENSE section')
+    (drift / model.LICENSE_FILE).write_bytes(
+        model.render_licenses(tuple(sections), closure.pin.gopls))
+    document = json.loads((drift / 'pin.json').read_text())
+    for module in document['modules']:
+        for license_file in module.get('licenses', []):
+            if (module['path'], license_file['name']) == ('example.test/dep', 'LICENSE'):
+                license_file['sha256'] = hashlib.sha256(body).hexdigest()
+    (drift / 'pin.json').write_text(json.dumps(document, indent=2) + '\n')
+    repin(drift)
+    drifted = model.load_closure(drift)
+    base, result = go_install(fixture_helper, drifted, fixture, 'go-install-notice-drift',
+                              model.Architecture.ARM64)
+    oracle = ''
+    try:
+        run_install(fixture, drifted, 'py-install-notice-drift',
+                    model.Architecture.ARM64)
+    except model.ClosureError as error:
+        oracle = str(error)
+    check('both installers refuse cache notices that are not the committed ones',
+          result.returncode == 1 and 'license evidence differs from the build cache'
+          in result.stderr
+          and 'license evidence differs from the build cache' in oracle,
+          f'(Go {result.stderr.strip()!r}, Python {oracle!r})')
+    check('the drifted notices published nothing',
+          not (base / 'bin').exists())
+
+    print('go install: a late failure withdraws every owned path, and the retry succeeds')
+    base = fixture.workspace / 'go-install-fault'
+    _ignored, result = go_install(fixture_helper, closure, fixture, 'go-install-fault',
+                                  model.Architecture.ARM64,
+                                  extra=['--fixture-fault', 'notice-written'])
+    check('the injected late failure is the reported one',
+          result.returncode == 1 and 'injected failure after the notice bytes' in result.stderr,
+          f'({result.returncode}: {result.stderr.strip()!r})')
+    check('no owned file and no owned directory survives the failure',
+          not (base / 'bin').exists() and not (base / 'share').exists(),
+          f'({sorted(str(path) for path in base.rglob("*"))})'
+          if base.exists() else '')
+    retried = run_helper(fixture_helper, install_argv(
+        closure, model.Architecture.ARM64, bin_dir=base / 'bin',
+        share_dir=base / 'share' / 'gopls', go_root=fixture.go_root,
+        fixture_proxy=fixture.proxy.url()))
+    check('the same-target retry after a real late failure succeeds',
+          retried.returncode == 0 and (base / 'bin' / 'gopls').is_file()
+          and (base / 'share' / 'gopls' / model.LICENSE_FILE).is_file(),
+          f'({retried.returncode}: {retried.stderr.strip()!r})')
+
+    # The other side of the same divergence (#188 G3): the oracle leaves the
+    # directories it created, and its own preflight then refuses the retry. Both
+    # halves are asserted, so a change to either side turns this red.
+    mutant = mutant_module('chmod_failure_owned_dirs', [
+        ('        os.chmod(licenses, 0o644)',
+         "        raise OSError('injected chmod failure')")], root / 'mutants-install')
+    oracle_base = fixture.workspace / 'py-install-fault'
+    oracle_target = mutant.Target(go_root=fixture.go_root, bin_dir=oracle_base / 'bin',
+                                  share_dir=oracle_base / 'share' / 'gopls',
+                                  arch=mutant.Architecture.ARM64)
+    # The mutant parses the same committed bytes with its own module, because a
+    # closure object from another module instance is not the same class; and each
+    # attempt owns its scratch, as the real adapter does, so the retry tests the
+    # target's state rather than a reused temporary tree.
+    loaded = mutant.load_closure(closure.directory)
+    try:
+        mutant.install(loaded, oracle_target, environment=fixture.build_environment(),
+                       runner=recording_runner([]))
+        oracle_failed = False
+    except (mutant.ClosureError, OSError):
+        oracle_failed = True
+    try:
+        check('the oracle fails the same late metadata step', oracle_failed)
+        check('the declared divergence: the oracle leaves its owned directory behind',
+              (oracle_base / 'share' / 'gopls').exists(),
+              'Python now removes it too, so this divergence is over and must be deleted')
+        refused_retry = ''
+        try:
+            mutant.install(loaded, oracle_target,
+                           environment=fixture.build_environment(),
+                           runner=recording_runner([]))
+        except mutant.ClosureError as error:
+            refused_retry = str(error)
+        check('the declared divergence: the oracle cannot retry the same target',
+              'refusing to install over an existing path' in refused_retry,
+              f'({refused_retry!r})')
+    finally:
+        remove_tree(root / 'mutants-install')
+
+    print('go install: the shipped build carries none of the fixture grammar')
+    shipped = run_helper(helper, install_argv(
+        closure, model.Architecture.ARM64, bin_dir=fixture.workspace / 'shipped-bin',
+        share_dir=fixture.workspace / 'shipped-share', go_root=fixture.go_root,
+        fixture_proxy=fixture.proxy.url()))
+    check('the shipped helper refuses the fixture proxy flag',
+          shipped.returncode == 2 and 'usage:' in shipped.stderr,
+          f'({shipped.returncode}: {shipped.stderr.strip()!r})')
+    check('the refused fixture invocation created nothing',
+          not (fixture.workspace / 'shipped-bin').exists())
 
 
 def test_escaping(fixture, closure) -> None:
@@ -2281,22 +2607,26 @@ def main() -> int:
     # compiler is not allowlisted and a setuid bit is stripped.
     if os.environ.get(sandbox.SANDBOXED_ENV) == '1':
         helper = Path(os.environ['GO_DEV_HELPER'])
+        fixture_helper = Path(os.environ['GO_DEV_HELPER_FIXTURE'])
         root = Path(os.environ['GO_DEV_PINS_ROOT'])
         directory, record, document, setuid, candidate = (
             Path(path) for path in os.environ['GO_DEV_WITNESSES'].split(os.pathsep))
         witnesses = Witnesses(directory, record, document, setuid, candidate)
-        if not helper.is_file() or not witnesses.setuid_binary.is_file():
-            print('gopls-closure-pins: the sandboxed pass is missing the helper or the '
+        if (not helper.is_file() or not fixture_helper.is_file()
+                or not witnesses.setuid_binary.is_file()):
+            print('gopls-closure-pins: the sandboxed pass is missing a helper or the '
                   'witnesses the first pass prepared', file=sys.stderr)
             return 1
     else:
         helper = build_go_dev_helper()
+        fixture_helper = build_go_dev_helper(fixture=True)
         # The scratch root is created here, before the boundary, because the re-exec
         # runs this function again: a second mkdtemp would strand the witnesses under
         # the first one and the fixture would write into a tree no check names.
         root = Path(tempfile.mkdtemp(prefix='gopls-closure-pins-')).resolve()
         witnesses = prepare_witnesses(root / 'witnesses', go_root / 'bin' / 'go')
         os.environ['GO_DEV_HELPER'] = str(helper)
+        os.environ['GO_DEV_HELPER_FIXTURE'] = str(fixture_helper)
         os.environ['GO_DEV_PINS_ROOT'] = str(root)
         os.environ['GO_DEV_WITNESSES'] = os.pathsep.join(
             str(path) for path in (witnesses.directory, witnesses.record_root,
@@ -2305,7 +2635,8 @@ def main() -> int:
 
     # The writer's children are not the only tree that needs the boundary: this
     # suite's real Go builds run under it too.
-    executables = go_executables(go_root) + [str(helper), *witnesses.executables()]
+    executables = go_executables(go_root) + [str(helper), str(fixture_helper),
+                                             *witnesses.executables()]
     try:
         sandbox.reexec_into_sandbox(
             executables,
@@ -2340,6 +2671,7 @@ def main() -> int:
 
         closure = model.load_closure(candidate)
         test_install(fixture, closure)
+        test_go_install_differential(fixture, closure, root, helper, fixture_helper)
         test_escaping(fixture, closure)
         test_hostile_ambient(fixture, closure)
         test_dependency_directives(fixture)

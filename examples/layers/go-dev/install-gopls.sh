@@ -4,11 +4,11 @@
 #
 # Why it is this thin: the selected module graph, both checksum kinds for every
 # selected module, the reviewed notice files and the record binding them live in
-# gopls-closure/, and gopls_closure.py is the only program that verifies and
-# installs them. This adapter exists so the Dockerfile keeps one plain RUN line
-# and a standalone host build behaves the same way. There is no alternate
-# install path: no `go install pkg@version`, no proxy-side version resolution and
-# no "latest" here.
+# gopls-closure/, and the layer's own `go-dev-helper install` is the only program
+# that verifies and installs them (#251). This adapter exists so the Dockerfile
+# keeps one plain RUN line and a standalone host build behaves the same way. There
+# is no alternate install path: no `go install pkg@version`, no proxy-side version
+# resolution and no "latest" here, and no Python: the layer's build runs none.
 #
 # What the helper proves before anything is published: the committed bytes match
 # their recorded digests, the wrapper module is in its reviewed canonical form,
@@ -17,10 +17,16 @@
 # reviewed current-pin adoption restriction. It then compiles with
 # `-mod=readonly` in an environment it builds from scratch (GOTOOLCHAIN=local,
 # proxy without `,direct`, explicit sumdb key, empty GOFLAGS, private caches,
-# CGO_ENABLED=0 and this image's Linux target), and finally accepts the result
-# only if the binary's own build info reports the pinned compiler, exactly the
-# reviewed modules and exactly their sums. The third-party licence file is
-# published from the same verified bytes.
+# CGO_ENABLED=0 and this image's Linux target), proves the module-cache notices are
+# the committed ones, and accepts the result only if the binary's own build info
+# reports the pinned compiler, exactly the reviewed modules and exactly their sums.
+# The third-party licence file is published from the same verified bytes. On any
+# failure it withdraws only the paths that invocation created, directories
+# included, so a retry over the same target is possible.
+#
+# Who speaks HTTP: the pinned `go` child, for module objects the committed go.sum
+# already names. The helper itself makes no request. There is no version
+# resolution, no new sum, no sum-database lookup and no toolchain download here.
 #
 # Environment:
 #   GOPLS_VERSION  required; the module version the closure must select
@@ -42,7 +48,6 @@ GO_TOOLS_BIN="${GO_TOOLS_BIN:-/opt/go-tools/bin}"
     exit 1
 }
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-export PYTHONDONTWRITEBYTECODE=1
 
 arch=$(dpkg --print-architecture)
 case "$arch" in
@@ -54,7 +59,7 @@ case "$arch" in
 esac
 
 echo "==> install-gopls: gopls ${GOPLS_VERSION} ($arch) from the committed closure"
-/usr/bin/python3 "$HERE/gopls_closure.py" install "$HERE/gopls-closure" \
+"$HERE/go-dev-helper" install "$HERE/gopls-closure" \
     --expect-gopls "$GOPLS_VERSION" --expect-go "$GO_VERSION" \
     --go-root "$GO_PREFIX" --arch "$arch" \
     --bin-dir "$GO_TOOLS_BIN" --share-dir /opt/go-tools/share/gopls

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the digest of every input the go-dev gopls steps build from.
+"""Print the digest of every input the go-dev layer's build steps read.
 
 The native harness records these in its log so acceptance evidence binds the
 working-copy bytes, not just the source commit and a count of dirty tracked
@@ -21,12 +21,11 @@ import sys
 # module, or a layer that lost an adapter, must fail the derivation itself. The
 # number is below today's total (52) so an honest edit is a diff, and the named
 # paths are the ones whose loss would silently shrink what the run binds.
-MINIMUM_INPUTS = 40
+MINIMUM_INPUTS = 45
 REQUIRED_INPUTS = (
     'Dockerfile',
     'install-gopls.sh',
     'verify-toolchain.sh',
-    'gopls_closure.py',
     'data/gopls-closure/go.mod',
     'data/gopls-closure/go.sum',
     'data/gopls-closure/gopls.go.mod',
@@ -35,9 +34,10 @@ REQUIRED_INPUTS = (
     'helper/go.mod',
     'helper/go.sum',
     'helper/vendor/modules.txt',
-    # The installed-state verifier the recipe and the native bundle run (#250): its
-    # sources are digested by the helper walk, and these three name the packages
-    # whose loss would leave the verb unable to load, run, or judge.
+    # The installer the recipe runs (#251): its sources are digested by the helper
+    # walk, and these two name the package whose loss would leave the verb unable to
+    # build and publish, or to load and verify what it installed.
+    'helper/install/install.go',
     'helper/installed/installed.go',
     'helper/gotool/gotool.go',
     'helper/buildinfo/buildinfo.go',
@@ -50,15 +50,17 @@ def main() -> int:
         return 2
     root = pathlib.Path(sys.argv[1])
     layer = root / sys.argv[2]
-    # Exactly the inputs the Dockerfile binds for the gopls steps, in the two sets
-    # the recipe uses: the final stage's mounts (recipe, three adapters, the Python
-    # reader, the five committed closure files) and the builder stage's bind
-    # (`helper`, the whole module including its vendor tree, which is what the
-    # stage compiles). The helper tree is walked rather than listed so a new source
-    # file cannot be built without being digested; the count is floored by the
-    # self-test control, which is what makes a short walk fail rather than pass.
+    # Exactly the inputs the Dockerfile binds, in the two sets the recipe uses: the
+    # final stage's mounts (the recipe, its two shell adapters and the five committed
+    # closure files) and the builder stage's bind (`helper`, the whole module
+    # including its vendor tree, which is what the stage compiles). `gopls_closure.py`
+    # is deliberately absent since #251: no step mounts it, the installer is Go, and
+    # the Python reader is a host-only oracle. The helper tree is walked rather than
+    # listed so a new source file cannot be built without being digested; the count is
+    # floored by the self-test control, which is what makes a short walk fail rather
+    # than pass.
     paths = [layer / name for name in ('Dockerfile', 'install-gopls.sh',
-                                       'verify-toolchain.sh', 'gopls_closure.py')]
+                                       'verify-toolchain.sh')]
     paths += sorted(path for path in (layer / 'data' / 'gopls-closure').iterdir()
                     if path.is_file())
     helper = layer / 'helper'
