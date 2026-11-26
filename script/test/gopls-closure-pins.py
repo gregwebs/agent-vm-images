@@ -1319,51 +1319,117 @@ BUILD_INFO_DIVERGENCES = frozenset(
 
 
 @dataclasses.dataclass(frozen=True)
-class OracleCrash:
-    """The oracle raised instead of returning a verdict."""
+class Verdict:
+    """One reader's verdict, constructed only by the code that ran it.
 
-    type: str
-    text: str
+    `status` is 0 (accept), 1 (refuse) or 'raises' (the reader had no verdict at
+    all). A callable that returns anything else — `None` in particular — has not
+    observed a verdict, and `Corpus.compare` refuses it instead of counting it.
+    """
+
+    status: int | str
+    fragment: str | None = None
+
+    @property
+    def accepted(self) -> bool:
+        return self.status == 0
+
+    @property
+    def crashed(self) -> bool:
+        return self.status == 'raises'
 
 
 class Corpus:
-    """Bookkeeping that can only advance when an execution happened.
+    """Bookkeeping that can only advance when both executions happened.
 
     Both readers are called *inside* compare(), and each observation inside
     observe(), so a row that stops running one side is a shortfall in that side's
-    count rather than a silently smaller agreement total.
+    count rather than a silently smaller agreement total. The agreement and
+    divergence counts are read-only properties over the comparison count, so a
+    single-observer row cannot reach them at all: `agreements += 1` there raises.
     """
 
     def __init__(self) -> None:
         self.comparisons = 0
-        self.agreements = 0
-        self.divergences = 0
         self.observations = 0
         self.go_runs = 0
         self.python_runs = 0
         self.go_accepts = 0
+        # equal is written only by compare(), under the verdict checks below.
+        self.equal = 0
+
+    @property
+    def agreements(self) -> int:
+        return self.equal
+
+    @property
+    def divergences(self) -> int:
+        return self.comparisons - self.equal
 
     def compare(self, inspect, run):
         oracle = inspect()
+        if not isinstance(oracle, Verdict):
+            raise AssertionError(
+                f'the oracle callable returned {oracle!r}, which is not an observed '
+                f'verdict: a side that did not run cannot be counted')
         result = run()
+        if not isinstance(result, subprocess.CompletedProcess):
+            raise AssertionError(
+                f'the reader callable returned {result!r}, which is not a finished '
+                f'process: a side that did not run cannot be counted')
         self.comparisons += 1
         self.go_runs += 1
         self.python_runs += 1
         if result.returncode == 0:
             self.go_accepts += 1
-        if (oracle is None) == (result.returncode == 0):
-            self.agreements += 1
-        else:
-            self.divergences += 1
+        if oracle.accepted == (result.returncode == 0):
+            self.equal += 1
         return oracle, result
 
     def observe(self, run):
         result = run()
+        if not isinstance(result, subprocess.CompletedProcess):
+            raise AssertionError(
+                f'the reader callable returned {result!r}, which is not a finished '
+                f'process')
         self.observations += 1
         self.go_runs += 1
         if result.returncode == 0:
             self.go_accepts += 1
         return result
+
+
+def corpus_control() -> None:
+    """The counter's own control, driven once before any corpus runs.
+
+    A comparison whose oracle callable returns no verdict must fail rather than
+    shrink the totals, and a single-observer row must not be able to reach the
+    agreement count. Both are the failure modes this mechanism exists to prevent, so
+    both are exercised directly instead of being assumed.
+    """
+    corpus = Corpus()
+    finished = subprocess.CompletedProcess([], 0, 'v0.0.1\n', '')
+    try:
+        corpus.compare(lambda: None, lambda: finished)
+    except AssertionError:
+        pass
+    else:
+        raise SystemExit('gopls-closure-pins: a comparison over no verdict was counted')
+    if corpus.comparisons or corpus.python_runs or corpus.agreements:
+        raise SystemExit('gopls-closure-pins: a comparison over no verdict advanced the '
+                         'counters')
+    corpus.observe(lambda: finished)
+    try:
+        corpus.agreements += 1
+    except AttributeError:
+        pass
+    else:
+        raise SystemExit('gopls-closure-pins: a single-observer row can reach the '
+                         'agreement count')
+    if corpus.agreements != 0 or corpus.divergences != 0:
+        raise SystemExit('gopls-closure-pins: an observation moved the paired counters')
+    print('corpus: no verdict is not counted, and an observation cannot reach the '
+          'paired counters')
 
 
 def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
@@ -1384,21 +1450,21 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
 
     corpus = Corpus()
 
-    def in_process(runner=None, inspected=None):
-        """The oracle's verdict: its refusal text, None when it accepts, or the
-        exception it raised when it has no verdict at all (OracleCrash).
+    def in_process(runner=None, inspected=None) -> Verdict:
+        """The oracle's verdict, as a typed observation.
 
-        The third outcome is data, not a crash: `json.loads` converts number
-        literals, so a document the ported reader accepts can be one the oracle
+        A refusal is (1, text), an acceptance (0), and an exception is ('raises',
+        type): the third is data, not a crash, because `json.loads` converts number
+        literals and so a document the ported reader accepts can be one the oracle
         cannot parse. A case that expects it declares 'raises' in the register.
         """
         try:
             model.verify_installed(closure, inspected or target, runner=runner)
         except model.ClosureError as error:
-            return str(error)
+            return Verdict(1, str(error))
         except Exception as error:  # noqa: BLE001 - "no verdict" is an outcome here
-            return OracleCrash(type(error).__name__, str(error))
-        return None
+            return Verdict('raises', type(error).__name__)
+        return Verdict(0)
 
     print('verify-installed: both readers on both Linux targets')
     for arch in model.Architecture:
@@ -1409,7 +1475,7 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
                 closure, arch, binary=target.bin_dir / 'gopls',
                 share_dir=target.share_dir, go_root=fixture.go_root)))
         check(f'{arch.value}: the installed-state verifier accepts the installation',
-              oracle is None and result.returncode == 0 and result.stdout == 'v0.0.1\n'
+              oracle.accepted and result.returncode == 0 and result.stdout == 'v0.0.1\n'
               and result.stderr == '',
               f'(oracle {oracle!r}, reader {result.returncode}, {result.stdout!r}, '
               f'{result.stderr!r})')
@@ -1460,7 +1526,7 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
             closure, target.arch, binary=target.bin_dir / 'gopls',
             share_dir=target.share_dir, go_root=fixture.go_root)))
     check('a correct installation verifies in both readers',
-          oracle is None and control.returncode == 0 and control.stdout == 'v0.0.1\n',
+          oracle.accepted and control.returncode == 0 and control.stdout == 'v0.0.1\n',
           f'(oracle {oracle!r}, reader {control.returncode}/{control.stderr.strip()!r})')
     license_path = target.share_dir / 'THIRD_PARTY_LICENSES'
     original_license = license_path.read_bytes()
@@ -1514,12 +1580,12 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
             restore()
         if python_fragment is None:
             check(f'{label}: the oracle accepts, the reader refuses (declared divergence)',
-                  message is None and result.returncode == 1
+                  message.accepted and result.returncode == 1
                   and go_fragment in result.stderr and result.stdout == '',
                   f'(oracle {message!r}, reader {result.returncode}/{result.stderr.strip()!r})')
             return
         check(f'{label}: both readers refuse it',
-              isinstance(message, str) and python_fragment in message
+              message.status == 1 and python_fragment in (message.fragment or '')
               and result.returncode == 1 and go_fragment in result.stderr
               and result.stdout == '',
               f'(oracle {message!r}, reader {result.returncode}/{result.stderr.strip()!r})')
@@ -1562,7 +1628,7 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
             share_dir=target.share_dir, go_root=witnesses.document_root)))
     check('a setuid binary mode: the oracle accepts, the reader refuses (declared '
           'divergence)',
-          oracle is None and setuid_result.returncode == 1 and setuid_result.stdout == ''
+          oracle.accepted and setuid_result.returncode == 1 and setuid_result.stdout == ''
           and 'has mode 4755, want 755' in setuid_result.stderr,
           f'(oracle {oracle!r}, reader {setuid_result.returncode}/'
           f'{setuid_result.stderr.strip()!r})')
@@ -1584,7 +1650,8 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
     finally:
         sibling.unlink()
     check('a requested binary path with no file is not substituted from a sibling',
-          isinstance(sibling_message, str) and 'installed: missing' in sibling_message
+          sibling_message.status == 1
+          and 'installed: missing' in (sibling_message.fragment or '')
           and sibling_result.returncode == 1
           and 'installed: missing' in sibling_result.stderr,
           f'(oracle {sibling_message!r}, reader {sibling_result.stderr.strip()!r})')
@@ -1683,12 +1750,11 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
             problems.append(f'reader refusal {result.stderr.strip()!r} does not name '
                             f'{go_fragment!r}')
         if python_status == 'raises':
-            if not isinstance(oracle, OracleCrash) or oracle.type != python_fragment:
+            if not oracle.crashed or oracle.fragment != python_fragment:
                 problems.append(f'oracle {oracle!r}, want it to raise {python_fragment}')
-        elif (oracle is None) != (python_status == 0):
+        elif oracle.accepted != (python_status == 0):
             problems.append(f'oracle verdict {oracle!r}, want status {python_status}')
-        elif python_status == 1 and (
-                not isinstance(oracle, str) or python_fragment not in oracle):
+        elif python_status == 1 and python_fragment not in (oracle.fragment or ''):
             problems.append(f'oracle refusal {oracle!r} does not name {python_fragment!r}')
         check(f'{name}: both readers declare their own verdict', not problems,
               '; '.join(problems))
@@ -2225,9 +2291,9 @@ def main() -> int:
             return 1
     else:
         helper = build_go_dev_helper()
-        # The scratch root is created here too: the setuid witness is hard-linked into
-        # an installation, and a link cannot cross the mounts the boundary gives the
-        # two trees, so both have to be under the tree this pass created.
+        # The scratch root is created here, before the boundary, because the re-exec
+        # runs this function again: a second mkdtemp would strand the witnesses under
+        # the first one and the fixture would write into a tree no check names.
         root = Path(tempfile.mkdtemp(prefix='gopls-closure-pins-')).resolve()
         witnesses = prepare_witnesses(root / 'witnesses', go_root / 'bin' / 'go')
         os.environ['GO_DEV_HELPER'] = str(helper)
@@ -2254,6 +2320,8 @@ def main() -> int:
     guards.install(executables)
 
     import gopls_closure as model  # noqa: F401 - imported after confinement
+
+    corpus_control()
 
     sys.path.insert(0, str(FIXTURES))
     import fixture as fixture_module

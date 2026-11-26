@@ -179,6 +179,69 @@ func TestProgramIsTheFirstPathEntry(t *testing.T) {
 	}
 }
 
+// TestCallerRootSpellingReachesThePinnedGo: the third consumer of the module's
+// no-normalise join. The loader and the verifier each have a row for it; without this
+// one, replacing pathjoin.Join with filepath.Join in this package would leave every
+// gotool test green while the child ran a `go` from a path the caller never named.
+//
+// The spelling is the same shape as the other two: `a/link` links to `b/sub`, so the
+// kernel's `a/link/../go-root` is `b/go-root` and a lexical clean reads `a/go-root`.
+func TestCallerRootSpellingReachesThePinnedGo(t *testing.T) {
+	root := t.TempDir()
+	a := filepath.Join(root, "a")
+	b := filepath.Join(root, "b")
+	sub := filepath.Join(b, "sub")
+	for _, directory := range []string{a, sub} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", directory, err)
+		}
+	}
+	if err := os.Symlink(sub, filepath.Join(a, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	// Only the kernel's target carries the compiler, so a joined path must name it.
+	if err := os.MkdirAll(filepath.Join(b, "go-root", "bin"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(b, "go-root", "bin", "go"), []byte("#!/bin/sh\n"),
+		0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	requested := a + "/link/../go-root"
+	target := Target{GoRoot: requested, Arch: ARM64}
+	paths := testPaths(t)
+	environment, err := Offline().ChildEnv(target, paths, nil)
+	if err != nil {
+		t.Fatalf("ChildEnv: %v", err)
+	}
+	child, err := NewChild(environment, EnvGoVersion, nil, "/work")
+	if err != nil {
+		t.Fatalf("NewChild: %v", err)
+	}
+	wantProgram := requested + "/bin/go"
+	if child.Program != wantProgram {
+		t.Fatalf("program %q, want the caller's spelling %q", child.Program, wantProgram)
+	}
+	pathEntry := ""
+	for _, entry := range child.Env {
+		if value, found := strings.CutPrefix(entry, "PATH="); found {
+			pathEntry = strings.Split(value, ":")[0]
+		}
+	}
+	if pathEntry != requested+"/bin" {
+		t.Fatalf("PATH's first entry is %q, want the caller's spelling %q", pathEntry,
+			requested+"/bin")
+	}
+	// The spelling names a real file through the kernel, and the cleaned spelling does
+	// not: this is what makes the string assertions above a filesystem statement.
+	if info, err := os.Stat(child.Program); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("the pinned go is not at the caller's spelling %q: %v", child.Program, err)
+	}
+	if _, err := os.Stat(a + "/go-root/bin/go"); err == nil {
+		t.Fatalf("the lexically cleaned spelling exists, so this row cannot discriminate")
+	}
+}
+
 // TestArchitectureText: only the two reviewed targets parse, and anything else is
 // a parse error (the CLI's status 2), not a value passed through to GOARCH.
 func TestArchitectureText(t *testing.T) {

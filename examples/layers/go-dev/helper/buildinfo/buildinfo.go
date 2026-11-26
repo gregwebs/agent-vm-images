@@ -23,11 +23,14 @@
 // number literal it parses and has a 4,300-digit limit, so a document with a 5,000-digit
 // literal in an optional member it does not read has no oracle verdict at all
 // (`ValueError`), while this reader accepts it. That is deliberate: the literal is kept
-// as written and never converted, and the member is unread, so there is nothing to
-// decide. It is also why Python's digit limit is not a denial-of-service surface here:
-// this package never turns a literal into a big integer, and the pin loader's only
-// conversion is `schema` through strconv.Atoi, which rejects an out-of-range literal
-// without allocating one.
+// as written and this member is never converted, so there is nothing to decide.
+//
+// What that does and does not say about denial of service: no number here becomes a big
+// integer, and no arithmetic is done on one, so this path cannot spend CPU on bignum
+// work. It does not make a huge document free — the literal is retained as a string of
+// its own length, parsing costs time proportional to the input, and a conversion's error
+// path copies the literal too. The bound is on the *kind* of work, not a proof that a
+// large document is harmless.
 package buildinfo
 
 import (
