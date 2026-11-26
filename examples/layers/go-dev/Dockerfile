@@ -8,9 +8,10 @@
 #     --tag agent-vm-go-dev:dev examples/layers/go-dev
 #   agent-vm claude --image agent-vm-go-dev:dev
 #
-# NAME is any host daemon-backed buildx builder that supports an OCI export: this
-# recipe is one `FROM ${BASE_IMAGE}` stage. This repository selects no builder, so
-# the name is the caller's.
+# NAME is any host daemon-backed buildx builder that supports multi-stage
+# Dockerfiles, `RUN --network=none` and an OCI export: the first stage compiles the
+# layer's own helper module. This repository selects no builder, so the name is the
+# caller's.
 #
 # It provides the pinned Go toolchain (go, gofmt, go vet, ...) plus the two
 # tools a Go project's edit/CI loop expects beyond it: golangci-lint and the
@@ -23,16 +24,75 @@
 # verify-toolchain.sh. This file only wires the pins and locations into them.
 #
 # Two further paths are build-only inputs, mounted read-only for the steps that
-# need them and never copied into the image: `gopls_closure.py` (the only
-# program that checks or installs the gopls closure) and `gopls-closure/` (the
-# reviewed module selection, its sums, its licences and the record that binds
-# them). See docs/adr/0008-go-example-gopls-closure.md.
+# need them and never copied into the image: `gopls_closure.py` (until #251 the
+# program that installs the gopls closure and verifies the installed binary) and
+# `data/gopls-closure/` (the reviewed module selection, its sums, its licences and
+# the record that binds them). See docs/adr/0008-go-example-gopls-closure.md. The
+# layer's own `go-dev-helper` reads the same five files offline; the Python
+# install, verifier and writer are unchanged by #249.
 #
 # The `ARG BASE_IMAGE`/`FROM ${BASE_IMAGE}` pair lets `--build-arg BASE_IMAGE=…`
 # retarget the build, and every `ENV` keeps `PATH` additive
 # (`PATH=<new>:${PATH}`) so the base's directories are never dropped.
 
 ARG BASE_IMAGE=ghcr.io/gregwebs/agent-vm-standard@sha256:04701db70ef6c2c75078ca39a85ce4b4c15b04cacfea47836c2e5d113c4d42de
+
+# go-dev-helper: this layer's own program (ADR 0017, "Example layers stay
+# self-contained"). An example build has no `--build-context`, so the module under
+# helper/ is compiled by this stage and mounted read-only into the one RUN that
+# needs it; nothing is copied into the image. The stage is the first FROM and the
+# image's own is the last, which `script/test/example-layers.sh` holds, and
+# `images/parent-pins.json` registers both stages as parents.
+#
+# The binding to the repository's Go toolchain is a chain, one link per gate:
+#
+#   1. here: the compiler in the image must be the `toolchain` line of
+#      helper/go.mod, so a builder whose patch release drifted cannot compile;
+#   2. script/test/example-layers.sh: helper/go.mod's `go` and `toolchain` lines
+#      must equal the root go.mod's, so the two modules cannot disagree;
+#   3. script/test/example-layers.sh: the FROM below must be exactly
+#      `golang:<root toolchain>-trixie` at the digest images/parent-pins.json
+#      records for `.pins["golang-builder"]`, so the image is the reviewed bytes;
+#   4. script/test/image-sources: the FROM must also be the reference the parent
+#      inventory binds to this stage.
+#
+# The chain binds a compiler version and this recipe/inventory relationship. It
+# does not bind source bytes, and neither does anything else here: a comment-only
+# edit under helper/ changes nothing any gate sees.
+#
+# The host check in `script/test/example-layers.sh` (the same module, built with the
+# same flags, over the same data the image mounts) and the parity suite
+# (`script/test/gopls-closure-parity.py`, this reader against the Python oracle over
+# the committed bytes and a mutant corpus) bind the reader's *behaviour*, not its
+# source: they fail when the rules or their verdicts change, and they stay green for
+# an edit that changes neither. Binding source bytes for a product image is #233's
+# question, and it is a different one.
+#
+# This stage is a closed instruction set: exactly the FROM below and the RUN below,
+# and `script/test/example-layers.sh` refuses every other instruction class. That
+# allowlist, not the wording of the RUN, is what the guarantees rest on: `SHELL`
+# can rewrite the command while the RUN stays byte-identical, `ADD` can fetch over
+# the network in a stage whose RUN has `--network=none`, and `ENV`/`ARG` can reach
+# the compiler through the environment.
+#
+# The committed vendor tree is the build's dependency closure. The `-mod=vendor` in
+# the RUN is policy, not the enforcement: Go selects vendor mode by default when
+# `vendor/modules.txt` is present, so removing the flag still builds. What the
+# bytes are worth is a different gate — `script/test/example-helper-vendor.sh
+# examples/layers/go-dev/helper` regenerates the tree and diffs it, and that gate
+# runs in the default contracts mode only.
+#
+# There is no `--platform=$BUILDPLATFORM`: the stage compiles for the target
+# platform natively, so the build does not depend on the builder resolving
+# BUILDPLATFORM.
+FROM golang:1.27.3-trixie@sha256:fbb7ae40b62ff8afe31662df570d39b4f5052ac32b90dae8e60d7657a20a74f4 AS go-dev-helper
+RUN --network=none --mount=type=bind,source=helper,target=/src,ro \
+    cd /src \
+ && { [ "$(GOTOOLCHAIN=local go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)" ] \
+      || { echo "go-dev-helper: the image compiler is not go.mod's toolchain" >&2; exit 1; }; } \
+ && GOTOOLCHAIN=local GOWORK=off GOENV=off GOFLAGS=-mod=vendor GOPROXY=off CGO_ENABLED=0 \
+    go build -trimpath -buildvcs=false -o /out/go-dev-helper .
+
 FROM ${BASE_IMAGE}
 
 # Runtime network requests (ADR 0014): the GOPROXY/GOSUMDB defaults.
@@ -101,6 +161,19 @@ RUN --mount=type=bind,source=install-gopls.sh,target=/tmp/install-gopls.sh,ro \
     --mount=type=bind,source=gopls_closure.py,target=/tmp/gopls_closure.py,ro \
     --mount=type=bind,source=data/gopls-closure,target=/tmp/gopls-closure,ro \
     bash /tmp/install-gopls.sh
+
+# The same five committed files, read offline by the layer's own Go reader. This is
+# the one `check`: no Go command runs, nothing is downloaded, and the two asserted
+# versions are the recipe's ARGs, so a bumped pin without a regenerated closure
+# fails the build here as well as in the Python install above. The binary is
+# mounted from the builder stage and the data from the build context; neither is
+# copied into the image. `script/test/example-layers.sh` holds this line's exact
+# shape, and `script/test/gopls-closure-parity.py` holds its verdicts against the
+# Python reader.
+RUN --network=none \
+    --mount=type=bind,from=go-dev-helper,source=/out/go-dev-helper,target=/tmp/go-dev-helper,ro \
+    --mount=type=bind,source=data/gopls-closure,target=/tmp/gopls-closure,ro \
+    /tmp/go-dev-helper check /tmp/gopls-closure --expect-gopls "$GOPLS_VERSION" --expect-go "$GO_VERSION"
 
 # PATH stays additive: the base's entries are preserved via
 # ${PATH}. GOTOOLCHAIN=local makes the pin the toolchain that actually

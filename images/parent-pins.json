@@ -104,6 +104,10 @@
     ],
     "examples/layers/go-dev/Dockerfile": [
       {
+        "stage": "go-dev-helper",
+        "pin": "golang-builder"
+      },
+      {
         "stage": null,
         "pin": "standard-release"
       }

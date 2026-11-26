@@ -58,17 +58,26 @@ formatter="$selected_goroot/bin/gofmt"
 go_packages=(./internal/... ./images/... ./cmd/...)
 harness_packages=(./script/test/pinsuite/...)
 # An example layer's own helper is a module of its own (ADR 0017), so the root
-# module's package patterns cannot cross into it: it is formatted, vetted, linted,
+# module's package patterns cannot cross into it: each is formatted, vetted, linted,
 # tested and vendor-checked as the separate module it is. The Dockerfile stage
-# compiles it with `-mod=vendor` under `--network=none`, so its gates run the same
-# way instead of reaching a proxy.
-helper_module="$contract_module/examples/layers/rust-dev/helper"
+# compiles each with `-mod=vendor` under `--network=none`, so its gates run the same
+# way instead of reaching a proxy. Both modules are listed here by name; a helper
+# module nobody lists would be built by an image and checked by nothing.
+helper_modules=(
+    "$contract_module/examples/layers/rust-dev/helper"
+    "$contract_module/examples/layers/go-dev/helper"
+)
 if package_dirs=$(cd "$contract_module" && GOTOOLCHAIN=auto go list -f '{{.Dir}}' "${go_packages[@]}" "${harness_packages[@]}"); then :; else
     status=$?; echo 'cannot list the module packages' >&2; exit "$status"
 fi
-if helper_dirs=$(cd "$helper_module" && GOTOOLCHAIN=auto GOFLAGS=-mod=vendor go list -f '{{.Dir}}' ./...); then :; else
-    status=$?; echo 'cannot list the example helper module packages' >&2; exit "$status"
-fi
+helper_dirs=''
+for helper_module in "${helper_modules[@]}"; do
+    if listed=$(cd "$helper_module" && GOTOOLCHAIN=auto GOFLAGS=-mod=vendor go list -f '{{.Dir}}' ./...); then :; else
+        status=$?; echo "cannot list the example helper module packages: $helper_module" >&2; exit "$status"
+    fi
+    helper_dirs="$helper_dirs
+$listed"
+done
 package_dirs="$package_dirs
 $helper_dirs"
 format_files=()
@@ -96,16 +105,20 @@ fi
 #    compares the files byte for byte.
 # The helper's filter is repeated in the default mode's `go test ./...`, which is
 # deliberate: the boundary is cheap and it is the one gate a guard-only run must
-# not lose.
-(cd "$helper_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test \
+# not lose. It is one register in one file (#188 G2: rust-dev's helper test owns the
+# table) and it classifies both layers' helper modules and the root `avm-pin`
+# closure, so a go-dev source file that gains `os/exec` is refused here too.
+(cd "${helper_modules[0]}" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test \
     -run 'TestImportsAreReviewed|TestImportBoundaryControls' .)
 (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test ./internal/vendordrift)
 # Vendor mode: dependencies are committed, so the gates never reach a module
 # proxy. A missing vendor tree fails here instead of downloading.
 (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go vet "${go_packages[@]}" "${harness_packages[@]}")
 (cd "$contract_module" && golangci-lint run "${go_packages[@]}" "${harness_packages[@]}")
-(cd "$helper_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go vet ./...)
-(cd "$helper_module" && golangci-lint run ./...)
+for helper_module in "${helper_modules[@]}"; do
+    (cd "$helper_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go vet ./...)
+    (cd "$helper_module" && golangci-lint run ./...)
+done
 # The composed helper is shared by every suite below and by the Rust graph guard,
 # so it is built once here: after the lint gates, because the formatter suite
 # replaces `go` and must stop at vet.
@@ -128,12 +141,15 @@ if [ "$guard_only" = false ]; then
     # are the fixture-seam absence test (it builds the shipped and the
     # `example_fixture` binary and holds the shipped one to carrying no seam) and
     # the kache-probe cases.
-    (cd "$helper_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test ./...)
+    for helper_module in "${helper_modules[@]}"; do
+        (cd "$helper_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test ./...)
+    done
     # Regeneration-plus-diff is the vendor drift gate: `go mod vendor` does not
     # authenticate edits to the committed tree and `go mod verify` never reads it.
     # It downloads through GOPROXY/GOSUMDB, so it is default-mode only.
     bash script/test/recipe-contract-vendor.sh
     bash script/test/example-helper-vendor.sh examples/layers/rust-dev/helper
+    bash script/test/example-helper-vendor.sh examples/layers/go-dev/helper
     python3 script/test/recipe-contract-oracle.py
     node script/test/recipe-contract-oracle.mjs
     python3 script/test/recipe-contract-adapters.py
@@ -189,6 +205,11 @@ if [ "$guard_only" = false ]; then
     # compiler; both suites refuse any other toolchain.
     python3 script/test/gopls-closure-pins.py --go-root "$selected_goroot"
     python3 script/test/gopls-closure-maintenance.py --go-root "$selected_goroot"
+    # The one Go/Python comparison of the gopls closure reader (#249): the layer's
+    # own `check` against the live Python oracle over the committed bytes and a
+    # mutant corpus, with a per-side floor and a case counter. It builds the host
+    # helper with the same flags the layer's stage uses, so it needs no daemon.
+    python3 script/test/gopls-closure-parity.py
     for suite in agent-versions apt-sources agy-installer claude-installer codex-installer copilot-installer copilot-verify \
         opencode-installer opencode-pnpm-prepare-lock opencode-pnpm-install opencode-pnpm-upgrade \
         opencode-plugins-verify run-pnpm dsh-prepare-lock dsh-verify pi-install pi-bridge-install pi-antigravity-install \

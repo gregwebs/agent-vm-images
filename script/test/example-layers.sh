@@ -24,12 +24,14 @@ HELPER_BUILD=${CHECKER%/*}/../build/example-helper.sh
 # deletion/rename must fail rather than silently leave lint coverage.
 GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp.sh go-dev/gopls_closure.py go-dev/install-go.sh go-dev/install-golangci-lint.sh go-dev/install-gopls.sh go-dev/verify-toolchain.sh rust-dev/install-kache.sh rust-dev/install-rust.sh rust-dev/install-verus.sh rust-dev/verify-toolchain.sh'
 # A layer may also carry its own Go module under `helper/` (ADR 0017, example
-# layers stay self-contained). Its non-vendor files are named here one entry per
-# file, like GUARDED_DATA: a reviewer of a new source file sees it in the diff, a
+# layers stay self-contained). Both layers that do are listed below; rust-dev's is
+# linked into the root module (#232) and go-dev's is not (#249, owner ruling G1),
+# and the entries are one list so a new source file is a review wherever it lands.
+# Its non-vendor files are named here one entry per file, like GUARDED_DATA: a reviewer of a new source file sees it in the diff, a
 # listed file that vanishes fails as `guarded script missing`, and a `.go` file
 # nobody listed fails as `unreviewed helper file`. The vendor tree is deliberately
 # out of this list: its bytes belong to the module's vendor drift gate.
-GUARDED_GO='rust-dev/helper/go.mod rust-dev/helper/go.sum rust-dev/helper/main.go rust-dev/helper/main_test.go rust-dev/helper/imports_test.go rust-dev/helper/seams_fixture.go rust-dev/helper/seams_shipped.go rust-dev/helper/seams_test.go rust-dev/helper/kacheprobe/probe.go rust-dev/helper/kacheprobe/probe_test.go rust-dev/helper/internal/gpg/gpg.go rust-dev/helper/internal/gpg/gpg_test.go rust-dev/helper/internal/strictjson/decode.go rust-dev/helper/internal/strictjson/decode_test.go rust-dev/helper/toolchain/toolchain.go rust-dev/helper/toolchain/policy.go rust-dev/helper/toolchain/types.go rust-dev/helper/toolchain/refusal.go rust-dev/helper/toolchain/decode.go rust-dev/helper/toolchain/pin.go rust-dev/helper/toolchain/inputs.go rust-dev/helper/toolchain/manifest.go rust-dev/helper/toolchain/installed.go rust-dev/helper/toolchain/commands.go rust-dev/helper/toolchain/types_test.go rust-dev/helper/toolchain/decode_test.go rust-dev/helper/toolchain/pin_test.go rust-dev/helper/toolchain/manifest_test.go rust-dev/helper/toolchain/installed_test.go rust-dev/helper/toolchain/fuzz_test.go rust-dev/helper/toolchain/events.go rust-dev/helper/toolchain/preflight.go rust-dev/helper/toolchain/prepare.go rust-dev/helper/toolchain/install.go rust-dev/helper/toolchain/stage.go rust-dev/helper/toolchain/stage_test.go rust-dev/helper/toolchain/preflight_test.go rust-dev/helper/toolchain/prepare_test.go rust-dev/helper/toolchain/install_test.go rust-dev/helper/toolchain/fuzz_install_test.go rust-dev/helper/helpers_test.go rust-dev/helper/internal/fetch/fetch.go rust-dev/helper/internal/fetch/loopback_fixture.go rust-dev/helper/internal/fetch/fetch_test.go rust-dev/helper/internal/fetch/loopback_fixture_test.go rust-dev/helper/internal/tarwalk/tarwalk.go rust-dev/helper/internal/tarwalk/tarwalk_test.go'
+GUARDED_GO='rust-dev/helper/go.mod rust-dev/helper/go.sum rust-dev/helper/main.go rust-dev/helper/main_test.go rust-dev/helper/imports_test.go rust-dev/helper/seams_fixture.go rust-dev/helper/seams_shipped.go rust-dev/helper/seams_test.go rust-dev/helper/kacheprobe/probe.go rust-dev/helper/kacheprobe/probe_test.go rust-dev/helper/internal/gpg/gpg.go rust-dev/helper/internal/gpg/gpg_test.go rust-dev/helper/internal/strictjson/decode.go rust-dev/helper/internal/strictjson/decode_test.go rust-dev/helper/toolchain/toolchain.go rust-dev/helper/toolchain/policy.go rust-dev/helper/toolchain/types.go rust-dev/helper/toolchain/refusal.go rust-dev/helper/toolchain/decode.go rust-dev/helper/toolchain/pin.go rust-dev/helper/toolchain/inputs.go rust-dev/helper/toolchain/manifest.go rust-dev/helper/toolchain/installed.go rust-dev/helper/toolchain/commands.go rust-dev/helper/toolchain/types_test.go rust-dev/helper/toolchain/decode_test.go rust-dev/helper/toolchain/pin_test.go rust-dev/helper/toolchain/manifest_test.go rust-dev/helper/toolchain/installed_test.go rust-dev/helper/toolchain/fuzz_test.go rust-dev/helper/toolchain/events.go rust-dev/helper/toolchain/preflight.go rust-dev/helper/toolchain/prepare.go rust-dev/helper/toolchain/install.go rust-dev/helper/toolchain/stage.go rust-dev/helper/toolchain/stage_test.go rust-dev/helper/toolchain/preflight_test.go rust-dev/helper/toolchain/prepare_test.go rust-dev/helper/toolchain/install_test.go rust-dev/helper/toolchain/fuzz_install_test.go rust-dev/helper/helpers_test.go rust-dev/helper/internal/fetch/fetch.go rust-dev/helper/internal/fetch/loopback_fixture.go rust-dev/helper/internal/fetch/fetch_test.go rust-dev/helper/internal/fetch/loopback_fixture_test.go rust-dev/helper/internal/tarwalk/tarwalk.go rust-dev/helper/internal/tarwalk/tarwalk_test.go go-dev/helper/go.mod go-dev/helper/go.sum go-dev/helper/main.go go-dev/helper/main_test.go go-dev/helper/closure/constants.go go-dev/helper/closure/document.go go-dev/helper/closure/gomods.go go-dev/helper/closure/gosum.go go-dev/helper/closure/grammar_test.go go-dev/helper/closure/helpers_test.go go-dev/helper/closure/inputs_test.go go-dev/helper/closure/licenses.go go-dev/helper/closure/load.go go-dev/helper/closure/model_test.go go-dev/helper/closure/notice_test.go go-dev/helper/closure/pin.go go-dev/helper/closure/source.go go-dev/helper/closure/values.go go-dev/helper/internal/strictjson/decode.go go-dev/helper/internal/strictjson/decode_test.go go-dev/helper/internal/strictjson/drift_test.go'
 # The rust-dev helper's builder stage. It is a reviewed parent:
 # `images/parent-pins.json` records its digest, and its tag is the root go.mod's
 # toolchain. Both are named by the literals below rather than by a variable, so a
@@ -45,7 +47,7 @@ GUARDED_DATA='chrome-devtools/data/chrome-devtools-mcp.sigstore.json chrome-devt
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=163
+SELF_TEST_CASES=172
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -209,6 +211,114 @@ review_args() { # EXAMPLE INSTRUCTIONS
         }
     '
 }
+# One implementation of the helper-stage contract, shared by both layers that
+# compile a helper module. The chain it holds, link by link:
+#
+#   1. the stage's own RUN: the image compiler must be helper/go.mod's `toolchain`
+#      line (asserted by the exact shape below, and it fails a build, not only a
+#      gate);
+#   2. helper/go.mod's `go` and `toolchain` lines must be the root go.mod's, so the
+#      two modules cannot select different compilers;
+#   3. the builder FROM must be exactly `golang:<root toolchain>-trixie` at the
+#      digest images/parent-pins.json records for `.pins["golang-builder"]`, so the
+#      reviewed version and the reviewed bytes move together;
+#   4. script/test/image-sources binds the same FROM to the same inventory
+#      reference.
+#
+# The stage itself is a closed instruction set (see the allowlist below). The chain
+# binds a compiler version and the recipe/inventory relationship, not source bytes:
+# a comment-only edit under helper/ changes nothing any gate sees. What binds the
+# bytes is the host check each caller runs, and the parity suite for the reader.
+check_helper_stage() { # EXAMPLE STAGE INSTRUCTIONS
+    local example=$1 stage=$2 instructions=$3
+    local helperdir=$LAYERS/$example/helper builder_ref first_from last_from builder_line
+    local builder_stage stage_keywords builder_body token reviewed_builder
+    local reviewed_helper_builder builder_template root_go root_toolchain helper_go helper_toolchain
+    [ -f "$helperdir/vendor/modules.txt" ] ||
+        fail "$example: helper/vendor is the build closure; it must stay committed"
+    [ -f "$ROOT/go.mod" ] || fail "$example: missing the root go.mod the helper is bound to"
+    root_go=$(awk '$1 == "go" { print $2 }' "$ROOT/go.mod")
+    root_toolchain=$(awk '$1 == "toolchain" { print $2 }' "$ROOT/go.mod")
+    [ -n "$root_go" ] && [ -n "$root_toolchain" ] ||
+        fail "$example: the root go.mod must state a go and a toolchain line"
+    helper_go=$(awk '$1 == "go" { print $2 }' "$helperdir/go.mod")
+    helper_toolchain=$(awk '$1 == "toolchain" { print $2 }' "$helperdir/go.mod")
+    [ "$helper_go" = "$root_go" ] ||
+        fail "$example: helper/go.mod's go line ($helper_go) must equal the root go.mod's ($root_go)"
+    [ "$helper_toolchain" = "$root_toolchain" ] ||
+        fail "$example: helper/go.mod's toolchain ($helper_toolchain) must equal the root go.mod's ($root_toolchain)"
+    [ -f "$ROOT/images/parent-pins.json" ] || fail "$example: missing images/parent-pins.json"
+    builder_ref=$(jq -er '.pins["golang-builder"].reference' "$ROOT/images/parent-pins.json") ||
+        fail "$example: images/parent-pins.json carries no golang-builder pin"
+    case "$builder_ref" in
+        "golang:${root_toolchain#go}-trixie@sha256:"*) ;;
+        *)
+            fail "$example: the golang-builder pin ($builder_ref) must be golang:${root_toolchain#go}-trixie at the digest of the reviewed image"
+            ;;
+    esac
+    first_from=$(printf '%s\n' "$instructions" |
+        awk 'toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { print; exit }')
+    last_from=$(printf '%s\n' "$instructions" |
+        awk 'toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { line = $0 } END { print line }')
+    reviewed_builder="FROM $builder_ref AS $stage"
+    [ "$(normalize_instruction "$last_from")" = 'FROM ${BASE_IMAGE}' ] ||
+        fail "$example: the helper stage must precede the parent: the last FROM must be FROM \${BASE_IMAGE} (got: $(normalize_instruction "$last_from"))"
+    [ "$(normalize_instruction "$first_from")" = "$reviewed_builder" ] ||
+        fail "$example: the first FROM must be exactly: $reviewed_builder (got: $(normalize_instruction "$first_from"))"
+    builder_line=$(printf '%s\n' "$instructions" |
+        awk -v binary="$stage" 'toupper($0) ~ /^[[:space:]]*RUN([[:space:]]|$)/ && index($0, binary) { print; exit }')
+    for token in '--network=none' 'source=helper,target=/src,ro' 'GOTOOLCHAIN=local go env GOVERSION' \
+        'GOFLAGS=-mod=vendor' 'GOPROXY=off' 'CGO_ENABLED=0' '-trimpath' '-buildvcs=false' \
+        'go build'; do
+        case "$builder_line" in
+            *"$token"*) ;;
+            *) fail "$example: the helper stage lacks the reviewed compile token: $token" ;;
+        esac
+    done
+    # A tag would compile the fixture seams in, and a second build flags assignment
+    # after the reviewed one would let a later line win over this text.
+    if printf '%s\n' "$builder_line" | grep -qE '(^|[[:space:]])-tags([[:space:]=]|$)'; then
+        fail "$example: the helper stage must not pass -tags: the shipped binary honours no fixture seam"
+    fi
+    # --- the stage allowlist, which is what the guarantees above rest on ------
+    # The stage may hold exactly two instructions: the pinned FROM and this RUN.
+    # Every other instruction class reaches the compile without changing the line
+    # compared above, and two of them were proven against the real compiler:
+    #
+    #   * `SHELL ["/bin/sh","-c","eval \"$(printf %s \"$0\" | sed
+    #     's/go build /go build -tags=example_fixture /')\""]` keeps the RUN
+    #     byte-identical and compiles the fixture seams in - the binary then
+    #     answers `--fixture-seams` with all three names;
+    #   * `ADD https://example.com/ /out/fetched.html` downloads inside a stage
+    #     whose RUN has `--network=none`, so "the only egress is the FROM pull"
+    #     is only true while the instruction set is closed.
+    #
+    # `ARG GOFLAGS` and `ENV GOFLAGS=-tags=...` lose to the RUN's own explicit
+    # assignment today, but a gate that permits them is enforcing that this RUN
+    # happens to be written defensively rather than a compile-time boundary. So
+    # the classes are refused, not argued about: no SHELL, ADD, COPY, ENV, ARG,
+    # WORKDIR, USER, ONBUILD or VOLUME, and no second FROM (the per-example FROM
+    # shape check above refuses a third, whichever stage it declares).
+    builder_stage=$(printf '%s\n' "$instructions" | awk -v stage="$stage" '
+        toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { inside = ($NF == stage); next }
+        inside { print }')
+    stage_keywords=$(printf '%s\n' "$builder_stage" | awk 'NF { print toupper($1) }' |
+        LC_ALL=C sort -u | tr '\n' ' ')
+    [ "${stage_keywords% }" = RUN ] ||
+        fail "$example: the helper stage may not carry these instructions: ${stage_keywords% } (only its reviewed RUN is allowed)"
+    builder_body=$(printf '%s\n' "$builder_stage" | grep -c . || true)
+    [ "$builder_body" -eq 1 ] ||
+        fail "$example: the helper stage must carry exactly one RUN (found $builder_body)"
+    # The reviewed RUN, rendered from one template: the binary name is the only
+    # thing that differs between the two layers, and the placeholder substitution
+    # keeps the `$(...)` in the command from running in this shell.
+    read -r -d '' builder_template <<'HELPER_BUILDER' || true
+RUN --network=none --mount=type=bind,source=helper,target=/src,ro cd /src && { [ "$(GOTOOLCHAIN=local go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)" ] || { echo "BINARY: the image compiler is not go.mod's toolchain" >&2; exit 1; }; } && GOTOOLCHAIN=local GOWORK=off GOENV=off GOFLAGS=-mod=vendor GOPROXY=off CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/BINARY .
+HELPER_BUILDER
+    reviewed_helper_builder=${builder_template//BINARY/$stage}
+    [ "$(normalize_instruction "$builder_stage")" = "$reviewed_helper_builder" ] ||
+        fail "$example: the helper stage RUN must be exactly: $reviewed_helper_builder (got: $(normalize_instruction "$builder_stage"))"
+}
 check() {
     [ -d "$ROOT" ] && [ -r "$ROOT" ] && [ -x "$ROOT" ] || fail "root missing: $ROOT"
     cd "$ROOT" || fail "root missing: $ROOT"
@@ -245,21 +355,24 @@ check() {
             }
             END { print found+0 }
         ')" -eq 1 ] || fail "parent pin: ARG shape: $example redefinition"
-        if [ "$example" = rust-dev ]; then
-            # The one example whose helper module is compiled in-image: its first
-            # FROM is the pinned compiler stage and its last is the parent. The
-            # exact builder line is asserted with the rest of the rust-dev recipe
-            # below; here only the shape and the order are held, for every layer,
-            # so a builder stage cannot appear in a layer that has no module.
+        case "$example" in
+        rust-dev | go-dev)
+            # The two examples whose helper module is compiled in-image: the first
+            # FROM is the pinned compiler stage and the last is the parent. The
+            # exact builder line is asserted with the rest of each recipe below;
+            # here only the shape and the order are held, for every layer, so a
+            # builder stage cannot appear in a layer that has no module.
             [ "$(printf '%s\n' "$instructions" | awk 'toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/' | wc -l)" -eq 2 ] ||
                 fail "parent pin: FROM shape: $example must carry exactly the helper stage and the parent"
             printf '%s\n' "$instructions" |
                 awk 'toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { count++; line[count] = $0 }
                      END { exit !(count == 2 && line[count] == "FROM ${BASE_IMAGE}") }' ||
                 fail "parent pin: FROM shape: $example must end on FROM \${BASE_IMAGE}"
-        else
+            ;;
+        *)
             printf '%s\n' "$instructions" | awk 'toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { found=1; if ($0 != "FROM ${BASE_IMAGE}") bad=1 } END { exit (!found || bad) }' || fail "parent pin: FROM shape: $example"
-        fi
+            ;;
+        esac
         review_args "$example" "$instructions"
     done
     refs=$(grep -rhoE 'ghcr\.io/gregwebs/agent-vm-standard[^[:space:]`"]*' "$LAYERS" | sort -u)
@@ -333,40 +446,8 @@ check() {
 # spacing, so runs of blanks are collapsed before the exact shape comparison.
 normalize_instruction() { printf '%s' "$1" | tr -s ' \t' ' ' | sed -e 's/^ //' -e 's/ $//'; }
     # --- rust-dev: the helper module and the compiler guard chain (#187) -----
-    # The layer's own program is a Go module under helper/, compiled by the first
-    # FROM and mounted into the verifier. Four links bind that compiler to the
-    # repository, each with the check that fails when it is deleted:
-    #
-    #   1. the stage's own RUN: the image compiler must be helper/go.mod's
-    #      `toolchain` line (asserted by the exact shape below, and it fails a
-    #      build, not only a gate);
-    #   2. helper/go.mod's `go` and `toolchain` lines must be the root go.mod's,
-    #      so the two modules cannot select different compilers;
-    #   3. the builder FROM must be exactly `golang:<root toolchain>-trixie` at the
-    #      digest images/parent-pins.json records for `.pins["golang-builder"]`,
-    #      so the reviewed version and the reviewed bytes move together;
-    #   4. script/test/image-sources binds the same FROM to the same inventory
-    #      reference.
-    #
-    # The stage itself is a closed instruction set (see the allowlist below): the
-    # chain binds a compiler version and the recipe/inventory relationship, not
-    # source bytes, so a comment-only edit under helper/ changes nothing any gate
-    # sees.
-    #
     helperdir=$rustdir/helper
-    [ -f "$helperdir/vendor/modules.txt" ] ||
-        fail 'rust-dev: helper/vendor is the build closure; it must stay committed'
-    [ -f "$ROOT/go.mod" ] || fail 'rust-dev: missing the root go.mod the helper is bound to'
-    root_go=$(awk '$1 == "go" { print $2 }' "$ROOT/go.mod")
-    root_toolchain=$(awk '$1 == "toolchain" { print $2 }' "$ROOT/go.mod")
-    [ -n "$root_go" ] && [ -n "$root_toolchain" ] ||
-        fail 'rust-dev: the root go.mod must state a go and a toolchain line'
-    helper_go=$(awk '$1 == "go" { print $2 }' "$helperdir/go.mod")
-    helper_toolchain=$(awk '$1 == "toolchain" { print $2 }' "$helperdir/go.mod")
-    [ "$helper_go" = "$root_go" ] ||
-        fail "rust-dev: helper/go.mod's go line ($helper_go) must equal the root go.mod's ($root_go)"
-    [ "$helper_toolchain" = "$root_toolchain" ] ||
-        fail "rust-dev: helper/go.mod's toolchain ($helper_toolchain) must equal the root go.mod's ($root_toolchain)"
+    check_helper_stage rust-dev rust-dev-helper "$instructions"
     # Link 5 -- the root module imports this one (#232), so the root binary and the
     # layer's build compile one library instead of two copies of the rules. Two
     # consequences are checked here: the import is a local replace at v0.0.0 (that
@@ -391,73 +472,6 @@ normalize_instruction() { printf '%s' "$1" | tr -s ' \t' ' ' | sed -e 's/^ //' -
         <(module_pins "$ROOT/go.mod") <(module_pins "$helperdir/go.mod"))
     [ -z "$shared_mismatch" ] ||
         fail "rust-dev: the two go.mod files require different versions of a shared module:"$'\n'"$shared_mismatch"
-    [ -f "$ROOT/images/parent-pins.json" ] || fail 'rust-dev: missing images/parent-pins.json'
-    builder_ref=$(jq -er '.pins["golang-builder"].reference' "$ROOT/images/parent-pins.json") ||
-        fail 'rust-dev: images/parent-pins.json carries no golang-builder pin'
-    case "$builder_ref" in
-        "golang:${root_toolchain#go}-trixie@sha256:"*) ;;
-        *)
-            fail "rust-dev: the golang-builder pin ($builder_ref) must be golang:${root_toolchain#go}-trixie at the digest of the reviewed image"
-            ;;
-    esac
-    first_from=$(printf '%s\n' "$instructions" |
-        awk 'toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { print; exit }')
-    last_from=$(printf '%s\n' "$instructions" |
-        awk 'toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { line = $0 } END { print line }')
-    reviewed_builder="FROM $builder_ref AS rust-dev-helper"
-    [ "$(normalize_instruction "$last_from")" = 'FROM ${BASE_IMAGE}' ] ||
-        fail "rust-dev: the helper stage must precede the parent: the last FROM must be FROM \${BASE_IMAGE} (got: $(normalize_instruction "$last_from"))"
-    [ "$(normalize_instruction "$first_from")" = "$reviewed_builder" ] ||
-        fail "rust-dev: the first FROM must be exactly: $reviewed_builder (got: $(normalize_instruction "$first_from"))"
-    builder_line=$(printf '%s\n' "$instructions" |
-        awk 'toupper($0) ~ /^[[:space:]]*RUN([[:space:]]|$)/ && /rust-dev-helper/ { print; exit }')
-    for token in '--network=none' 'source=helper,target=/src,ro' 'GOTOOLCHAIN=local go env GOVERSION' \
-        'GOFLAGS=-mod=vendor' 'GOPROXY=off' 'CGO_ENABLED=0' '-trimpath' '-buildvcs=false' \
-        'go build'; do
-        case "$builder_line" in
-            *"$token"*) ;;
-            *) fail "rust-dev: the helper stage lacks the reviewed compile token: $token" ;;
-        esac
-    done
-    # A tag would compile the fixture seams in, and a second build flags assignment
-    # after the reviewed one would let a later line win over this text.
-    if printf '%s\n' "$builder_line" | grep -qE '(^|[[:space:]])-tags([[:space:]=]|$)'; then
-        fail 'rust-dev: the helper stage must not pass -tags: the shipped binary honours no fixture seam'
-    fi
-    # --- the stage allowlist, which is what the guarantees above rest on ------
-    # The stage may hold exactly two instructions: the pinned FROM and this RUN.
-    # Every other instruction class reaches the compile without changing the line
-    # compared above, and two of them were proven against the real compiler:
-    #
-    #   * `SHELL ["/bin/sh","-c","eval \"$(printf %s \"$0\" | sed
-    #     's/go build /go build -tags=example_fixture /')\""]` keeps the RUN
-    #     byte-identical and compiles the fixture seams in - the binary then
-    #     answers `--fixture-seams` with all three names;
-    #   * `ADD https://example.com/ /out/fetched.html` downloads inside a stage
-    #     whose RUN has `--network=none`, so "the only egress is the FROM pull"
-    #     is only true while the instruction set is closed.
-    #
-    # `ARG GOFLAGS` and `ENV GOFLAGS=-tags=...` lose to the RUN's own explicit
-    # assignment today, but a gate that permits them is enforcing that this RUN
-    # happens to be written defensively rather than a compile-time boundary. So
-    # the classes are refused, not argued about: no SHELL, ADD, COPY, ENV, ARG,
-    # WORKDIR, USER, ONBUILD or VOLUME, and no second FROM (the per-example FROM
-    # shape check above refuses a third, whichever stage it declares).
-    builder_stage=$(printf '%s\n' "$instructions" | awk -v stage=rust-dev-helper '
-        toupper($0) ~ /^[[:space:]]*FROM([[:space:]]|$)/ { inside = ($NF == stage); next }
-        inside { print }')
-    stage_keywords=$(printf '%s\n' "$builder_stage" | awk 'NF { print toupper($1) }' |
-        LC_ALL=C sort -u | tr '\n' ' ')
-    [ "${stage_keywords% }" = RUN ] ||
-        fail "rust-dev: the helper stage may not carry these instructions: ${stage_keywords% } (only its reviewed RUN is allowed)"
-    builder_body=$(printf '%s\n' "$builder_stage" | grep -c . || true)
-    [ "$builder_body" -eq 1 ] ||
-        fail "rust-dev: the helper stage must carry exactly one RUN (found $builder_body)"
-    read -r -d '' reviewed_helper_builder <<'HELPER_BUILDER' || true
-RUN --network=none --mount=type=bind,source=helper,target=/src,ro cd /src && { [ "$(GOTOOLCHAIN=local go env GOVERSION)" = "$(awk '$1 == "toolchain" { print $2 }' go.mod)" ] || { echo "rust-dev-helper: the image compiler is not go.mod's toolchain" >&2; exit 1; }; } && GOTOOLCHAIN=local GOWORK=off GOENV=off GOFLAGS=-mod=vendor GOPROXY=off CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /out/rust-dev-helper .
-HELPER_BUILDER
-    [ "$(normalize_instruction "$builder_stage")" = "$reviewed_helper_builder" ] ||
-        fail "rust-dev: the helper stage RUN must be exactly: $reviewed_helper_builder (got: $(normalize_instruction "$builder_stage"))"
     # One reader. `check` moved to the layer's own Go helper in #187 slice 2 and
     # the Python oracle is deleted (#245), so this gate holds the Go answer: a
     # refusal is reported with its own text, and the channel assertion must match
@@ -678,12 +692,33 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     go_arg=$(sed -nE 's/^ARG GO_VERSION=(.*)$/\1/p' "$godir/Dockerfile")
     [ "$(printf '%s\n' "$gopls_arg" | grep -c .)" -eq 1 ] || fail 'go-dev pins: ARG GOPLS_VERSION'
     [ "$(printf '%s\n' "$go_arg" | grep -c .)" -eq 1 ] || fail 'go-dev pins: ARG GO_VERSION'
-    # The committed closure is checked offline here, and both Dockerfile pins are
-    # assertions on it: a version bumped without a regenerated closure fails.
+    # The committed closure is checked offline here by both readers, and both
+    # Dockerfile pins are assertions on them: a version bumped without a
+    # regenerated closure fails. The Go binary is the layer's own reader, built
+    # from this checkout with the same flags the stage uses; the Python reader stays
+    # live as the oracle (#188 G5), so the two answers are compared on the same
+    # bytes. Deleting either invocation leaves this gate unable to say which reader
+    # it measured.
     selected=$(PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/$helper" check "$ROOT/$datadir" \
         --expect-gopls "$gopls_arg" --expect-go "$go_arg" 2>&1) || fail "go-dev pins: $selected"
     [ "$selected" = "$gopls_arg" ] || fail 'go-dev pins: the closure and ARG GOPLS_VERSION disagree'
     instructions=$(logical_instructions "$godir/Dockerfile" go-dev) || exit 1
+    # --- go-dev: the helper module and the compiler guard chain (#249) -------
+    # The same chain the rust-dev stage carries (check_helper_stage), over this
+    # layer's own module. The difference that matters: this helper is NOT linked
+    # into the root module (#249, owner ruling G1), so there is no root
+    # require/replace to check and no shared-version rule; #252 adds them with the
+    # writer that imports this package.
+    check_helper_stage go-dev go-dev-helper "$instructions"
+    host_os=$(uname -s | tr '[:upper:]' '[:lower:]')
+    go_helper=$(bash "$HELPER_BUILD" go-dev --root "$ROOT" --os "$host_os") ||
+        fail 'go-dev pins: cannot build the host helper'
+    go_selected='' go_status=0
+    go_selected=$("$go_helper" check "$ROOT/$datadir" --expect-gopls "$gopls_arg" \
+        --expect-go "$go_arg" 2>&1) || go_status=$?
+    [ "$go_status" -eq 0 ] || fail "go-dev pins: $go_selected"
+    [ "$go_selected" = "$selected" ] ||
+        fail "go-dev pins: the two readers disagree: Go $go_selected, Python $selected"
     reviewed_gopls_installer='RUN --mount=type=bind,source=install-gopls.sh,target=/tmp/install-gopls.sh,ro --mount=type=bind,source=gopls_closure.py,target=/tmp/gopls_closure.py,ro --mount=type=bind,source=data/gopls-closure,target=/tmp/gopls-closure,ro bash /tmp/install-gopls.sh'
     reviewed_go_verifier='RUN --network=none --mount=type=bind,source=verify-toolchain.sh,target=/run/go-verify/verify-toolchain.sh,ro --mount=type=bind,source=gopls_closure.py,target=/run/go-verify/gopls_closure.py,ro --mount=type=bind,source=data/gopls-closure,target=/run/go-verify/gopls-closure,ro PYTHONDONTWRITEBYTECODE=1 /bin/bash /run/go-verify/verify-toolchain.sh'
     gopls_installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-gopls.sh' || true)
@@ -718,6 +753,31 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     done
     [ "$(normalize_instruction "$gopls_verifier_line")" = "$reviewed_go_verifier" ] ||
         fail "go-dev: verifier RUN must be exactly: $reviewed_go_verifier (got: $(normalize_instruction "$gopls_verifier_line"))"
+    # The one offline `check`: the layer's own binary, the same five committed
+    # files the installer and verifier read, no network, and both ARG assertions.
+    # Exact shape, so a disabled or extended command is not the reviewed check, and
+    # a mount this gate did not review is a failure rather than an extra delivery.
+    reviewed_helper_check='RUN --network=none --mount=type=bind,from=go-dev-helper,source=/out/go-dev-helper,target=/tmp/go-dev-helper,ro --mount=type=bind,source=data/gopls-closure,target=/tmp/gopls-closure,ro /tmp/go-dev-helper check /tmp/gopls-closure --expect-gopls "$GOPLS_VERSION" --expect-go "$GO_VERSION"'
+    helper_check_runs=$(printf '%s\n' "$instructions" | grep -cF '/tmp/go-dev-helper check' || true)
+    [ "$helper_check_runs" -eq 1 ] || fail 'go-dev: the helper check RUN must appear exactly once'
+    helper_check_line=$(printf '%s\n' "$instructions" | grep -F '/tmp/go-dev-helper check')
+    for token in '--network=none' \
+        'from=go-dev-helper,source=/out/go-dev-helper,target=/tmp/go-dev-helper,ro' \
+        'source=data/gopls-closure,target=/tmp/gopls-closure,ro' \
+        '--expect-gopls "$GOPLS_VERSION"' '--expect-go "$GO_VERSION"'; do
+        case "$helper_check_line" in
+            *"$token"*) ;;
+            *) fail "go-dev: helper check RUN lacks the reviewed delivery: $token" ;;
+        esac
+    done
+    [ "$(normalize_instruction "$helper_check_line")" = "$reviewed_helper_check" ] ||
+        fail "go-dev: helper check RUN must be exactly: $reviewed_helper_check (got: $(normalize_instruction "$helper_check_line"))"
+    # The binary is mounted, never copied: the image must not carry a build helper
+    # (CONTEXT.md, "Build helper"). go-example.sh checks the same absence from the
+    # built image; this is the static half.
+    if printf '%s\n' "$instructions" | grep -E '^[[:space:]]*(COPY|ADD)([[:space:]]|$)' | grep -qF 'helper'; then
+        fail 'go-dev: the helper binary must be mounted for one RUN, never copied into the image'
+    fi
     [ "$(grep -cxF 'ENV GOTOOLCHAIN=local' "$godir/Dockerfile")" -eq 1 ] ||
         fail 'go-dev: GOTOOLCHAIN=local must be exported exactly once'
     if grep -qE '^ENV .*(GOFLAGS|GOPROXY|GOSUMDB|GONOSUMDB|GOPRIVATE|GONOPROXY|GOINSECURE|GOTOOLCHAIN=(auto|go|path))' "$godir/Dockerfile"; then
@@ -819,11 +879,16 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
 # Insert one instruction immediately after the helper stage's FROM. The cases below
 # use it to show which instruction classes the stage allowlist refuses: every one
 # of them can change what the reviewed RUN compiles without changing that RUN.
-insert_builder_instruction() { # FILE TEXT
-    awk -v text="$2" '!placed && /^FROM golang:.* AS rust-dev-helper$/ {
-            print; print text; placed = 1; next
+insert_builder_instruction() { # FILE TEXT [EXAMPLE]
+    local stage=${3:-rust-dev}-helper
+    # The text goes through the environment, not `-v`: awk processes escape
+    # sequences in a `-v` assignment, so a mutation containing `\"` or `\$` would
+    # be inserted in a different form than the one this function then greps for.
+    TEXT=$2 awk -v stage="$stage" '!placed && /^FROM / && $NF == stage {
+            print; print ENVIRON["TEXT"]; placed = 1; next
         } { print }' "$1" > "$SCRATCH/rewrite"
     cat "$SCRATCH/rewrite" > "$1"
+    grep -qF -- "$2" "$1" || fail "self-test: the builder instruction did not apply"
 }
 # Rewrites preserve copied file modes on both BSD and GNU hosts.
 rewrite() {
@@ -1265,8 +1330,33 @@ self_test() {
                 rewrite "$godocker" 's|bash /tmp/install-gopls.sh|bash /tmp/install-gopls.sh \|\| true|'
                 expected='installer RUN must be exactly' ;;
             96)
-                rewrite "$godocker" 's|RUN --network=none|RUN|'
-                expected='verifier must run with --network=none' ;;
+                # The builder stage's RUN also carries --network=none, so the
+                # mutation is addressed by the verifier's own mount rather than by
+                # the first line that matches: a selector that could strip the
+                # builder's flag would test the wrong instruction.
+                awk -v bind='verify-toolchain.sh,target=/run/go-verify/verify-toolchain.sh,ro' '
+                    { lines[NR] = $0 }
+                    END {
+                        for (i = 1; i <= NR; i++) {
+                            if (lines[i] ~ /^RUN/) {
+                                start = i; j = i; instruction = lines[i]
+                                while (lines[j] ~ /\\$/ && j < NR) {
+                                    j++; instruction = instruction "\n" lines[j]
+                                }
+                                if (index(instruction, bind) && !stripped) {
+                                    sub(/RUN --network=none/, "RUN", lines[start]); stripped = 1
+                                }
+                                for (k = start; k <= j; k++) print lines[k]
+                                i = j
+                            } else {
+                                print lines[i]
+                            }
+                        }
+                        if (!stripped) exit 1
+                    }' "$godocker" > "$SCRATCH/rewrite" ||
+                    fail 'self-test: case 96 could not select the verifier RUN'
+                cat "$SCRATCH/rewrite" > "$godocker"
+                expected='go-dev: verifier must run with --network=none' ;;
             97)
                 echo 'RUN go install golang.org/x/tools/gopls@latest' >> "$godocker"
                 expected='unpinned go install, graph regeneration or checksum bypass in Dockerfile' ;;
@@ -1550,6 +1640,45 @@ INSTRUCTION
             163)
                 printf '\nrequire (\n\tgithub.com/ulikunitz/xz v0.5.16\n)\n' >> "$tree/go.mod"
                 expected='require different versions of a shared module' ;;
+            # 164-172: the go-dev helper module and its compiler guard chain
+            # (#249). The same links as rust-dev's (check_helper_stage), over a
+            # module that is not linked into the root module, plus the one offline
+            # check RUN that mounts the binary. Each case changes one thing, so the
+            # link under test is the one that fires.
+            164)
+                rewrite "$godir/helper/go.mod" 's|^toolchain go1\.27\.3$|toolchain go1.27.4|'
+                expected="go-dev: helper/go.mod's toolchain (go1.27.4) must equal the root go.mod's (go1.27.3)" ;;
+            165)
+                rewrite "$godocker" 's|^FROM golang:1\.27\.3-trixie@|FROM golang:1.27.2-trixie@|'
+                expected='go-dev: the first FROM must be exactly' ;;
+            166)
+                awk '!/^RUN --network=none --mount=type=bind,source=helper/ { print }
+                     /^RUN --network=none --mount=type=bind,source=helper/ {
+                        sub(/RUN --network=none/, "RUN"); print }' \
+                    "$godocker" > "$SCRATCH/rewrite"
+                cat "$SCRATCH/rewrite" > "$godocker"
+                expected='go-dev: the helper stage lacks the reviewed compile token: --network=none' ;;
+            167)
+                insert_builder_instruction "$godocker" 'ADD https://example.com/ /out/fetched.html' go-dev
+                expected='go-dev: the helper stage may not carry these instructions: ADD RUN' ;;
+            168)
+                rm "$godir/helper/vendor/modules.txt"
+                expected='go-dev: helper/vendor is the build closure' ;;
+            169)
+                rewrite "$godocker" '/from=go-dev-helper,source=\/out\/go-dev-helper,target=\/tmp\/go-dev-helper,ro/d'
+                expected='go-dev: helper check RUN lacks the reviewed delivery' ;;
+            170)
+                # A swallowed failure keeps every token and every mount, so only the
+                # exact shape can catch it.
+                rewrite "$godocker" 's#/tmp/go-dev-helper check \(.*\)#/tmp/go-dev-helper check \1 || true#'
+                expected='go-dev: helper check RUN must be exactly' ;;
+            171)
+                printf 'COPY --from=go-dev-helper /out/go-dev-helper /usr/local/bin/go-dev-helper\n' \
+                    >> "$godocker"
+                expected='go-dev: the helper binary must be mounted for one RUN, never copied into the image' ;;
+            172)
+                printf 'package closure\n' > "$godir/helper/closure/unreviewed.go"
+                expected='unreviewed helper file: go-dev/helper/closure/unreviewed.go' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac

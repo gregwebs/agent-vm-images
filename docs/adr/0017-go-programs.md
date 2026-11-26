@@ -79,6 +79,14 @@ nothing any gate sees, and binding source bytes for a product image is
    same version, so MVS cannot raise a version in the root and make `avm-pin`
    link a different decoder than the image compiles.
 
+`rust-dev` satisfies all five because the root module imports its helper. The
+`go-dev` layer's helper (`#249`) is self-contained and *not* linked into the root
+module yet, so it satisfies 1–4 and has no root `require`/`replace` to check; the
+link arrives with the writer that imports it (`#252`), and link 5 then applies to
+it too. One shell function, `check_helper_stage` in
+`script/test/example-layers.sh`, holds 1–3 for both layers rather than one copy
+each.
+
 The compiler pin is a parent image like the base: `images/parent-pins.json`
 carries its digest, its platform manifests and their reviewed provenance, and
 `script/dev/refresh-parent-pins.sh golang-builder` refreshes it. Its *version* is
@@ -114,7 +122,13 @@ against the Go program and is the oracle. Output text is frozen only where a
 consumer parses it. ADR 0004's byte-level differential parity is not required
 for new ports.
 
-**A ported reader has two implementations until the Python is deleted.** `#187
+**A ported reader has two implementations until the Python is deleted.** The
+go-dev example is in that state for its reader (`#249`): `go-dev-helper check`
+ships in the image and `gopls_closure.py check` remains the host-only oracle,
+compared case by case in `script/test/gopls-closure-parity.py` with floors and a
+case counter, and with each difference declared by name. Python is still the only
+installer there until `#251`, so the layer's apt line still carries `python3`.
+`#187
 slice 2` moved the rust-dev layer's `check` and `verify-installed` to its Go
 helper, and slice 3 (#231) moved `install` as well: the Go helper now fetches the
 seven pinned URLs, preflights the archives with `ulikunitz/xz` `SingleStream` and

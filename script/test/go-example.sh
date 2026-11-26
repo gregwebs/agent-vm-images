@@ -773,9 +773,20 @@ input_digest_controls() { # LOG
         selftest_expect 1 0 'the build-input digest is computable' "$out"
         return
     fi
+    # The count is a floor plus the named sets: the recipe, three adapters, the
+    # Python reader and the five closure files are 10, and the builder stage's own
+    # bind is the whole helper module (source, go.mod, go.sum, vendor). A walk that
+    # stopped seeing the helper would still be above 10, so the helper files are
+    # named below and the floor is set under today's total.
     count=$(grep -c '^input [0-9a-f]\{64\}  ' <<<"$listing" || true)
-    selftest_expect "$count" 9 \
-        'the digest covers the recipe, two adapters, the helper and five closure files' "$out"
+    if [ "${count:-0}" -lt 40 ]; then
+        selftest_expect "$count" 40 \
+            'the digest covers the final stage mounts and the whole helper module' "$out"
+    fi
+    selftest_expect_contains "$listing" "  examples/layers/go-dev/helper/go.mod" \
+        'the builder stage input set is digested too'
+    selftest_expect_contains "$listing" "  examples/layers/go-dev/helper/vendor/modules.txt" \
+        'the vendored closure the builder compiles is digested too'
     selftest_expect "$(grep -c '^inputs-set [0-9a-f]\{64\}$' <<<"$listing" || true)" 1 \
         'the digest set carries one aggregate' "$out"
     dockerfile=$(sha256_file "$ROOT/$EXAMPLE/Dockerfile")
@@ -1331,13 +1342,21 @@ trap cleanup EXIT
 
 log "=== go-example $RUN_ID platform=$PLATFORM arch=$ARCH ==="
 log "source $(git -C "$ROOT" rev-parse HEAD) dirty=$(git -C "$ROOT" status --porcelain | grep -cv '^?? ' || true)"
-# Add-only self-binding: the digests of the bytes this run builds (recipe, both
-# adapters, the helper, the five closure files) and one over the set. A digest that
-# cannot be computed is logged as unavailable rather than becoming a new failure.
+# Self-binding: the digests of the bytes this run builds (the recipe, three
+# adapters, the reader, the five closure files and the builder stage's whole helper
+# tree) and one over the set. A required artefact that is missing is red, never
+# skipped (#188 R-d): the derivation itself refuses a short walk, and a run without
+# it would record "which commit" instead of "which bytes".
 if input_listing=$(input_digests "$ROOT" "$EXAMPLE" 2>"$LOG_DIR/input-digests.err"); then
     while IFS= read -r digest_line; do log "$digest_line"; done <<<"$input_listing"
 else
-    log 'inputs-set unavailable (see input-digests.err)'
+    # `fail` records and continues by design (a phase can have several independent
+    # assertions), so this one exits: a run that cannot bind its inputs must not go
+    # on to reach a build, even though it could never pass. The EXIT trap runs the
+    # owned-resource cleanup, and nothing has been created yet.
+    cat "$LOG_DIR/input-digests.err" >&2 || true
+    fail 'the build-input digest is unavailable; this run cannot bind the bytes it builds'
+    exit 1
 fi
 run_bounded daemon "$DAEMON_SECONDS" "$LOG_DIR/daemon.log" "$DOCKER" version || true
 run_bounded context "$DAEMON_SECONDS" "$LOG_DIR/context.log" "$DOCKER" context show || true

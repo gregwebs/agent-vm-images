@@ -551,6 +551,13 @@ with exactly their sums, after which the licence file is published from the same
 verified bytes. The `GoCommand` set is closed, so `go get`, `go install`,
 `go mod tidy|download|vendor` are not expressible in an ordinary build.
 
+The recipe additionally re-reads the same five files offline with the layer's own
+Go reader (`go-dev-helper check`, `#249`), which runs no Go command and makes no
+network request: the same rules as the paragraph above, one implementation for the
+image and one for the host oracle until the Python is deleted. Its differences
+from the Python reader are the reproduced `#188` G3 defects, each declared by name
+in `script/test/gopls-closure-parity.py`.
+
 What it does not prove: that the release is safe, that the publisher authorised
 its bytes, or that the transported notices are legally sufficient. It also does
 not cover a guest's own `go get`, `go install` or project module download — those
