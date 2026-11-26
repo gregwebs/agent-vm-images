@@ -13,8 +13,11 @@
 // The Python reader used a permissive JSON decoder for this document (#188 G3: the
 // pin is strict, the build info was not). This package uses the strict decoder, so
 // a duplicate key, NaN, a leading BOM or trailing data is a refusal. That is a
-// declared divergence from the oracle while it lives; script/test/gopls-closure-pins.py
-// carries both sides of it.
+// declared divergence from the oracle while it lives: script/test/gopls-closure-pins.py
+// runs both readers over the same document and declares each side's verdict, and the
+// two divergent cases (a duplicate key whose value agrees, a non-JSON constant in a
+// member the oracle does not read) are named there. Deleting the strict decoder makes
+// those cases red at verdict level.
 package buildinfo
 
 import (

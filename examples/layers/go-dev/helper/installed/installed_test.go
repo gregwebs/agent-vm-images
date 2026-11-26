@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -128,8 +129,7 @@ func newInstalledState(t *testing.T, arch gotool.Architecture) installedState {
 		t.Fatalf("chmod: %v", err)
 	}
 	digest := sha256.Sum256(notice)
-	target := gotool.Target{GoRoot: goRoot, BinDir: binDir, ShareDir: shareDir, Arch: arch,
-		Binary: binary}
+	target := gotool.Target{GoRoot: goRoot, ShareDir: shareDir, Arch: arch, Binary: binary}
 	return installedState{root: root, target: target,
 		data:   loaded(t, closure.SHA256(hex.EncodeToString(digest[:]))),
 		notice: notice}
@@ -192,7 +192,7 @@ func TestTargetRulesRefuse(t *testing.T) {
 			"--go-root must be an absolute Go root with bin/go: "},
 		{"a relative binary", state.target.GoRoot, "gopls", "--binary must be absolute: gopls"},
 		{"a binary with another name", state.target.GoRoot,
-			filepath.Join(state.target.BinDir, "not-gopls"),
+			filepath.Join(filepath.Dir(state.target.Binary), "not-gopls"),
 			"--binary must name the installed tool gopls, not 'not-gopls'"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -531,6 +531,151 @@ func TestScratchIsRemoved(t *testing.T) {
 	}
 	if _, err := os.Lstat(scratch); err == nil {
 		t.Fatalf("%s survived the invocation", scratch)
+	}
+}
+
+// TestPathSemanticsAreTheKernels: the paths the CLI is given are used in the
+// spelling the caller wrote, because `..` after a symlink resolves at the kernel and
+// not lexically.
+//
+// `a/link` is a symlink to `b/sub`, so `a/link/../gopls` is `b/gopls`. A reader that
+// cleaned the path would inspect `a/gopls` instead — accepting a candidate the caller
+// did not name, or refusing one they did. The same holds for the notice directory.
+func TestPathSemanticsAreTheKernels(t *testing.T) {
+	state := newInstalledState(t, gotool.ARM64)
+	a := filepath.Join(state.root, "a")
+	b := filepath.Join(state.root, "b")
+	sub := filepath.Join(b, "sub")
+	for _, directory := range []string{a, sub} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", directory, err)
+		}
+	}
+	if err := os.Symlink(sub, filepath.Join(a, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	// Built by concatenation: filepath.Join would clean the `..` this case is about.
+	requested := a + "/link/../gopls"
+	candidate := func() {
+		// The kernel's target of the requested spelling. The bytes are a script: the
+		// build info is answered by the runner, so only the path rule is under test.
+		if err := os.WriteFile(filepath.Join(b, "gopls"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := os.Chmod(filepath.Join(b, "gopls"), 0o755); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+	}
+	runner := func() *recordingRunner {
+		return &recordingRunner{target: state.target, document: buildInfoDocument(t,
+			gotool.ARM64)}
+	}
+
+	// Only the lexically cleaned location carries a file: the requested path has no
+	// candidate, so the verifier must refuse rather than verify `a/gopls`.
+	if err := os.WriteFile(filepath.Join(a, "gopls"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	target, err := NewTarget(state.target.GoRoot, requested, state.target.ShareDir,
+		gotool.ARM64)
+	if err != nil {
+		t.Fatalf("NewTarget: %v", err)
+	}
+	if target.Binary != requested {
+		t.Fatalf("the target names %q, not the requested spelling %q", target.Binary, requested)
+	}
+	_, err = Verify(state.data, target, runner())
+	if err == nil || !strings.Contains(err.Error(), "installed: missing "+requested) {
+		t.Fatalf("the lexically cleaned location was verified: %v", err)
+	}
+	// The kernel's target is the one that verifies. The positive control is the same
+	// seam: a reader that refused every `..` would fail here too.
+	candidate()
+	if _, err := Verify(state.data, target, runner()); err != nil {
+		t.Fatalf("the kernel-resolved candidate was refused: %v", err)
+	}
+
+	// The notice directory has the same semantics: `outer/link/..` is `real` when
+	// `outer/link` links to `real/nested`, and a reader that cleaned would look in
+	// `outer` instead.
+	outer := filepath.Join(state.root, "outer")
+	real := filepath.Join(state.root, "real")
+	nested := filepath.Join(real, "nested")
+	for _, directory := range []string{outer, nested} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", directory, err)
+		}
+	}
+	if err := os.Symlink(nested, filepath.Join(outer, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	wanted := filepath.Join(real, string(closure.FileLicenses))
+	if err := os.WriteFile(wanted, state.notice, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.Chmod(wanted, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	noticeTarget, err := NewTarget(state.target.GoRoot, state.target.Binary,
+		outer+"/link/..", gotool.ARM64)
+	if err != nil {
+		t.Fatalf("NewTarget: %v", err)
+	}
+	if _, err := Verify(state.data, noticeTarget, runner()); err != nil {
+		t.Fatalf("the kernel-resolved notice directory was refused: %v", err)
+	}
+	// Now the kernel's directory has nothing, and the cleaned spelling has wrong
+	// bytes. A reader that cleaned reads the wrong bytes and refuses with the digest
+	// rule; the shipped reader reports the missing file at the requested spelling.
+	if err := os.Remove(wanted); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	wrong := filepath.Join(outer, string(closure.FileLicenses))
+	if err := os.WriteFile(wrong, []byte("another notice\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.Chmod(wrong, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	_, err = Verify(state.data, noticeTarget, runner())
+	requestedNotice := outer + "/link/../" + string(closure.FileLicenses)
+	if err == nil || !strings.Contains(err.Error(), "installed: missing "+requestedNotice) {
+		t.Fatalf("the lexically cleaned notice directory was read: %v", err)
+	}
+}
+
+// TestCandidateIsNeverExecuted: the observation is the candidate's own side effect,
+// not a log from a child the verifier chose to run. The candidate writes a file next
+// to itself when it starts; nothing else does, so the file appearing means something
+// started it — including an `os.StartProcess` the injected runner cannot see.
+func TestCandidateIsNeverExecuted(t *testing.T) {
+	state := newInstalledState(t, gotool.ARM64)
+	marker := filepath.Join(filepath.Dir(state.target.Binary), "executed")
+	script := "#!/bin/sh\n: > '" + marker + "'\n"
+	if err := os.WriteFile(state.target.Binary, []byte(script), 0o755); err != nil {
+		t.Fatalf("write the candidate: %v", err)
+	}
+	if err := os.Chmod(state.target.Binary, 0o755); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	runner := &recordingRunner{target: state.target, document: buildInfoDocument(t,
+		gotool.ARM64)}
+	if _, err := Verify(state.data, state.target, runner); err != nil {
+		t.Fatalf("the fixture was refused: %v", err)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("the candidate was executed: %s exists", marker)
+	}
+	// The control that the marker would appear: run the same file the way a direct
+	// execution would, and require its side effect. Without this the absence above
+	// could be a script that never writes anything.
+	control := exec.Command(state.target.Binary)
+	if err := control.Run(); err != nil {
+		t.Fatalf("the marker control could not run the candidate: %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("the candidate's own side effect did not appear under direct execution: %v",
+			err)
 	}
 }
 

@@ -508,6 +508,9 @@ self_test() {
     echo 'self-test: the LSP client discriminates every named defect'
     lsp_smoke_controls "$scratch" "$scratch/lsp-smoke.log"
 
+    echo 'self-test: the verifier bundle must be the row machine'
+    helper_target_controls "$scratch"
+
     echo 'self-test: the closure mutator is coherent and only then reaches Go'
     mutate_closure_controls "$scratch" "$scratch/mutate-closure.log"
 
@@ -521,6 +524,43 @@ self_test() {
     input_digest_controls "$scratch/input-digests.log"
 
     echo 'self-test: passed'
+}
+
+# The bundle target rule, driven with the two real cross-builds and a non-ELF file:
+# an arm64 helper must not pass an amd64 row, and a four-byte magic is not enough.
+helper_target_controls() { # SCRATCH
+    local scratch=$1 amd64_helper arm64_helper not_elf
+    amd64_helper=$(bash "$ROOT/script/build/example-helper.sh" go-dev --root "$ROOT" \
+        --os linux --arch amd64 --binary go-dev-helper-amd64) || {
+        selftest_expect 0 1 'the amd64 helper builds for the target control' "$scratch/target.log"
+        return
+    }
+    arm64_helper=$(bash "$ROOT/script/build/example-helper.sh" go-dev --root "$ROOT" \
+        --os linux --arch arm64 --binary go-dev-helper-arm64) || {
+        selftest_expect 0 1 'the arm64 helper builds for the target control' "$scratch/target.log"
+        return
+    }
+    not_elf="$scratch/not-an-elf"
+    printf '#!/bin/sh\n' >"$not_elf"
+    elf_machine_matches "$amd64_helper" amd64 &&
+        selftest_expect 1 1 'an amd64 helper passes an amd64 row' "$scratch/target.log"
+    elf_machine_matches "$arm64_helper" arm64 &&
+        selftest_expect 1 1 'an arm64 helper passes an arm64 row' "$scratch/target.log"
+    if elf_machine_matches "$arm64_helper" amd64; then
+        selftest_expect 1 0 'an arm64 helper must not pass an amd64 row' "$scratch/target.log"
+    else
+        selftest_expect 0 0 'an arm64 helper is refused for an amd64 row' "$scratch/target.log"
+    fi
+    if elf_machine_matches "$amd64_helper" arm64; then
+        selftest_expect 1 0 'an amd64 helper must not pass an arm64 row' "$scratch/target.log"
+    else
+        selftest_expect 0 0 'an amd64 helper is refused for an arm64 row' "$scratch/target.log"
+    fi
+    if elf_machine_matches "$not_elf" amd64; then
+        selftest_expect 1 0 'a script must not pass as an ELF' "$scratch/target.log"
+    else
+        selftest_expect 0 0 'a non-ELF file is refused' "$scratch/target.log"
+    fi
 }
 
 # The first-use, negative-build and cleanup rules as pure functions: each wrong
@@ -1130,6 +1170,25 @@ require_clean_diagnostics() { # FILE
 FUNCTION
 }
 
+# --- the verifier bundle's target ------------------------------------------
+# A four-byte ELF magic says "Linux ELF"; it does not say which machine, so a host
+# binary or the other architecture's cross-build would pass a magic-only check. The
+# ELF header's e_machine (offset 18, two bytes little-endian) does: 0x3e for amd64,
+# 0xb7 for arm64. This is the bundle's own contract — the image runs this row's
+# target — not a claim about the binary's code.
+elf_machine_matches() { # BINARY ARCH
+    local binary=$1 arch=$2 magic machine
+    [ -f "$binary" ] || return 1
+    magic=$(head -c 4 "$binary" | od -An -tx1 | tr -d ' \n')
+    machine=$(od -An -j18 -N2 -tx1 "$binary" | tr -d ' \n')
+    [ "$magic" = 7f454c46 ] || return 1
+    case "$arch" in
+        amd64) [ "$machine" = 3e00 ] ;;
+        arm64) [ "$machine" = b700 ] ;;
+        *) return 1 ;;
+    esac
+}
+
 # --- the bytes this run actually builds ------------------------------------
 # `source <sha> dirty=<n>` binds a commit, not a working copy: the closure, the
 # helper and the adapters can be uncommitted (they are, until the PR lands), and
@@ -1616,10 +1675,10 @@ cp -R "$DATA" "$BUNDLE/gopls-closure"
 linux_helper=$(bash "$ROOT/script/build/example-helper.sh" go-dev --root "$ROOT" \
     --os linux --arch "$ARCH" --binary go-dev-helper) ||
     { fail 'cannot build the Linux-target go-dev helper for the verifier bundle'; exit 1; }
-if [ "$(head -c 4 "$linux_helper" | od -An -tx1 | tr -d ' \n')" = 7f454c46 ]; then
-    pass "the verifier bundle ships Linux bytes for $ARCH"
+if elf_machine_matches "$linux_helper" "$ARCH"; then
+    pass "the verifier bundle ships $ARCH Linux bytes (e_machine checked)"
 else
-    fail "the verifier bundle would ship host bytes, not a Linux helper for $ARCH"
+    fail "the verifier bundle would ship host bytes or another machine than $ARCH"
 fi
 cp "$linux_helper" "$BUNDLE/go-dev-helper"
 log "verifier helper $(sha256_file "$linux_helper") arch=$ARCH"

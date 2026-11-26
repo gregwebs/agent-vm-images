@@ -613,10 +613,15 @@ committed selection, compiler and Linux target settings. What it cannot see: a
 binary whose metadata matches the pin while its code does not, a network request
 made by the verifier itself (the boundary is the RUN's `--network=none`), and any
 ambient-state question, because the child environment is constructed rather than
-inherited. The verifier bundle ships the Linux-target helper binary built from
-the digested `helper/` tree, and `verify-toolchain.sh` keeps the guest PATH smoke
-as a separate shell check: an absolute-path verification says nothing about
-whether the guest's `PATH` resolves the tools or whether they can analyse code.
+inherited. The verifier bundle ships this row's Linux helper binary — the ELF
+`e_machine` is checked against the target, not just the magic — built from the
+digested `helper/` tree, and `verify-toolchain.sh` keeps the guest PATH smoke as a
+separate shell check: an absolute-path verification says nothing about whether the
+guest's `PATH` resolves the tools or whether they can analyse code.
+
+The verifier inspects the path it was given in the spelling it was given: `..`
+after a symlink resolves at the kernel, so `a/link/../gopls` is not `a/gopls`.
+Cleaning the argument would verify a file the caller did not name.
 
 What a build proves: the committed bytes are the reviewed ones, the compiler is
 the pinned one, and the finished binary's own build info reports exactly the

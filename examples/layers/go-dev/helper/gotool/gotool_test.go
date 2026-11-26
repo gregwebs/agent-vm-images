@@ -12,8 +12,7 @@ import (
 
 func testTarget(t *testing.T) Target {
 	t.Helper()
-	return Target{GoRoot: "/opt/go", BinDir: "/opt/go-tools/bin",
-		ShareDir: "/opt/go-tools/share/gopls", Arch: ARM64,
+	return Target{GoRoot: "/opt/go", ShareDir: "/opt/go-tools/share/gopls", Arch: ARM64,
 		Binary: "/opt/go-tools/bin/gopls"}
 }
 

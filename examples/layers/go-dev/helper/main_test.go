@@ -356,6 +356,62 @@ func TestVerifyInstalledRefusesBeforeTheGoChild(t *testing.T) {
 	}
 }
 
+// TestVerifyInstalledUsesTheRequestedSpelling: the `..`-after-a-symlink case at the
+// CLI seam. The unit tests call NewTarget and Verify directly; this one runs the
+// binary, because the cleaning this row forbids lived in the argument handling.
+//
+// `b/link` links to `elsewhere/sub`, so `b/link/../gopls` is `elsewhere/gopls` to the
+// kernel and `b/gopls` to a lexical clean. The two spellings name different files,
+// and the row requires the kernel's.
+func TestVerifyInstalledUsesTheRequestedSpelling(t *testing.T) {
+	binary := build(t)
+	committed := committedData(t)
+	tree := newInstalledTree(t, committed)
+	b := filepath.Join(tree.root, "b")
+	elsewhere := filepath.Join(tree.root, "elsewhere")
+	for _, directory := range []string{b, filepath.Join(elsewhere, "sub")} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(elsewhere, "sub"), filepath.Join(b, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	requested := b + "/link/../gopls"
+	writeCandidate := func(directory string) {
+		path := filepath.Join(directory, "gopls")
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		if err := os.Chmod(path, 0o755); err != nil {
+			t.Fatalf("chmod %s: %v", path, err)
+		}
+	}
+	// The kernel's target carries the candidate, so the path rule must pass and the
+	// pinned go must be reached (its shim records being started).
+	writeCandidate(elsewhere)
+	_, stderr, status := runBinary(t, binary, tree.args(committed, requested)...)
+	if status == 1 && strings.Contains(stderr, "installed: missing "+requested) {
+		t.Fatalf("the requested spelling was not found although the kernel resolves it: %v",
+			stderr)
+	}
+	if _, err := os.Stat(tree.record); err != nil {
+		t.Fatalf("the verifier did not reach the pinned go for the kernel-resolved path: "+
+			"status %d, stderr %q", status, stderr)
+	}
+	// Only the cleaned spelling carries a file now. A reader that cleaned would verify
+	// `b/gopls`; the shipped one must refuse, naming the spelling it was given.
+	if err := os.Remove(filepath.Join(elsewhere, "gopls")); err != nil {
+		t.Fatalf("remove the kernel-resolved candidate: %v", err)
+	}
+	writeCandidate(b)
+	_, stderr, status = runBinary(t, binary, tree.args(committed, requested)...)
+	if status != 1 || !strings.Contains(stderr, "installed: missing "+requested) {
+		t.Fatalf("the lexically cleaned spelling was verified: status %d, stderr %q", status,
+			stderr)
+	}
+}
+
 // TestVerifyInstalledRejectsAMissingGoRoot: the `--go-root` rule is the last path
 // check, and it is a refusal rather than a fallback to whichever `go` answers.
 func TestVerifyInstalledRejectsAMissingGoRoot(t *testing.T) {

@@ -11,6 +11,7 @@
 //	rule                                                Python                    test
 //	--go-root absolute with bin/go                      _target 1730-1734         TestTargetRulesRefuse
 //	--binary absolute and named gopls                   _target 1735-1740         TestTargetRulesRefuse
+//	the caller's spelling is used, as the kernel reads it  _target 1722-1740      TestPathSemanticsAreTheKernels, main: TestVerifyInstalledUsesTheRequestedSpelling
 //	the requested binary is present, not a symlink      verify_installed 1659     TestBinaryRulesRefuse
 //	exactly the requested path, no sibling fallback     verify_installed 1657     TestSiblingIsNotSubstituted
 //	binary mode is exactly 0755, special bits included  verify_installed 1660-62  TestBinaryRulesRefuse, TestModeSpecialBitsDiverge
@@ -22,7 +23,7 @@
 //	go env GOROOT is --go-root                          require_pinned_compiler   TestGoRootRulesRefuse
 //	strict build-info JSON (G3)                         parse_build_info 1342     package buildinfo: TestStrictDocumentRefuses
 //	build-info identity, target and settings            verify_module_build_info 1386-1410  package buildinfo
-//	the candidate is never executed and no request made verify_installed 1654     TestChildArguments, TestScratchIsRemoved
+//	the candidate is never executed, no request made    verify_installed 1654     TestChildArguments, TestCandidateIsNeverExecuted, TestScratchIsRemoved, pins: "a verifiable candidate that would write a marker is never started", "the verifier made no proxy request"
 //	status 0 with the release on stdout, 1 on refusal   main 1738-1765            main: TestStatusMatrix
 //
 // Not ported, with the reason:
@@ -32,10 +33,11 @@
 //     sections. It is a duplicate call, not defence in depth (#188 R-c); the digest
 //     rule is the witness for the family.
 //   - the copy of go.mod/go.sum into the scratch module (Python 1672-1677). Neither
-//     closed command reads a module — `go env` reports configuration and
-//     `go version -m -json` reads the named binary — so the copied bytes were never
-//     read, and re-reading them after the loader's digest check would be a second,
-//     unverified read of the data directory on the verification path.
+//     closed command's *answer* depends on a module's contents — `go env` reports
+//     configuration and `go version -m -json` reads the named binary — so copying
+//     them would add a second read of the data directory after the loader's digest
+//     check without deciding either verdict. It is not a claim about which files the
+//     Go command opens.
 //
 // The two G3 fixes this verb owns are declared divergences while the Python oracle
 // lives: a binary mode is compared with its special bits included (Python masked
@@ -62,9 +64,16 @@ const Prefix = "gopls-closure"
 
 // NewTarget validates the paths the verb was given and turns them into the one
 // target the rest of the check uses.
+//
+// Every path is kept in the spelling the caller wrote. `filepath.Clean` would turn
+// `a/link/../gopls` into `a/gopls`, which is a different file when `link` is a
+// symlink: the kernel resolves `..` after the link, so the caller's spelling and the
+// cleaned spelling name different files. This verb must inspect the file the caller
+// named, so it neither cleans nor resolves here — and the rules below use
+// gotool.Join, not filepath.Join, for the same reason.
 func NewTarget(goRoot, binary, shareDir string, arch gotool.Architecture) (gotool.Target, error) {
-	root := filepath.Clean(goRoot)
-	if !filepath.IsAbs(root) || !isRegularFile(filepath.Join(root, "bin", "go")) {
+	if !filepath.IsAbs(goRoot) ||
+		!isRegularFile(gotool.Join(gotool.Join(goRoot, "bin"), "go")) {
 		return gotool.Target{}, fmt.Errorf("--go-root must be an absolute Go root with bin/go: %s",
 			goRoot)
 	}
@@ -75,8 +84,7 @@ func NewTarget(goRoot, binary, shareDir string, arch gotool.Architecture) (gotoo
 		return gotool.Target{}, fmt.Errorf("--binary must name the installed tool gopls, not %s",
 			quote(filepath.Base(binary)))
 	}
-	return gotool.Target{GoRoot: root, BinDir: filepath.Dir(binary),
-		ShareDir: filepath.Clean(shareDir), Arch: arch, Binary: filepath.Clean(binary)}, nil
+	return gotool.Target{GoRoot: goRoot, ShareDir: shareDir, Arch: arch, Binary: binary}, nil
 }
 
 // Verify proves the installed state against the loaded closure and returns the
@@ -167,7 +175,7 @@ func checkBinary(binary string) error {
 // evidence; the section re-parse the Python reader also ran could not disagree with
 // it, so it is not ported (see the package comment).
 func checkNotice(shareDir string, pinned closure.SHA256) error {
-	path := filepath.Join(shareDir, string(closure.FileLicenses))
+	path := gotool.Join(shareDir, string(closure.FileLicenses))
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return fmt.Errorf("installed: missing %s", path)

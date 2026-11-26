@@ -60,10 +60,17 @@ Commit the selection, then let one deep helper compile from it.
   installed state too, compared per case in
   `script/test/gopls-closure-pins.py`, and the two defects this verb owns (a mode
   compared with its special bits, and the notice file's mode) are declared
-  divergences with both verdicts asserted. Inspecting reported build info is not
-  authentication: nothing signs the metadata, the pinned `go` child is a metadata
-  reader, the candidate is never executed, and a self-report that agrees with the
-  pin is accepted whether or not the code is the reviewed code. The guest PATH
+  divergences with both verdicts asserted; the strict build-info decoder is a third
+  and a fourth (a duplicate key whose value agrees, a non-JSON constant in a member
+  the oracle does not read), asserted from both sides on the same document. The verb
+  uses the caller's path spelling rather than a lexical clean, because `..` after a
+  symlink resolves at the kernel: cleaning would inspect a file the caller did not
+  name. Non-execution is observed by the candidate's own side effect — a marker the
+  inspected program writes if it is started — alongside the `go` shim's argv record,
+  because neither observer can see what the other can. Inspecting reported build info
+  is not authentication: nothing signs the metadata, the pinned `go` child is a
+  metadata reader, the candidate is never executed, and a self-report that agrees
+  with the pin is accepted whether or not the code is the reviewed code. The guest PATH
   smoke in `verify-toolchain.sh` stays a separate check, because an
   absolute-path verification answers a different question than "does the guest's
   `PATH` resolve these tools and can they analyse code".

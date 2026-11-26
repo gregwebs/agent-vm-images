@@ -1313,9 +1313,16 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
               f'({result.returncode}, {result.stdout!r}, {result.stderr!r})')
 
         # The binary the verifier inspects is named, absolute, and never executed: the
-        # only child that reads it is `go version -m -json`. A shim root records every
-        # argv and forwards that one command, so an unrecorded command cannot run and
-        # a recorded program that is the candidate fails the row.
+        # only child that reads it is `go version -m -json`. Three observations, and
+        # what each one can see:
+        #
+        #   * the `go` shim record sees every Go invocation the reader makes — program,
+        #     argv, order — and refuses any argv outside the three exact shapes;
+        #   * the candidate's own marker file (below) sees the candidate being started,
+        #     wherever from, which the shim record cannot;
+        #   * the loopback proxy recorder sees requests.
+        #
+        # No single observer is trusted for more than that.
         witnesses.clear()
         shimmed = run_helper(helper, verify_installed_argv(
             closure, arch, binary=target.bin_dir / 'gopls', share_dir=target.share_dir,
@@ -1373,14 +1380,20 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
             return str(error)
         return None
 
-    def canned_runner(document: dict):
-        """The oracle's runner seam, answering the closed set from one document."""
+    def canned_runner(document):
+        """The oracle's runner seam: the three closed answers, one document.
+
+        The document is passed through verbatim, as text, because these rows are about
+        what each decoder makes of the same bytes.
+        """
+        text = document if isinstance(document, str) else json.dumps(document)
+
         def runner(command, extra, env, cwd):
             if command is model.GoCommand.GOVERSION:
                 return subprocess.CompletedProcess([], 0, 'go1.27.3\n', '')
             if command is model.GoCommand.GOROOT:
                 return subprocess.CompletedProcess([], 0, str(target.go_root) + '\n', '')
-            return subprocess.CompletedProcess([], 0, json.dumps(document), '')
+            return subprocess.CompletedProcess([], 0, text, '')
         return runner
 
     def go_reader(*, binary_path: Path | None = None) -> subprocess.CompletedProcess:
@@ -1444,14 +1457,16 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
     row('a group-writable notice mode', mutate_group, restore_group,
         go_fragment='want 644', python_fragment=None)
     # A setuid bit cannot be set inside the boundary (it is stripped), so the witness
-    # file is prepared outside it and both readers are pointed at *that* file: the mode
-    # rule fires before anything reads the bytes, and the oracle's injected runner
-    # answers the build-info question, so both verdicts are about the mode.
+    # file is prepared outside it and both readers are pointed at *that* file. The
+    # reader gets the document shim, so if the mode rule were deleted the run would
+    # reach the shim and *accept*: the row fails on the verdict, not on a message. The
+    # oracle's injected runner answers the same document for the same reason.
+    witnesses.answer(document)
     setuid_target = dataclasses.replace(target, binary=witnesses.setuid_binary)
     oracle = in_process(canned_runner(document), setuid_target)
     setuid_result = run_helper(helper, verify_installed_argv(
         closure, target.arch, binary=witnesses.setuid_binary, share_dir=target.share_dir,
-        go_root=fixture.go_root))
+        go_root=witnesses.document_root))
     rows += 1
     divergences += 1
     check('a setuid binary mode: the oracle accepts, the reader refuses (declared '
@@ -1492,11 +1507,16 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
           f'(oracle {sibling_message!r}, reader {sibling_result.stderr.strip()!r})')
 
     print('verify-installed: the build info is read, not authenticated')
-    # One mutation per rule, emitted by the document shim whose only job is that one
-    # command: a command outside the reviewed set cannot run at all.
+    # Every case here runs *both* readers over the same document: the Go reader through
+    # the document shim (a real child process), the oracle through its runner seam. The
+    # two decoders are the point — the oracle's json.loads is permissive, the ported
+    # reader's is strict — so a case is only counted when both sides ran, and the two
+    # cases where their verdicts differ are named here.
 
-    def emit(value) -> subprocess.CompletedProcess:
-        witnesses.answer(value)
+    def document_for(value) -> str:
+        return value if isinstance(value, str) else json.dumps(value)
+
+    def emit() -> subprocess.CompletedProcess:
         return run_helper(helper, verify_installed_argv(
             closure, target.arch, binary=binary, share_dir=target.share_dir,
             go_root=witnesses.document_root))
@@ -1505,9 +1525,6 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
         edited_document = json.loads(json.dumps(document))
         change(edited_document)
         return edited_document
-
-    def settings(document_: dict) -> dict:
-        return {item['Key']: item['Value'] for item in document_['Settings']}
 
     def set_setting(key: str, value: str):
         def change(document_: dict) -> None:
@@ -1518,38 +1535,116 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
             raise AssertionError(f'the document carries no {key} setting')
         return change
 
+    def replace_once(text: str, old: str, new: str) -> str:
+        if old not in text:
+            raise AssertionError(f'the build-info document does not carry {old!r}')
+        return text.replace(old, new, 1)
+
+    # A case is (label, document, go status, go fragment, python status, python
+    # fragment). A fragment is only used on a side that refuses.
     build_cases = [
-        ('unparseable build info', 'not a document', 'build info: not valid JSON'),
-        ('a duplicate build-info key',
-         real.stdout.replace('"GoVersion": "go1.27.3"',
-                             '"GoVersion": "go1.27.3", "GoVersion": "go9.9.9"', 1),
-         'duplicate key'),
+        ('a coherent build-info document', real.stdout, 0, None, 0, None),
+        ('unparseable build info', 'not a document', 1, 'not valid JSON',
+         1, 'not valid JSON'),
         ('the wrong compiler in the build info',
          json.dumps(mutate_document(lambda d: d.update({'GoVersion': 'go1.26.5'}))),
-         'compiler is go1.26.5, want go1.27.3'),
+         1, 'compiler is go1.26.5, want go1.27.3', 1, 'compiler is go1.26.5, want go1.27.3'),
         ('another selected closure',
          json.dumps(mutate_document(lambda d: d['Deps'][0].update(
              {'Path': 'example.test/evil'}))),
-         'not in the reviewed closure'),
+         1, 'not in the reviewed closure', 1, 'not in the reviewed closure'),
         ('another Linux target',
          json.dumps(mutate_document(set_setting('GOARM64', 'v9.0'))),
-         'build settings differ'),
+         1, 'build settings differ', 1, 'build settings differ'),
         ('a Darwin build',
          json.dumps(mutate_document(set_setting('GOOS', 'darwin'))),
-         'build settings differ'),
+         1, 'build settings differ', 1, 'build settings differ'),
+        # Declared divergences (#188 G3): the oracle's permissive decoder accepts a
+        # duplicate key whose value agrees and a non-JSON constant in a member it does
+        # not read; the strict decoder refuses both.
+        ('a duplicate build-info key',
+         replace_once(real.stdout, '"GoVersion": "go1.27.3"',
+                      '"GoVersion": "go1.27.3", "GoVersion": "go1.27.3"'),
+         1, 'duplicate key', 0, None),
+        ('a non-JSON constant in an optional member',
+         replace_once(real.stdout, '"Path": "golang.org/x/tools/gopls"', '"Path": NaN'),
+         1, 'NaN is not valid JSON', 0, None),
     ]
-    for label, value, fragment in build_cases:
-        result = emit(value)
+    oracle_accepts = 0
+    for label, value, go_status, go_fragment, python_status, python_fragment in build_cases:
+        witnesses.answer(document_for(value))
+        result = emit()
+        oracle = in_process(canned_runner(document_for(value)))
         rows += 1
-        agreements += 1
-        check(f'{label}: the reader refuses it',
-              result.returncode == 1 and result.stdout == '' and fragment in result.stderr,
-              f'({result.returncode}, {result.stdout!r}, {result.stderr.strip()!r})')
+        if oracle is None:
+            oracle_accepts += 1
+        if go_status == python_status:
+            agreements += 1
+        else:
+            divergences += 1
+        problems = []
+        if (result.returncode == 0) != (go_status == 0):
+            problems.append(f'reader status {result.returncode}, want {go_status} '
+                            f'({result.stderr.strip()!r})')
+        if go_status == 0 and (result.stdout != 'v0.0.1\n' or result.stderr != ''):
+            problems.append(f'reader accepted with {result.stdout!r}/{result.stderr!r}')
+        if go_status == 1 and (result.stdout != '' or go_fragment not in result.stderr):
+            problems.append(f'reader refusal {result.stderr.strip()!r} does not name '
+                            f'{go_fragment!r}')
+        if (oracle is None) != (python_status == 0):
+            problems.append(f'oracle verdict {oracle!r}, want status {python_status}')
+        if python_status == 1 and python_fragment not in (oracle or ''):
+            problems.append(f'oracle refusal {oracle!r} does not name {python_fragment!r}')
+        check(f'{label}: both readers declare their own verdict', not problems,
+              '; '.join(problems))
 
+    # The shim's own control: it must refuse an argv outside the three exact shapes,
+    # or "the shim refuses everything else" is a claim its source does not keep.
+    stray = subprocess.run([str(witnesses.record_root / 'bin' / 'go'), 'version', '-m',
+                            '-json', 'a', 'b'], capture_output=True, text=True, check=False)
+    check('the go shim refuses an argv outside the three closed shapes',
+          stray.returncode == 9 and 'the review forbids this command' in stray.stderr,
+          f'({stray.returncode}, {stray.stderr.strip()!r})')
+
+    # The candidate's own side effect, not a log from a child the verifier chose to
+    # start: a `go` shim record cannot see `os.StartProcess`, and this marker can see
+    # nothing else. The *allowlisted* witness program is the verified candidate, so if
+    # the reader ever started it the boundary would permit it and the marker would
+    # appear; its absence is the reader's choice, not the sandbox's refusal. The bytes
+    # are a marker program, and the build info comes from the document shim, so the
+    # run must reach acceptance to make "never executed" meaningful.
+    print('verify-installed: the candidate is never executed')
+    witnesses.answer(real.stdout)
+    marker = witnesses.candidate.parent / 'executed'
+    if marker.exists():
+        marker.unlink()
+    marker_run = run_helper(helper, verify_installed_argv(
+        closure, target.arch, binary=witnesses.candidate, share_dir=target.share_dir,
+        go_root=witnesses.document_root))
+    rows += 1
+    accepts += 1
+    agreements += 1
+    check('a verifiable candidate that would write a marker is never started',
+          marker_run.returncode == 0 and marker_run.stdout == 'v0.0.1\n'
+          and not marker.exists(),
+          f'({marker_run.returncode}, {marker_run.stderr.strip()!r}, '
+          f'marker {marker.exists()})')
+    # The control that the marker would appear: start the same allowlisted file
+    # directly and require its side effect, so the absence above cannot be a program
+    # that writes nothing.
+    control = subprocess.run([str(witnesses.candidate)], capture_output=True, check=False)
+    check('the marker candidate writes its side effect when it is executed',
+          control.returncode == 0 and marker.exists(),
+          f'(status {control.returncode}, marker {marker.exists()})')
+    marker.unlink()
+
+    # Floors, deliberately below today's counts: every row ran both readers, so a
+    # shrinking table is a failure rather than a quieter pass (ruling R-a).
     check('the paired installed-state corpus is nonempty and both verdicts are exercised',
-          rows >= 20 and accepts >= 6 and agreements >= 15 and divergences == 2,
+          rows >= 22 and accepts >= 6 and agreements >= 18 and divergences == 4
+          and oracle_accepts >= 3,
           f'(rows {rows}, accepts {accepts}, agreements {agreements}, '
-          f'divergences {divergences})')
+          f'divergences {divergences}, oracle accepts {oracle_accepts})')
 
 
 class Witnesses:
@@ -1564,15 +1659,16 @@ class Witnesses:
     """
 
     def __init__(self, directory: Path, record_root: Path, document_root: Path,
-                 setuid_binary: Path) -> None:
+                 setuid_binary: Path, candidate: Path) -> None:
         self.directory = directory
         self.record_root = record_root
         self.document_root = document_root
         self.setuid_binary = setuid_binary
+        self.candidate = candidate
 
     def executables(self) -> list[str]:
         return [str(self.record_root / 'bin' / 'go'),
-                str(self.document_root / 'bin' / 'go')]
+                str(self.document_root / 'bin' / 'go'), str(self.candidate)]
 
     def record(self) -> Path:
         return self.record_root / 'record'
@@ -1589,11 +1685,13 @@ class Witnesses:
         (self.document_root / 'document').write_text(value)
 
 
-# shimSource is the test shim's whole program. It is compiled by the pinned go in
-# the unconfined pass: an executable the OS boundary allowlists must be a program,
-# not a shell script, because allowing /bin/sh to interpret a script would hand the
-# fixture a general shell and weaken the boundary for everything else.
-SHIM_SOURCE = """package main
+# SHIM_SOURCE is the test shim's whole program: the closed command set, exact.
+#
+# It is compiled by the pinned go in the unconfined pass, because an executable the
+# OS boundary allowlists must be a program rather than a shell script: allowing
+# /bin/sh to interpret one would hand the fixture a general shell and weaken the
+# boundary for everything else.
+SHIM_SOURCE = r"""package main
 
 import (
 	"fmt"
@@ -1603,9 +1701,12 @@ import (
 	"syscall"
 )
 
-// A test shim: it answers only the installed-state verifier's closed command set,
-// records every argv, and refuses anything else. `version -m -json` is answered by
-// exec'ing the pinned go named in <root>/forward, or by printing <root>/document.
+// A test shim: it answers exactly the verifier's three closed invocations, records
+// every argv, and refuses anything else with status 9 — a fourth command, an extra
+// argument or a different verb cannot make a verification pass. The *order* of the
+// three is the caller's business and is asserted by the suite's row, not here.
+// `go version -m -json PATH` is answered by exec'ing the pinned go named in
+// <root>/forward, or by printing <root>/document.
 func main() {
 	exe, err := os.Executable()
 	if err != nil {
@@ -1617,17 +1718,17 @@ func main() {
 		fmt.Fprintln(record, strings.Join(os.Args[1:], " "))
 		record.Close()
 	}
-	joined := strings.Join(os.Args[1:], " ")
+	argv := os.Args[1:]
 	switch {
-	case joined == "env GOVERSION":
+	case len(argv) == 2 && argv[0] == "env" && argv[1] == "GOVERSION":
 		fmt.Println("go1.27.3")
-	case joined == "env GOROOT":
+	case len(argv) == 2 && argv[0] == "env" && argv[1] == "GOROOT":
 		fmt.Println(root)
-	case strings.HasPrefix(joined, "version -m"):
+	case len(argv) == 4 && argv[0] == "version" && argv[1] == "-m" && argv[2] == "-json":
 		if forward, err := os.ReadFile(filepath.Join(root, "forward")); err == nil &&
 			len(forward) > 0 {
-			argv := append([]string{strings.TrimSpace(string(forward))}, os.Args[1:]...)
-			if err := syscall.Exec(argv[0], argv, os.Environ()); err != nil {
+			invocation := append([]string{strings.TrimSpace(string(forward))}, argv...)
+			if err := syscall.Exec(invocation[0], invocation, os.Environ()); err != nil {
 				os.Exit(9)
 			}
 		}
@@ -1637,35 +1738,56 @@ func main() {
 		}
 		os.Stdout.Write(document)
 	default:
-		fmt.Fprintln(os.Stderr, "the review forbids this command")
+		fmt.Fprintf(os.Stderr, "the review forbids this command: %q\n", argv)
 		os.Exit(9)
 	}
 }
 """
 
+# MARKER_SOURCE is the candidate a non-execution row installs: when it starts, it
+# writes a file next to itself. That side effect is the observation, because it has
+# exactly one possible writer — the candidate — so it sees a direct execution the
+# runner record and the `go` shim cannot.
+MARKER_SOURCE = r"""package main
 
-def compile_shim(directory: Path, real_go: Path) -> Path:
-    """Compile the shim with the pinned go, before the boundary exists."""
-    source = directory / 'shim.go'
-    source.write_text(SHIM_SOURCE)
-    binary = directory / 'go-shim'
+import (
+	"os"
+	"path/filepath"
+)
+
+func main() {
+	exe, err := os.Executable()
+	if err != nil {
+		os.Exit(1)
+	}
+	_ = os.WriteFile(filepath.Join(filepath.Dir(exe), "executed"), []byte("executed\n"),
+		0o644)
+}
+"""
+
+
+def compile_go(directory: Path, name: str, source: str, real_go: Path) -> Path:
+    """Compile one test program with the pinned go, before the boundary exists."""
+    path = directory / f'{name}.go'
+    path.write_text(source)
+    binary = directory / name
     environment = dict(os.environ)
     environment.update({'GOTOOLCHAIN': 'local', 'GOFLAGS': '', 'GOPROXY': 'off'})
     result = subprocess.run([str(real_go), 'build', '-trimpath', '-buildvcs=false',
-                             '-o', str(binary), str(source)],
+                             '-o', str(binary), str(path)],
                             capture_output=True, text=True, check=False,
                             env=environment, cwd=str(directory))
     if result.returncode != 0 or not binary.is_file():
-        raise SystemExit(f'gopls-closure-pins: cannot compile the go shim:\n'
+        raise SystemExit(f'gopls-closure-pins: cannot compile {name}:\n'
                          f'{result.stdout}{result.stderr}')
     return binary
 
 
 def prepare_witnesses(directory: Path, real_go: Path) -> Witnesses:
-    """Build both shims and the setuid witness before the boundary goes up."""
+    """Build the shims, the marker candidate and the setuid witness before the boundary."""
     directory = directory.resolve()
     directory.mkdir(parents=True)
-    shim = compile_shim(directory, real_go)
+    shim = compile_go(directory, 'go-shim', SHIM_SOURCE, real_go)
     record_root = directory / 'record'
     document_root = directory / 'document'
     for root in (record_root, document_root):
@@ -1677,8 +1799,16 @@ def prepare_witnesses(directory: Path, real_go: Path) -> Witnesses:
     # The forwarding shim answers from the pinned go; the document shim from the file
     # the installed-state rows write.
     (record_root / 'forward').write_text(str(real_go))
-    # The verifier refuses any --binary whose basename is not `gopls`, so the
-    # witness is the file that name, in its own directory.
+    # The candidate a non-execution row installs, and the setuid witness. Both are
+    # allowlisted: the boundary must *permit* starting them, or their absence would
+    # prove only that the sandbox refused.
+    # The candidate is named `gopls` because the verifier refuses any other name: a
+    # witness that could not be the inspected file would prove nothing.
+    (directory / 'candidate').mkdir()
+    candidate = directory / 'candidate' / 'gopls'
+    shutil.copyfile(compile_go(directory, 'marker-candidate', MARKER_SOURCE, real_go),
+                    candidate)
+    os.chmod(candidate, 0o755)
     (directory / 'setuid').mkdir()
     setuid_binary = directory / 'setuid' / 'gopls'
     setuid_binary.write_bytes(b'\x7fELF placeholder\n')
@@ -1686,7 +1816,7 @@ def prepare_witnesses(directory: Path, real_go: Path) -> Witnesses:
     if not os.lstat(setuid_binary).st_mode & 0o4000:
         raise SystemExit('gopls-closure-pins: the host will not keep a setuid bit, so '
                          'the special-bit witness cannot be produced')
-    return Witnesses(directory, record_root, document_root, setuid_binary)
+    return Witnesses(directory, record_root, document_root, setuid_binary, candidate)
 
 
 def sh_quote(text: str) -> str:
@@ -1987,9 +2117,9 @@ def main() -> int:
     if os.environ.get(sandbox.SANDBOXED_ENV) == '1':
         helper = Path(os.environ['GO_DEV_HELPER'])
         root = Path(os.environ['GO_DEV_PINS_ROOT'])
-        directory, record, document, setuid = (
+        directory, record, document, setuid, candidate = (
             Path(path) for path in os.environ['GO_DEV_WITNESSES'].split(os.pathsep))
-        witnesses = Witnesses(directory, record, document, setuid)
+        witnesses = Witnesses(directory, record, document, setuid, candidate)
         if not helper.is_file() or not witnesses.setuid_binary.is_file():
             print('gopls-closure-pins: the sandboxed pass is missing the helper or the '
                   'witnesses the first pass prepared', file=sys.stderr)
@@ -2005,7 +2135,8 @@ def main() -> int:
         os.environ['GO_DEV_PINS_ROOT'] = str(root)
         os.environ['GO_DEV_WITNESSES'] = os.pathsep.join(
             str(path) for path in (witnesses.directory, witnesses.record_root,
-                                   witnesses.document_root, witnesses.setuid_binary))
+                                   witnesses.document_root, witnesses.setuid_binary,
+                                   witnesses.candidate))
 
     # The writer's children are not the only tree that needs the boundary: this
     # suite's real Go builds run under it too.
