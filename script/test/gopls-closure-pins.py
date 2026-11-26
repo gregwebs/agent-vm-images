@@ -1293,6 +1293,8 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
     turns the row red. Each accepted row is preceded by the oracle's own acceptance,
     so the corpus cannot pass by every case refusing.
     """
+    import dataclasses
+
     import gopls_closure as model
 
     print('verify-installed: both readers on both Linux targets')
@@ -1363,10 +1365,10 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
     shutil.copyfile(binary, sibling)
     os.chmod(sibling, 0o755)
 
-    def in_process(runner=None) -> str | None:
+    def in_process(runner=None, inspected=None) -> str | None:
         """The oracle's verdict: its refusal text, or None when it accepts."""
         try:
-            model.verify_installed(closure, target, runner=runner)
+            model.verify_installed(closure, inspected or target, runner=runner)
         except model.ClosureError as error:
             return str(error)
         return None
@@ -1392,6 +1394,12 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
         nonlocal rows, agreements, divergences, accepts
         try:
             mutate()
+        except BaseException:
+            # A mutation that could not be applied is not a comparison: undo what it
+            # managed to change and report it, instead of letting the restore hide it.
+            restore()
+            raise
+        try:
             message = in_process(oracle_runner)
             result = go_reader()
         finally:
@@ -1435,18 +1443,23 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
     mutate_group, restore_group = mode_of(license_path, 0o664)
     row('a group-writable notice mode', mutate_group, restore_group,
         go_fragment='want 644', python_fragment=None)
-    # A setuid bit cannot be set inside the boundary (it is stripped), so the file is
-    # prepared outside it and hard-linked in: the verified path is then a real 4755
-    # file, not a mode that a test asserted over.
-    # The oracle's runner is injected for this row because the hard-linked file is a
-    # placeholder: what is compared is the *mode* verdict, and giving the oracle the
-    # reviewed document is what keeps its answer about the mode rather than the bytes.
-    row('a setuid binary mode',
-        lambda: (binary.unlink(), os.link(witnesses.setuid_binary, binary)),
-        lambda: (binary.unlink(), binary.write_bytes(original_binary),
-                 os.chmod(binary, 0o755)),
-        go_fragment='has mode 4755, want 755', python_fragment=None,
-        oracle_runner=canned_runner(document))
+    # A setuid bit cannot be set inside the boundary (it is stripped), so the witness
+    # file is prepared outside it and both readers are pointed at *that* file: the mode
+    # rule fires before anything reads the bytes, and the oracle's injected runner
+    # answers the build-info question, so both verdicts are about the mode.
+    setuid_target = dataclasses.replace(target, binary=witnesses.setuid_binary)
+    oracle = in_process(canned_runner(document), setuid_target)
+    setuid_result = run_helper(helper, verify_installed_argv(
+        closure, target.arch, binary=witnesses.setuid_binary, share_dir=target.share_dir,
+        go_root=fixture.go_root))
+    rows += 1
+    divergences += 1
+    check('a setuid binary mode: the oracle accepts, the reader refuses (declared '
+          'divergence)',
+          oracle is None and setuid_result.returncode == 1 and setuid_result.stdout == ''
+          and 'has mode 4755, want 755' in setuid_result.stderr,
+          f'(oracle {oracle!r}, reader {setuid_result.returncode}/'
+          f'{setuid_result.stderr.strip()!r})')
     row('a binary that is not a Go program',
         lambda: binary.write_bytes(b'not the reviewed binary\n'),
         lambda: binary.write_bytes(original_binary),
@@ -1648,9 +1661,10 @@ def compile_shim(directory: Path, real_go: Path) -> Path:
     return binary
 
 
-def prepare_witnesses(real_go: Path) -> Witnesses:
+def prepare_witnesses(directory: Path, real_go: Path) -> Witnesses:
     """Build both shims and the setuid witness before the boundary goes up."""
-    directory = Path(tempfile.mkdtemp(prefix='gopls-closure-witness-')).resolve()
+    directory = directory.resolve()
+    directory.mkdir(parents=True)
     shim = compile_shim(directory, real_go)
     record_root = directory / 'record'
     document_root = directory / 'document'
@@ -1663,7 +1677,10 @@ def prepare_witnesses(real_go: Path) -> Witnesses:
     # The forwarding shim answers from the pinned go; the document shim from the file
     # the installed-state rows write.
     (record_root / 'forward').write_text(str(real_go))
-    setuid_binary = directory / 'gopls-setuid'
+    # The verifier refuses any --binary whose basename is not `gopls`, so the
+    # witness is the file that name, in its own directory.
+    (directory / 'setuid').mkdir()
+    setuid_binary = directory / 'setuid' / 'gopls'
     setuid_binary.write_bytes(b'\x7fELF placeholder\n')
     os.chmod(setuid_binary, 0o755 | 0o4000)
     if not os.lstat(setuid_binary).st_mode & 0o4000:
@@ -1969,6 +1986,7 @@ def main() -> int:
     # compiler is not allowlisted and a setuid bit is stripped.
     if os.environ.get(sandbox.SANDBOXED_ENV) == '1':
         helper = Path(os.environ['GO_DEV_HELPER'])
+        root = Path(os.environ['GO_DEV_PINS_ROOT'])
         directory, record, document, setuid = (
             Path(path) for path in os.environ['GO_DEV_WITNESSES'].split(os.pathsep))
         witnesses = Witnesses(directory, record, document, setuid)
@@ -1978,8 +1996,13 @@ def main() -> int:
             return 1
     else:
         helper = build_go_dev_helper()
-        witnesses = prepare_witnesses(go_root / 'bin' / 'go')
+        # The scratch root is created here too: the setuid witness is hard-linked into
+        # an installation, and a link cannot cross the mounts the boundary gives the
+        # two trees, so both have to be under the tree this pass created.
+        root = Path(tempfile.mkdtemp(prefix='gopls-closure-pins-')).resolve()
+        witnesses = prepare_witnesses(root / 'witnesses', go_root / 'bin' / 'go')
         os.environ['GO_DEV_HELPER'] = str(helper)
+        os.environ['GO_DEV_PINS_ROOT'] = str(root)
         os.environ['GO_DEV_WITNESSES'] = os.pathsep.join(
             str(path) for path in (witnesses.directory, witnesses.record_root,
                                    witnesses.document_root, witnesses.setuid_binary))
@@ -2005,7 +2028,6 @@ def main() -> int:
     sys.path.insert(0, str(FIXTURES))
     import fixture as fixture_module
 
-    root = Path(tempfile.mkdtemp(prefix='gopls-closure-pins-')).resolve()
     fixture = None
     try:
         test_constants()
