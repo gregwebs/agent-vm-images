@@ -231,13 +231,30 @@ func repr(text string) string {
 	return out.String()
 }
 
-// ParseReleaseVersion and ParseGoVersion are the exported entry points for the
-// caller that turns `--expect-*` spellings into assertions. The loader itself
-// only ever sees the validated newtypes.
+// ParseReleaseVersion, ParseGoVersion, ParseModulePath, ParseModuleVersion and
+// ParseH1 are the exported entry points for callers outside this package: the
+// first two turn `--expect-*` spellings into assertions, the last three validate
+// a module identity another document reports (the build information a binary
+// carries, package buildinfo). The loader itself only ever sees the newtypes.
 func ParseReleaseVersion(text, what string) (ReleaseVersion, error) {
 	return parseReleaseVersion(text, what)
 }
 
 func ParseGoVersion(text, what string) (GoVersion, error) {
 	return parseGoVersion(text, what)
+}
+
+// ParseModulePath validates a module path from a decoded document.
+func ParseModulePath(value any, what string) (ModulePath, error) {
+	return parseModulePath(value, what)
+}
+
+// ParseModuleVersion validates a semantic module version from a decoded document.
+func ParseModuleVersion(value any, what string) (ModuleVersion, error) {
+	return parseModuleVersion(value, what)
+}
+
+// ParseH1 validates a module content checksum from a decoded document.
+func ParseH1(value any, what string) (H1, error) {
+	return parseH1(value, what)
 }

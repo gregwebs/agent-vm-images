@@ -81,7 +81,12 @@ var reviewedImporters = map[string][]string{
 	// time. `net/url` is not a network capability (the guarded set is conservative
 	// on purpose, as it is for the root's artifactpin), and the reader opens no
 	// socket: `check` runs under --network=none with no Go child at all.
-	goDevHelperPath + "/closure/pin.go":                     {"net/url"},
+	goDevHelperPath + "/closure/pin.go": {"net/url"},
+	// `verify-installed` starts exactly one program, the pinned go, with the argv and
+	// environment package gotool builds (#250). The binary under test is never a
+	// program: it is an argument to `go version -m -json`. The boundary around that
+	// child is the recipe's --network=none RUN, not this list.
+	goDevHelperPath + "/gotool/exec.go":                     {"os/exec"},
 	mainModulePath + "/internal/artifactpin/rules.go":       {"net/url"},
 	mainModulePath + "/internal/artifactinstall/archive.go": {"os/exec"},
 	mainModulePath + "/internal/artifactinstall/install.go": {"os/exec"},
