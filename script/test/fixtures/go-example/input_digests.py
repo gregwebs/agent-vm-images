@@ -23,12 +23,23 @@ def main() -> int:
         return 2
     root = pathlib.Path(sys.argv[1])
     layer = root / sys.argv[2]
-    # Exactly the inputs the Dockerfile bind-mounts for the gopls steps: the
-    # recipe, the two adapters, the helper and the five committed closure files.
+    # Exactly the inputs the Dockerfile binds for the gopls steps, in the two sets
+    # the recipe uses: the final stage's mounts (recipe, three adapters, the Python
+    # reader, the five committed closure files) and the builder stage's bind
+    # (`helper`, the whole module including its vendor tree, which is what the
+    # stage compiles). The helper tree is walked rather than listed so a new source
+    # file cannot be built without being digested; the count is floored by the
+    # self-test control, which is what makes a short walk fail rather than pass.
     paths = [layer / name for name in ('Dockerfile', 'install-gopls.sh',
                                        'verify-toolchain.sh', 'gopls_closure.py')]
     paths += sorted(path for path in (layer / 'data' / 'gopls-closure').iterdir()
                     if path.is_file())
+    helper = layer / 'helper'
+    paths += sorted(path for path in helper.rglob('*') if path.is_file())
+    if len(paths) < 30:
+        print(f'input_digests: found {len(paths)} inputs, want at least 30: the walk is '
+              f'not looking at the helper module', file=sys.stderr)
+        return 1
     lines = [f'{hashlib.sha256(path.read_bytes()).hexdigest()}  '
              f'{path.relative_to(root)}' for path in paths]
     for line in lines:

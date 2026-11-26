@@ -43,9 +43,15 @@ Commit the selection, then let one deep helper compile from it.
   and `go build` does not authenticate a vendored tree, so a networked drift gate
   would still be needed. A bespoke sums file would reimplement Go's resolver, and
   a committed prebuilt gopls would be an unreviewed binary.
-- Ordinary builds run exactly one deep helper,
-  `examples/layers/go-dev/gopls_closure.py`, through a thin adapter
-  (`install-gopls.sh`). The helper:
+- Ordinary builds run the offline check through the layer's own Go reader and the
+  install through `examples/layers/go-dev/gopls_closure.py`, which stays the
+  installer and the live oracle until #251/#254. Since #249 the recipe also runs
+  `go-dev-helper check` under `--network=none` over the same five committed files:
+  the same rules, no Go command, no network. The duplicate reader exists for one
+  slice at a time and its differences are recorded per case in
+  `script/test/gopls-closure-parity.py`; the defects that reader fixes (#188 G3)
+  are listed there too.
+- The Python helper:
   1. checks the committed data **offline** — exact file set, per-file digests,
      canonical `go.mod`, both checksum kinds for every pinned module, the root
      `go.mod` evidence hash, the reviewed notice sections, the record's review

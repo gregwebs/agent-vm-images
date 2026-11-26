@@ -9,22 +9,31 @@ package main
 // `os/exec` plus an `init` in `cmd/avm-pin` started a program while this test
 // passed).
 //
-// So the classified set is derived twice and unioned: every non-test Go file of
-// this module, and every non-test Go file of every main-module package in
-// `go list -deps ./cmd/avm-pin`'s closure, both offline. Every file of the shipped
-// writer's own sources is therefore in exactly one of those two lists, and the one
-// table below says which guarded imports each may have. Test files are excluded
-// because they are not in the shipped binary; vendor and testdata are excluded
-// because they are not sources this repository owns.
+// So the classified set is derived three times and unioned: every non-test Go file
+// of this module, every non-test Go file of the go-dev layer's helper module
+// (#249, owner ruling G2: one register over the owned Go source of *both* layer
+// helpers), and every non-test Go file of every main-module package in
+// `go list -deps ./cmd/avm-pin`'s closure, all offline. Every file of the shipped
+// writer's own sources and of the go-dev reader is therefore in exactly one of
+// those lists, and the one table below says which guarded imports each may have.
+// Test files are excluded because they are not in the shipped binary; vendor and
+// testdata are excluded because they are not sources this repository owns. Each
+// derivation carries its own floor, so a walk that stops seeing one of the three
+// trees is red rather than quietly green.
+//
+// This is the register the #188 ruling means by "runs in guard-only and before any
+// fixture child is built": script/test/contracts.sh runs it in --guard-only mode
+// before it builds the recipe-contract helper and before any suite starts a child
+// process.
 //
 // What an import-level guard cannot see, and why the Python audit hook it replaced
 // (deleted with its interpreter, #245) was a different kind of statement (R2 of
-// #232): `os.StartProcess`, a socket made
-// through `syscall`, code reached through cgo or `plugin`, and any of the above
-// inside a dependency someone adds later. The hook vetoed those at run time in one
-// interpreter; this rejects them at review time in the sources we compile. It is
-// not equivalent, and the difference is deliberate: it is static, it needs no child
-// process, and it runs on every PR.
+// #232): a socket opened through `syscall` rather than `net`, `os.StartProcess`,
+// code reached through cgo or `plugin`, any of the above inside a dependency
+// someone adds later, and anything a child process does once it is running. The
+// hook vetoed those at run time in one interpreter; this rejects them at review
+// time in the sources we compile. It is not equivalent, and the difference is
+// deliberate: it is static, it needs no child process, and it runs on every PR.
 
 import (
 	"bytes"
@@ -41,8 +50,10 @@ import (
 )
 
 const (
-	mainModulePath   = "github.com/gregwebs/agent-vm-images"
-	helperModulePath = mainModulePath + "/examples/layers/rust-dev/helper"
+	mainModulePath      = "github.com/gregwebs/agent-vm-images"
+	helperModulePath    = mainModulePath + "/examples/layers/rust-dev/helper"
+	goDevHelperPath     = mainModulePath + "/examples/layers/go-dev/helper"
+	goDevHelperRelative = "../../go-dev/helper"
 )
 
 // guardedImports are the packages that reach the network or start a program.
@@ -66,16 +77,22 @@ var reviewedImporters = map[string][]string{
 	helperModulePath + "/internal/fetch/loopback_fixture.go": {"net/http", "net/url"},
 	helperModulePath + "/internal/gpg/gpg.go":                {"os/exec"},
 	helperModulePath + "/toolchain/installed.go":             {"os/exec"},
-	mainModulePath + "/internal/artifactpin/rules.go":        {"net/url"},
-	mainModulePath + "/internal/artifactinstall/archive.go":  {"os/exec"},
-	mainModulePath + "/internal/artifactinstall/install.go":  {"os/exec"},
-	mainModulePath + "/internal/artifactwriter/exec.go":      {"os/exec"},
-	mainModulePath + "/internal/claudepin/gpg.go":            {"os/exec"},
-	mainModulePath + "/internal/codewriter/cosign.go":        {"os/exec"},
-	mainModulePath + "/internal/fetch/fetch.go":              {"net/http", "net/url"},
+	// The go-dev reader parses the provenance and evidence URLs one pin field at a
+	// time. `net/url` is not a network capability (the guarded set is conservative
+	// on purpose, as it is for the root's artifactpin), and the reader opens no
+	// socket: `check` runs under --network=none with no Go child at all.
+	goDevHelperPath + "/closure/pin.go":                     {"net/url"},
+	mainModulePath + "/internal/artifactpin/rules.go":       {"net/url"},
+	mainModulePath + "/internal/artifactinstall/archive.go": {"os/exec"},
+	mainModulePath + "/internal/artifactinstall/install.go": {"os/exec"},
+	mainModulePath + "/internal/artifactwriter/exec.go":     {"os/exec"},
+	mainModulePath + "/internal/claudepin/gpg.go":           {"os/exec"},
+	mainModulePath + "/internal/codewriter/cosign.go":       {"os/exec"},
+	mainModulePath + "/internal/fetch/fetch.go":             {"net/http", "net/url"},
 }
 
-// TestImportsAreReviewed holds the writer's whole compile closure to the list.
+// TestImportsAreReviewed holds the writer's and both helpers' whole compile
+// closures to the list.
 func TestImportsAreReviewed(t *testing.T) {
 	files, err := writerSources()
 	if err != nil {
@@ -87,26 +104,29 @@ func TestImportsAreReviewed(t *testing.T) {
 		t.Fatalf("classified %d source files, want at least 40: the walk is not looking at "+
 			"the writer", len(files))
 	}
-	// Both halves must be present, or one of the two derivations is not running.
-	layer, main := 0, 0
+	// All three derivations must be present, or one of them is not running.
+	layer, goDev, main := 0, 0, 0
 	for name := range files {
-		if strings.HasPrefix(name, helperModulePath+"/") {
+		switch {
+		case strings.HasPrefix(name, helperModulePath+"/"):
 			layer++
-		} else {
+		case strings.HasPrefix(name, goDevHelperPath+"/"):
+			goDev++
+		default:
 			main++
 		}
 	}
-	if layer < 10 || main < 10 {
-		t.Fatalf("classified %d layer and %d main-module files: both derivations must run",
-			layer, main)
+	if layer < 10 || goDev < 8 || main < 10 {
+		t.Fatalf("classified %d rust-dev, %d go-dev and %d main-module files: all three "+
+			"derivations must run", layer, goDev, main)
 	}
 	for _, violation := range importViolations(files) {
 		t.Error(violation)
 	}
 }
 
-// writerSources is the union of this module's sources and the main-module sources
-// in `avm-pin`'s import graph.
+// writerSources is the union of this module's sources, the go-dev helper module's
+// sources and the main-module sources in `avm-pin`'s import graph.
 func writerSources() (map[string][]string, error) {
 	files := map[string][]string{}
 	layer, err := filesOf(".", helperModulePath)
@@ -114,6 +134,13 @@ func writerSources() (map[string][]string, error) {
 		return nil, err
 	}
 	for name, imports := range layer {
+		files[name] = imports
+	}
+	goDev, err := filesOf(goDevHelperRelative, goDevHelperPath)
+	if err != nil {
+		return nil, err
+	}
+	for name, imports := range goDev {
 		files[name] = imports
 	}
 	root, err := repositoryRoot()
@@ -312,13 +339,19 @@ func TestImportBoundaryControls(t *testing.T) {
 	// The escape a reviewer demonstrated, keyed the way the closure keys it: a file
 	// in the root binary, which the old walk could not see at all.
 	files[mainModulePath+"/cmd/avm-pin/escape.go"] = []string{"os/exec", "net/http"}
+	// The same escape in the other layer's helper, which the register must also
+	// classify (#249): a go-dev reader that grew `net/http` is not reviewed for it.
+	files[goDevHelperPath+"/closure/socket.go"] = []string{"net", "net/http"}
 	violations := importViolations(files)
-	// Three: the layer mutant's one import, and both of the escape file's.
-	if len(violations) != 3 {
-		t.Fatalf("want three violations (one layer, two root), got %v", violations)
+	// Five: the layer mutant's one import, both of the root escape's, and both of
+	// the go-dev escape's.
+	if len(violations) != 5 {
+		t.Fatalf("want five violations (one rust-dev, two root, two go-dev), got %v",
+			violations)
 	}
 	for _, want := range []string{"mutant.go imports os/exec",
-		"cmd/avm-pin/escape.go imports os/exec", "cmd/avm-pin/escape.go imports net/http"} {
+		"cmd/avm-pin/escape.go imports os/exec", "cmd/avm-pin/escape.go imports net/http",
+		"closure/socket.go imports net", "closure/socket.go imports net/http"} {
 		found := false
 		for _, violation := range violations {
 			if strings.Contains(violation, want) {

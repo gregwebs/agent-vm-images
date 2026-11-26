@@ -5620,6 +5620,106 @@ fn the_rust_dev_recipe_binds_its_helper_builder() {
     );
 }
 
+/// The go-dev recipe names the same two parents for its own reasons (#249): the
+/// pinned `golang:` stage compiles the layer's helper module, and the released base
+/// is the image. Its stage is registered here so a digest, a stage name, an order or
+/// a dropped entry is a reviewed change, exactly as for rust-dev.
+#[test]
+fn the_go_dev_recipe_binds_its_helper_builder() {
+    let inventory = parse_parent_inventory(&read_text(PARENT_INVENTORY)).unwrap();
+    let go = match &inventory.pins[GO_PIN] {
+        Pin::Official(pin) => pin,
+        Pin::Release(_) => panic!("the Go builder is a Docker Official Image"),
+    };
+    let path = "examples/layers/go-dev/Dockerfile";
+    assert_eq!(
+        inventory.recipes[path],
+        vec![
+            ParentSpec {
+                stage: Some("go-dev-helper".to_owned()),
+                binding: Binding::Pin(GO_PIN.to_owned()),
+            },
+            ParentSpec {
+                stage: None,
+                binding: Binding::Pin(RELEASE_PIN.to_owned()),
+            },
+        ],
+        "the builder stage and the base are the recipe's two registered parents"
+    );
+    let source = read_text(path);
+    let froms = parse_froms(&source).unwrap();
+    assert_eq!(
+        froms.len(),
+        2,
+        "the recipe has exactly two FROM instructions"
+    );
+    assert_eq!(froms[0].raw_image, go.reference.text());
+    assert_eq!(froms[0].stage.as_deref(), Some("go-dev-helper"));
+    assert_eq!(
+        froms[1].resolved_image,
+        inventory.pins[RELEASE_PIN].reference().text()
+    );
+    assert_eq!(froms[1].stage, None);
+    // The compiled binary is mounted for the one offline check and never copied:
+    // a build helper leaves no trace in the finished image (CONTEXT.md).
+    assert!(
+        source.contains("--mount=type=bind,from=go-dev-helper,source=/out/go-dev-helper,"),
+        "the helper check RUN must mount the stage's binary"
+    );
+    let builder_from = format!("FROM {} AS go-dev-helper", go.reference.text());
+    let instructions = dockerfile_instructions(&source).unwrap();
+    let at = instructions
+        .iter()
+        .position(|instruction| *instruction == builder_from)
+        .expect("the builder stage is the recipe's first FROM");
+    let runner = instructions
+        .get(at + 1)
+        .expect("the builder stage has a RUN after its FROM");
+    assert!(
+        runner.starts_with("RUN --network=none ") && runner.contains("go build -trimpath"),
+        "the builder stage's one RUN must compile offline and reproducibly: {runner}"
+    );
+    let recipes = maintained_recipes();
+    assert!(
+        check_recipe_parents(&inventory, &recipes).is_ok(),
+        "the committed recipe must be bound to the committed inventory"
+    );
+    let renamed = source.replacen(" AS go-dev-helper", " AS helper", 1);
+    let swapped = source.replacen(
+        &go.reference.text(),
+        &format!("golang:1.27.3-trixie@sha256:{}", "1".repeat(64)),
+        1,
+    );
+    let removed = source.replace(&builder_from, "FROM scratch AS go-dev-helper");
+    let second = format!("{source}\nFROM {} AS second-builder\n", go.reference.text());
+    for (label, changed) in [
+        ("a renamed builder stage", renamed),
+        ("a different builder digest", swapped),
+        ("a builder that is not the pinned image", removed),
+        ("a second builder stage", second),
+    ] {
+        assert_ne!(changed, source, "{label}: mutation did not apply");
+        let mut edited = recipes.clone();
+        edited.insert(path.to_owned(), changed);
+        assert!(
+            check_recipe_parents(&inventory, &edited).is_err(),
+            "accepted a go-dev recipe mutation: {label}"
+        );
+    }
+    let mut dropped = inventory.clone();
+    dropped.recipes.insert(
+        path.to_owned(),
+        vec![ParentSpec {
+            stage: None,
+            binding: Binding::Pin(RELEASE_PIN.to_owned()),
+        }],
+    );
+    assert!(
+        check_recipe_parents(&dropped, &recipes).is_err(),
+        "accepted an inventory that leaves the builder stage unbound"
+    );
+}
+
 /// `attestations.py` is the verifier that refuses an inventory naming any other
 /// signer, and it reads `REPO`/`WORKFLOW` from its own module. The gate composes
 /// the same identity from two Rust literals, so a rename in the release module

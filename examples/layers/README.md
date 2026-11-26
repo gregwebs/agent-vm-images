@@ -593,6 +593,13 @@ were never committed or reviewed here. The layer now commits the selection in
   scope, the dated module-channel determination, the unauthenticated proxy
   provenance and the partial VCS signature inventory.
 
+The recipe also runs the layer's own Go reader (`helper/`, `#249`) once with
+`--network=none` over the same five files: the same rules, no Go command and no
+network request, with the Python reader kept as the host-only oracle until it is
+deleted. The helper's builder is the pinned `golang:` stage, its vendor tree is
+the build closure, and `script/test/gopls-closure-parity.py` compares the two
+readers over the committed bytes and a mutant corpus.
+
 What a build proves: the committed bytes are the reviewed ones, the compiler is
 the pinned one, and the finished binary's own build info reports exactly the
 reviewed modules and sums — after which `gopls` and its licence file are
