@@ -18,6 +18,16 @@
 // two divergent cases (a duplicate key whose value agrees, a non-JSON constant in a
 // member the oracle does not read) are named there. Deleting the strict decoder makes
 // those cases red at verdict level.
+//
+// A third divergence runs the other way and is declared too: Python converts every
+// number literal it parses and has a 4,300-digit limit, so a document with a 5,000-digit
+// literal in an optional member it does not read has no oracle verdict at all
+// (`ValueError`), while this reader accepts it. That is deliberate: the literal is kept
+// as written and never converted, and the member is unread, so there is nothing to
+// decide. It is also why Python's digit limit is not a denial-of-service surface here:
+// this package never turns a literal into a big integer, and the pin loader's only
+// conversion is `schema` through strconv.Atoi, which rejects an out-of-range literal
+// without allocating one.
 package buildinfo
 
 import (

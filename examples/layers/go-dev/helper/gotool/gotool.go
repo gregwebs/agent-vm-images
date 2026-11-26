@@ -29,6 +29,7 @@ import (
 	"strings"
 
 	"github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/closure"
+	"github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/internal/pathjoin"
 )
 
 // Architecture is one of the two Linux targets the closure is cross-built for. It
@@ -74,28 +75,12 @@ func (a *Architecture) UnmarshalText(text []byte) error {
 // Binary is the exact path the caller asked to verify. There is deliberately no
 // fallback to BinDir/gopls: a verifier that substituted a sibling would say nothing
 // about the path it was given. Every path is kept in the spelling the caller used:
-// see Join.
+// see internal/pathjoin.
 type Target struct {
 	GoRoot   string
 	ShareDir string
 	Arch     Architecture
 	Binary   string
-}
-
-// Join appends one element to a directory **without normalising either**, and it is
-// the only way this package builds a path from a caller's string.
-//
-// filepath.Join would collapse `a/link/../gopls` to `a/gopls`. That is a different
-// file when `link` is a symlink: the kernel resolves `..` after the link, so the
-// caller's spelling names one file and the cleaned spelling another. A verifier that
-// cleaned would inspect, or fail to find, a file the caller did not name. The
-// Python reader joined with no normalisation, and the installed-state rules keep the
-// kernel's meaning of a path.
-func Join(directory, name string) string {
-	if strings.HasSuffix(directory, string(os.PathSeparator)) {
-		return directory + name
-	}
-	return directory + string(os.PathSeparator) + name
 }
 
 // Paths is the private tree one invocation owns. Every Go child runs with HOME,
@@ -211,7 +196,7 @@ const imagePath = "/usr/bin:/bin"
 // dropped: a caller asking to add GOOS is a caller whose assumption is wrong.
 func (e Environment) ChildEnv(target Target, paths Paths, transport map[string]string) ([]string, error) {
 	values := map[string]string{
-		"PATH":        Join(target.GoRoot, "bin") + ":" + imagePath,
+		"PATH":        pathjoin.Join(target.GoRoot, "bin") + ":" + imagePath,
 		"HOME":        paths.Home(),
 		"GOPATH":      paths.Gopath(),
 		"GOMODCACHE":  paths.ModuleCache(),
@@ -282,7 +267,8 @@ func NewChild(environment []string, command Command, extra []string, dir string)
 		return Child{}, err
 	}
 	argv := append(command.Argv(), extra...)
-	return Child{Program: Join(first, "go"), Argv: argv, Env: environment, Dir: dir}, nil
+	return Child{Program: pathjoin.Join(first, "go"), Argv: argv, Env: environment,
+		Dir: dir}, nil
 }
 
 // pathFirstEntry is the first PATH entry of an environment list.

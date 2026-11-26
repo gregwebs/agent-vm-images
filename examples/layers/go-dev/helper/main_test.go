@@ -356,6 +356,60 @@ func TestVerifyInstalledRefusesBeforeTheGoChild(t *testing.T) {
 	}
 }
 
+// TestCheckUsesTheRequestedSpelling: the loader's half of the same rule. The five
+// committed files are reached through the directory the caller named, in that
+// spelling, so `a/link/../closure` is the kernel's `b/closure` and not a cleaned
+// `a/closure`.
+func TestCheckUsesTheRequestedSpelling(t *testing.T) {
+	binary := build(t)
+	committed := committedData(t)
+	root := t.TempDir()
+	a := filepath.Join(root, "a")
+	elsewhere := filepath.Join(root, "b")
+	for _, directory := range []string{a, filepath.Join(elsewhere, "sub")} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(elsewhere, "sub"), filepath.Join(a, "link")); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	copyClosure := func(directory string) {
+		t.Helper()
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", directory, err)
+		}
+		for _, name := range []string{"go.mod", "go.sum", "gopls.go.mod", "pin.json",
+			"THIRD_PARTY_LICENSES"} {
+			raw, err := os.ReadFile(filepath.Join(committed, name))
+			if err != nil {
+				t.Fatalf("read the committed %s: %v", name, err)
+			}
+			if err := os.WriteFile(filepath.Join(directory, name), raw, 0o644); err != nil {
+				t.Fatalf("write %s: %v", filepath.Join(directory, name), err)
+			}
+		}
+	}
+	requested := a + "/link/../closure"
+	// The kernel's target carries the closure: the requested spelling must be read.
+	copyClosure(filepath.Join(elsewhere, "closure"))
+	stdout, stderr, status := runBinary(t, binary, "check", requested)
+	if status != 0 || stdout != "v0.23.0\n" {
+		t.Fatalf("the kernel-resolved closure was not checked: status %d, %q, %q", status,
+			stdout, stderr)
+	}
+	// Only the cleaned spelling carries it now. A loader that cleaned would print the
+	// release; the shipped one must refuse, naming the spelling it was given.
+	if err := os.RemoveAll(filepath.Join(elsewhere, "closure")); err != nil {
+		t.Fatalf("remove the kernel-resolved closure: %v", err)
+	}
+	copyClosure(filepath.Join(a, "closure"))
+	_, stderr, status = runBinary(t, binary, "check", requested)
+	if status != 1 || !strings.Contains(stderr, "not a directory: "+requested) {
+		t.Fatalf("the lexically cleaned closure was read: status %d, stderr %q", status, stderr)
+	}
+}
+
 // TestVerifyInstalledUsesTheRequestedSpelling: the `..`-after-a-symlink case at the
 // CLI seam. The unit tests call NewTarget and Verify directly; this one runs the
 // binary, because the cleaning this row forbids lived in the argument handling.

@@ -3,6 +3,8 @@ package closure
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/internal/pathjoin"
 )
 
 // Source is the committed data directory as the loader sees it: the input set and
@@ -19,15 +21,23 @@ type Source interface {
 // Dir is the real directory source.
 type Dir struct{ directory string }
 
-// DirSource returns the source for one absolute-or-relative directory. The
-// directory is made absolute here, because a relative spelling would make two
-// readers of one tree name it differently.
+// DirSource returns the source for one absolute-or-relative directory, in the
+// spelling the caller wrote.
+//
+// A relative path is anchored to the working directory and nothing is normalised:
+// filepath.Abs cleans, and cleaning is not resolving. With `a/link -> b/sub`, the
+// caller's `a/link/../closure` is `b/closure` to the kernel and `a/closure` to a
+// lexical clean, so a reader that cleaned could load a closure the caller never
+// named. The Python reader this ported from used the path as written.
 func DirSource(directory string) (Source, error) {
-	absolute, err := filepath.Abs(directory)
-	if err != nil {
-		return nil, err
+	if filepath.IsAbs(directory) {
+		return &Dir{directory: directory}, nil
 	}
-	return &Dir{directory: absolute}, nil
+	working, err := os.Getwd()
+	if err != nil {
+		return nil, refuse("cannot resolve %s: %v", directory, err)
+	}
+	return &Dir{directory: pathjoin.Join(working, directory)}, nil
 }
 
 // List refuses a path that is not a plain directory: a symlink to one is a
@@ -51,7 +61,7 @@ func (d *Dir) List() ([]string, error) {
 // Read refuses a symlink before reading it: `lstat` is the mode the pin binds, and
 // a symlinked input would let the bytes come from anywhere.
 func (d *Dir) Read(name Filename) ([]byte, error) {
-	path := filepath.Join(d.directory, string(name))
+	path := pathjoin.Join(d.directory, string(name))
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, refuse("missing input: %s", name)

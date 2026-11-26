@@ -56,6 +56,7 @@ import (
 	"github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/buildinfo"
 	"github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/closure"
 	"github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/gotool"
+	"github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/internal/pathjoin"
 )
 
 // Prefix is the frozen diagnostic prefix this program's consumer parses. It is
@@ -73,7 +74,7 @@ const Prefix = "gopls-closure"
 // gotool.Join, not filepath.Join, for the same reason.
 func NewTarget(goRoot, binary, shareDir string, arch gotool.Architecture) (gotool.Target, error) {
 	if !filepath.IsAbs(goRoot) ||
-		!isRegularFile(gotool.Join(gotool.Join(goRoot, "bin"), "go")) {
+		!isRegularFile(pathjoin.Join(pathjoin.Join(goRoot, "bin"), "go")) {
 		return gotool.Target{}, fmt.Errorf("--go-root must be an absolute Go root with bin/go: %s",
 			goRoot)
 	}
@@ -175,7 +176,7 @@ func checkBinary(binary string) error {
 // evidence; the section re-parse the Python reader also ran could not disagree with
 // it, so it is not ported (see the package comment).
 func checkNotice(shareDir string, pinned closure.SHA256) error {
-	path := gotool.Join(shareDir, string(closure.FileLicenses))
+	path := pathjoin.Join(shareDir, string(closure.FileLicenses))
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return fmt.Errorf("installed: missing %s", path)

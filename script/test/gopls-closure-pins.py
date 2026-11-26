@@ -19,8 +19,9 @@ From #250 on, the suite also drives the layer's own Go reader as a child: the
 host-built ``go-dev-helper``, allowlisted before the boundary goes up. The
 installed-state rows run *both* readers over the same installation and compare their
 verdicts per case, including the two declared divergences this verb owns (a binary
-mode with its special bits, and the installed notice file's mode). A row that only
-one side runs would not be a comparison.
+mode with its special bits, and the installed notice file's mode) and the three
+build-info documents whose decoders disagree. A row that only one side runs would
+not be a comparison, so the counters advance only inside the calls that execute.
 
 Native acceptance is ``script/test/go-example.sh``; a Linux binary built here is
 inspected, never executed.
@@ -29,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import dataclasses
 import hashlib
 import json
 import os
@@ -1282,51 +1284,154 @@ def test_notice_cache(fixture, closure) -> None:
         dep_dir.chmod(0o555)
 
 
+# BUILD_INFO_EXPECTATIONS is the independent register for the paired build-info
+# rows: it is keyed by case name, and the case table below supplies bytes only. The
+# table cannot state an expectation, so a row cannot "pass" by declaring itself. A
+# side is (status, fragment): 0 accepts (fragment must be None), 1 refuses, and
+# 'raises' means the oracle has no verdict at all (the fragment is the exception
+# type it raised). The two sides are held to the register in both directions before
+# a row runs.
+BUILD_INFO_EXPECTATIONS = {
+    'a coherent build-info document': (0, None, 0, None),
+    'unparseable build info': (1, 'not valid JSON', 1, 'not valid JSON'),
+    'the wrong compiler in the build info': (1, 'compiler is go1.26.5, want go1.27.3',
+                                             1, 'compiler is go1.26.5, want go1.27.3'),
+    'another selected closure': (1, 'not in the reviewed closure',
+                                 1, 'not in the reviewed closure'),
+    'another Linux target': (1, 'build settings differ', 1, 'build settings differ'),
+    'a Darwin build': (1, 'build settings differ', 1, 'build settings differ'),
+    # Declared divergences (#188 G3): the oracle's permissive decoder accepts a
+    # duplicate key whose value agrees and a non-JSON constant in a member it does not
+    # read; the strict decoder refuses both.
+    'a duplicate build-info key': (1, 'duplicate key', 0, None),
+    'a non-JSON constant in an optional member': (1, 'NaN is not valid JSON', 0, None),
+    # The converse: Python converts every number literal and has a 4,300-digit limit,
+    # so this document has no oracle verdict at all while the ported reader accepts it
+    # (the member is optional and unread). Declared, not silently skipped.
+    'an integer literal beyond the oracle digit limit': (0, None, 'raises', 'ValueError'),
+}
+
+# BUILD_INFO_DIVERGENCES is derived from the register, not maintained beside it, so
+# the two cannot disagree.
+BUILD_INFO_DIVERGENCES = frozenset(
+    name for name, entry in BUILD_INFO_EXPECTATIONS.items()
+    if (entry[0] == 0) != (entry[2] == 0))
+
+
+@dataclasses.dataclass(frozen=True)
+class OracleCrash:
+    """The oracle raised instead of returning a verdict."""
+
+    type: str
+    text: str
+
+
+class Corpus:
+    """Bookkeeping that can only advance when an execution happened.
+
+    Both readers are called *inside* compare(), and each observation inside
+    observe(), so a row that stops running one side is a shortfall in that side's
+    count rather than a silently smaller agreement total.
+    """
+
+    def __init__(self) -> None:
+        self.comparisons = 0
+        self.agreements = 0
+        self.divergences = 0
+        self.observations = 0
+        self.go_runs = 0
+        self.python_runs = 0
+        self.go_accepts = 0
+
+    def compare(self, inspect, run):
+        oracle = inspect()
+        result = run()
+        self.comparisons += 1
+        self.go_runs += 1
+        self.python_runs += 1
+        if result.returncode == 0:
+            self.go_accepts += 1
+        if (oracle is None) == (result.returncode == 0):
+            self.agreements += 1
+        else:
+            self.divergences += 1
+        return oracle, result
+
+    def observe(self, run):
+        result = run()
+        self.observations += 1
+        self.go_runs += 1
+        if result.returncode == 0:
+            self.go_accepts += 1
+        return result
+
+
 def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
                                  witnesses: Witnesses) -> None:
     """Paired installed-state rows: the Python oracle and the ported reader.
 
     Every row runs both readers over the same installation and declares both
-    verdicts. Two rows are declared divergences (#188 G3) — the reader compares a
-    binary mode with its special bits and checks the notice file's mode, which the
-    oracle does not — and each asserts *both* sides, so a change on either side
-    turns the row red. Each accepted row is preceded by the oracle's own acceptance,
-    so the corpus cannot pass by every case refusing.
+    verdicts. Five rows are declared divergences — the reader compares a binary mode
+    with its special bits and checks the notice file's mode, which the oracle does
+    not (#188 G3), and three build-info documents where the two decoders disagree
+    (see BUILD_INFO_EXPECTATIONS) — and each asserts *both* sides, so a change on
+    either side turns the row red. Each accepted row is preceded by the oracle's own
+    acceptance, so the corpus cannot pass by every case refusing.
     """
     import dataclasses
 
     import gopls_closure as model
 
+    corpus = Corpus()
+
+    def in_process(runner=None, inspected=None):
+        """The oracle's verdict: its refusal text, None when it accepts, or the
+        exception it raised when it has no verdict at all (OracleCrash).
+
+        The third outcome is data, not a crash: `json.loads` converts number
+        literals, so a document the ported reader accepts can be one the oracle
+        cannot parse. A case that expects it declares 'raises' in the register.
+        """
+        try:
+            model.verify_installed(closure, inspected or target, runner=runner)
+        except model.ClosureError as error:
+            return str(error)
+        except Exception as error:  # noqa: BLE001 - "no verdict" is an outcome here
+            return OracleCrash(type(error).__name__, str(error))
+        return None
+
     print('verify-installed: both readers on both Linux targets')
-    rows = agreements = divergences = accepts = 0
     for arch in model.Architecture:
         target, _paths = run_install(fixture, closure, f'verify-installed-{arch.value}', arch)
-        model.verify_installed(closure, target)
-        result = run_helper(helper, verify_installed_argv(
-            closure, arch, binary=target.bin_dir / 'gopls', share_dir=target.share_dir,
-            go_root=fixture.go_root))
-        rows += 1
-        accepts += 1
-        agreements += 1
+        oracle, result = corpus.compare(
+            lambda: in_process(),
+            lambda: run_helper(helper, verify_installed_argv(
+                closure, arch, binary=target.bin_dir / 'gopls',
+                share_dir=target.share_dir, go_root=fixture.go_root)))
         check(f'{arch.value}: the installed-state verifier accepts the installation',
-              (result.returncode, result.stdout, result.stderr) == (0, 'v0.0.1\n', ''),
-              f'({result.returncode}, {result.stdout!r}, {result.stderr!r})')
+              oracle is None and result.returncode == 0 and result.stdout == 'v0.0.1\n'
+              and result.stderr == '',
+              f'(oracle {oracle!r}, reader {result.returncode}, {result.stdout!r}, '
+              f'{result.stderr!r})')
 
         # The binary the verifier inspects is named, absolute, and never executed: the
         # only child that reads it is `go version -m -json`. Three observations, and
         # what each one can see:
         #
-        #   * the `go` shim record sees every Go invocation the reader makes — program,
-        #     argv, order — and refuses any argv outside the three exact shapes;
+        #   * the `go` shim record sees the invocations that go **through that shim** —
+        #     program, argv, order — and refuses any argv outside the three exact
+        #     shapes. It cannot see a program the reader starts directly;
         #   * the candidate's own marker file (below) sees the candidate being started,
         #     wherever from, which the shim record cannot;
-        #   * the loopback proxy recorder sees requests.
+        #   * the loopback proxy recorder sees requests **to that recorder**, which is
+        #     the only origin this fixture offers.
         #
-        # No single observer is trusted for more than that.
+        # No single observer is trusted for more than that, and none of them sees every
+        # possible Go invocation or every possible request.
         witnesses.clear()
-        shimmed = run_helper(helper, verify_installed_argv(
+        shimmed = corpus.observe(lambda: run_helper(helper, verify_installed_argv(
             closure, arch, binary=target.bin_dir / 'gopls', share_dir=target.share_dir,
-            go_root=witnesses.record_root))
+            go_root=witnesses.record_root)))
         lines = witnesses.argv()
         binary_path = str(target.bin_dir / 'gopls')
         check(f'{arch.value}: the verifier ran exactly the three closed commands',
@@ -1335,28 +1440,28 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
               f'({shimmed.returncode}, {lines!r}, {shimmed.stderr!r})')
         check(f'{arch.value}: the candidate binary is never started as a program',
               all(not line.startswith(binary_path) for line in lines), f'({lines!r})')
-        rows += 1
-        accepts += 1
-        agreements += 1
 
-        # No request: the loopback proxy is the only origin this fixture offers, and
-        # its recorder must stay empty across a verification.
+        # No request to the recorder: the loopback proxy is the only origin this
+        # fixture offers, and its request log must stay empty across a verification.
         fixture.proxy.clear_requests()
-        quiet = run_helper(helper, verify_installed_argv(
+        quiet = corpus.observe(lambda: run_helper(helper, verify_installed_argv(
             closure, arch, binary=target.bin_dir / 'gopls', share_dir=target.share_dir,
-            go_root=fixture.go_root))
+            go_root=fixture.go_root)))
         requested = fixture.proxy.requested_paths()
         check(f'{arch.value}: the verifier made no proxy request',
               quiet.returncode == 0 and requested == [], f'({quiet.returncode}, {requested})')
-        rows += 1
-        accepts += 1
-        agreements += 1
 
     print('verify-installed: the installed bytes are proved, not assumed')
     target, _paths = run_install(fixture, closure, 'verify-installed-faults',
                                  model.Architecture.ARM64)
-    model.verify_installed(closure, target)
-    check('a correct installation verifies in both readers', True)
+    oracle, control = corpus.compare(
+        lambda: in_process(),
+        lambda: run_helper(helper, verify_installed_argv(
+            closure, target.arch, binary=target.bin_dir / 'gopls',
+            share_dir=target.share_dir, go_root=fixture.go_root)))
+    check('a correct installation verifies in both readers',
+          oracle is None and control.returncode == 0 and control.stdout == 'v0.0.1\n',
+          f'(oracle {oracle!r}, reader {control.returncode}/{control.stderr.strip()!r})')
     license_path = target.share_dir / 'THIRD_PARTY_LICENSES'
     original_license = license_path.read_bytes()
     binary = target.bin_dir / 'gopls'
@@ -1371,14 +1476,6 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
     sibling = elsewhere / 'gopls'
     shutil.copyfile(binary, sibling)
     os.chmod(sibling, 0o755)
-
-    def in_process(runner=None, inspected=None) -> str | None:
-        """The oracle's verdict: its refusal text, or None when it accepts."""
-        try:
-            model.verify_installed(closure, inspected or target, runner=runner)
-        except model.ClosureError as error:
-            return str(error)
-        return None
 
     def canned_runner(document):
         """The oracle's runner seam: the three closed answers, one document.
@@ -1404,7 +1501,6 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
     def row(label: str, mutate, restore, *, go_fragment: str, python_fragment: str | None,
             oracle_runner=None) -> None:
         """One paired case. python_fragment None declares an oracle acceptance."""
-        nonlocal rows, agreements, divergences, accepts
         try:
             mutate()
         except BaseException:
@@ -1413,21 +1509,17 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
             restore()
             raise
         try:
-            message = in_process(oracle_runner)
-            result = go_reader()
+            message, result = corpus.compare(lambda: in_process(oracle_runner), go_reader)
         finally:
             restore()
-        rows += 1
         if python_fragment is None:
-            divergences += 1
             check(f'{label}: the oracle accepts, the reader refuses (declared divergence)',
                   message is None and result.returncode == 1
                   and go_fragment in result.stderr and result.stdout == '',
                   f'(oracle {message!r}, reader {result.returncode}/{result.stderr.strip()!r})')
             return
-        agreements += 1
         check(f'{label}: both readers refuse it',
-              message is not None and python_fragment in message
+              isinstance(message, str) and python_fragment in message
               and result.returncode == 1 and go_fragment in result.stderr
               and result.stdout == '',
               f'(oracle {message!r}, reader {result.returncode}/{result.stderr.strip()!r})')
@@ -1463,12 +1555,11 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
     # oracle's injected runner answers the same document for the same reason.
     witnesses.answer(document)
     setuid_target = dataclasses.replace(target, binary=witnesses.setuid_binary)
-    oracle = in_process(canned_runner(document), setuid_target)
-    setuid_result = run_helper(helper, verify_installed_argv(
-        closure, target.arch, binary=witnesses.setuid_binary, share_dir=target.share_dir,
-        go_root=witnesses.document_root))
-    rows += 1
-    divergences += 1
+    oracle, setuid_result = corpus.compare(
+        lambda: in_process(canned_runner(document), setuid_target),
+        lambda: run_helper(helper, verify_installed_argv(
+            closure, target.arch, binary=witnesses.setuid_binary,
+            share_dir=target.share_dir, go_root=witnesses.document_root)))
     check('a setuid binary mode: the oracle accepts, the reader refuses (declared '
           'divergence)',
           oracle is None and setuid_result.returncode == 1 and setuid_result.stdout == ''
@@ -1485,25 +1576,17 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
         go_fragment='installed: missing', python_fragment='installed: missing')
     # The requested path is the one inspected: a sibling with the expected name is
     # not a substitute, in either reader.
-    sibling_message = None
-    sibling_result = None
+    sibling_target = dataclasses.replace(target, binary=elsewhere / 'absent' / 'gopls')
     try:
-        sibling_message = None
-        try:
-            model.verify_installed(
-                closure, model.Target(go_root=target.go_root, bin_dir=elsewhere,
-                                      share_dir=target.share_dir, arch=target.arch,
-                                      binary=elsewhere / 'absent' / 'gopls'))
-        except model.ClosureError as error:
-            sibling_message = str(error)
-        sibling_result = go_reader(binary_path=elsewhere / 'absent' / 'gopls')
+        sibling_message, sibling_result = corpus.compare(
+            lambda: in_process(inspected=sibling_target),
+            lambda: go_reader(binary_path=elsewhere / 'absent' / 'gopls'))
     finally:
         sibling.unlink()
-    rows += 1
-    agreements += 1
     check('a requested binary path with no file is not substituted from a sibling',
-          sibling_message is not None and 'installed: missing' in sibling_message
-          and sibling_result.returncode == 1 and 'installed: missing' in sibling_result.stderr,
+          isinstance(sibling_message, str) and 'installed: missing' in sibling_message
+          and sibling_result.returncode == 1
+          and 'installed: missing' in sibling_result.stderr,
           f'(oracle {sibling_message!r}, reader {sibling_result.stderr.strip()!r})')
 
     print('verify-installed: the build info is read, not authenticated')
@@ -1540,62 +1623,74 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
             raise AssertionError(f'the build-info document does not carry {old!r}')
         return text.replace(old, new, 1)
 
-    # A case is (label, document, go status, go fragment, python status, python
-    # fragment). A fragment is only used on a side that refuses.
-    build_cases = [
-        ('a coherent build-info document', real.stdout, 0, None, 0, None),
-        ('unparseable build info', 'not a document', 1, 'not valid JSON',
-         1, 'not valid JSON'),
-        ('the wrong compiler in the build info',
-         json.dumps(mutate_document(lambda d: d.update({'GoVersion': 'go1.26.5'}))),
-         1, 'compiler is go1.26.5, want go1.27.3', 1, 'compiler is go1.26.5, want go1.27.3'),
-        ('another selected closure',
-         json.dumps(mutate_document(lambda d: d['Deps'][0].update(
-             {'Path': 'example.test/evil'}))),
-         1, 'not in the reviewed closure', 1, 'not in the reviewed closure'),
-        ('another Linux target',
-         json.dumps(mutate_document(set_setting('GOARM64', 'v9.0'))),
-         1, 'build settings differ', 1, 'build settings differ'),
-        ('a Darwin build',
-         json.dumps(mutate_document(set_setting('GOOS', 'darwin'))),
-         1, 'build settings differ', 1, 'build settings differ'),
-        # Declared divergences (#188 G3): the oracle's permissive decoder accepts a
-        # duplicate key whose value agrees and a non-JSON constant in a member it does
-        # not read; the strict decoder refuses both.
-        ('a duplicate build-info key',
-         replace_once(real.stdout, '"GoVersion": "go1.27.3"',
-                      '"GoVersion": "go1.27.3", "GoVersion": "go1.27.3"'),
-         1, 'duplicate key', 0, None),
-        ('a non-JSON constant in an optional member',
-         replace_once(real.stdout, '"Path": "golang.org/x/tools/gopls"', '"Path": NaN'),
-         1, 'NaN is not valid JSON', 0, None),
-    ]
-    oracle_accepts = 0
-    for label, value, go_status, go_fragment, python_status, python_fragment in build_cases:
-        witnesses.answer(document_for(value))
-        result = emit()
-        oracle = in_process(canned_runner(document_for(value)))
-        rows += 1
-        if oracle is None:
-            oracle_accepts += 1
-        if go_status == python_status:
-            agreements += 1
-        else:
-            divergences += 1
+    # The case table supplies bytes and nothing else: the expectation for each name
+    # is in BUILD_INFO_EXPECTATIONS, so a row cannot declare its own verdict.
+    build_answers = {
+        'a coherent build-info document': real.stdout,
+        'unparseable build info': 'not a document',
+        'the wrong compiler in the build info':
+            json.dumps(mutate_document(lambda d: d.update({'GoVersion': 'go1.26.5'}))),
+        'another selected closure':
+            json.dumps(mutate_document(lambda d: d['Deps'][0].update(
+                {'Path': 'example.test/evil'}))),
+        'another Linux target': json.dumps(mutate_document(set_setting('GOARM64', 'v9.0'))),
+        'a Darwin build': json.dumps(mutate_document(set_setting('GOOS', 'darwin'))),
+        'a duplicate build-info key':
+            replace_once(real.stdout, '"GoVersion": "go1.27.3"',
+                         '"GoVersion": "go1.27.3", "GoVersion": "go1.27.3"'),
+        'a non-JSON constant in an optional member':
+            replace_once(real.stdout, '"Path": "golang.org/x/tools/gopls"', '"Path": NaN'),
+        # 5,000 digits in a member neither reader reads: the strict decoder keeps the
+        # literal as written, while Python converts every number it parses and refuses
+        # beyond 4,300 digits. The port accepts a document the oracle cannot parse at
+        # all; that is declared in the register, not hidden.
+        'an integer literal beyond the oracle digit limit':
+            replace_once(real.stdout, '"Path": "golang.org/x/tools/gopls"',
+                         '"Path": ' + '9' * 5000),
+    }
+    # The register and the table are held equal in both directions before a row runs:
+    # a deleted case leaves a registered name with no bytes, and a new case without an
+    # entry is refused rather than silently unchecked.
+    if set(build_answers) != set(BUILD_INFO_EXPECTATIONS):
+        missing = sorted(set(BUILD_INFO_EXPECTATIONS) - set(build_answers))
+        extra = sorted(set(build_answers) - set(BUILD_INFO_EXPECTATIONS))
+        check('the build-info register and case table agree', False,
+              f'(no bytes for {missing}, no expectation for {extra})')
+    else:
+        check('the build-info register and case table agree', True)
+    for name, entry in BUILD_INFO_EXPECTATIONS.items():
+        go_status, go_fragment, python_status, python_fragment = entry
+        if (go_status == 0) != (python_status == 0):
+            continue
+        if go_status == python_status and go_fragment != python_fragment:
+            check(f'the register entry for {name!r} declares one verdict with two '
+                  f'fragments', False, f'({entry})')
+    for name, answer in build_answers.items():
+        entry = BUILD_INFO_EXPECTATIONS.get(name)
+        if entry is None:
+            continue
+        go_status, go_fragment, python_status, python_fragment = entry
+        witnesses.answer(answer)
+        oracle, result = corpus.compare(
+            lambda: in_process(canned_runner(answer)), emit)
         problems = []
         if (result.returncode == 0) != (go_status == 0):
             problems.append(f'reader status {result.returncode}, want {go_status} '
                             f'({result.stderr.strip()!r})')
-        if go_status == 0 and (result.stdout != 'v0.0.1\n' or result.stderr != ''):
+        elif go_status == 0 and (result.stdout != 'v0.0.1\n' or result.stderr != ''):
             problems.append(f'reader accepted with {result.stdout!r}/{result.stderr!r}')
-        if go_status == 1 and (result.stdout != '' or go_fragment not in result.stderr):
+        elif go_status == 1 and (result.stdout != '' or go_fragment not in result.stderr):
             problems.append(f'reader refusal {result.stderr.strip()!r} does not name '
                             f'{go_fragment!r}')
-        if (oracle is None) != (python_status == 0):
+        if python_status == 'raises':
+            if not isinstance(oracle, OracleCrash) or oracle.type != python_fragment:
+                problems.append(f'oracle {oracle!r}, want it to raise {python_fragment}')
+        elif (oracle is None) != (python_status == 0):
             problems.append(f'oracle verdict {oracle!r}, want status {python_status}')
-        if python_status == 1 and python_fragment not in (oracle or ''):
+        elif python_status == 1 and (
+                not isinstance(oracle, str) or python_fragment not in oracle):
             problems.append(f'oracle refusal {oracle!r} does not name {python_fragment!r}')
-        check(f'{label}: both readers declare their own verdict', not problems,
+        check(f'{name}: both readers declare their own verdict', not problems,
               '; '.join(problems))
 
     # The shim's own control: it must refuse an argv outside the three exact shapes,
@@ -1618,12 +1713,9 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
     marker = witnesses.candidate.parent / 'executed'
     if marker.exists():
         marker.unlink()
-    marker_run = run_helper(helper, verify_installed_argv(
+    marker_run = corpus.observe(lambda: run_helper(helper, verify_installed_argv(
         closure, target.arch, binary=witnesses.candidate, share_dir=target.share_dir,
-        go_root=witnesses.document_root))
-    rows += 1
-    accepts += 1
-    agreements += 1
+        go_root=witnesses.document_root)))
     check('a verifiable candidate that would write a marker is never started',
           marker_run.returncode == 0 and marker_run.stdout == 'v0.0.1\n'
           and not marker.exists(),
@@ -1638,13 +1730,20 @@ def test_verify_installed_faults(fixture, closure, root: Path, helper: Path,
           f'(status {control.returncode}, marker {marker.exists()})')
     marker.unlink()
 
-    # Floors, deliberately below today's counts: every row ran both readers, so a
-    # shrinking table is a failure rather than a quieter pass (ruling R-a).
+    # Floors, deliberately below today's counts: a comparison only counts when both
+    # executions happened, so a shrinking table — or a side that stopped running — is a
+    # failure rather than a quieter pass (ruling R-a).
     check('the paired installed-state corpus is nonempty and both verdicts are exercised',
-          rows >= 22 and accepts >= 6 and agreements >= 18 and divergences == 4
-          and oracle_accepts >= 3,
-          f'(rows {rows}, accepts {accepts}, agreements {agreements}, '
-          f'divergences {divergences}, oracle accepts {oracle_accepts})')
+          corpus.comparisons >= 20 and corpus.agreements >= 15
+          and corpus.divergences == len(BUILD_INFO_DIVERGENCES) + 2
+          and corpus.observations >= 5
+          and corpus.go_runs == corpus.comparisons + corpus.observations
+          and corpus.python_runs == corpus.comparisons
+          and corpus.go_accepts >= 10,
+          f'(comparisons {corpus.comparisons}, agreements {corpus.agreements}, '
+          f'divergences {corpus.divergences}, observations {corpus.observations}, '
+          f'go runs {corpus.go_runs}, python runs {corpus.python_runs}, '
+          f'go accepts {corpus.go_accepts})')
 
 
 class Witnesses:

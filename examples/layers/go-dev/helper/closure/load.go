@@ -18,6 +18,7 @@ import (
 // same mutants are recorded in script/test/gopls-closure-parity.py.
 //
 //	rule                                               Python                          test
+//	directory used in the caller's spelling           load_closure 1035 (Path)        main: TestCheckUsesTheRequestedSpelling
 //	input set: five regular files, no symlink          load_closure 1035-1060          TestInputShapeRulesRefuse, TestSymlinkedDataDirectoryRefuses
 //	pin schema and closed key sets                     load_closure 1070-1090, 895-909 TestPinShapeRulesRefuse
 //	four content digests, pin excluded                 load_closure 1091-1093          TestContentDigestRulesRefuse

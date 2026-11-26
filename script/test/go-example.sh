@@ -529,38 +529,37 @@ self_test() {
 # The bundle target rule, driven with the two real cross-builds and a non-ELF file:
 # an arm64 helper must not pass an amd64 row, and a four-byte magic is not enough.
 helper_target_controls() { # SCRATCH
-    local scratch=$1 amd64_helper arm64_helper not_elf
+    local scratch=$1 amd64_helper arm64_helper not_elf verdict
+    local log="$scratch/target.log"
     amd64_helper=$(bash "$ROOT/script/build/example-helper.sh" go-dev --root "$ROOT" \
         --os linux --arch amd64 --binary go-dev-helper-amd64) || {
-        selftest_expect 0 1 'the amd64 helper builds for the target control' "$scratch/target.log"
+        selftest_expect 0 1 'the amd64 helper builds for the target control' "$log"
         return
     }
     arm64_helper=$(bash "$ROOT/script/build/example-helper.sh" go-dev --root "$ROOT" \
         --os linux --arch arm64 --binary go-dev-helper-arm64) || {
-        selftest_expect 0 1 'the arm64 helper builds for the target control' "$scratch/target.log"
+        selftest_expect 0 1 'the arm64 helper builds for the target control' "$log"
         return
     }
     not_elf="$scratch/not-an-elf"
     printf '#!/bin/sh\n' >"$not_elf"
-    elf_machine_matches "$amd64_helper" amd64 &&
-        selftest_expect 1 1 'an amd64 helper passes an amd64 row' "$scratch/target.log"
-    elf_machine_matches "$arm64_helper" arm64 &&
-        selftest_expect 1 1 'an arm64 helper passes an arm64 row' "$scratch/target.log"
-    if elf_machine_matches "$arm64_helper" amd64; then
-        selftest_expect 1 0 'an arm64 helper must not pass an amd64 row' "$scratch/target.log"
-    else
-        selftest_expect 0 0 'an arm64 helper is refused for an amd64 row' "$scratch/target.log"
-    fi
-    if elf_machine_matches "$amd64_helper" arm64; then
-        selftest_expect 1 0 'an amd64 helper must not pass an arm64 row' "$scratch/target.log"
-    else
-        selftest_expect 0 0 'an amd64 helper is refused for an arm64 row' "$scratch/target.log"
-    fi
-    if elf_machine_matches "$not_elf" amd64; then
-        selftest_expect 1 0 'a script must not pass as an ELF' "$scratch/target.log"
-    else
-        selftest_expect 0 0 'a non-ELF file is refused' "$scratch/target.log"
-    fi
+    # Each case records the predicate's verdict and compares it, so a predicate that
+    # refuses every helper fails the two positive controls instead of skipping them.
+    verdict=0
+    elf_machine_matches "$amd64_helper" amd64 && verdict=1
+    selftest_expect "$verdict" 1 'an amd64 helper passes an amd64 row' "$log"
+    verdict=0
+    elf_machine_matches "$arm64_helper" arm64 && verdict=1
+    selftest_expect "$verdict" 1 'an arm64 helper passes an arm64 row' "$log"
+    verdict=0
+    elf_machine_matches "$arm64_helper" amd64 && verdict=1
+    selftest_expect "$verdict" 0 'an arm64 helper is refused for an amd64 row' "$log"
+    verdict=0
+    elf_machine_matches "$amd64_helper" arm64 && verdict=1
+    selftest_expect "$verdict" 0 'an amd64 helper is refused for an arm64 row' "$log"
+    verdict=0
+    elf_machine_matches "$not_elf" amd64 && verdict=1
+    selftest_expect "$verdict" 0 'a non-ELF file is refused' "$log"
 }
 
 # The first-use, negative-build and cleanup rules as pure functions: each wrong
