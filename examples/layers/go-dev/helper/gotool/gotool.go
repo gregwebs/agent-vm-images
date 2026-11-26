@@ -73,9 +73,9 @@ func (a *Architecture) UnmarshalText(text []byte) error {
 // Target is what the layer installed and which Linux target it was built for.
 //
 // Binary is the exact path the caller asked to verify. There is deliberately no
-// fallback to BinDir/gopls: a verifier that substituted a sibling would say nothing
-// about the path it was given. Every path is kept in the spelling the caller used:
-// see internal/pathjoin.
+// fallback to a `gopls` beside it: a verifier that substituted a sibling would say
+// nothing about the path it was given. Every path is kept in the spelling the caller
+// used: see internal/pathjoin.
 type Target struct {
 	GoRoot   string
 	ShareDir string

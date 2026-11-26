@@ -72,8 +72,8 @@ type verifyInstalledCommand struct {
 	ExpectGo    *string             `arg:"--expect-go" placeholder:"EXACT" help:"assert this exact X.Y.Z Go version"`
 	GoRoot      string              `arg:"--go-root,required" placeholder:"DIR" help:"the installed Go root the pinned compiler lives in"`
 	Arch        gotool.Architecture `arg:"--arch,required" placeholder:"AMD64|ARM64" help:"the Linux target the installed binary was built for"`
-	// The exact path this verb inspects. There is no fallback to BinDir/gopls: a
-	// verifier that substituted a sibling would say nothing about its argument.
+	// The exact path this verb inspects. There is no fallback to a `gopls` beside it:
+	// a verifier that substituted a sibling would say nothing about its argument.
 	Binary   string `arg:"--binary,required" placeholder:"PATH" help:"the exact installed gopls path to inspect"`
 	ShareDir string `arg:"--share-dir,required" placeholder:"DIR" help:"the directory holding the installed notice file"`
 }

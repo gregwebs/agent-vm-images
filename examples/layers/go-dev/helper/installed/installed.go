@@ -70,8 +70,9 @@ const Prefix = "gopls-closure"
 // `a/link/../gopls` into `a/gopls`, which is a different file when `link` is a
 // symlink: the kernel resolves `..` after the link, so the caller's spelling and the
 // cleaned spelling name different files. This verb must inspect the file the caller
-// named, so it neither cleans nor resolves here — and the rules below use
-// gotool.Join, not filepath.Join, for the same reason.
+// named, so it neither cleans nor resolves here — and every path the rules below
+// append goes through internal/pathjoin, the module's single no-normalise join,
+// rather than filepath.Join.
 func NewTarget(goRoot, binary, shareDir string, arch gotool.Architecture) (gotool.Target, error) {
 	if !filepath.IsAbs(goRoot) ||
 		!isRegularFile(pathjoin.Join(pathjoin.Join(goRoot, "bin"), "go")) {
