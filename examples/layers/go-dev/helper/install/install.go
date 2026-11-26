@@ -27,23 +27,23 @@
 // deleted, and the deletion mutation is run in the #251 PR.
 //
 //	rule                                                     Python                    test
-//	the closure is loaded and proved before a child runs     main 1738-1757            pins: install rows
-//	--go-root absolute with bin/go                           _target 1720-1724         TestTargetRulesRefuse
-//	the arch enum owns GOARCH, not `dpkg` output             Architecture 1296-1325    TestChildArguments
-//	a destination is never overwritten                       1585-1588                 TestExistingDestinationRefused
+//	the closure is loaded and its pin assertions hold        main 1738-1757            main: TestStatusMatrix (wrong --expect-gopls, refused before a child)
+//	--go-root absolute with bin/go                           _target 1720-1724         TestTargetRulesRefuse; installed: TestTargetRulesRefuse
+//	the arch enum owns GOARCH, not `dpkg` output             Architecture 1296-1325    TestChildArguments; main: TestStatusMatrix (--arch 386)
+//	a destination is never overwritten                       1585-1588                 TestExistingDestinationRefused, TestConcurrentPublicationCannotOverwrite
 //	the scratch tree belongs to this invocation              1589-1592                 TestScratchIsRemoved, TestScratchMessageIsNotAVeto
-//	closed 21-key child environment, reviewed transport only 1296-1325                 TestChildArguments
+//	closed 21-key child environment, reviewed transport only 1296-1325                 TestChildArguments; gotool: TestChildArguments
 //	pinned compiler before the first request                 1435-1443                 TestWrongCompilerMakesNoRequest
 //	committed go.mod/go.sum bytes are copied, digest-checked 1519-1530                 TestCommittedBytesAreCopied
-//	exactly one readonly build, reviewed flags               1449-1457                 TestChildArguments, pins: install rows
+//	exactly one readonly build, reviewed flags               1449-1457                 TestChildArguments; pins: install rows
 //	build-info identity, target and settings                 1458-1464                 TestWrongSelectionIsRefused
 //	cache notice bytes equal the committed evidence          1512-1533                 TestCacheNoticeMutation
-//	license bytes re-read and re-checked before publication  1500-1510                 TestNoticeDriftRefused
-//	binary published at 0755 through an owned temporary      1600-1605                 pins: install rows
-//	notices published at 0644 from the re-checked bytes      1610-1613                 pins: install rows
-//	withdrawal removes exactly the claimed paths             1617-1637                 TestPublicationFailureWithdraws
-//	withdrawal removes the owned empty directories (G3)      absent in Python          TestOwnedDirectoryIsRemoved, TestOwnedDirectoryDiverges
-//	a same-target retry after a late failure succeeds (G3)   absent in Python          TestRetryAfterLateFailure, TestRetryDiverges
+//	license bytes re-read and re-checked before publication  1500-1510                 TestCommittedBytesAreCopied (drift arm)
+//	binary published at 0755 through an owned temporary      1600-1605                 TestTemporaryNameIsInvocationOwned, TestPublicationFailureWithdraws
+//	notices published at 0644 from the re-checked bytes      1610-1613                 TestPublicationFailureWithdraws, TestConcurrentPublicationCannotOverwrite
+//	withdrawal removes exactly the created paths             1617-1637                 TestPublicationFailureWithdraws
+//	withdrawal removes the owned empty directories (G3)      absent in Python          TestLateWriteRetryThroughInstall; pins: the declared divergence
+//	a same-target retry after a late failure succeeds (G3)   absent in Python          TestLateWriteRetryThroughInstall; pins: the declared divergence
 //	status 0 with the release on stdout, 1 on refusal         main 1738-1765            main: TestStatusMatrix
 //
 // The two G3 fixes this verb owns are declared divergences while the Python oracle
@@ -345,13 +345,29 @@ type published struct {
 	notice string
 }
 
-// publish writes the built bytes and the verified notice bytes, claiming each
-// destination before the first fallible operation on it.
+// publish writes the built bytes and the verified notice bytes.
 //
-// Claiming first is what makes a partial write withdrawable: a metadata error leaves
-// the bytes on disk, so a list built after the write would not name the file it has
-// to remove. The temporary name is this invocation's own (Python used a fixed
-// `.gopls.new`, which two invocations would have fought over).
+// Two properties, and both are about *ownership* rather than about naming:
+//
+//   - The destination is created exclusively. The binary is hard-linked from the
+//     temporary file and the notice is opened with O_CREATE|O_EXCL, so a second
+//     invocation that reaches the same target cannot replace what this one published
+//     — the kernel refuses the create instead of clobbering it. A rename would
+//     overwrite, and then this invocation's withdrawal would delete a file another
+//     one had successfully published: the two-invocation witness in
+//     TestConcurrentPublicationCannotOverwrite is what fails without this.
+//   - A path enters the withdrawal list only once *this* invocation created it, so a
+//     failure removes nothing it did not create. Directories are claimed by the
+//     Mkdir that succeeded, not by a prior existence check, which is what makes the
+//     claim race-free.
+//
+// The temporary name is this invocation's own (Python used a fixed `.gopls.new`,
+// which two invocations would have fought over); the exclusive create above is what
+// protects the destination itself.
+//
+// What this is not: a defence against a process that does not cooperate. A writer
+// that unlinks the published path and writes its own is outside any of this, and the
+// `go` child and the filesystem boundary are separate owners.
 func publish(target Target, built string, notices []byte, fault func(Phase) error) (
 	published, error) {
 	var claimed []string
@@ -410,19 +426,29 @@ func publish(target Target, built string, notices []byte, fault func(Phase) erro
 		if err := os.Chmod(partial, 0o755); err != nil {
 			return fmt.Errorf("cannot set the mode of %s: %v", partial, err)
 		}
-		claim(binary)
-		if err := os.Rename(partial, binary); err != nil {
+		// Link, do not rename: `os.Link` fails with EEXIST when the destination is
+		// there, so a concurrent invocation cannot overwrite a publication, and the
+		// claim is the kernel's answer rather than a check this program made earlier.
+		if err := os.Link(partial, binary); err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				return fmt.Errorf("refusing to install over an existing path: %s", binary)
+			}
 			return fmt.Errorf("cannot publish %s: %v", binary, err)
+		}
+		claim(binary)
+		if err := os.Remove(partial); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("cannot remove %s: %v", partial, err)
 		}
 		if fault != nil {
 			if err := fault(PhaseBinaryPublished); err != nil {
 				return err
 			}
 		}
-		claim(notice)
-		if err := os.WriteFile(notice, notices, 0o644); err != nil {
-			return fmt.Errorf("cannot write %s: %v", notice, err)
+		published, err := createExclusive(notice, notices)
+		if err != nil {
+			return err
 		}
+		claim(published)
 		if fault != nil {
 			if err := fault(PhaseNoticeWritten); err != nil {
 				return err
@@ -443,6 +469,30 @@ func publish(target Target, built string, notices []byte, fault func(Phase) erro
 		return published{}, err
 	}
 	return published{binary: binary, notice: notice}, nil
+}
+
+// createExclusive creates path with exactly these bytes and mode 0644, and refuses a
+// path that already exists.
+//
+// O_CREATE|O_EXCL is the claim: the kernel both tests and takes the name, so the
+// answer "created" is this invocation's to withdraw and no second invocation can
+// have got the same one.
+func createExclusive(path string, raw []byte) (string, error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return "", fmt.Errorf("refusing to install over an existing path: %s", path)
+		}
+		return "", fmt.Errorf("cannot write %s: %v", path, err)
+	}
+	if _, err := file.Write(raw); err != nil {
+		_ = file.Close()
+		return path, fmt.Errorf("cannot write %s: %v", path, err)
+	}
+	if err := file.Close(); err != nil {
+		return path, fmt.Errorf("cannot write %s: %v", path, err)
+	}
+	return path, nil
 }
 
 // createOwnedDirs creates path and every missing ancestor, returning exactly the
@@ -469,10 +519,21 @@ func createOwnedDirs(path string) ([]string, error) {
 	}
 	created := make([]string, 0, len(missing))
 	for i := len(missing) - 1; i >= 0; i-- {
-		if err := os.Mkdir(missing[i], 0o755); err != nil {
+		err := os.Mkdir(missing[i], 0o755)
+		switch {
+		case err == nil:
+			// The Mkdir is the claim: only the invocation whose call succeeded owns
+			// this directory, so a concurrent one that created the same path first is
+			// never removed by the other's withdrawal.
+			created = append(created, missing[i])
+		case errors.Is(err, fs.ErrExist):
+			// Someone else created it between the check above and now. Not ours.
+			if info, statErr := os.Lstat(missing[i]); statErr != nil || !info.IsDir() {
+				return created, fmt.Errorf("%s exists and is not a directory", missing[i])
+			}
+		default:
 			return created, fmt.Errorf("cannot create %s: %v", missing[i], err)
 		}
-		created = append(created, missing[i])
 	}
 	return created, nil
 }

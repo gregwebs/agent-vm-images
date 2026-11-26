@@ -86,7 +86,14 @@ var reviewedImporters = map[string][]string{
 	// environment package gotool builds (#250). The binary under test is never a
 	// program: it is an argument to `go version -m -json`. The boundary around that
 	// child is the recipe's --network=none RUN, not this list.
-	goDevHelperPath + "/gotool/exec.go":                     {"os/exec"},
+	goDevHelperPath + "/gotool/exec.go": {"os/exec"},
+	// The `example_fixture` seam parses the loopback origin it was given, and refuses
+	// anything that is not `http://<loopback IP>:<port>` before the installer sees it
+	// (#251). `net/url` is a parser, not a client, in the same sense as the root's
+	// artifactpin and the go-dev loader. The file exists only in a `-tags
+	// example_fixture` build (ADR 0017, decision D1), and the shipped binary's bytes
+	// carry none of it — `seams_test.go` holds both halves.
+	goDevHelperPath + "/seams_fixture.go":                   {"net/url"},
 	mainModulePath + "/internal/artifactpin/rules.go":       {"net/url"},
 	mainModulePath + "/internal/artifactinstall/archive.go": {"os/exec"},
 	mainModulePath + "/internal/artifactinstall/install.go": {"os/exec"},

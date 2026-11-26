@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1055,16 +1056,112 @@ def go_install(fixture_helper: Path, closure, fixture, name: str, arch, *,
     return base, run_helper(fixture_helper, argv + list(extra))
 
 
-def published_digest(base: Path) -> tuple[str, int, str, int]:
-    """The four observations a published tree is compared on."""
+def tree_observation(base: Path) -> list[tuple[str, str, int, str]]:
+    """Every path under `base`: relative name, kind, permission bits, and digest.
+
+    A publication comparison must be over the *whole tree*, not a list of the files
+    somebody remembered: an extra file, an extra directory or a directory's mode is a
+    difference this program's withdrawal could have left behind. `stat.S_IMODE`
+    includes the setuid, setgid and sticky bits, so a 04755 binary is not 0755 here.
+    """
+    observation = []
+    for path in sorted(base.rglob('*')):
+        relative = path.relative_to(base).as_posix()
+        mode = path.lstat().st_mode
+        if path.is_symlink():
+            kind = 'link'
+        elif path.is_dir():
+            kind = 'dir'
+        elif path.is_file():
+            kind = 'file'
+        else:
+            kind = 'other'
+        digest = hashlib.sha256(path.read_bytes()).hexdigest() if kind == 'file' else ''
+        observation.append((relative, kind, stat.S_IMODE(mode), digest))
+    return observation
+
+
+def published_tree(base: Path) -> list[tuple[str, str, int, str]]:
+    """The whole published tree: everything under the two positions installation owns.
+
+    `bin/` and `share/` are what publication creates; the invocation's scratch tree is
+    private to each side (the Go installer removes its own, the oracle's caller keeps
+    the one the row handed it), so a difference there is not a difference in what was
+    published. Within those two positions nothing is filtered: an extra file, an extra
+    directory and a directory's mode are all in the observation.
+    """
+    observation = []
+    for position in ('bin', 'share'):
+        directory = base / position
+        if not directory.is_dir():
+            raise AssertionError(f'the published position {directory} does not exist')
+        # The position itself first, so its own mode is observed too.
+        observation.append((position, 'dir', stat.S_IMODE(directory.lstat().st_mode), ''))
+        observation += [(f'{position}/{relative}', kind, mode, digest)
+                        for relative, kind, mode, digest in tree_observation(directory)]
+    return observation
+
+
+def tree_difference(left: Path, right: Path) -> str:
+    """The first whole-tree difference, or the empty string when they are equal."""
+    one, two = tree_observation(left), tree_observation(right)
+    if one == two:
+        return ''
+    for index in range(max(len(one), len(two))):
+        here = one[index] if index < len(one) else None
+        there = two[index] if index < len(two) else None
+        if here != there:
+            return f'{here!r} != {there!r}'
+    return 'tree lengths differ'
+
+
+def test_published_tree_comparator(root: Path, witnesses) -> None:
+    """The comparison itself: sensitive to every dimension it claims, and not always red."""
     import gopls_closure as model
 
-    binary = base / 'bin' / 'gopls'
-    notice = base / 'share' / 'gopls' / model.LICENSE_FILE
-    return (hashlib.sha256(binary.read_bytes()).hexdigest(),
-            binary.stat().st_mode & 0o777,
-            hashlib.sha256(notice.read_bytes()).hexdigest(),
-            notice.stat().st_mode & 0o777)
+    print('publication comparison: whole tree, not a hard-coded pair of files')
+    first = root / 'tree-control' / 'first'
+    (first / 'sub').mkdir(parents=True)
+    (first / 'bin' / 'gopls').parent.mkdir()
+    (first / 'bin' / 'gopls').write_bytes(b'\x7fELF control\n')
+    os.chmod(first / 'bin' / 'gopls', 0o755)
+    (first / 'share' / 'gopls').mkdir(parents=True)
+    (first / 'share' / 'gopls' / model.LICENSE_FILE).write_bytes(b'notice\n')
+    os.chmod(first / 'share' / 'gopls' / model.LICENSE_FILE, 0o644)
+    os.chmod(first / 'sub', 0o755)
+
+    same = root / 'tree-control' / 'same'
+    shutil.copytree(first, same, symlinks=True)
+    check('two identical trees compare equal, so the comparison is not always red',
+          tree_difference(first, same) == '', tree_difference(first, same))
+
+    def variant(name, change) -> Path:
+        copy = root / 'tree-control' / name
+        shutil.copytree(first, copy, symlinks=True)
+        change(copy)
+        return copy
+
+    cases = {
+        'an extra file': lambda copy: (copy / 'extra').write_bytes(b'x'),
+        'an extra directory': lambda copy: (copy / 'extra-dir').mkdir(),
+        'a changed file': lambda copy: (copy / 'bin' / 'gopls').write_bytes(b'other'),
+        'a file mode': lambda copy: os.chmod(copy / 'share' / 'gopls'
+                                             / model.LICENSE_FILE, 0o600),
+        'a directory mode': lambda copy: os.chmod(copy / 'sub', 0o700),
+        'a missing file': lambda copy: (copy / 'share' / 'gopls'
+                                        / model.LICENSE_FILE).unlink(),
+    }
+    for label, change in cases.items():
+        copy = variant(label.replace(' ', '-'), change)
+        check(f'the tree comparison reports {label}', tree_difference(first, copy) != '',
+              '(the trees compared equal)')
+    # The setuid bit: the suite already proved this host keeps one (prepare_witnesses
+    # raised otherwise), so this dimension is real here, not hypothetical.
+    setuid = variant('setuid', lambda copy: shutil.copyfile(
+        witnesses.setuid_binary, copy / 'bin' / 'gopls'))
+    os.chmod(setuid / 'bin' / 'gopls', 0o4755)
+    check('the tree comparison reports a setuid bit',
+          tree_difference(first, setuid) != '', '(a 04755 binary compared equal to 0755)')
 
 
 def test_go_install_differential(fixture, closure, root: Path, helper: Path,
@@ -1126,11 +1223,47 @@ def test_go_install_differential(fixture, closure, root: Path, helper: Path,
               sorted(python_requests) == sorted(go_requests)
               and len(python_requests) >= minimum_requests,
               f'(Go {sorted(go_requests)} vs Python {sorted(python_requests)})')
-        check(f'{arch.value}: both installers published the same bytes and modes',
-              published_digest(base) == published_digest(fixture.workspace
-                                                         / f'py-install-{arch.value}'),
-              f'(Go {published_digest(base)} vs Python '
-              f'{published_digest(fixture.workspace / f"py-install-{arch.value}")})')
+        python_base = fixture.workspace / f'py-install-{arch.value}'
+        # Two different trees, both nonempty, compared whole: every path, its kind,
+        # its permission bits (special bits included) and a file's bytes. Comparing a
+        # tree with itself would satisfy an equality and prove nothing, so the paths
+        # are asserted different as well.
+        go_tree = published_tree(base)
+        python_tree = published_tree(python_base)
+        check(f'{arch.value}: both installers published the same tree',
+              base != python_base and len(go_tree) >= 5 and len(python_tree) >= 5
+              and go_tree == python_tree,
+              f'(Go {go_tree} vs Python {python_tree})')
+        if arch == model.Architecture.ARM64:
+            # The self-control for the row above: it must be red when the *Python*
+            # side differs, or the comparison proves nothing about that side. Only the
+            # published positions are copied — the scratch tree is not publication.
+            perturbed = fixture.workspace / 'published-self-control'
+            if perturbed.exists():
+                remove_tree(perturbed)
+            for position in ('bin', 'share'):
+                shutil.copytree(python_base / position, perturbed / position,
+                                symlinks=True)
+            check('an unperturbed copy of the Python publication compares equal',
+                  published_tree(perturbed) == go_tree, '(the copy is not a copy)')
+            notice = perturbed / 'share' / 'gopls' / model.LICENSE_FILE
+            original = notice.read_bytes()
+            notice.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+            check("the tree comparison is red when the Python side's bytes differ",
+                  published_tree(perturbed) != go_tree, '(one changed notice byte was invisible)')
+            notice.write_bytes(original)
+            (perturbed / 'bin' / 'stray').write_bytes(b'x')
+            check("the tree comparison is red when the Python side's tree gains a path",
+                  published_tree(perturbed) != go_tree, '(an extra file in bin/ was invisible)')
+            (perturbed / 'bin' / 'stray').unlink()
+            os.chmod(perturbed / 'share' / 'gopls', 0o700)
+            check("the tree comparison is red when the Python side's directory mode differs",
+                  published_tree(perturbed) != go_tree, '(a directory mode was invisible)')
+            os.chmod(perturbed / 'share' / 'gopls', 0o755)
+            check('the restored copy compares equal again, so the control is not stuck red',
+                  published_tree(perturbed) == go_tree, '(the restored copy still differs)')
+            remove_tree(perturbed)
+
         # The oracle's own verifier reads the Go installer's tree: the two verbs
         # agree about what a valid installation is.
         state = model.Target(go_root=fixture.go_root, bin_dir=base / 'bin',
@@ -2671,6 +2804,7 @@ def main() -> int:
 
         closure = model.load_closure(candidate)
         test_install(fixture, closure)
+        test_published_tree_comparator(root, witnesses)
         test_go_install_differential(fixture, closure, root, helper, fixture_helper)
         test_escaping(fixture, closure)
         test_hostile_ambient(fixture, closure)

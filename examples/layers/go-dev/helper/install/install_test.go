@@ -396,6 +396,51 @@ func TestPublicationFailureWithdraws(t *testing.T) {
 	}
 }
 
+// TestConcurrentPublicationCannotOverwrite: the destination is created
+// exclusively, so a second invocation cannot replace a publication — and a
+// withdrawal therefore never removes another invocation's file.
+//
+// The interleaving is deterministic rather than timing-dependent: A's failure hook
+// runs B's publication synchronously at the one moment both are past their own
+// preflight, which is the window a separate preflight cannot close.
+func TestConcurrentPublicationCannotOverwrite(t *testing.T) {
+	built := newFixture(t, gotool.ARM64).target
+	source := filepath.Join(t.TempDir(), "gopls")
+	if err := os.WriteFile(source, []byte("\x7fELF first\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	notices := []byte("verified notice bytes\n")
+	var secondErr error
+	fault := func(phase Phase) error {
+		if phase == PhaseBinaryPublished {
+			_, secondErr = publish(built, source, notices, nil)
+			return errors.New("injected: the first invocation fails after publishing")
+		}
+		return nil
+	}
+	if _, err := publish(built, source, notices, fault); err == nil ||
+		!strings.Contains(err.Error(), "injected:") {
+		t.Fatalf("got %v, want the injected failure", err)
+	}
+	if secondErr == nil {
+		t.Fatal("a second invocation published over the first while it was still running")
+	}
+	if !strings.Contains(secondErr.Error(), "refusing to install over an existing path") {
+		t.Fatalf("the second invocation was refused for another reason: %v", secondErr)
+	}
+	// The first invocation withdrew exactly what it created: its file (the second
+	// invocation has none, and must not lose one), and the directories it made.
+	for _, path := range []string{built.Binary(), built.Notice(), built.ShareDir, built.BinDir} {
+		if _, err := os.Lstat(path); err == nil {
+			t.Fatalf("%s survived a failed publication", path)
+		}
+	}
+	// And the target is still installable afterwards.
+	if _, err := publish(built, source, notices, nil); err != nil {
+		t.Fatalf("the target is not installable after the interleaving: %v", err)
+	}
+}
+
 // TestLateWriteRetryThroughInstall: the whole verb, including a real late failure,
 // leaves no owned file or directory, so an immediate retry succeeds.
 func TestLateWriteRetryThroughInstall(t *testing.T) {

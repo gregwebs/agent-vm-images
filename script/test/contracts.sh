@@ -108,7 +108,10 @@ fi
 # not lose. It is one register in one file (#188 G2: rust-dev's helper test owns the
 # table) and it classifies both layers' helper modules and the root `avm-pin`
 # closure, so a go-dev source file that gains `os/exec` is refused here too.
-(cd "${helper_modules[0]}" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test \
+# `-count=1` is not cosmetic: the test scans *other* modules' sources, and Go's test
+# cache would otherwise answer from a cached pass while those bytes changed. A
+# cached result here is not a source scan (#251 review).
+(cd "${helper_modules[0]}" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test -count=1 \
     -run 'TestImportsAreReviewed|TestImportBoundaryControls' .)
 (cd "$contract_module" && GOFLAGS=-mod=vendor GOTOOLCHAIN=auto go test ./internal/vendordrift)
 # Vendor mode: dependencies are committed, so the gates never reach a module

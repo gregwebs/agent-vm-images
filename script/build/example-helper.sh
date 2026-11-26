@@ -10,6 +10,15 @@
 # It prints one absolute path: the binary it wrote. Pass `--fixture` to build with
 # `-tags example_fixture`, which is how a suite gets the fixture seams (decision
 # D1); the shipped binary never carries them.
+#
+# Before it compiles anything, a build from a checkout runs the guarded-import
+# register (owner ruling G2 of #188): "before any fixture child is built". The
+# register lives in examples/layers/rust-dev/helper/imports_test.go and classifies
+# both layer helpers and the root `avm-pin` closure, so a helper source that gained
+# `os/exec` or `net/http` is refused here rather than after a suite has started
+# children. A tree with no root module (the example-layers self-test's synthetic
+# copies, which cannot contain one) skips it and says so: that tree has no
+# `cmd/avm-pin` to classify, and its own guards are the checker's own cases.
 set -euo pipefail
 
 usage() {
@@ -118,6 +127,21 @@ esac
 
 out="$root/target/example-helper/$layer/$os-$arch"
 mkdir -p "$out"
+
+if [ -f "$root/cmd/avm-pin/main.go" ]; then
+    # The guard's scope is the checkout it runs in, so it runs in $root: a fixture
+    # built from another tree would otherwise be classified by this checkout's
+    # sources, which is not what it compiles.
+    (
+        cd "$root/examples/layers/rust-dev/helper" || exit 1
+        env -u GOFLAGS -u GOEXPERIMENT -u GOOS -u GOARCH -u GOWORK \
+            GOTOOLCHAIN=auto GOENV=off GOWORK=off GOFLAGS=-mod=vendor GOPROXY=off \
+            go test -count=1 -run 'TestImportsAreReviewed|TestImportBoundaryControls' .
+    ) >&2 || { echo "example-helper: the guarded-import register refused this tree; no child was built" >&2; exit 1; }
+else
+    echo "example-helper: no root module in $root, so the guarded-import register is not run" \
+        "(a self-test scratch tree has no cmd/avm-pin to classify)" >&2
+fi
 
 tags=()
 if [ "$fixture" = true ]; then
