@@ -18,8 +18,19 @@ type Source interface {
 	Read(name Filename) ([]byte, error)
 }
 
+// Locator is a Source whose bytes come from a directory the caller may name again.
+// A source that cannot (an in-memory fixture) still loads; the caller then has no
+// directory to re-read, and a verb that must re-read refuses instead of guessing.
+type Locator interface {
+	// Directory is the spelling the caller gave, unaltered.
+	Directory() string
+}
+
 // Dir is the real directory source.
 type Dir struct{ directory string }
+
+// Directory is the caller's spelling of the data directory.
+func (d *Dir) Directory() string { return d.directory }
 
 // DirSource returns the source for one absolute-or-relative directory, in the
 // spelling the caller wrote.

@@ -131,8 +131,9 @@ func (p Paths) Prepare() error {
 //
 // The set is closed on purpose: there is no `install`, `get`, `mod tidy`, `mod
 // download` or `mod vendor` member, so no caller can express a version resolution,
-// a graph regeneration or a sum database lookup. #251 adds `build` to this set; it
-// must not grow a resolution verb.
+// a graph regeneration or a sum database lookup. `Build` is the one member that can
+// read module objects from the reviewed proxy (#251); it must never grow company —
+// no resolution verb, and no `version`/`env` variant beyond the two readers.
 type Command struct {
 	name string
 	argv []string
@@ -152,11 +153,15 @@ var (
 	// BuildInfo reads a binary's build information: `go version -m -json`. The
 	// binary is only ever an argument to this command; it is never executed.
 	BuildInfo = Command{name: "BuildInfo", argv: []string{"version", "-m", "-json"}}
+	// Build compiles a selected module: `go build`. It carries no version
+	// resolution of its own; the caller appends the reviewed flags and the root the
+	// loaded closure names.
+	Build = Command{name: "Build", argv: []string{"build"}}
 )
 
 // Commands is the closed set, for a caller that holds it to a reviewed count or a
 // reviewed absence of resolution verbs.
-func Commands() []Command { return []Command{EnvGoVersion, EnvGoRoot, BuildInfo} }
+func Commands() []Command { return []Command{EnvGoVersion, EnvGoRoot, BuildInfo, Build} }
 
 // Environment is the whole Go environment a child may run in.
 type Environment struct {
@@ -170,6 +175,38 @@ type Environment struct {
 // than a second copy: with the proxy off it is part of a closed environment, not a
 // fetch.
 func Offline() Environment { return Environment{proxy: "off", sumdb: closure.SumDB} }
+
+// Install is the installation environment: the one reviewed proxy, with no
+// `,direct` fallback, and the reviewed sum-database key. The pinned `go` child is
+// the module-protocol client here; this program makes no HTTP request of its own
+// (G8a). The child may only read the module objects the committed go.sum already
+// names, and `GOTOOLCHAIN=local` below means it cannot select a toolchain.
+func Install() Environment { return Environment{proxy: closure.Proxy, sumdb: closure.SumDB} }
+
+// NewEnvironment is the value constructor behind Install and Offline. Production
+// callers use those two; a `-tags example_fixture` build calls this one so its
+// loopback recorder can stand in for the proxy and the sum database can be off for
+// synthetic modules. It is a constructor, not a runtime input: no flag or variable
+// in a shipped build reaches it, and the seam that does refuses any origin that is
+// not the suite's loopback.
+func NewEnvironment(proxy, sumdb string) Environment {
+	return Environment{proxy: proxy, sumdb: sumdb}
+}
+
+// ProductionTransport is the reviewed transport passthrough: the proxy URL and build
+// CA variables the image may legitimately carry, copied from this process's
+// environment. It carries bytes and a route, never a content decision: none of these
+// keys can change which module sums a committed go.sum accepts, and a key outside
+// this list is refused by ChildEnv rather than inherited.
+func ProductionTransport() map[string]string {
+	transport := map[string]string{}
+	for _, key := range transportKeys {
+		if value, present := os.LookupEnv(key); present {
+			transport[key] = value
+		}
+	}
+	return transport
+}
 
 // childEnvironmentKeys is the exact key set of a child environment, in order. It is
 // an interface: a test asserts the produced list, so a key that is not here cannot

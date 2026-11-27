@@ -43,14 +43,46 @@ Commit the selection, then let one deep helper compile from it.
   and `go build` does not authenticate a vendored tree, so a networked drift gate
   would still be needed. A bespoke sums file would reimplement Go's resolver, and
   a committed prebuilt gopls would be an unreviewed binary.
-- Ordinary builds run the offline check through the layer's own Go reader and the
-  install through `examples/layers/go-dev/gopls_closure.py`, which stays the
-  installer and the live oracle until #251/#254. Since #249 the recipe also runs
-  `go-dev-helper check` under `--network=none` over the same five committed files:
-  the same rules, no Go command, no network. The duplicate reader exists for one
-  slice at a time and its differences are recorded per case in
-  `script/test/gopls-closure-parity.py`; the defects that reader fixes (#188 G3)
-  are listed there too.
+- Ordinary builds run the offline check and the install through the layer's own
+  Go program. Since #249 the reader is `go-dev-helper check`; since #251 the
+  installer is `go-dev-helper install`, and the recipe's separate `check` RUN is
+  gone because `install` owns the same pre-fetch check over the same five committed
+  files. `examples/layers/go-dev/gopls_closure.py` is now a **host-only oracle**:
+  nothing in the layer mounts it, the layer installs no interpreter, and it stays
+  live until #254 deletes it. The duplicate reader exists for one slice at a time and
+  its differences are recorded per case in `script/test/gopls-closure-parity.py`;
+  the defects the Go reader fixes (#188 G3) are listed there too.
+- What the layer installs and runs (#251): one Go binary built by the pinned
+  `golang:` stage, and that binary installs gopls. No Python is installed by this
+  layer (the `python3` token is gone from its apt line) and no Python runs in its
+  build. Inherited guest Python may still be present in the parent image as a user
+  feature; that is the parent's, nothing here depends on it, and the native harness
+  refuses only a `python3` this layer added (any interpreter path the parent does not
+  already carry). The first-use canary that used to run on the image's Python now runs
+  in a separate digest-pinned test runtime
+  (`script/test/fixtures/go-example/canary-runtime.ref`), proven to carry `python3`
+  and read back from the container's own image before the legs start.
+
+  Two limits stated rather than implied. **No CI job runs `go-example.sh`**: the layer
+  workflow runs `script/test/layer-build.sh` (pull, cold build, inspect, egress), so
+  the acceptance for the native suite is a recorded native run and the PR evidence;
+  what CI exercises is `go-example.sh --self-test`, whose fake docker drives the
+  carrier, the ref grammar and both refusal arms. The missing harness row is filed as
+  its own issue rather than folded into this slice. **The image inspection compares
+  only the resolved `python3` path** with the parent's: it shows the layer added no
+  interpreter of its own on that path, and it cannot show that no Python bytes were
+  added at the same path.
+- Who speaks HTTP: the pinned `go` child, for module objects the committed `go.sum`
+  already names. The helper itself makes no request, resolves no version, fetches no
+  new sum, never consults the sum database for a decision of its own, and cannot
+  select a toolchain (`GOTOOLCHAIN=local`). The module-cache notice proof and the
+  build-info proof are post-build, local reads.
+- The installer's own limits: it publishes the bytes it built and verified against
+  the reviewed selection, sums, compiler and target settings, and the notice bytes it
+  re-read and re-checked. Its post-build proof is the binary's own build info, which
+  is metadata the binary carries about itself; a candidate that lies coherently with
+  the pin is not detected. Authentication of module content is the committed `go.sum`
+  plus the reviewed channel determination below, not this program.
 - Since #250 the installed-state verification is the helper's as well:
   `verify-installed` reads the same five files, checks exactly the named binary
   path, its mode and the installed notice file, proves the pinned compiler and Go
@@ -74,7 +106,7 @@ Commit the selection, then let one deep helper compile from it.
   smoke in `verify-toolchain.sh` stays a separate check, because an
   absolute-path verification answers a different question than "does the guest's
   `PATH` resolve these tools and can they analyse code".
-- The Python helper:
+- The Python oracle (host-only since #251), and what the Go installer ports:
   1. checks the committed data **offline** — exact file set, per-file digests,
      canonical `go.mod`, both checksum kinds for every pinned module, the root
      `go.mod` evidence hash, the reviewed notice sections, the record's review
@@ -85,6 +117,23 @@ Commit the selection, then let one deep helper compile from it.
      compiler, the pinned target and exactly the reviewed modules and sums;
   4. only then publishes `gopls` (0755) and the third-party licence file, and
      withdraws them again if any later step fails.
+
+  The Go installer additionally proves the notice bytes the build actually used
+  against the committed framed evidence (both directions), re-reads and re-checks
+  the inputs it copies and publishes, publishes through an invocation-owned
+  temporary file, and withdraws **only** the paths and directories that invocation
+  created — so a same-target retry after a late failure succeeds where the oracle's
+  leftover `share/gopls` made its own preflight refuse. Both of those are declared
+  divergences with both verdicts asserted in `script/test/gopls-closure-pins.py`.
+
+  Destination ownership is exclusive, not merely preflighted: the binary is hard-linked
+  into place (`os.Link` refuses an existing name) and the notice is created with
+  `O_CREATE|O_EXCL`, so a second invocation cannot replace a publication and a
+  withdrawal can never delete another invocation's file. A separate existence check is
+  a fast, clear refusal; the kernel's answer is the guarantee. Directories are claimed
+  by the `Mkdir` that succeeded, which is race-free where a prior `stat` is not. What
+  this does not defend against is a process that does not cooperate — unlinking a
+  published path and writing its own is outside any lock in this program.
 - The child environment is a closed 21-key allowlist. `PATH` is the pinned Go
   root only; `HOME`/`GOPATH`/`GOMODCACHE`/`GOCACHE`/`TMPDIR` are
   invocation-private scratch removed afterwards; `GOENV=off`, `GOWORK=off`,
@@ -96,7 +145,7 @@ Commit the selection, then let one deep helper compile from it.
   architecture. Only transport variables (`HTTP_PROXY`, `HTTPS_PROXY`,
   `NO_PROXY`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, and lowercase forms) may be added
   in production, because the bytes are hash-verified anyway.
-- The `GoCommand` enum is closed to four members (`env GOVERSION`, `env GOROOT`,
+- The command set is closed to four members (`env GOVERSION`, `env GOROOT`,
   `build`, `version -m -json`): a `go get`, `go install`, `go mod tidy`,
   `go mod download` or `go mod vendor` is not expressible in the ordinary build
   path at all.
@@ -146,6 +195,18 @@ For this closure the reviewed authentication channel is sum.golang.org under the
 explicit verifier key plus the committed `go.sum`. Maintenance-time sums are
 fetched through that log; ordinary builds accept only committed sums and never
 consult the log, a `@v/list` or a `@latest` endpoint.
+
+The suites' synthetic fixtures are not that channel and do not stand in for it: they
+point the pinned `go` child at a loopback recorder with `GOSUMDB=off`, because their
+modules are not in the real transparency log. What those rows prove is the *request
+set* and the verdicts — exact URLs, exact identities, no `@v/list`, no `/sumdb/`, no
+toolchain module — and never that live checksum-database authentication happened. The
+records they build still carry the production proxy and verifier key so the strict
+loader consumes exactly what production emits.
+
+Who is the module-transport client matters for the same reason: it is the pinned `go`
+child, not the layer's helper (#251, ruling G8a). The helper holds no HTTP client, and
+its environment forbids a fallback origin.
 
 VCS release signatures were inventoried against the *selected* versions and are
 retained as evidence only. They are not verified here, and they are not used as
@@ -299,7 +360,8 @@ not claim.
 Hermetic, real `go`, inside the unchanged OS network boundary:
 
 ```sh
-python3 script/test/gopls-closure-pins.py --go-root /abs/native/go1.27.3
+python3 script/test/gopls-closure-pins.py --go-root /abs/native/go1.27.3   # both installers, loopback
+
 python3 script/test/gopls-closure-maintenance.py --go-root /abs/native/go1.27.3
 python3 script/test/fixtures/gopls-closure/sandbox-feasibility.py --go-root /abs/native/go1.27.3
 ```

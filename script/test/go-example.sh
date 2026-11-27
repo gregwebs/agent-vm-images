@@ -172,6 +172,54 @@ first_use_verdict() { # EXPECTED_STATUS STATUS LOG_STATUS EXPECT_REQUESTS LOG
     printf 'ok\n'
 }
 
+# --- the canary's own runtime (#251, owner ruling G8b) ----------------------
+# The layer under test installs and runs no Python, so the canary may not run there.
+# It runs in one explicit, digest-pinned test runtime instead, read from
+# script/test/fixtures/go-example/canary-runtime.ref -- one line, a digest-pinned
+# reference, nothing else. The harness pulls it, proves `python3` resolves inside it
+# and proves the canary container really ran it before the legs start; a reference
+# this function refuses is a harness error, not a build failure.
+canary_runtime_ref() { # FILE
+    local file=$1 line
+    [ -f "$file" ] || { printf 'the canary runtime pin is missing: %s\n' "$file"; return 1; }
+    line=$(cat "$file")
+    case "$line" in
+        '') printf 'the canary runtime pin is empty: %s\n' "$file"; return 1 ;;
+        *[[:space:]]*)
+            printf 'the canary runtime pin carries whitespace or a second line: %s\n' "$file"
+            return 1 ;;
+        *@sha256:*) ;;
+        *) printf 'the canary runtime pin is not digest-pinned: %s\n' "$line"; return 1 ;;
+    esac
+    case "$line" in
+        *[\`\$\'\"\&\|\;\<\>]*)
+            printf 'the canary runtime pin carries a shell metacharacter: %s\n' "$line"
+            return 1 ;;
+    esac
+    case "${line##*@sha256:}" in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+        *) printf 'the canary runtime pin digest is not a sha256: %s\n' "$line"; return 1 ;;
+    esac
+    printf '%s\n' "$line"
+}
+
+# The layer's Python story in one decision, so the self-test can hold every arm
+# without a daemon. The layer installs none (#251): an interpreter the *parent*
+# carries is the parent's user feature and the layer may inherit it, but a layer
+# that gained one of its own would be the dependency back. `parent` and `image` are
+# each the resolved path of `python3` or the empty string.
+layer_python_verdict() { # PARENT IMAGE
+    local parent=$1 image=$2
+    if [ -z "$image" ]; then
+        printf 'ok\n'; return 0
+    fi
+    if [ "$parent" = "$image" ]; then
+        printf 'ok inherited %s\n' "$image"; return 0
+    fi
+    printf 'the layer carries a python3 the parent does not: %s (parent: %s)\n' \
+        "$image" "${parent:-none}"
+}
+
 # A cold build of the mutated closure is evidence only for the failure it names. A
 # timeout, a signal, a daemon or permission failure, a retained-archive digest
 # failure and any generic error fail the build for some other reason, so none of
@@ -502,6 +550,9 @@ self_test() {
     selftest_expect "$(grep -c '1 proxy requests, not zero' "$out" || true)" 4 \
         'a lookalike request still fails the zero-request legs' "$out"
 
+    echo 'self-test: the canary runs in a pinned runtime, not in the image under test'
+    canary_runtime_controls "$scratch"
+
     echo 'self-test: the verdicts preserve statuses and confirmed absence'
     verdict_controls "$scratch" "$scratch/verdicts.log"
 
@@ -524,6 +575,63 @@ self_test() {
     input_digest_controls "$scratch/input-digests.log"
 
     echo 'self-test: passed'
+}
+
+# --- self-test: the canary's own runtime -----------------------------------
+# The rule is Go-less and daemon-free in two halves: the pin parser, and the verdict
+# about which Python the layer may carry. Both are driven directly; then a run with a
+# fake docker answers the two ways the harness must refuse.
+canary_runtime_controls() { # SCRATCH
+    local scratch=$1 out reference verdict
+    reference="$scratch/canary-ref"
+    printf '%s\n' 'python:3.13-slim-trixie@sha256:7249d5587b78209a006dc4a3b5340678f84ea729239193aa559962cd8c1fce50' \
+        >"$reference"
+    selftest_expect_text 'a digest-pinned canary runtime is accepted' \
+        "$(canary_runtime_ref "$reference")" \
+        'python:3.13-slim-trixie@sha256:7249d5587b78209a006dc4a3b5340678f84ea729239193aa559962cd8c1fce50'
+
+    for mutation in missing unpinned two-lines metacharacter short-digest; do
+        case "$mutation" in
+            missing) rm -f "$reference" ;;
+            unpinned) printf '%s\n' 'python:3.13-slim-trixie' >"$reference" ;;
+            two-lines) printf '%s\n%s\n' 'python:3.13@sha256:7249d5587b78209a006dc4a3b5340678f84ea729239193aa559962cd8c1fce50' \
+                           'debian:13@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad' >"$reference" ;;
+            metacharacter) printf '%s\n' 'python:3.13@sha256:7249d5587b78209a006dc4a3b5340678f84ea729239193aa559962cd8c1fce50;true' >"$reference" ;;
+            short-digest) printf '%s\n' 'python:3.13@sha256:abc' >"$reference" ;;
+        esac
+        verdict=$(canary_runtime_ref "$reference" || true)
+        case "$mutation" in
+            missing) selftest_expect_contains "$verdict" 'the canary runtime pin is missing' 'a missing canary runtime pin is refused' ;;
+            unpinned) selftest_expect_contains "$verdict" 'not digest-pinned' 'an unpinned canary runtime is refused' ;;
+            two-lines) selftest_expect_contains "$verdict" 'whitespace or a second line' 'a second line in the canary runtime pin is refused' ;;
+            metacharacter) selftest_expect_contains "$verdict" 'shell metacharacter' 'a canary runtime pin with a metacharacter is refused' ;;
+            short-digest) selftest_expect_contains "$verdict" 'digest is not a sha256' 'a short canary runtime digest is refused' ;;
+        esac
+    done
+
+    selftest_expect_text 'a layer with no python3 and a parent with none is accepted' \
+        "$(layer_python_verdict '' '')" 'ok'
+    selftest_expect_text 'inherited guest Python is accepted and named' \
+        "$(layer_python_verdict /usr/bin/python3 /usr/bin/python3)" 'ok inherited /usr/bin/python3'
+    selftest_expect_contains "$(layer_python_verdict '' /usr/bin/python3)" \
+        'the layer carries a python3 the parent does not' \
+        'a python3 the parent lacks is refused'
+    selftest_expect_contains "$(layer_python_verdict /usr/bin/python3 /usr/local/bin/python3)" \
+        'the layer carries a python3 the parent does not' \
+        'a second interpreter path is refused, so an extra one is visible'
+
+    # The two run-time refusals, on a fake docker that answers the carrier question
+    # wrongly: a runtime without Python, and a canary running something else.
+    out=$scratch/canary-runtime-absent.log
+    FAKE_DOCKER_MODE=record FAKE_RUNTIME_PYTHON=absent PATH="$scratch/bin:$PATH" \
+        bash "${BASH_SOURCE[0]}" --platform linux/amd64 >"$out" 2>&1 || true
+    selftest_expect_grep 'FAIL [canary-runtime]: the canary test runtime carries no python3' \
+        "$out" 'a runtime without python3 stops the canary phase'
+    out=$scratch/canary-runtime-carrier.log
+    FAKE_DOCKER_MODE=record FAKE_CANARY_CARRIER=image-under-test PATH="$scratch/bin:$PATH" \
+        bash "${BASH_SOURCE[0]}" --platform linux/amd64 >"$out" 2>&1 || true
+    selftest_expect_grep 'FAIL [canary-runtime]: the first-use canary is not running the pinned test runtime' \
+        "$out" 'a canary running on another image is refused'
 }
 
 # The bundle target rule, driven with the two real cross-builds and a non-ELF file:
@@ -812,16 +920,20 @@ input_digest_controls() { # LOG
         selftest_expect 1 0 'the build-input digest is computable' "$out"
         return
     fi
-    # The count is a floor plus the named sets: the recipe, three adapters, the
-    # Python reader and the five closure files are 10, and the builder stage's own
-    # bind is the whole helper module (source, go.mod, go.sum, vendor). A walk that
-    # stopped seeing the helper would still be above 10, so the helper files are
-    # named below and the floor is set under today's total.
+    # The count is a floor: the recipe, its two shell adapters and the five closure
+    # files are 8, and the builder stage's own bind is the whole helper module
+    # (source, go.mod, go.sum, vendor). A walk that stopped seeing the helper would
+    # still be above 8, so the helper files are named below and the floor is set under
+    # today's total — the installer's own package included since #251.
     count=$(grep -c '^input [0-9a-f]\{64\}  ' <<<"$listing" || true)
-    if [ "${count:-0}" -lt 40 ]; then
-        selftest_expect "$count" 40 \
+    if [ "${count:-0}" -lt 45 ]; then
+        selftest_expect "$(( ${count:-0} >= 45 ))" 1 \
             'the digest covers the final stage mounts and the whole helper module' "$out"
     fi
+    selftest_expect_contains "$listing" "  examples/layers/go-dev/helper/install/install.go" \
+        'the installer package is digested too'
+    selftest_expect "$(grep -c '  examples/layers/go-dev/gopls_closure.py$' <<<"$listing" || true)" 0 \
+        'the host-only Python oracle is not a build input' "$out"
     selftest_expect_contains "$listing" "  examples/layers/go-dev/helper/go.mod" \
         'the builder stage input set is digested too'
     selftest_expect_contains "$listing" "  examples/layers/go-dev/helper/vendor/modules.txt" \
@@ -1055,6 +1167,10 @@ case "$1" in
                         printf 'sha256:%s fake@sha256:%s %s\n' \
                             "$(printf 'b%.0s' $(seq 1 64))" "$(printf 'b%.0s' $(seq 1 64))" \
                             "$server_arch" ;;
+                    *'{{.Id}}'*'{{.Size}}'*)
+                        printf 'sha256:%s 12345\n' "$(printf 'b%.0s' $(seq 1 64))" ;;
+                    *'{{.Id}}'*)
+                        printf 'sha256:%s\n' "$(printf 'b%.0s' $(seq 1 64))" ;;
                     *)
                         printf 'sha256:%s 12345\n' "$(printf 'b%.0s' $(seq 1 64))" ;;
                 esac ;;
@@ -1077,6 +1193,19 @@ case "$1" in
         esac ;;
     network) exit 0 ;;
     ps) exit 0 ;;
+    inspect)
+        # The canary container's own image, as the harness reads it back: the same
+        # fake id `image inspect` reports for the runtime, so the carrier check can
+        # pass -- and so a harness that assumed the image would be caught by the
+        # control where this prints something else.
+        case " $* " in
+            *'{{.Image}}'*)
+                case "${FAKE_CANARY_CARRIER:-runtime}" in
+                    image-under-test) printf 'sha256:%s [python3]\n' "$(printf 'a%.0s' $(seq 1 64))" ;;
+                    *) printf 'sha256:%s [python3]\n' "$(printf 'b%.0s' $(seq 1 64))" ;;
+                esac ;;
+        esac
+        exit 0 ;;
     logs)
         # The recorder's log, as `docker logs` returns it: the whole log each time,
         # accumulated in a state file so a per-leg delta is observable.
@@ -1091,6 +1220,16 @@ case "$1" in
     rm) exit 0 ;;
     rmi) exit 0 ;;
     run)
+        # The canary runtime probe: does this image carry python3 at all? The
+        # control is the answer, not the command, so the fake states one.
+        case " $* " in
+            *'command -v python3'*)
+                case "${FAKE_RUNTIME_PYTHON:-present}" in
+                    absent) exit 1 ;;
+                    *) printf '/usr/local/bin/python3\n' ;;
+                esac
+                exit 0 ;;
+        esac
         # A first-use guest leg: model the refusal each leg expects, so the controls
         # can hold the status contract fixed while the observation varies. What the
         # recorder saw is appended to the state file, one line per fetch.
@@ -1623,8 +1762,27 @@ record "image id=$IMAGE_ID size=$IMAGE_SIZE parent=$PARENT_REF parent-id=$PARENT
 PHASE=inspect
 run_bounded inspect-env "$RUN_SECONDS" "$LOG_DIR/inspect.log" \
     "$DOCKER" run --rm --network none --label "$LABEL" --entrypoint /bin/bash "$TAG" -c \
-    'env | sort; stat -c "%a %U:%G %n" /opt /opt/go /opt/go/bin/go /opt/go-tools/bin/gopls /opt/go-tools/share/gopls/THIRD_PARTY_LICENSES 2>&1; ls -d /run/go-verify /tmp/gopls-closure 2>&1 || true; command -v python3' \
+    'env | sort; stat -c "%a %U:%G %n" /opt /opt/go /opt/go/bin/go /opt/go-tools/bin/gopls /opt/go-tools/share/gopls/THIRD_PARTY_LICENSES 2>&1; ls -d /run/go-verify /tmp/gopls-closure /tmp/go-dev-helper /tmp/install-gopls.sh /tmp/gopls_closure.py 2>&1 || true; command -v python3 || true' \
     || true
+# The same two questions about the parent, so the layer's own contribution is what
+# is judged rather than the parent's: inherited guest Python is the parent's feature
+# (#251, G8b), and this layer must neither install nor run one.
+run_bounded inspect-parent-python "$RUN_SECONDS" "$LOG_DIR/inspect-parent-python.log" \
+    "$DOCKER" run --rm --network none --entrypoint /bin/bash "$PARENT_REF" -c \
+    'command -v python3 || true' || true
+parent_python=$(tr -d '[:space:]' <"$LOG_DIR/inspect-parent-python.log" 2>/dev/null || true)
+image_python=$(sed -n 's|^\(/.*/python3[0-9.]*\)$|\1|p' "$LOG_DIR/inspect.log" 2>/dev/null | head -1 || true)
+python_verdict=$(layer_python_verdict "$parent_python" "$image_python")
+case "$python_verdict" in
+    ok)
+        pass "the layer installs and runs no Python (parent python3: ${parent_python:-none})"
+        record "layer-python parent=${parent_python:-none} image=${image_python:-none} verdict=ok" ;;
+    ok\ inherited\ *)
+        pass "inherited guest Python only: the layer added none (${python_verdict#ok inherited })"
+        record "layer-python parent=${parent_python:-none} image=${image_python:-none} verdict=inherited" ;;
+    *)
+        fail "python: $python_verdict" ;;
+esac
 if grep -qx 'GOTOOLCHAIN=local' "$LOG_DIR/inspect.log" &&
     ! grep -qE '^(GOFLAGS|GOPROXY|GOSUMDB|GONOSUMDB|GOPRIVATE|GONOPROXY|GOINSECURE)=' "$LOG_DIR/inspect.log"; then
     pass 'image ENV: GOTOOLCHAIN=local and no other GO* policy exported'
@@ -1639,10 +1797,13 @@ else
     fail 'installed tool modes or ownership'
 fi
 if grep -q "ls: cannot access '/run/go-verify': No such file or directory" "$LOG_DIR/inspect.log" &&
-    grep -q "ls: cannot access '/tmp/gopls-closure': No such file or directory" "$LOG_DIR/inspect.log"; then
-    pass 'no build-time closure bundle or helper remains in the image'
+    grep -q "ls: cannot access '/tmp/gopls-closure': No such file or directory" "$LOG_DIR/inspect.log" &&
+    grep -q "ls: cannot access '/tmp/go-dev-helper': No such file or directory" "$LOG_DIR/inspect.log" &&
+    grep -q "ls: cannot access '/tmp/install-gopls.sh': No such file or directory" "$LOG_DIR/inspect.log" &&
+    grep -q "ls: cannot access '/tmp/gopls_closure.py': No such file or directory" "$LOG_DIR/inspect.log"; then
+    pass 'no build-time closure bundle, helper, adapter or Python reader remains in the image'
 else
-    fail 'the build-time closure bundle was copied into the image'
+    fail 'a build-time mount was copied into the image'
 fi
 
 # The licence bytes are checked from inside the image, independently of the
@@ -1814,6 +1975,42 @@ canary_leg() { # LABEL IDENTITY EXPECTED EXPECT_REQUESTS PATTERN COMMAND
     pass "first use $label as $identity: status $status, $observed proxy requests"
 }
 : >"$LOG_DIR/canary-previous.log"
+# Its own phase, so a carrier observation is never counted as a leg's verdict.
+PHASE=canary-runtime
+# The recorder runs in the pinned test runtime, not in the image under test: this
+# layer installs and runs no Python (#251, G8b), so a canary started from "$TAG"
+# would be measuring the parent's or the harness's interpretation of it.
+if ! canary_ref=$(canary_runtime_ref "$ROOT/$FIXTURES/canary-runtime.ref"); then
+    fail "canary runtime: $canary_ref"
+    exit 1
+fi
+record "canary-runtime ref=$canary_ref"
+if ! run_bounded canary-runtime-pull "$PULL_SECONDS" "$LOG_DIR/canary-runtime-pull.log" \
+        "$DOCKER" pull --platform "$PLATFORM" "$canary_ref"; then
+    fail "the canary test runtime could not be pulled: $canary_ref"
+    exit 1
+fi
+if ! run_bounded canary-runtime-python "$RUN_SECONDS" \
+        "$LOG_DIR/canary-runtime-python.log" \
+        "$DOCKER" run --rm --network none --entrypoint /bin/sh "$canary_ref" -c \
+        'command -v python3'; then
+    fail "the canary test runtime carries no python3: $canary_ref"
+    exit 1
+fi
+runtime_python=$(tr -d '[:space:]' <"$LOG_DIR/canary-runtime-python.log" 2>/dev/null || true)
+if [ -z "$runtime_python" ]; then
+    fail "the canary test runtime reported no python3 path: $canary_ref"
+    exit 1
+fi
+record "canary-runtime-python $canary_ref python=$runtime_python"
+pass "the canary test runtime carries python3 ($canary_ref)"
+run_bounded canary-runtime-inspect "$RUN_SECONDS" "$LOG_DIR/canary-runtime-inspect.log" \
+    "$DOCKER" image inspect --format '{{.Id}}' "$canary_ref" || true
+RUNTIME_ID=$(tr -d '[:space:]' <"$LOG_DIR/canary-runtime-inspect.log" 2>/dev/null || true)
+if ! printf '%s' "$RUNTIME_ID" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+    fail "the canary test runtime could not be inspected: $canary_ref"
+    exit 1
+fi
 OWNED_NETWORK=1
 if run_bounded canary-network "$RUN_SECONDS" "$LOG_DIR/canary-network.log" \
         "$DOCKER" network create --internal --label "$LABEL" "$NETWORK_NAME"; then
@@ -1822,8 +2019,26 @@ if run_bounded canary-network "$RUN_SECONDS" "$LOG_DIR/canary-network.log" \
             "$DOCKER" run -d --name "$CANARY_NAME" --label "$LABEL" \
             --network "$NETWORK_NAME" --network-alias canary \
             -v "$ROOT/script/test/fixtures/rust-toolchain/canary.py:/canary.py:ro" \
-            --entrypoint /usr/bin/python3 "$TAG" /canary.py 8765; then
+            --entrypoint python3 "$canary_ref" /canary.py 8765; then
         sleep 2
+        # The canary ran in the pinned runtime, not on the image under test: the
+        # container's own image is read back, not assumed from the command line.
+        run_bounded canary-image "$RUN_SECONDS" "$LOG_DIR/canary-image.log" \
+            "$DOCKER" inspect --format '{{.Image}} {{.Config.Entrypoint}}' \
+            "$CANARY_NAME" || true
+        canary_image=$(awk '{ print $1 }' "$LOG_DIR/canary-image.log" 2>/dev/null | head -1)
+        if [ "$canary_image" = "$RUNTIME_ID" ]; then
+            pass "the first-use canary runs in the pinned test runtime ($RUNTIME_ID)"
+            record "canary-carrier image=$canary_image runtime=$canary_ref"
+        else
+            fail "the first-use canary is not running the pinned test runtime (got '$canary_image', want '$RUNTIME_ID')"
+        fi
+        if grep -qi 'canary listening' "$LOG_DIR/canary-start.log"; then
+            pass 'the canary recorder reported it is listening'
+        else
+            log 'NOTE [canary-runtime]: the recorder log does not report its listening line'
+        fi
+        PHASE=first-use
         for identity in 0:0 12345:23456; do
             while IFS='|' read -r label expected requests pattern command; do
                 [ -n "$label" ] || continue

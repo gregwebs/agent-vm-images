@@ -23,14 +23,20 @@
 # install-go.sh, install-golangci-lint.sh, install-gopls.sh and
 # verify-toolchain.sh. This file only wires the pins and locations into them.
 #
-# Two further paths are build-only inputs, mounted read-only for the steps that
-# need them and never copied into the image: `gopls_closure.py` (until #251 the
-# program that installs the gopls closure) and `data/gopls-closure/` (the reviewed
+# One further path is a build-only input, mounted read-only for the steps that
+# need it and never copied into the image: `data/gopls-closure/` (the reviewed
 # module selection, its sums, its licences and the record that binds them). See
 # docs/adr/0008-go-example-gopls-closure.md. The layer's own `go-dev-helper` reads
-# the same five files offline: `check` proves them (#249) and `verify-installed`
-# proves the installed binary against them (#250). Python is the installer and the
-# live oracle; it is no longer on the verification path.
+# those five files offline: `install` proves them and publishes gopls (#251) and
+# `verify-installed` proves the installed binary against them (#250).
+#
+# This layer installs and runs no Python (#251, owner ruling G8b). Its build used to
+# mount `gopls_closure.py` and apt-install python3 so that file could install the
+# closure; install is Go now, and the Python reader stays host-only as the live
+# oracle until #254. Inherited guest Python may still be present in the parent
+# image as a user feature — that is the parent's, not this layer's, and nothing here
+# depends on it. `script/test/go-example.sh` proves the canary that used to run on
+# this image's Python now runs in an explicit digest-pinned test runtime.
 #
 # The `ARG BASE_IMAGE`/`FROM ${BASE_IMAGE}` pair lets `--build-arg BASE_IMAGE=…`
 # retarget the build, and every `ENV` keeps `PATH` additive
@@ -109,12 +115,12 @@ LABEL org.agent-vm.network-requests.image.go-dev="proxy.golang.org,sum.golang.or
 # CGO_ENABLED=1". rust-dev installs the same package for its native build
 # dependencies.
 #
-# python3 runs the reviewed gopls closure helper below. It comes from the
-# official Debian apt repository like the rest of this layer's distro packages
-# (the only inputs allowed to float), because the released parent is not
-# assumed to carry it; rust-dev installs it the same way.
+# No Python: the gopls install and the post-install verification are the layer's
+# own Go binary (#251), so this line carries no interpreter. It used to install
+# python3 because the released parent was not assumed to carry it; that dependency
+# is gone, and `script/test/example-layers.sh` refuses a python3 token in this line.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential python3 \
+ && apt-get install -y --no-install-recommends build-essential \
  && rm -rf /var/lib/apt/lists/*
 
 # Pins. The lint version mirrors the repository root golangci-lint.version
@@ -152,29 +158,22 @@ RUN --mount=type=bind,source=install-go.sh,target=/tmp/install-go.sh,ro \
 RUN --mount=type=bind,source=install-golangci-lint.sh,target=/tmp/install-golangci-lint.sh,ro \
     bash /tmp/install-golangci-lint.sh
 
-# gopls is built from the reviewed closure by gopls_closure.py in an environment
-# it constructs from scratch (no inherited GOFLAGS/GOPROXY/GONOSUMDB/GOENV), with
-# GOTOOLCHAIN=local, CGO_ENABLED=0 and GOOS/GOARCH forced to this image's Linux
-# target. The helper proves the result from the binary's own build info and only
-# then publishes gopls and the third-party licence file. The three inputs are
-# mounted read-only for this step and are not part of the image.
+# gopls is built from the reviewed closure by the layer's own `go-dev-helper
+# install` in an environment it constructs from scratch (no inherited
+# GOFLAGS/GOPROXY/GONOSUMDB/GOENV), with GOTOOLCHAIN=local, CGO_ENABLED=0 and
+# GOOS/GOARCH forced to this image's Linux target. The helper loads and proves the
+# same five committed files, runs exactly one readonly `go build`, proves the
+# module-cache notices and the binary's own build info, and only then publishes
+# gopls at 0755 and the third-party licence file at 0644 — withdrawing the paths it
+# created if anything fails. It speaks no HTTP itself: the pinned `go` child is the
+# module-protocol client, and it may only read the module objects the committed
+# go.sum already names. This one RUN is also the pre-fetch check the loop used to
+# run separately: a bumped pin without a regenerated closure fails here. The three
+# inputs are mounted read-only for this step and are not part of the image.
 RUN --mount=type=bind,source=install-gopls.sh,target=/tmp/install-gopls.sh,ro \
-    --mount=type=bind,source=gopls_closure.py,target=/tmp/gopls_closure.py,ro \
-    --mount=type=bind,source=data/gopls-closure,target=/tmp/gopls-closure,ro \
-    bash /tmp/install-gopls.sh
-
-# The same five committed files, read offline by the layer's own Go reader. This is
-# the one `check`: no Go command runs, nothing is downloaded, and the two asserted
-# versions are the recipe's ARGs, so a bumped pin without a regenerated closure
-# fails the build here as well as in the Python install above. The binary is
-# mounted from the builder stage and the data from the build context; neither is
-# copied into the image. `script/test/example-layers.sh` holds this line's exact
-# shape, and `script/test/gopls-closure-parity.py` holds its verdicts against the
-# Python reader.
-RUN --network=none \
     --mount=type=bind,from=go-dev-helper,source=/out/go-dev-helper,target=/tmp/go-dev-helper,ro \
     --mount=type=bind,source=data/gopls-closure,target=/tmp/gopls-closure,ro \
-    /tmp/go-dev-helper check /tmp/gopls-closure --expect-gopls "$GOPLS_VERSION" --expect-go "$GO_VERSION"
+    bash /tmp/install-gopls.sh
 
 # PATH stays additive: the base's entries are preserved via
 # ${PATH}. GOTOOLCHAIN=local makes the pin the toolchain that actually

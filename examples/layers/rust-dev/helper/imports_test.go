@@ -22,9 +22,20 @@ package main
 // trees is red rather than quietly green.
 //
 // This is the register the #188 ruling means by "runs in guard-only and before any
-// fixture child is built": script/test/contracts.sh runs it in --guard-only mode
-// before it builds the recipe-contract helper and before any suite starts a child
-// process.
+// fixture child is built": script/test/contracts.sh runs it with `-count=1` (it scans
+// other modules' sources, so Go's test cache would answer from a cached pass) in
+// --guard-only mode before it builds the recipe-contract helper and before any suite
+// starts a child process, and script/build/example-helper.sh — the one host build path
+// every suite now uses — runs it before it compiles anything.
+//
+// One caller cannot inherit that: a tree with no `cmd/avm-pin` (the example-layers
+// self-test's synthetic copies, which cannot contain a root module) has no root
+// closure to classify, so the wrapper runs the helper-only part of nothing and says
+// on stderr that it skipped the register. That is deliberate and it is the only such
+// path: a build from a checkout always runs it, including every fixture build a suite
+// asks for. A test that bypassed the wrapper with its own `go build` would not, which
+// is why both helpers' test builders go through the wrapper and hold the returned
+// binary to the wrapper's own output directory.
 //
 // What an import-level guard cannot see, and why the Python audit hook it replaced
 // (deleted with its interpreter, #245) was a different kind of statement (R2 of
@@ -86,7 +97,14 @@ var reviewedImporters = map[string][]string{
 	// environment package gotool builds (#250). The binary under test is never a
 	// program: it is an argument to `go version -m -json`. The boundary around that
 	// child is the recipe's --network=none RUN, not this list.
-	goDevHelperPath + "/gotool/exec.go":                     {"os/exec"},
+	goDevHelperPath + "/gotool/exec.go": {"os/exec"},
+	// The `example_fixture` seam parses the loopback origin it was given, and refuses
+	// anything that is not `http://<loopback IP>:<port>` before the installer sees it
+	// (#251). `net/url` is a parser, not a client, in the same sense as the root's
+	// artifactpin and the go-dev loader. The file exists only in a `-tags
+	// example_fixture` build (ADR 0017, decision D1), and the shipped binary's bytes
+	// carry none of it — `seams_test.go` holds both halves.
+	goDevHelperPath + "/seams_fixture.go":                   {"net/url"},
 	mainModulePath + "/internal/artifactpin/rules.go":       {"net/url"},
 	mainModulePath + "/internal/artifactinstall/archive.go": {"os/exec"},
 	mainModulePath + "/internal/artifactinstall/install.go": {"os/exec"},

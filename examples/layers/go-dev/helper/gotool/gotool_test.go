@@ -107,12 +107,13 @@ func TestTransportIsOnlyWhatIsReviewed(t *testing.T) {
 	}
 }
 
-// TestClosedCommandSet: the set has exactly the three reads this verb makes, and no
-// member can resolve a version, regenerate the graph or fetch a sum.
+// TestClosedCommandSet: the set has exactly the four reads and the one build this
+// program makes, and no member can resolve a version, regenerate the graph or fetch
+// a sum.
 func TestClosedCommandSet(t *testing.T) {
 	commands := Commands()
-	if len(commands) != 3 {
-		t.Fatalf("%d commands, want 3", len(commands))
+	if len(commands) != 4 {
+		t.Fatalf("%d commands, want 4", len(commands))
 	}
 	names := []string{}
 	for _, command := range commands {
@@ -124,7 +125,7 @@ func TestClosedCommandSet(t *testing.T) {
 			t.Fatalf("%s can regenerate the graph: %v", command.Name(), command.Argv())
 		}
 	}
-	for _, want := range []string{"EnvGoVersion", "EnvGoRoot", "BuildInfo"} {
+	for _, want := range []string{"EnvGoVersion", "EnvGoRoot", "BuildInfo", "Build"} {
 		found := false
 		for _, name := range names {
 			if name == want {
@@ -143,6 +144,9 @@ func TestClosedCommandSet(t *testing.T) {
 	}
 	if got := strings.Join(BuildInfo.Argv(), " "); got != "version -m -json" {
 		t.Fatalf("BuildInfo argv %q", got)
+	}
+	if got := strings.Join(Build.Argv(), " "); got != "build" {
+		t.Fatalf("Build argv %q", got)
 	}
 	// Argv is a copy: a caller that appends to it cannot change the closed set.
 	argv := BuildInfo.Argv()

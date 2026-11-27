@@ -45,7 +45,7 @@ case "${1:-}" in
     test)
         case "$*" in
             'test ./internal/buildcheck') exit 0 ;;
-            'test -run TestImportsAreReviewed|TestImportBoundaryControls .') exit 0 ;;
+            'test -count=1 -run TestImportsAreReviewed|TestImportBoundaryControls .') exit 0 ;;
             'test ./internal/vendordrift') exit 0 ;;
         esac
         ;;
@@ -138,7 +138,7 @@ for mode in default guard-only; do
     grep -qx 'vet ./internal/... ./images/... ./cmd/... ./script/test/pinsuite/...' "$work/go-log" ||
         fail "$mode/wrong-path: go log: $(cat "$work/go-log")"
     # The two every-PR gates must have run *before* the vet line, in both modes.
-    grep -qx 'test -run TestImportsAreReviewed|TestImportBoundaryControls .' "$work/go-log" ||
+    grep -qx 'test -count=1 -run TestImportsAreReviewed|TestImportBoundaryControls .' "$work/go-log" ||
         fail "$mode/wrong-path: the import-boundary gate did not run: $(cat "$work/go-log")"
     grep -qx 'test ./internal/vendordrift' "$work/go-log" ||
         fail "$mode/wrong-path: the vendored-copy drift gate did not run: $(cat "$work/go-log")"

@@ -74,10 +74,8 @@ const Prefix = "gopls-closure"
 // append goes through internal/pathjoin, the module's single no-normalise join,
 // rather than filepath.Join.
 func NewTarget(goRoot, binary, shareDir string, arch gotool.Architecture) (gotool.Target, error) {
-	if !filepath.IsAbs(goRoot) ||
-		!isRegularFile(pathjoin.Join(pathjoin.Join(goRoot, "bin"), "go")) {
-		return gotool.Target{}, fmt.Errorf("--go-root must be an absolute Go root with bin/go: %s",
-			goRoot)
+	if err := CheckGoRoot(goRoot); err != nil {
+		return gotool.Target{}, err
 	}
 	if !filepath.IsAbs(binary) {
 		return gotool.Target{}, fmt.Errorf("--binary must be absolute: %s", binary)
@@ -87,6 +85,20 @@ func NewTarget(goRoot, binary, shareDir string, arch gotool.Architecture) (gotoo
 			quote(filepath.Base(binary)))
 	}
 	return gotool.Target{GoRoot: goRoot, ShareDir: shareDir, Arch: arch, Binary: binary}, nil
+}
+
+// CheckGoRoot is the `--go-root` rule, and the only copy of it.
+//
+// `install` writes into a directory rather than naming a binary, so it cannot call
+// NewTarget; it calls this instead, and the rule the two verbs apply is then one
+// rule. A Go root that is not absolute, or that does not hold `bin/go`, would make
+// every child below it a different compiler than the pin names.
+func CheckGoRoot(goRoot string) error {
+	if !filepath.IsAbs(goRoot) ||
+		!isRegularFile(pathjoin.Join(pathjoin.Join(goRoot, "bin"), "go")) {
+		return fmt.Errorf("--go-root must be an absolute Go root with bin/go: %s", goRoot)
+	}
+	return nil
 }
 
 // Verify proves the installed state against the loaded closure and returns the
@@ -131,10 +143,10 @@ func Verify(data *closure.Data, target gotool.Target, runner gotool.Runner) (clo
 	if err != nil {
 		return "", err
 	}
-	if err := requirePinnedCompiler(environment, paths.Work(), data.Pin.Go, target, runner); err != nil {
+	if err := RequirePinnedCompiler(environment, paths.Work(), data.Pin.Go, target, runner); err != nil {
 		return "", err
 	}
-	raw, err := buildInfo(environment, paths.Work(), target.Binary, runner)
+	raw, err := ReadBuildInfo(environment, paths.Work(), target.Binary, runner)
 	if err != nil {
 		return "", err
 	}
@@ -142,15 +154,16 @@ func Verify(data *closure.Data, target gotool.Target, runner gotool.Runner) (clo
 	if err != nil {
 		return "", err
 	}
-	if err := buildinfo.Verify(selection(data), info, target.Arch, data.Pin.Go); err != nil {
+	if err := buildinfo.Verify(Selection(data), info, target.Arch, data.Pin.Go); err != nil {
 		return "", err
 	}
 	return data.Pin.Gopls, nil
 }
 
-// selection projects the validated pin onto the identity triple the build-info
-// check compares.
-func selection(data *closure.Data) []buildinfo.Module {
+// Selection projects the validated pin onto the identity triple the build-info
+// check compares. The installed-state check and the installer both prove a binary
+// against it, so the projection has one owner.
+func Selection(data *closure.Data) []buildinfo.Module {
 	modules := make([]buildinfo.Module, 0, len(data.Pin.Modules))
 	for _, module := range data.Pin.Modules {
 		modules = append(modules, buildinfo.Module{Path: module.ID.Path,
@@ -196,10 +209,11 @@ func checkNotice(shareDir string, pinned closure.SHA256) error {
 	return nil
 }
 
-// requirePinnedCompiler refuses before the build-info read if the compiler that
-// will answer is not the one the pin names, or if it lives somewhere other than the
-// Go root the caller named.
-func requirePinnedCompiler(environment []string, dir string, compiler closure.GoVersion,
+// RequirePinnedCompiler refuses before the first request if the compiler that will
+// answer is not the one the pin names, or if it lives somewhere other than the Go
+// root the caller named. The installer calls it before its build, so a wrong
+// compiler costs no network request; the verifier calls it before its metadata read.
+func RequirePinnedCompiler(environment []string, dir string, compiler closure.GoVersion,
 	target gotool.Target, runner gotool.Runner) error {
 	version, err := output(environment, gotool.EnvGoVersion, nil, dir, "go env GOVERSION",
 		runner)
@@ -219,8 +233,10 @@ func requirePinnedCompiler(environment []string, dir string, compiler closure.Go
 	return nil
 }
 
-// buildInfo runs the one command that reads a binary's metadata.
-func buildInfo(environment []string, dir, binary string, runner gotool.Runner) (string, error) {
+// ReadBuildInfo runs the one command that reads a binary's metadata. It is the
+// reader both verbs use: the verifier on the installed path, the installer on the
+// bytes it just built and has not published yet.
+func ReadBuildInfo(environment []string, dir, binary string, runner gotool.Runner) (string, error) {
 	return output(environment, gotool.BuildInfo, []string{binary}, dir, "go version -m -json",
 		runner)
 }
