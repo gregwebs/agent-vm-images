@@ -10,7 +10,6 @@ package main
 import (
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -20,21 +19,20 @@ import (
 // file: the list is the contract this test holds.
 var seamNames = []string{"fixture-seams", "fixture-proxy", "fixture-sumdb", "fixture-fault"}
 
-// buildTagged compiles this module with the given build tags.
+// buildTagged compiles this module with the given build tags through the reviewed
+// host build path, never with `go build` of its own: the wrapper is where the
+// guarded-import register runs before a child is built (owner ruling G2 of #188), so
+// a fixture build from a refused tree fails there and this test cannot construct one.
 func buildTagged(t *testing.T, tags string) string {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "go-dev-helper")
-	argv := []string{"build", "-trimpath", "-buildvcs=false"}
-	if tags != "" {
-		argv = append(argv, "-tags", tags)
+	switch tags {
+	case "":
+		return helperBinary(t, false)
+	case "example_fixture":
+		return helperBinary(t, true)
 	}
-	argv = append(argv, "-o", binary, ".")
-	command := exec.Command("go", argv...)
-	command.Env = append(os.Environ(), "GOFLAGS=-mod=vendor", "GOPROXY=off")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("go build: %v\n%s", err, output)
-	}
-	return binary
+	t.Fatalf("no build path for tags %q", tags)
+	return ""
 }
 
 // TestShippedBuildHonoursNoSeam: every seam name the fixture build reports is absent

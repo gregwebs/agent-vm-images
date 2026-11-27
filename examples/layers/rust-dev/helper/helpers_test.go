@@ -8,24 +8,52 @@ package main
 import (
 	"bytes"
 	"errors"
-	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
+// build compiles this module through script/build/example-helper.sh, the one host
+// build path, never with `go build` of its own.
+//
+// The wrapper runs the guarded-import register before it compiles anything (owner
+// ruling G2 of #188), so a suite cannot build a tree the register refuses; the
+// returned path is held to the wrapper's own output directory, which a hand-rolled
+// `-o $TMPDIR/...` cannot satisfy. `tags` is the fixture variant or none, exactly as
+// the wrapper names them.
 func build(t *testing.T, tags string) string {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "rust-dev-helper")
-	args := []string{"build", "-trimpath", "-buildvcs=false", "-o", binary}
-	if tags != "" {
-		args = append(args, "-tags", tags)
+	root, err := filepath.Abs(filepath.Join("..", "..", "..", ".."))
+	if err != nil {
+		t.Fatalf("resolve the repository root: %v", err)
 	}
-	args = append(args, ".")
-	command := exec.Command("go", args...)
-	command.Env = append(os.Environ(), "GOFLAGS=-mod=vendor", "GOPROXY=off")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("go build (tags %q): %v\n%s", tags, err, output)
+	args := []string{filepath.Join(root, "script", "build", "example-helper.sh"),
+		"rust-dev", "--root", root, "--os", runtime.GOOS}
+	switch tags {
+	case "":
+	case "example_fixture":
+		args = append(args, "--fixture")
+	default:
+		t.Fatalf("no build path for tags %q", tags)
+	}
+	command := exec.Command("bash", args...)
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		t.Fatalf("the helper build refused this tree (tags %q): %v\n%s%s", tags, err,
+			stdout.String(), stderr.String())
+	}
+	binary := strings.TrimSpace(stdout.String())
+	if !filepath.IsAbs(binary) {
+		t.Fatalf("the builder printed %q, which is not an absolute path", binary)
+	}
+	wanted := filepath.Join(root, "target", "example-helper", "rust-dev",
+		runtime.GOOS+"-"+runtime.GOARCH)
+	if filepath.Dir(binary) != wanted {
+		t.Fatalf("the test built %s, which is not the reviewed build path %s", binary, wanted)
 	}
 	return binary
 }

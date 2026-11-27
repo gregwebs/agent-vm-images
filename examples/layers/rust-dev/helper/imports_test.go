@@ -22,9 +22,20 @@ package main
 // trees is red rather than quietly green.
 //
 // This is the register the #188 ruling means by "runs in guard-only and before any
-// fixture child is built": script/test/contracts.sh runs it in --guard-only mode
-// before it builds the recipe-contract helper and before any suite starts a child
-// process.
+// fixture child is built": script/test/contracts.sh runs it with `-count=1` (it scans
+// other modules' sources, so Go's test cache would answer from a cached pass) in
+// --guard-only mode before it builds the recipe-contract helper and before any suite
+// starts a child process, and script/build/example-helper.sh — the one host build path
+// every suite now uses — runs it before it compiles anything.
+//
+// One caller cannot inherit that: a tree with no `cmd/avm-pin` (the example-layers
+// self-test's synthetic copies, which cannot contain a root module) has no root
+// closure to classify, so the wrapper runs the helper-only part of nothing and says
+// on stderr that it skipped the register. That is deliberate and it is the only such
+// path: a build from a checkout always runs it, including every fixture build a suite
+// asks for. A test that bypassed the wrapper with its own `go build` would not, which
+// is why both helpers' test builders go through the wrapper and hold the returned
+// binary to the wrapper's own output directory.
 //
 // What an import-level guard cannot see, and why the Python audit hook it replaced
 // (deleted with its interpreter, #245) was a different kind of statement (R2 of

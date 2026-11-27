@@ -1081,7 +1081,20 @@ def tree_observation(base: Path) -> list[tuple[str, str, int, str]]:
     return observation
 
 
-def published_tree(base: Path) -> list[tuple[str, str, int, str]]:
+@dataclasses.dataclass(frozen=True)
+class Publication:
+    """One side's published tree, and the base it was taken from.
+
+    The root is part of the observation, not decoration: without it a comparison can
+    be pointed at one tree twice and still be an equality, which is exactly the
+    tautology the differential must not be able to become.
+    """
+
+    root: str
+    entries: tuple[tuple[str, str, int, str], ...]
+
+
+def published_tree(base: Path) -> Publication:
     """The whole published tree: everything under the two positions installation owns.
 
     `bin/` and `share/` are what publication creates; the invocation's scratch tree is
@@ -1090,16 +1103,39 @@ def published_tree(base: Path) -> list[tuple[str, str, int, str]]:
     published. Within those two positions nothing is filtered: an extra file, an extra
     directory and a directory's mode are all in the observation.
     """
-    observation = []
+    entries = []
     for position in ('bin', 'share'):
         directory = base / position
         if not directory.is_dir():
             raise AssertionError(f'the published position {directory} does not exist')
         # The position itself first, so its own mode is observed too.
-        observation.append((position, 'dir', stat.S_IMODE(directory.lstat().st_mode), ''))
-        observation += [(f'{position}/{relative}', kind, mode, digest)
-                        for relative, kind, mode, digest in tree_observation(directory)]
-    return observation
+        entries.append((position, 'dir', stat.S_IMODE(directory.lstat().st_mode), ''))
+        entries += [(f'{position}/{relative}', kind, mode, digest)
+                    for relative, kind, mode, digest in tree_observation(directory)]
+    return Publication(root=str(base.resolve()), entries=tuple(entries))
+
+
+def publication_difference(go: Publication, python: Publication, *, go_base: Path,
+                           python_base: Path, minimum: int = 5) -> str:
+    """Why two publications are not the same, or the empty string when they are.
+
+    The roots are held to the bases the row passed, and to each other: a row that
+    took both observations from one tree is a comparison with itself and is refused
+    here, so substituting the expression cannot pass.
+    """
+    if go.root != str(go_base.resolve()):
+        return f'the Go observation was taken from {go.root}, not {go_base}'
+    if python.root != str(python_base.resolve()):
+        return f'the Python observation was taken from {python.root}, not {python_base}'
+    if go.root == python.root:
+        return f'both observations were taken from {go.root}'
+    if len(go.entries) < minimum:
+        return f'the Go observation has {len(go.entries)} entries, want at least {minimum}'
+    if len(python.entries) < minimum:
+        return f'the Python observation has {len(python.entries)} entries, want at least {minimum}'
+    if go.entries != python.entries:
+        return f'{go.entries!r} != {python.entries!r}'
+    return ''
 
 
 def tree_difference(left: Path, right: Path) -> str:
@@ -1230,10 +1266,19 @@ def test_go_install_differential(fixture, closure, root: Path, helper: Path,
         # are asserted different as well.
         go_tree = published_tree(base)
         python_tree = published_tree(python_base)
+        difference = publication_difference(go_tree, python_tree, go_base=base,
+                                            python_base=python_base)
         check(f'{arch.value}: both installers published the same tree',
-              base != python_base and len(go_tree) >= 5 and len(python_tree) >= 5
-              and go_tree == python_tree,
-              f'(Go {go_tree} vs Python {python_tree})')
+              base != python_base and difference == '',
+              f'({difference})' if difference else '')
+        # The expression itself is held: this is the reviewer's substitution —
+        # both observations taken from the Go tree — and the row's own predicate must
+        # refuse it. Without this, swapping the argument leaves an equality of a tree
+        # with itself, which is what the suite must not be able to pass on.
+        swapped = publication_difference(published_tree(base), published_tree(base),
+                                         go_base=base, python_base=python_base)
+        check(f'{arch.value}: the row is red when both observations come from one tree',
+              swapped != '', '(one tree compared with itself passed)')
         if arch == model.Architecture.ARM64:
             # The self-control for the row above: it must be red when the *Python*
             # side differs, or the comparison proves nothing about that side. Only the
@@ -1244,8 +1289,11 @@ def test_go_install_differential(fixture, closure, root: Path, helper: Path,
             for position in ('bin', 'share'):
                 shutil.copytree(python_base / position, perturbed / position,
                                 symlinks=True)
+            control = publication_difference(
+                go_tree, published_tree(perturbed), go_base=base,
+                python_base=perturbed)
             check('an unperturbed copy of the Python publication compares equal',
-                  published_tree(perturbed) == go_tree, '(the copy is not a copy)')
+                  control == '', f'({control})')
             notice = perturbed / 'share' / 'gopls' / model.LICENSE_FILE
             original = notice.read_bytes()
             notice.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
@@ -1260,8 +1308,10 @@ def test_go_install_differential(fixture, closure, root: Path, helper: Path,
             check("the tree comparison is red when the Python side's directory mode differs",
                   published_tree(perturbed) != go_tree, '(a directory mode was invisible)')
             os.chmod(perturbed / 'share' / 'gopls', 0o755)
+            restored = publication_difference(go_tree, published_tree(perturbed),
+                                              go_base=base, python_base=perturbed)
             check('the restored copy compares equal again, so the control is not stuck red',
-                  published_tree(perturbed) == go_tree, '(the restored copy still differs)')
+                  restored == '', f'({restored})')
             remove_tree(perturbed)
 
         # The oracle's own verifier reads the Go installer's tree: the two verbs

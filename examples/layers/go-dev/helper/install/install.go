@@ -31,8 +31,8 @@
 //	--go-root absolute with bin/go                           _target 1720-1724         TestTargetRulesRefuse; installed: TestTargetRulesRefuse
 //	the arch enum owns GOARCH, not `dpkg` output             Architecture 1296-1325    TestChildArguments; main: TestStatusMatrix (--arch 386)
 //	a destination is never overwritten                       1585-1588                 TestExistingDestinationRefused, TestConcurrentPublicationCannotOverwrite
-//	the scratch tree belongs to this invocation              1589-1592                 TestScratchIsRemoved, TestScratchMessageIsNotAVeto
-//	closed 21-key child environment, reviewed transport only 1296-1325                 TestChildArguments; gotool: TestChildArguments
+//	the scratch tree belongs to this invocation              1589-1592                 TestScratchIsRemoved; gotool: TestRemoveTreeLeavesNothing
+//	closed 21-key child environment, reviewed transport only 1296-1325                 TestChildArguments; gotool: TestChildEnvironmentIsTheWholeEnvironment, TestTransportIsOnlyWhatIsReviewed
 //	pinned compiler before the first request                 1435-1443                 TestWrongCompilerMakesNoRequest
 //	committed go.mod/go.sum bytes are copied, digest-checked 1519-1530                 TestCommittedBytesAreCopied
 //	exactly one readonly build, reviewed flags               1449-1457                 TestChildArguments; pins: install rows
@@ -41,7 +41,8 @@
 //	license bytes re-read and re-checked before publication  1500-1510                 TestCommittedBytesAreCopied (drift arm)
 //	binary published at 0755 through an owned temporary      1600-1605                 TestTemporaryNameIsInvocationOwned, TestPublicationFailureWithdraws
 //	notices published at 0644 from the re-checked bytes      1610-1613                 TestPublicationFailureWithdraws, TestConcurrentPublicationCannotOverwrite
-//	withdrawal removes exactly the created paths             1617-1637                 TestPublicationFailureWithdraws
+//	withdrawal removes exactly the created paths             1617-1637                 TestPublicationFailureWithdraws, TestPartialNoticeWriteIsWithdrawn
+//	a created list survives a later Mkdir failure            1617-1637                 TestCreatedDirectoriesAreWithdrawn
 //	withdrawal removes the owned empty directories (G3)      absent in Python          TestLateWriteRetryThroughInstall; pins: the declared divergence
 //	a same-target retry after a late failure succeeds (G3)   absent in Python          TestLateWriteRetryThroughInstall; pins: the declared divergence
 //	status 0 with the release on stdout, 1 on refusal         main 1738-1765            main: TestStatusMatrix
@@ -444,11 +445,17 @@ func publish(target Target, built string, notices []byte, fault func(Phase) erro
 				return err
 			}
 		}
-		published, err := createExclusive(notice, notices)
+		created, err := createExclusive(notice, notices)
+		// The name is this invocation's from the moment the create succeeded, so a
+		// partial file is claimed *before* the error is returned: otherwise a write
+		// that failed halfway (a size limit, a full disk) leaves a file nothing
+		// withdraws, and its directory then refuses the retry.
+		if created != "" {
+			claim(created)
+		}
 		if err != nil {
 			return err
 		}
-		claim(published)
 		if fault != nil {
 			if err := fault(PhaseNoticeWritten); err != nil {
 				return err
@@ -477,6 +484,11 @@ func publish(target Target, built string, notices []byte, fault func(Phase) erro
 // O_CREATE|O_EXCL is the claim: the kernel both tests and takes the name, so the
 // answer "created" is this invocation's to withdraw and no second invocation can
 // have got the same one.
+//
+// It returns the path it created even when the write or the close fails: the name is
+// already the invocation's, so the caller must be able to withdraw a partial file —
+// a write that ended at a size limit leaves bytes on disk, and an unclaimed path
+// would both survive the failure and make its empty directory refuse a retry.
 func createExclusive(path string, raw []byte) (string, error) {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {

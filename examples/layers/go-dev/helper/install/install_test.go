@@ -1,14 +1,18 @@
 package install
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/closure"
@@ -596,6 +600,121 @@ func TestTemporaryNameIsInvocationOwned(t *testing.T) {
 	}
 }
 
+// TestPartialNoticeWriteIsWithdrawn: a notice write that fails partway leaves a file
+// behind, and it must be withdrawn.
+//
+// The failure is real, not injected: the child sets RLIMIT_FSIZE below the notice
+// size, so the kernel stops the write at the limit and the file exists with four
+// kilobytes in it. A child process is used because the limit is per-process, and the
+// parent asserts the child's own output names the failure — a child that never
+// reached the write would otherwise look like a pass.
+func TestPartialNoticeWriteIsWithdrawn(t *testing.T) {
+	if os.Getenv(partialNoticeChildEnv) == "1" {
+		partialNoticeChild(t)
+		return
+	}
+	command := exec.Command(os.Args[0], "-test.run=TestPartialNoticeWriteIsWithdrawn",
+		"-test.v")
+	command.Env = append(os.Environ(), partialNoticeChildEnv+"=1")
+	var stdout, stderr strings.Builder
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		t.Fatalf("the partial-write child failed: %v\n%s%s", err, stdout.String(),
+			stderr.String())
+	}
+	if !strings.Contains(stdout.String()+stderr.String(), "file too large") {
+		t.Fatalf("the child never reached the real write failure:\n%s%s", stdout.String(),
+			stderr.String())
+	}
+}
+
+// partialNoticeChild is the body of the child process above.
+func partialNoticeChild(t *testing.T) {
+	var previous syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_FSIZE, &previous); err != nil {
+		t.Fatalf("Getrlimit: %v", err)
+	}
+	limit := syscall.Rlimit{Cur: 4096, Max: previous.Max}
+	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &limit); err != nil {
+		t.Fatalf("Setrlimit: %v", err)
+	}
+	defer func() {
+		if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &previous); err != nil {
+			t.Logf("could not restore RLIMIT_FSIZE: %v", err)
+		}
+	}()
+	built := newFixture(t, gotool.ARM64).target
+	source := filepath.Join(t.TempDir(), "gopls")
+	if err := os.WriteFile(source, []byte("\x7fELF built by the suite\n"), 0o600); err != nil {
+		t.Fatalf("write the built binary: %v", err)
+	}
+	// Larger than the limit, so the write stops partway and the file stays on disk.
+	_, err := publish(built, source, bytes.Repeat([]byte("n"), 8192), nil)
+	// Printed on purpose: the parent reads this line back, so a child that never
+	// reached the write cannot look like a pass.
+	fmt.Printf("partial-notice-write: %v\n", err)
+	if err == nil || !strings.Contains(err.Error(), "file too large") {
+		t.Fatalf("got %v, want the size-limit failure", err)
+	}
+	if info, statErr := os.Lstat(built.Notice()); statErr == nil {
+		t.Fatalf("the partial notice survived the failure (size %d, mode %v)",
+			info.Size(), info.Mode())
+	}
+	for _, path := range []string{built.Binary(), built.ShareDir, built.BinDir} {
+		if _, statErr := os.Lstat(path); statErr == nil {
+			t.Fatalf("%s survived the failure, so a retry would be refused", path)
+		}
+	}
+	// The same target, with a notice that fits: the retry must work.
+	if _, err := publish(built, source, []byte("small notice\n"), nil); err != nil {
+		t.Fatalf("the same-target retry failed: %v", err)
+	}
+}
+
+// TestCreatedDirectoriesAreWithdrawn: the directories a failed invocation created are
+// withdrawn, including the ones created before a later Mkdir failed.
+//
+// The failure is real: a umask of 0777 makes the first level she creates mode 000, so
+// the next level cannot be entered and its Mkdir fails with EACCES. A program that
+// dropped the already-created list on that error would leave the first directory
+// behind and its own retry would be refused.
+func TestCreatedDirectoriesAreWithdrawn(t *testing.T) {
+	base := t.TempDir()
+	created, err := createOwnedDirs(filepath.Join(base, "a", "b"))
+	if err != nil {
+		t.Fatalf("the setup's first level could not be created: %v", err)
+	}
+	if len(created) != 2 {
+		t.Fatalf("created %v, want both levels", created)
+	}
+	for i := len(created) - 1; i >= 0; i-- {
+		if err := os.Remove(created[i]); err != nil {
+			t.Fatalf("remove %s: %v", created[i], err)
+		}
+	}
+
+	previous := syscall.Umask(0o777)
+	defer syscall.Umask(previous)
+	partial, err := createOwnedDirs(filepath.Join(base, "x", "y"))
+	if err == nil {
+		t.Fatalf("a mode-000 parent let the second level be created")
+	}
+	if len(partial) == 0 || partial[0] != filepath.Join(base, "x") {
+		t.Fatalf("the created list is %v, want the first level it made: a caller that "+
+			"drops it cannot withdraw that directory", partial)
+	}
+	syscall.Umask(previous)
+	for i := len(partial) - 1; i >= 0; i-- {
+		if err := os.Remove(partial[i]); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("remove %s: %v", partial[i], err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(base, "x")); err == nil {
+		t.Fatal("the first level survived")
+	}
+}
+
 // TestEscapeModule: the module cache spelling of an uppercase component.
 func TestEscapeModule(t *testing.T) {
 	for input, want := range map[string]string{
@@ -608,6 +727,8 @@ func TestEscapeModule(t *testing.T) {
 		}
 	}
 }
+
+const partialNoticeChildEnv = "GO_DEV_INSTALL_PARTIAL_NOTICE_CHILD"
 
 // --- fakes -------------------------------------------------------------------
 

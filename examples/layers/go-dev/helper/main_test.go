@@ -10,20 +10,68 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
+// repositoryRoot is the checkout this module belongs to, so the one host build path
+// can be found from inside a test.
+func repositoryRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("..", "..", "..", ".."))
+	if err != nil {
+		t.Fatalf("resolve the repository root: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "script", "build", "example-helper.sh")); err != nil {
+		t.Fatalf("the helper builder is missing under %s: %v", root, err)
+	}
+	return root
+}
+
+// helperBinary builds this module through script/build/example-helper.sh, the one
+// host build path — never with `go build` of its own.
+//
+// That matters because the wrapper runs the guarded-import register before it
+// compiles anything (ADR 0017 D1, owner ruling G2 of #188). A test that compiled the
+// module itself would bypass the register and could build the very tree the register
+// refuses; the returned path is therefore also held to the wrapper's own output
+// directory, which a hand-rolled `-o $TMPDIR/...` cannot satisfy.
+func helperBinary(t *testing.T, fixture bool) string {
+	t.Helper()
+	root := repositoryRoot(t)
+	argv := []string{filepath.Join(root, "script", "build", "example-helper.sh"), "go-dev",
+		"--root", root, "--os", runtime.GOOS}
+	if fixture {
+		argv = append(argv, "--fixture")
+	}
+	command := exec.Command("bash", argv...)
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		// The wrapper's precondition refusal is the interesting failure here: it is
+		// what stops a fixture child being built from a tree the register refuses.
+		t.Fatalf("the helper build refused this tree: %v\n%s%s", err, stdout.String(),
+			stderr.String())
+	}
+	binary := strings.TrimSpace(stdout.String())
+	if !filepath.IsAbs(binary) {
+		t.Fatalf("the builder printed %q, which is not an absolute path", binary)
+	}
+	wanted := filepath.Join(root, "target", "example-helper", "go-dev",
+		runtime.GOOS+"-"+runtime.GOARCH)
+	if filepath.Dir(binary) != wanted {
+		t.Fatalf("the test built %s, which is not the reviewed build path %s: a test "+
+			"must not compile this module itself", binary, wanted)
+	}
+	return binary
+}
+
 // build compiles the shipped binary the way the layer's stage does.
 func build(t *testing.T) string {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "go-dev-helper")
-	command := exec.Command("go", "build", "-trimpath", "-buildvcs=false", "-o", binary, ".")
-	command.Env = append(os.Environ(), "GOFLAGS=-mod=vendor", "GOPROXY=off")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("go build: %v\n%s", err, output)
-	}
-	return binary
+	return helperBinary(t, false)
 }
 
 func runBinary(t *testing.T, binary string, args ...string) (string, string, int) {
