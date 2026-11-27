@@ -1123,19 +1123,47 @@ def publication_difference(go: Publication, python: Publication, *, go_base: Pat
     took both observations from one tree is a comparison with itself and is refused
     here, so substituting the expression cannot pass.
     """
+    # The same-tree case is checked first: it is the substitution this predicate
+    # exists to refuse, and its message is the specific one.
+    if go.root == python.root:
+        return f'both observations were taken from {go.root}'
     if go.root != str(go_base.resolve()):
         return f'the Go observation was taken from {go.root}, not {go_base}'
     if python.root != str(python_base.resolve()):
         return f'the Python observation was taken from {python.root}, not {python_base}'
-    if go.root == python.root:
-        return f'both observations were taken from {go.root}'
     if len(go.entries) < minimum:
         return f'the Go observation has {len(go.entries)} entries, want at least {minimum}'
     if len(python.entries) < minimum:
         return f'the Python observation has {len(python.entries)} entries, want at least {minimum}'
     if go.entries != python.entries:
-        return f'{go.entries!r} != {python.entries!r}'
+        return entry_difference(go.entries, python.entries)
     return ''
+
+
+def entry_difference(one: tuple, two: tuple) -> str:
+    """Name the first difference between two published trees, by dimension.
+
+    A message that only dumps both tuples is not a witness that the comparison looked
+    at anything in particular: the controls below assert the dimension they perturbed
+    is the one named here.
+    """
+    here = {path: (kind, mode, digest) for path, kind, mode, digest in one}
+    there = {path: (kind, mode, digest) for path, kind, mode, digest in two}
+    missing = sorted(set(here) - set(there))
+    if missing:
+        return f'the Python publication lacks {missing[0]}'
+    extra = sorted(set(there) - set(here))
+    if extra:
+        return f'the Python publication has an extra path {extra[0]}'
+    for path in sorted(here):
+        mine, theirs = here[path], there[path]
+        if mine[0] != theirs[0]:
+            return f'{path}: kind {mine[0]} != {theirs[0]}'
+        if mine[1] != theirs[1]:
+            return f'{path}: mode {mine[1]:04o} != {theirs[1]:04o}'
+        if mine[2] != theirs[2]:
+            return f'{path}: content differs'
+    return 'the trees differ in an unnamed dimension' 
 
 
 def tree_difference(left: Path, right: Path) -> str:
@@ -1278,7 +1306,7 @@ def test_go_install_differential(fixture, closure, root: Path, helper: Path,
         swapped = publication_difference(published_tree(base), published_tree(base),
                                          go_base=base, python_base=python_base)
         check(f'{arch.value}: the row is red when both observations come from one tree',
-              swapped != '', '(one tree compared with itself passed)')
+              'both observations were taken from' in swapped, f'({swapped!r})')
         if arch == model.Architecture.ARM64:
             # The self-control for the row above: it must be red when the *Python*
             # side differs, or the comparison proves nothing about that side. Only the
@@ -1294,19 +1322,27 @@ def test_go_install_differential(fixture, closure, root: Path, helper: Path,
                 python_base=perturbed)
             check('an unperturbed copy of the Python publication compares equal',
                   control == '', f'({control})')
+            def control_difference() -> str:
+                """The row's own predicate, with the bases the row passes."""
+                return publication_difference(go_tree, published_tree(perturbed),
+                                              go_base=base, python_base=perturbed)
+
             notice = perturbed / 'share' / 'gopls' / model.LICENSE_FILE
             original = notice.read_bytes()
             notice.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+            changed = control_difference()
             check("the tree comparison is red when the Python side's bytes differ",
-                  published_tree(perturbed) != go_tree, '(one changed notice byte was invisible)')
+                  'content differs' in changed, f'({changed!r})')
             notice.write_bytes(original)
             (perturbed / 'bin' / 'stray').write_bytes(b'x')
+            added = control_difference()
             check("the tree comparison is red when the Python side's tree gains a path",
-                  published_tree(perturbed) != go_tree, '(an extra file in bin/ was invisible)')
+                  'extra path bin/stray' in added, f'({added!r})')
             (perturbed / 'bin' / 'stray').unlink()
             os.chmod(perturbed / 'share' / 'gopls', 0o700)
+            mode = control_difference()
             check("the tree comparison is red when the Python side's directory mode differs",
-                  published_tree(perturbed) != go_tree, '(a directory mode was invisible)')
+                  'share/gopls: mode 0755 != 0700' in mode, f'({mode!r})')
             os.chmod(perturbed / 'share' / 'gopls', 0o755)
             restored = publication_difference(go_tree, published_tree(perturbed),
                                               go_base=base, python_base=perturbed)
