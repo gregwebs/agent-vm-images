@@ -5,6 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -167,4 +171,51 @@ func asciiDigits(text string) bool {
 // reviewedNestedNotices is the reviewed nested layout for one module, if any.
 func reviewedNestedNotices(module ModuleID) []string {
 	return ReviewedNestedNotices[module]
+}
+
+// noticeName is the reviewed notice-file name set as one compiled pattern, read from
+// the constant below rather than a second regular expression kept in step by hand.
+var noticeName = regexp.MustCompile(NoticeNamePattern)
+
+// CollectNotices reads one module directory's notice files from the module cache,
+// keyed by canonical relative path.
+//
+// One rule for both consumers: the stager transports these bytes into the committed
+// evidence (#252), and the installer re-reads the same files to prove the build used
+// the bytes it published. Whether the resulting layout is *reviewed* is decided by
+// the caller against ReviewedNestedNotices, not here. A module directory that is not
+// there is missing evidence, never an empty set; a symlink in the tree is an
+// unsupported layout rather than a file to follow.
+func CollectNotices(directory string, module ModuleID) (map[NoticePath][]byte, error) {
+	info, err := os.Stat(directory)
+	if err != nil || !info.IsDir() {
+		return nil, refuse("license evidence missing for %s: the cache has no %s", module,
+			directory)
+	}
+	found := map[NoticePath][]byte{}
+	err = filepath.WalkDir(directory, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return refuse("%s: unsupported license layout; a notice path is a symlink", module)
+		}
+		if entry.IsDir() || !noticeName.MatchString(entry.Name()) {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(directory, path)
+		if err != nil {
+			return err
+		}
+		found[NoticePath(filepath.ToSlash(relative))] = raw
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return found, nil
 }

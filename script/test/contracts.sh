@@ -213,6 +213,12 @@ if [ "$guard_only" = false ]; then
     # mutant corpus, with a per-side floor and a case counter. It builds the host
     # helper with the same flags the layer's stage uses, so it needs no daemon.
     python3 script/test/gopls-closure-parity.py
+    # The one Go/Python comparison of the gopls *staging* writer (#252): `avm-pin gopls
+    # stage` against the live Python stager over the synthetic fixture closure, with a
+    # per-side floor, a case counter, status/stdout/stderr and every written file's bytes
+    # and mode compared. The real-release leg of the same suite needs the reviewed proxy,
+    # so it is `--same-release` and never part of this gate.
+    python3 script/test/gopls-stage-parity.py --go-root "$selected_goroot"
     for suite in agent-versions apt-sources agy-installer claude-installer codex-installer copilot-installer copilot-verify \
         opencode-installer opencode-pnpm-prepare-lock opencode-pnpm-install opencode-pnpm-upgrade \
         opencode-plugins-verify run-pnpm dsh-prepare-lock dsh-verify pi-install pi-bridge-install pi-antigravity-install \

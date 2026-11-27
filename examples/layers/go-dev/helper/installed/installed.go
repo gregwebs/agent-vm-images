@@ -164,12 +164,19 @@ func Verify(data *closure.Data, target gotool.Target, runner gotool.Runner) (clo
 // check compares. The installed-state check and the installer both prove a binary
 // against it, so the projection has one owner.
 func Selection(data *closure.Data) []buildinfo.Module {
-	modules := make([]buildinfo.Module, 0, len(data.Pin.Modules))
-	for _, module := range data.Pin.Modules {
-		modules = append(modules, buildinfo.Module{Path: module.ID.Path,
+	return SelectionOf(data.Pin.Modules)
+}
+
+// SelectionOf is the same projection over a candidate's modules: the maintainer
+// stager proves the two Linux cross-builds against the selection it just derived
+// (#252), so the triple is built in one place rather than twice.
+func SelectionOf(modules []closure.PinnedModule) []buildinfo.Module {
+	selection := make([]buildinfo.Module, 0, len(modules))
+	for _, module := range modules {
+		selection = append(selection, buildinfo.Module{Path: module.ID.Path,
 			Version: module.ID.Version, H1: module.H1})
 	}
-	return modules
+	return selection
 }
 
 // checkBinary applies the presence and mode rules to exactly the requested path.

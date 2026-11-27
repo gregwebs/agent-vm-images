@@ -643,6 +643,14 @@ func requireExpectations(request Request, pin Pin) error {
 	return nil
 }
 
+// LanguageAtMost is the compiler/language relation: a `go` directive may not name a
+// language newer than the pinned compiler. The writer asks it before it retargets the
+// resolved wrapper (#252), so a release that needs a newer Go is refused as a
+// release/toolchain mismatch rather than as a `go mod tidy` error.
+func LanguageAtMost(language GoLanguage, compiler GoVersion) bool {
+	return languageAtMost(language, compiler)
+}
+
 // languageAtMost compares a `go` directive against the pinned compiler, treating a
 // missing patch number as zero.
 func languageAtMost(language GoLanguage, compiler GoVersion) bool {

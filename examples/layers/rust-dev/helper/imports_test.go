@@ -98,6 +98,11 @@ var reviewedImporters = map[string][]string{
 	// program: it is an argument to `go version -m -json`. The boundary around that
 	// child is the recipe's --network=none RUN, not this list.
 	goDevHelperPath + "/gotool/exec.go": {"os/exec"},
+	// The fixture builds — the layer installer's and, from #252, the maintainer
+	// stager's — name a loopback origin on their command line, and this file parses
+	// that origin and refuses anything that is not `http://<loopback IP>:<port>`.
+	// `net/url` is a parser here, not a client: no shipped build can reach it.
+	goDevHelperPath + "/gotool/loopback.go": {"net/url"},
 	// The `example_fixture` seam parses the loopback origin it was given, and refuses
 	// anything that is not `http://<loopback IP>:<port>` before the installer sees it
 	// (#251). `net/url` is a parser, not a client, in the same sense as the root's

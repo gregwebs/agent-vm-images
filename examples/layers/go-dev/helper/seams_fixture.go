@@ -4,8 +4,6 @@ package main
 
 import (
 	"fmt"
-	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/gotool"
@@ -44,7 +42,7 @@ func (fixture fixtureArguments) environment() (gotool.Environment, error) {
 	if fixture.FixtureProxy == nil {
 		return gotool.Install(), nil
 	}
-	if err := requireLoopback(*fixture.FixtureProxy); err != nil {
+	if err := gotool.RequireLoopback("--fixture-proxy", *fixture.FixtureProxy); err != nil {
 		return gotool.Environment{}, err
 	}
 	sumdb := "off"
@@ -85,29 +83,6 @@ func (fixture fixtureArguments) fault() func(install.Phase) error {
 		}
 		return nil
 	}
-}
-
-// requireLoopback accepts only the suite recorder's strict shape: http, a literal
-// loopback IP, and a numeric port. An origin that needs a name to resolve is not a
-// loopback recorder, and this build is not the place to discover that.
-func requireLoopback(origin string) error {
-	parsed, err := url.Parse(origin)
-	if err != nil {
-		return fmt.Errorf("--fixture-proxy: %v", err)
-	}
-	if parsed.Scheme != "http" || parsed.User != nil || parsed.Path != "" ||
-		parsed.RawQuery != "" || parsed.Fragment != "" {
-		return fmt.Errorf("--fixture-proxy must be http://IP:PORT, not %q", origin)
-	}
-	host := parsed.Hostname()
-	if host != "127.0.0.1" && host != "::1" {
-		return fmt.Errorf("--fixture-proxy must name the loopback address, not %q", host)
-	}
-	port, err := strconv.Atoi(parsed.Port())
-	if err != nil || port < 1 || port > 65535 {
-		return fmt.Errorf("--fixture-proxy must carry a numeric port, not %q", origin)
-	}
-	return nil
 }
 
 // runFixtureSeams prints the seam names, one per line, and writes nothing.

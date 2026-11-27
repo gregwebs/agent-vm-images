@@ -33,12 +33,16 @@ func TestCheckThroughASymlinkedRoot(t *testing.T) {
 	}
 	// The derived closure must be non-empty in this form too, or a green result
 	// here would be a comparison over nothing.
-	if len(report.Imported) < MinPackages || len(report.Vendored) < MinPackages {
-		t.Fatalf("derivation is implausibly small through the symlink: imported %v, vendored %v",
-			report.Imported, report.Vendored)
-	}
-	if !sameStrings(report.Imported, report.Vendored) {
-		t.Fatalf("imported %v, vendored %v", report.Imported, report.Vendored)
+	for _, entry := range report.Modules {
+		floor := MinPackages[entry.Module.Path]
+		if len(entry.Imported) < floor || len(entry.Vendored) < floor {
+			t.Fatalf("%s: derivation is implausibly small through the symlink: imported %v, "+
+				"vendored %v", entry.Module.Path, entry.Imported, entry.Vendored)
+		}
+		if !sameStrings(entry.Imported, entry.Vendored) {
+			t.Fatalf("%s: imported %v, vendored %v", entry.Module.Path, entry.Imported,
+				entry.Vendored)
+		}
 	}
 	if report.Files < MinFiles {
 		t.Fatalf("compared %d files through the symlink, want at least %d", report.Files,
