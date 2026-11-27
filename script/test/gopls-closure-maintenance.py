@@ -17,6 +17,14 @@ need (bash, its coreutils, the pinned Go and its own tools, the test-owned
 ``python3`` shim), and the guard then refuses anything outside it. A native grandchild
 is not covered by the Python hook, so the operating system makes the network and exec
 calls; losing that prerequisite exits 3 before any case runs.
+
+The signal channel the supervisor and this suite exchange is two single-line files
+(request, result). Its *reader* owns the atomicity, not its writer: ``write_text``
+creates the path before the document lands, so a reader that trusts its first
+observation reads an empty or truncated prefix -- a refusal for a malformed request,
+which is #248. Every reader here therefore treats an empty or newline-less document as
+"not written yet" and polls it under a bound (:func:`await_line`), keeping the
+completeness rule in one place. Both sides write plainly and depend on that.
 """
 from __future__ import annotations
 
@@ -34,6 +42,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -363,6 +372,7 @@ def check(name: str, condition: bool, detail: str = '') -> None:
 
 SIGNAL_REQUEST = 'signal-request'
 SIGNAL_RESULT = 'signal-result'
+SIGNAL_WINDOW_FILE = 'signal-window.txt'
 FORGED_MARKER_FILES = ('forged-marker.txt', 'supervisor-controls.txt')
 TMPDIR_GUARD_FILE = 'tmpdir-guard.txt'
 SECOND_PASS_FILE = 'second-pass-controls.txt'
@@ -373,6 +383,18 @@ WRITER_TOOLS_FILE = 'writer-tools.txt'
 # The unlisted candidate, chosen outside the boundary for the same reason. Its
 # absence travels as ``null``: a leg that could not be made refuses, never skips.
 UNLISTED_BINARY_FILE = 'unlisted-binary.txt'
+# How long a reader waits for a document's last byte, and how often it looks. A write
+# is microseconds, so the bound only catches a writer that died mid-document: a broken
+# channel is then reported instead of hanging the suite.
+CHANNEL_BOUND = 30.0
+CHANNEL_POLL = 0.005
+# The pause the signal-window control puts inside one write: two orders of magnitude
+# longer than a poll interval, so the window is observed rather than raced for.
+OBSERVATION_PAUSE = 0.5
+# No process can hold this pid (Linux caps ``pid_max`` at 2**22), so the control's
+# document names an identity the supervisor must refuse without signalling anything.
+UNREACHABLE_PID = 4194305
+MALFORMED_REQUEST = 'refused: malformed request'
 
 
 @dataclass(frozen=True)
@@ -549,6 +571,9 @@ def supervise(go_root: Path) -> int:
         bystander.terminate()
         bystander.wait(timeout=30)
 
+    # The request channel's own reading, driven against a write that is observed
+    # mid-document. Recorded here and checked inside with the other host controls.
+    (root / SIGNAL_WINDOW_FILE).write_text(json.dumps(signal_window_check(root)) + '\n')
     # The TMPDIR guard is host glue (a pure path check), so it runs here where a
     # succeeding mktemp shim can actually execute -- the boundary's exec allowlist
     # would refuse it. The --inside pass reads this file and records the checks.
@@ -565,18 +590,107 @@ def supervise(go_root: Path) -> int:
         env=child_environment, start_new_session=True)
     try:
         while child.poll() is None:
-            request = root / SIGNAL_REQUEST
-            if request.exists():
-                text = request.read_text().strip()
-                request.unlink()
-                outcome = signal_in_session(child.pid, text)
-                (root / SIGNAL_RESULT).write_text(outcome + '\n')
+            if (root / SIGNAL_REQUEST).exists():
+                verdict = consume_request(root, child.pid)
+                (root / SIGNAL_RESULT).write_text(verdict + '\n')
             time.sleep(0.1)
     finally:
         if child.poll() is None:
             child.kill()
         child.wait(timeout=60)
     return child.returncode
+
+
+def consume_request(root: Path, child_pid: int) -> str:
+    """Answer the request the supervisor observed and take the path back.
+
+    The path is removed whatever was read: the supervisor owns the channel, so a
+    document that never completed is reported once instead of being re-read forever,
+    and the next request is a different document.
+    """
+    request = root / SIGNAL_REQUEST
+    document = await_line(request)
+    request.unlink(missing_ok=True)
+    if document is None:
+        return 'refused: incomplete request'
+    return signal_in_session(child_pid, document)
+
+
+def await_line(path: Path, bound: float = CHANNEL_BOUND) -> str | None:
+    """The complete document at ``path``, or ``None`` if it never was complete.
+
+    Both sides of the channel write with ``write_text``, which creates the path before
+    the write lands, so the first look at an existing path can be an empty or
+    truncated document. The trailing newline is the byte the writer emits last, so its
+    presence is what says the document is whole. ``None`` means the channel never
+    completed within ``bound`` -- a writer that died mid-document, not a partial
+    document to parse.
+    """
+    give_up = time.monotonic() + bound
+    while True:
+        try:
+            document = path.read_bytes().decode('utf-8', 'replace')
+        except FileNotFoundError:
+            document = ''
+        if document.endswith('\n') and document.strip():
+            return document.strip()
+        if time.monotonic() >= give_up:
+            return None
+        time.sleep(CHANNEL_POLL)
+
+
+def signal_window_check(root: Path) -> dict:
+    """Drive the supervisor's own readers against a write observed mid-document.
+
+    ``write_text`` creates the request path and then fills it, so a supervisor can
+    look in between. That window is normally too small to hit and was only ever seen
+    as a CI flake (#248), so it is made here instead of hoped for: a writer thread
+    creates the document and completes it in two halves with a pause on each side, and
+    each reader starts only once the path exists.
+
+    Two rows, one per reader in the handshake. The line reader must return the whole
+    document, not the prefix it first saw; the request consumer must answer with the
+    same verdict a direct call on the complete document gives, never ``malformed
+    request``. The comparison is against that direct call, so a reader that hardcoded
+    a verdict would not pass it -- and that expectation is refused if it is itself a
+    malformed refusal, which is the one value a reader of the prefix also produces.
+    """
+    scratch = root / 'signal-window'
+    scratch.mkdir()
+    document = f'{UNREACHABLE_PID}\n'
+    half = len(document) // 2
+    created = threading.Event()
+
+    def write_in_halves(path: Path) -> None:
+        with path.open('w') as handle:
+            handle.flush()
+            created.set()
+            for piece in (document[:half], document[half:]):
+                time.sleep(OBSERVATION_PAUSE)
+                handle.write(piece)
+                handle.flush()
+
+    observed: dict[str, str | None] = {}
+    for label in ('document', 'request'):
+        leg = scratch / label
+        leg.mkdir()
+        path = leg / SIGNAL_REQUEST
+        created.clear()
+        writer = threading.Thread(target=write_in_halves, args=(path,), daemon=True)
+        writer.start()
+        created.wait(timeout=CHANNEL_BOUND)
+        observed[label] = (await_line(path) if label == 'document'
+                           else consume_request(leg, os.getpid()))
+        writer.join(timeout=CHANNEL_BOUND)
+    expected = signal_in_session(os.getpid(), document.strip())
+    assert not expected.startswith(MALFORMED_REQUEST), (
+        f'the complete document {document.strip()!r} is refused as malformed, so the '
+        'request row cannot tell a whole document from a prefix of one')
+    return {'document': observed['document'],
+            'document_expected': document.strip(),
+            'request': observed['request'],
+            'request_expected': expected,
+            'pause': OBSERVATION_PAUSE}
 
 
 def signal_in_session(child_pid: int, request: str) -> str:
@@ -592,7 +706,7 @@ def signal_in_session(child_pid: int, request: str) -> str:
     try:
         requested = int(request.strip())
     except ValueError:
-        return 'refused: malformed request'
+        return MALFORMED_REQUEST
     if requested == child_pid:
         return 'refused: the suite itself is not a writer'
     pid = supervised_pid(requested, child_pid)
@@ -676,17 +790,17 @@ def descends_from(pid: int, ancestor: int, depth: int = 64) -> bool:
 
 
 def send_signal(root: Path, pid: int) -> str:
-    """Ask the supervisor to signal this writer and wait for its verdict."""
+    """Ask the supervisor to signal this writer and wait for its verdict.
+
+    The result document is read through the same completeness rule as the request:
+    this side is a reader of the supervisor's answer and can observe it mid-write.
+    """
     result_path = root / SIGNAL_RESULT
     if result_path.exists():
         result_path.unlink()
     (root / SIGNAL_REQUEST).write_text(f'{pid}\n')
-    deadline = time.monotonic() + 120
-    while time.monotonic() < deadline:
-        if result_path.exists():
-            return result_path.read_text().strip()
-        time.sleep(0.1)
-    return 'no answer from the supervisor'
+    verdict = await_line(result_path, bound=120)
+    return 'no answer from the supervisor' if verdict is None else verdict
 
 
 def retained_proposals() -> set[Path]:
@@ -1102,6 +1216,14 @@ def main() -> int:
           ' / '.join(controls))
     check('the supervisor refuses a malformed signal request',
           len(controls) >= 3 and controls[2].startswith('refused'), ' / '.join(controls))
+    window = json.loads((root / SIGNAL_WINDOW_FILE).read_text())
+    check('the signal reader returns the whole document, not the prefix it observed',
+          window['document'] == window['document_expected'],
+          f"({window['document']!r} for {window['document_expected']!r} "
+          f"across a {window['pause']}s pause mid-write)")
+    check('a request observed mid-document is answered, not refused as malformed',
+          window['request'] == window['request_expected'],
+          f"({window['request']!r} for {window['request_expected']!r})")
     forged = (root / FORGED_MARKER_FILES[0]).read_text().splitlines()
     check('a forged sandbox marker does not buy confinement (the --inside path refuses)',
           len(forged) >= 3 and forged[0].strip() != '0'
