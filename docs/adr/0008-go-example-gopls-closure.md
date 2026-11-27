@@ -169,7 +169,20 @@ Commit the selection, then let one deep helper compile from it.
   closure proof is the committed selection, both checksum kinds, isolated
   readonly resolution, and exact post-build identity on both Linux targets.
 - Maintenance is `script/dev/upgrade-gopls.sh VERSION [--review-determination
-  YYYY-MM-DD --reviewer NAME]` plus its stager `script/dev/gopls-closure-update.py`.
+  YYYY-MM-DD --reviewer NAME]` plus its stager. Since #252 the stager's replacement is
+  `avm-pin gopls stage`, which resolves through the layer's own `closure` package and
+  compiles both Linux targets through the image's `install.Build`; the shell publisher
+  keeps calling the Python stager until #253, so the two run side by side and
+  `script/test/gopls-stage-parity.py` compares them over the synthetic fixture (status,
+  stdout/stderr, and every written file's bytes and mode) and, with `--same-release`,
+  over the reviewed `v0.23.0` with the real proxy. That run reproduced all six committed
+  paths byte for byte from the Go writer, including `pin.json`, so the record's renderer
+  (Go's JSON encoder with HTML escaping off) is held to the Python `json.dumps(indent=2)`
+  output on the committed bytes rather than argued about; a non-ASCII origin field is
+  the one shape the two would spell differently. The stage-time rules themselves are
+  unchanged: the writer's own resolution commands stay out of the layer, and the
+  Python stager's `check`/`current`/`compare` are thin projections over the same loader.
+  The next slice (#253) moves publication; nothing in #252 writes the checkout.
   The stager regenerates the graph and sums with the layer's **pinned Go**
   (`GOTOOLCHAIN=go<GO_VERSION>`, asserted via `go env GOVERSION`), fetches and
   log-verifies every new sum under the explicit key, cross-builds both Linux

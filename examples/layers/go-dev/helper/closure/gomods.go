@@ -39,6 +39,15 @@ type RootGoMod struct {
 	Requires map[ModulePath]ModuleVersion
 }
 
+// ParseRootGoMod reads upstream root evidence the writer has just downloaded (#252).
+// It is the same grammar the loader applies to the committed evidence file, exported
+// because the stager must know the upstream `go` directive before it retargets the
+// wrapper. A caller that has committed bytes should use Load instead: the loader also
+// binds the evidence hash.
+func ParseRootGoMod(raw []byte, what string) (RootGoMod, error) {
+	return parseRootGoMod(raw, what)
+}
+
 // renderWrapper is the one canonical form: a byte comparison against this
 // rendering, not a parser leniency, is what accepts the committed wrapper.
 func renderWrapper(language GoLanguage, requires map[ModulePath]ModuleVersion) []byte {

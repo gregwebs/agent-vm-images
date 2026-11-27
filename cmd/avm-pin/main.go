@@ -19,6 +19,7 @@ import (
 	"github.com/gregwebs/agent-vm-images/internal/claudepin"
 	"github.com/gregwebs/agent-vm-images/internal/claudewriter"
 	"github.com/gregwebs/agent-vm-images/internal/codewriter"
+	"github.com/gregwebs/agent-vm-images/internal/goplsstage"
 )
 
 type arguments struct {
@@ -27,6 +28,7 @@ type arguments struct {
 	Claude   *claudeCommand        `arg:"subcommand:claude" help:"refresh the Claude native payload closure"`
 	Codex    *codexCommand         `arg:"subcommand:codex" help:"refresh the Codex payload closure"`
 	Rust     *rustToolchainCommand `arg:"subcommand:rust-toolchain" help:"stage the rust-dev example's toolchain pin"`
+	Gopls    *goplsCommand         `arg:"subcommand:gopls" help:"stage the go-dev example's gopls closure"`
 }
 
 func (arguments) Description() string {
@@ -104,7 +106,7 @@ func run(args []string) int {
 		return 2
 	}
 	if parsed.Artifact == nil && parsed.Agy == nil && parsed.Claude == nil &&
-		parsed.Codex == nil && parsed.Rust == nil {
+		parsed.Codex == nil && parsed.Rust == nil && parsed.Gopls == nil {
 		parser.WriteHelp(os.Stderr)
 		return 2
 	}
@@ -119,6 +121,9 @@ func run(args []string) int {
 	}
 	if parsed.Rust != nil {
 		return runRustToolchain(parsed.Rust)
+	}
+	if parsed.Gopls != nil {
+		return runGopls(parsed.Gopls)
 	}
 	command := parsed.Artifact
 	root, err := resolveRoot(command.Root)
@@ -189,6 +194,8 @@ func prefixFor(args []string) string {
 			return agywriter.Prefix
 		case "rust-toolchain":
 			return rustToolchainPrefix
+		case "gopls":
+			return goplsstage.Prefix
 		}
 	}
 	return artifactwriter.Prefix

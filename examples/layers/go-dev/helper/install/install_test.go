@@ -329,8 +329,8 @@ func TestCacheNoticeMutation(t *testing.T) {
 		t.Fatalf("the committed evidence does not match its own cache: %v", err)
 	}
 	module := data.Pin.Modules[0]
-	directory := filepath.Join(cache, escapeModule(string(module.ID.Path))+"@"+
-		escapeModule(string(module.ID.Version)))
+	directory := filepath.Join(cache, closure.EscapeModule(string(module.ID.Path))+"@"+
+		closure.EscapeModule(string(module.ID.Version)))
 	extra := filepath.Join(directory, "NOTICE")
 	if err := os.WriteFile(extra, []byte("cache-only notice\n"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
@@ -715,19 +715,6 @@ func TestCreatedDirectoriesAreWithdrawn(t *testing.T) {
 	}
 }
 
-// TestEscapeModule: the module cache spelling of an uppercase component.
-func TestEscapeModule(t *testing.T) {
-	for input, want := range map[string]string{
-		"github.com/BurntSushi/toml": "github.com/!burnt!sushi/toml",
-		"example.test/dep":           "example.test/dep",
-		"v1.0.0":                     "v1.0.0",
-	} {
-		if got := escapeModule(input); got != want {
-			t.Fatalf("escapeModule(%q) = %q, want %q", input, got, want)
-		}
-	}
-}
-
 const partialNoticeChildEnv = "GO_DEV_INSTALL_PARTIAL_NOTICE_CHILD"
 
 // --- fakes -------------------------------------------------------------------
@@ -825,8 +812,8 @@ func buildInfoDocument(data *closure.Data, arch gotool.Architecture) map[string]
 // writeCache materialises the committed notice evidence as a module cache tree.
 func writeCache(cache string, data *closure.Data) error {
 	for _, section := range data.Notices {
-		directory := filepath.Join(cache, escapeModule(string(section.ID.Path))+"@"+
-			escapeModule(string(section.ID.Version)))
+		directory := filepath.Join(cache, closure.EscapeModule(string(section.ID.Path))+"@"+
+			closure.EscapeModule(string(section.ID.Version)))
 		if err := os.MkdirAll(filepath.Join(directory, filepath.Dir(string(section.Name))),
 			0o755); err != nil {
 			return err
@@ -839,8 +826,8 @@ func writeCache(cache string, data *closure.Data) error {
 	// One module directory per selected module, even when it ships no notice: a
 	// missing directory is missing evidence, and that is a different rule's case.
 	for _, module := range data.Pin.Modules {
-		directory := filepath.Join(cache, escapeModule(string(module.ID.Path))+"@"+
-			escapeModule(string(module.ID.Version)))
+		directory := filepath.Join(cache, closure.EscapeModule(string(module.ID.Path))+"@"+
+			closure.EscapeModule(string(module.ID.Version)))
 		if err := os.MkdirAll(directory, 0o755); err != nil {
 			return err
 		}

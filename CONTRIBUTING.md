@@ -123,7 +123,7 @@ bash script/dev/upgrade-rust-toolchain.sh 1.98.1    # expected: unchanged
 bash script/dev/upgrade-rust-toolchain.sh --check   # offline verification
 python3 script/test/rust-toolchain-pins.py
 python3 script/test/rust-toolchain-maintenance.py
-bash script/test/example-layers.sh --self-test       # 150 cases
+bash script/test/example-layers.sh --self-test       # 180 cases
 bash script/test/rust-example.sh --self-test          # harness controls, no daemon
 ```
 
@@ -164,13 +164,32 @@ bash script/dev/upgrade-gopls.sh v0.23.0    # expected: unchanged
 bash script/dev/upgrade-gopls.sh --check    # offline verification
 python3 script/test/gopls-closure-pins.py --go-root /abs/native/go1.27.3
 python3 script/test/gopls-closure-maintenance.py --go-root /abs/native/go1.27.3
-bash script/test/example-layers.sh --self-test       # 150 cases
+python3 script/test/gopls-stage-parity.py --go-root /abs/native/go1.27.3 \
+  --same-release                                     # the real release, both writers
+bash script/test/example-layers.sh --self-test       # 180 cases
 bash script/test/go-example.sh --self-test           # harness controls, no daemon
+```
+
+Staging is `avm-pin gopls stage` since #252 (`script/dev/upgrade-gopls.sh` still
+publishes the checkout until #253, and calls the Python stager meanwhile):
+
+```bash
+go build -o target/avm-pin-bin/avm-pin ./cmd/avm-pin
+target/avm-pin-bin/avm-pin gopls stage --gopls v0.23.0 --go 1.27.3 \
+  --current examples/layers/go-dev/data/gopls-closure \
+  --out /abs/new/dir --dockerfile "$PWD/examples/layers/go-dev/Dockerfile"
+target/avm-pin-bin/avm-pin gopls check examples/layers/go-dev/data/gopls-closure
+target/avm-pin-bin/avm-pin gopls current examples/layers/go-dev/data/gopls-closure
+target/avm-pin-bin/avm-pin gopls compare PROPOSAL_DIR STAGED_DIR
 ```
 
 Prerequisites: host `go` >= 1.24, `python3` >= 3.11 and network access; the
 writer re-runs the staging with the layer's pinned Go (`GOTOOLCHAIN=go<GO_VERSION>`,
-asserted), so `--go` is never a free choice. The run regenerates the module graph
+asserted), so `--go` is never a free choice. The staging rules are the layer's own
+`closure` package, which the image compiles too, so the maintainer's writer and the
+image's installer cannot disagree; `script/test/gopls-stage-parity.py` compares the
+Go staging verb with the Python stager over the synthetic fixture, and
+`--same-release` repeats the comparison on the reviewed release with the real proxy. The run regenerates the module graph
 and sums through the checksum database, cross-builds both Linux targets from the
 staged files with `GOPROXY=off`, and publishes the five closure files plus the
 Dockerfile assertion as one transaction. A changed root, sum set, notice layout,

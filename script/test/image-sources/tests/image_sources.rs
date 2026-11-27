@@ -10157,7 +10157,7 @@ fn check_opencode_parser_boundary(source: &str) -> Result<(), String> {
 /// The exact vendor closure: `modules.txt` plus every file of the three reviewed
 /// modules. The module list, the checksum pin and the files are the provenance
 /// evidence: a vendored file nobody reviewed is a build input nobody reviewed.
-const VENDOR_MODULE_FILES: [&str; 182] = [
+const VENDOR_MODULE_FILES: [&str; 200] = [
     "github.com/alexflint/go-arg/.gitignore",
     "github.com/alexflint/go-arg/LICENSE",
     "github.com/alexflint/go-arg/README.md",
@@ -10222,6 +10222,24 @@ const VENDOR_MODULE_FILES: [&str; 182] = [
     "github.com/failsafe-go/failsafe-go/retrypolicy/doc.go",
     "github.com/failsafe-go/failsafe-go/retrypolicy/retry.go",
     "github.com/failsafe-go/failsafe-go/retrypolicy/retryexecutor.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/buildinfo/buildinfo.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/closure/constants.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/closure/document.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/closure/gomods.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/closure/gosum.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/closure/licenses.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/closure/load.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/closure/pin.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/closure/source.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/closure/stage.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/closure/values.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/gotool/exec.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/gotool/gotool.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/gotool/loopback.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/install/install.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/installed/installed.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/internal/pathjoin/pathjoin.go",
+    "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/internal/strictjson/decode.go",
     "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/fetch/fetch.go",
     "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/fetch/loopback_fixture.go",
     "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/gpg/gpg.go",
@@ -10342,51 +10360,7 @@ const VENDOR_MODULE_FILES: [&str; 182] = [
     "go.yaml.in/yaml/v3/yamlprivateh.go",
 ];
 
-const VENDOR_MODULES_TXT: &str = "\
-# github.com/alexflint/go-arg v1.6.1
-## explicit; go 1.18
-github.com/alexflint/go-arg
-# github.com/alexflint/go-scalar v1.2.0
-## explicit; go 1.15
-github.com/alexflint/go-scalar
-# github.com/bits-and-blooms/bitset v1.24.4
-## explicit; go 1.16
-github.com/bits-and-blooms/bitset
-# github.com/failsafe-go/failsafe-go v0.9.8
-## explicit; go 1.22
-github.com/failsafe-go/failsafe-go
-github.com/failsafe-go/failsafe-go/budget
-github.com/failsafe-go/failsafe-go/common
-github.com/failsafe-go/failsafe-go/internal
-github.com/failsafe-go/failsafe-go/internal/util
-github.com/failsafe-go/failsafe-go/policy
-github.com/failsafe-go/failsafe-go/priority
-github.com/failsafe-go/failsafe-go/retrypolicy
-# github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper v0.0.0 => ./examples/layers/rust-dev/helper
-## explicit; go 1.27.0
-github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/fetch
-github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/gpg
-github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/strictjson
-github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/tarwalk
-github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain
-# github.com/pelletier/go-toml/v2 v2.2.4
-## explicit; go 1.21.0
-github.com/pelletier/go-toml/v2
-github.com/pelletier/go-toml/v2/internal/characters
-github.com/pelletier/go-toml/v2/internal/danger
-github.com/pelletier/go-toml/v2/internal/tracker
-github.com/pelletier/go-toml/v2/unstable
-# github.com/ulikunitz/xz v0.5.17
-## explicit; go 1.20
-github.com/ulikunitz/xz
-github.com/ulikunitz/xz/internal/hash
-github.com/ulikunitz/xz/internal/xlog
-github.com/ulikunitz/xz/lzma
-# go.yaml.in/yaml/v3 v3.0.5
-## explicit; go 1.16
-go.yaml.in/yaml/v3
-# github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper => ./examples/layers/rust-dev/helper
-";
+const VENDOR_MODULES_TXT: &str = "# github.com/alexflint/go-arg v1.6.1\n## explicit; go 1.18\ngithub.com/alexflint/go-arg\n# github.com/alexflint/go-scalar v1.2.0\n## explicit; go 1.15\ngithub.com/alexflint/go-scalar\n# github.com/bits-and-blooms/bitset v1.24.4\n## explicit; go 1.16\ngithub.com/bits-and-blooms/bitset\n# github.com/failsafe-go/failsafe-go v0.9.8\n## explicit; go 1.22\ngithub.com/failsafe-go/failsafe-go\ngithub.com/failsafe-go/failsafe-go/budget\ngithub.com/failsafe-go/failsafe-go/common\ngithub.com/failsafe-go/failsafe-go/internal\ngithub.com/failsafe-go/failsafe-go/internal/util\ngithub.com/failsafe-go/failsafe-go/policy\ngithub.com/failsafe-go/failsafe-go/priority\ngithub.com/failsafe-go/failsafe-go/retrypolicy\n# github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper v0.0.0 => ./examples/layers/go-dev/helper\n## explicit; go 1.27.0\ngithub.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/buildinfo\ngithub.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/closure\ngithub.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/gotool\ngithub.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/install\ngithub.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/installed\ngithub.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/internal/pathjoin\ngithub.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/internal/strictjson\n# github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper v0.0.0 => ./examples/layers/rust-dev/helper\n## explicit; go 1.27.0\ngithub.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/fetch\ngithub.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/gpg\ngithub.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/strictjson\ngithub.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/internal/tarwalk\ngithub.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper/toolchain\n# github.com/pelletier/go-toml/v2 v2.2.4\n## explicit; go 1.21.0\ngithub.com/pelletier/go-toml/v2\ngithub.com/pelletier/go-toml/v2/internal/characters\ngithub.com/pelletier/go-toml/v2/internal/danger\ngithub.com/pelletier/go-toml/v2/internal/tracker\ngithub.com/pelletier/go-toml/v2/unstable\n# github.com/ulikunitz/xz v0.5.17\n## explicit; go 1.20\ngithub.com/ulikunitz/xz\ngithub.com/ulikunitz/xz/internal/hash\ngithub.com/ulikunitz/xz/internal/xlog\ngithub.com/ulikunitz/xz/lzma\n# go.yaml.in/yaml/v3 v3.0.5\n## explicit; go 1.16\ngo.yaml.in/yaml/v3\n# github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper => ./examples/layers/go-dev/helper\n# github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper => ./examples/layers/rust-dev/helper\n";
 
 const VENDOR_GO_SUM: &str = "\
 github.com/alexflint/go-arg v1.6.1 h1:uZogJ6VDBjcuosydKgvYYRhh9sRCusjOvoOLZopBlnA=
@@ -10496,6 +10470,7 @@ fn check_go_mod(text: &str) -> Result<(), String> {
         "github.com/alexflint/go-scalar v1.2.0",
         "github.com/bits-and-blooms/bitset v1.24.4",
         "github.com/failsafe-go/failsafe-go v0.9.8",
+        "github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper v0.0.0",
         "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper v0.0.0",
         "github.com/pelletier/go-toml/v2 v2.2.4",
         "github.com/ulikunitz/xz v0.5.17",

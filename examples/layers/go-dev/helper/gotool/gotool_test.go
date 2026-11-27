@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/closure"
 )
 
 func testTarget(t *testing.T) Target {
@@ -362,5 +364,96 @@ func TestRemoveTreeReportsWhatItCannotRemove(t *testing.T) {
 	if !strings.Contains(err.Error(), scratch) || !strings.Contains(err.Error(),
 		"could not remove the invocation scratch tree") {
 		t.Fatalf("the diagnostic does not name the retained tree: %v", err)
+	}
+}
+
+// TestResolutionCommandsAreWriterOnly holds the two command lists apart: the image's
+// program can name no resolution verb, the writer can name no build or reader beyond
+// the ones it shares, and neither list is empty. Deleting either side is what this
+// test fails on.
+func TestResolutionCommandsAreWriterOnly(t *testing.T) {
+	closed := map[string]struct{}{}
+	for _, command := range Commands() {
+		closed[command.Name()] = struct{}{}
+	}
+	resolution := ResolutionCommands()
+	if len(resolution) != 6 {
+		t.Fatalf("%d resolution commands, want 6", len(resolution))
+	}
+	for _, command := range resolution {
+		if _, shared := closed[command.Name()]; shared {
+			t.Fatalf("%s is in both the closed set and the writer-only set", command.Name())
+		}
+	}
+	for _, want := range []string{"GetTool", "ModDownloadJSON", "ModEdit", "ModTidy",
+		"ModVerify", "ModTidyDiff"} {
+		found := false
+		for _, command := range resolution {
+			if command.Name() == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("the writer-only set is missing %s", want)
+		}
+	}
+	for name, argv := range map[string]string{
+		"GetTool":         "get -tool",
+		"ModDownloadJSON": "mod download -json",
+		"ModEdit":         "mod edit",
+		"ModTidy":         "mod tidy",
+		"ModVerify":       "mod verify",
+		"ModTidyDiff":     "mod tidy -diff",
+	} {
+		for _, command := range resolution {
+			if command.Name() == name && strings.Join(command.Argv(), " ") != argv {
+				t.Fatalf("%s argv %q, want %q", name, strings.Join(command.Argv(), " "), argv)
+			}
+		}
+	}
+}
+
+// TestResolutionEnvironmentIsTheChildEnvironmentMinusTheTarget: the writer resolves
+// for the host with two overlays, and every other key is the build environment's own.
+func TestResolutionEnvironmentIsTheChildEnvironmentMinusTheTarget(t *testing.T) {
+	paths := testPaths(t)
+	environment, err := Offline().ResolutionEnv("/opt/go/bin/go", paths, "go1.27.3", nil)
+	if err != nil {
+		t.Fatalf("ResolutionEnv: %v", err)
+	}
+	values := map[string]string{}
+	keys := []string{}
+	for _, entry := range environment {
+		key, value, found := strings.Cut(entry, "=")
+		if !found {
+			t.Fatalf("entry %q is not KEY=value", entry)
+		}
+		keys = append(keys, key)
+		values[key] = value
+	}
+	want := []string{}
+	for _, key := range childEnvironmentKeys {
+		if key != "GOOS" && key != "GOARCH" {
+			want = append(want, key)
+		}
+	}
+	if strings.Join(keys, ",") != strings.Join(want, ",") {
+		t.Fatalf("keys %v, want %v", keys, want)
+	}
+	if values["GOFLAGS"] != "-mod=mod" || values["GOTOOLCHAIN"] != "go1.27.3" {
+		t.Fatalf("the resolution overlays are %q and %q", values["GOFLAGS"],
+			values["GOTOOLCHAIN"])
+	}
+	if values["GOPROXY"] != "off" || values["GOSUMDB"] != closure.SumDB {
+		t.Fatalf("the origin is %q with sumdb %q", values["GOPROXY"], values["GOSUMDB"])
+	}
+	if values["PATH"] != "/opt/go/bin:"+imagePath {
+		t.Fatalf("PATH is %q", values["PATH"])
+	}
+	// The transport rule is the build environment's: a GO* key is refused.
+	if _, err := Offline().ResolutionEnv("/opt/go/bin/go", paths, "go1.27.3",
+		map[string]string{"GOOS": "linux"}); err == nil ||
+		!strings.Contains(err.Error(), "GOOS is not a reviewed transport key") {
+		t.Fatalf("a GO* key was accepted as transport: %v", err)
 	}
 }

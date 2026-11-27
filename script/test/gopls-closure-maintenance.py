@@ -7,7 +7,11 @@ set and a test-owned ``python3`` launcher (first on the writer's PATH) imports t
 real updater and supplies that origin. The publication transaction, its rollback,
 the refusal rules and the signal states are the shipped code.
 
-The whole tree runs inside the same OS boundary as the pins suite: the suite
+Since #252 the stager's replacement exists as a direct verb (`avm-pin gopls stage`), and
+`script/test/gopls-stage-parity.py` compares the two over the synthetic fixture and, with
+`--same-release`, over the reviewed release. This suite keeps driving the *shell* writer,
+because that is what publishes the checkout until #253; its staging rows are the Python
+stager's own faults, not the Go verb's. The whole tree runs inside the same OS boundary as the pins suite: the suite
 re-execs itself with an explicit inventory of the executables the writer's children
 need (bash, its coreutils, the pinned Go and its own tools, the test-owned
 ``python3`` shim), and the guard then refuses anything outside it. A native grandchild

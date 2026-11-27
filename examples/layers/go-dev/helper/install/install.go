@@ -73,7 +73,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper/buildinfo"
@@ -278,27 +277,15 @@ func Install(data *closure.Data, target Target, options Options) (*Installed, er
 	if err != nil {
 		return nil, err
 	}
-	if err := installed.RequirePinnedCompiler(env, work, data.Pin.Go, target.goal(),
-		runner); err != nil {
-		return nil, err
-	}
 	out := pathjoin.Join(pathjoin.Join(paths.Scratch, "out"), "gopls")
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		return nil, fmt.Errorf("cannot create %s: %v", filepath.Dir(out), err)
 	}
-	if err := build(env, work, out, runner); err != nil {
-		return nil, err
-	}
-	raw, err := installed.ReadBuildInfo(env, work, out, runner)
-	if err != nil {
-		return nil, err
-	}
-	info, err := buildinfo.Parse([]byte(raw))
-	if err != nil {
-		return nil, err
-	}
-	if err := buildinfo.Verify(installed.Selection(data), info, target.Arch,
-		data.Pin.Go); err != nil {
+	// The compiler proof, the one build and the build-info proof are one owner:
+	// the maintainer stager compiles each Linux target through the same call, so
+	// the reviewed flags and the identity check cannot differ between them (#252).
+	if err := Build(env, work, out, target.goal(), installed.Selection(data), data.Pin.Go,
+		runner); err != nil {
 		return nil, err
 	}
 	if err := verifyModuleNotices(data, paths.ModuleCache()); err != nil {
@@ -315,6 +302,35 @@ func Install(data *closure.Data, target Target, options Options) (*Installed, er
 	}
 	return &Installed{Release: data.Pin.Gopls, Binary: published.binary,
 		Notice: published.notice}, nil
+}
+
+// Build proves the pinned compiler, runs the one readonly build and proves the result
+// from its own build information. It is the whole compile contract of this
+// repository's go programs: `install` publishes what it produced, and the maintainer
+// stager (`avm-pin gopls stage`, #252) inspects the two Linux cross-builds and
+// publishes nothing. Splitting the flags, the compiler proof or the identity check
+// into a second copy is what this function exists to prevent.
+//
+// dir must hold the canonical wrapper go.mod/go.sum the build compiles from; the
+// caller copies verified bytes or writes the staged candidate there. Nothing is
+// published here.
+func Build(env []string, dir, out string, target gotool.Target, selection []buildinfo.Module,
+	compiler closure.GoVersion, runner gotool.Runner) error {
+	if err := installed.RequirePinnedCompiler(env, dir, compiler, target, runner); err != nil {
+		return err
+	}
+	if err := build(env, dir, out, runner); err != nil {
+		return err
+	}
+	raw, err := installed.ReadBuildInfo(env, dir, out, runner)
+	if err != nil {
+		return err
+	}
+	info, err := buildinfo.Parse([]byte(raw))
+	if err != nil {
+		return err
+	}
+	return buildinfo.Verify(selection, info, target.Arch, compiler)
 }
 
 // build is the one readonly build this program makes: the reviewed flags, the root
@@ -586,11 +602,6 @@ func verifiedFile(data *closure.Data, name closure.Filename) ([]byte, error) {
 	return raw, nil
 }
 
-// noticeName is the reviewed notice-file name set, read from the one constant the
-// loader validates its evidence with (closure.NoticeNamePattern) rather than a second
-// regular expression kept in step by hand.
-var noticeName = regexp.MustCompile(closure.NoticeNamePattern)
-
 // verifyModuleNotices proves the notice bytes the build used are the committed ones.
 //
 // The loader proves the committed framing, identity and digest; the cache is new
@@ -604,9 +615,8 @@ func verifyModuleNotices(data *closure.Data, moduleCache string) error {
 	}
 	actual := map[string][]byte{}
 	for _, module := range data.Pin.Modules {
-		directory := pathjoin.Join(moduleCache,
-			escapeModule(string(module.ID.Path))+"@"+escapeModule(string(module.ID.Version)))
-		found, err := collectNotices(directory, module.ID)
+		found, err := closure.CollectNotices(
+			closure.ModuleCacheDirectory(moduleCache, module.ID), module.ID)
 		if err != nil {
 			return err
 		}
@@ -634,61 +644,4 @@ func verifyModuleNotices(data *closure.Data, moduleCache string) error {
 // sectionKey is one notice's identity in the evidence and in the cache.
 func sectionKey(id closure.ModuleID, name closure.NoticePath) string {
 	return string(id.Path) + " " + string(id.Version) + " " + string(name)
-}
-
-// collectNotices is the notice files of one module cache directory, by canonical
-// relative path. A module directory that is not there is missing evidence, never an
-// empty set.
-func collectNotices(directory string, module closure.ModuleID) (map[closure.NoticePath][]byte,
-	error) {
-	info, err := os.Stat(directory)
-	if err != nil || !info.IsDir() {
-		return nil, fmt.Errorf("license evidence missing for %s: the cache has no %s",
-			module, directory)
-	}
-	found := map[closure.NoticePath][]byte{}
-	err = filepath.WalkDir(directory, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%s: unsupported license layout; a notice path is a symlink",
-				module)
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		if !noticeName.MatchString(entry.Name()) {
-			return nil
-		}
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		relative, err := filepath.Rel(directory, path)
-		if err != nil {
-			return err
-		}
-		found[closure.NoticePath(filepath.ToSlash(relative))] = raw
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return found, nil
-}
-
-// escapeModule is the module cache's spelling of a module path or a version: an
-// uppercase letter is written as `!` followed by its lowercase form.
-func escapeModule(text string) string {
-	var builder strings.Builder
-	for _, character := range text {
-		if character >= 'A' && character <= 'Z' {
-			builder.WriteByte('!')
-			builder.WriteRune(character - 'A' + 'a')
-			continue
-		}
-		builder.WriteRune(character)
-	}
-	return builder.String()
 }

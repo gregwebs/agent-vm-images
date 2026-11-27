@@ -1,29 +1,39 @@
-// Package vendordrift is the gate over the copy of the rust-dev example's helper
-// module that the root module commits in vendor/ (slice 4a of #187).
+// Package vendordrift is the gate over the copies of the example layers' helper
+// modules that the root module commits in vendor/.
 //
-// After slice 4a two copies of that source exist: the layer module, which the
-// image's `golang:` stage compiles, and the copy inside the root `vendor/` tree,
-// which `avm-pin rust-toolchain` links. Editing one and not the other changes a
-// binary silently -- the image would install one writer and the maintainer would
-// run another -- so this gate compares them byte for byte.
+// Each linked example layer has two copies of its source: the layer module, which the
+// image's `golang:` stage compiles, and the copy inside the root `vendor/` tree, which
+// `avm-pin` links. Editing one and not the other changes a binary silently -- the image
+// would install one writer and the maintainer would run another -- so this gate compares
+// them byte for byte. The rust-dev link arrived in slice 4a of #187; the go-dev link
+// arrived with `avm-pin gopls` (#252), and the same facts are checked for both.
 //
 // Why it compares an *imported package closure* and not "the whole tree": Go's
 // vendoring copies only the packages the main module imports, and only their
-// non-test files. `main.go`, the kache probe package, `internal/fetch` and every
-// `_test.go` are therefore legitimately absent from `vendor/`. A whole-tree
-// comparison would be red on its first run, and the two ways to silence it -- a
-// hand-written exemption list, or copying the whole tree -- are both a second
-// authority that rots. So the closure itself is derived and asserted, and the
-// files inside it are compared in both directions.
+// non-test files. `main.go`, the kache probe package, `internal/fetch`, the fixture
+// seams and every `_test.go` are therefore legitimately absent from `vendor/`. A
+// whole-tree comparison would be red on its first run, and the two ways to silence it
+// -- a hand-written exemption list, or copying the whole tree -- are both a second
+// authority that rots. So each closure is derived and asserted, and the files inside
+// it are compared in both directions.
 //
 // It runs offline, and it asserts that it did: `go list -deps` is asked under
 // `GOFLAGS=-mod=vendor GOPROXY=off`, `go env GOPROXY` is read back inside that
-// environment, and every module dependency in the resulting closure must live
-// under `vendor/`. That last assertion is what makes "no module cache" real: a
-// package resolved from a cache would carry the cache's directory, not the
-// committed copy. (The empty-GOMODCACHE form does not work here: the toolchain
-// switch that go.mod's `toolchain` line selects is itself a module, and with no
-// cache and no proxy it cannot resolve at all.)
+// environment, and every module dependency in the resulting closure must live under
+// `vendor/`. That last assertion is what makes "no module cache" real: a package
+// resolved from a cache would carry the cache's directory, not the committed copy.
+// (The empty-GOMODCACHE form does not work here: the toolchain switch that go.mod's
+// `toolchain` line selects is itself a module, and with no cache and no proxy it
+// cannot resolve at all.)
+//
+// The gate also measures ADR 0017's link 5 offline: for every requirement a helper
+// module's own `go.mod` names, the root `go.mod` must require the same version, so
+// minimal version selection in the root cannot raise a version and compile the writer
+// against a library the layer's build never selects. `script/test/example-layers.sh`
+// states the same rule in shell, which ADR 0017 names as link 5's home and whose
+// self-test rows mutate the `go.mod` files of a synthetic tree that has no root module
+// for this gate to read. The two are measurements of one fact from two harnesses, not
+// two owners: this one runs in the guard-only mode, where the shell gate cannot.
 package vendordrift
 
 import (
@@ -36,37 +46,75 @@ import (
 	"strings"
 )
 
-// HelperModule is the example layer's own module. It is the one committed record
-// of which module this gate is about; the packages inside it are derived. It sits
-// under the main module's path, which is why the main module's own packages are
-// excluded from the vendor-residency assertion below and this one is not.
+// MainModule is the module that builds `avm-pin`.
+const MainModule = "github.com/gregwebs/agent-vm-images"
+
+// Module is one example layer's helper module: the path the writer imports and the
+// directory the layer compiles, relative to the repository root in slash form.
+type Module struct {
+	Path      string
+	Directory string
+}
+
+// Modules is the one committed record of which modules this gate is about; the
+// packages inside each are derived. Each sits under the main module's path, which is
+// why the main module's own packages are excluded from the vendor-residency assertion
+// below and these are not.
+var Modules = []Module{
+	{Path: MainModule + "/examples/layers/go-dev/helper",
+		Directory: "examples/layers/go-dev/helper"},
+	{Path: MainModule + "/examples/layers/rust-dev/helper",
+		Directory: "examples/layers/rust-dev/helper"},
+}
+
+// HelperModule is the rust-dev module, named by the shell gate the rust-dev slice
+// introduced. It is the second entry of Modules; nothing below keys off it.
+const HelperModule = MainModule + "/examples/layers/rust-dev/helper"
+
+// Floors below which a green result is not believable. Each module's derivation must
+// reach the packages its writer actually imports -- the go-dev closure and its
+// installer stack, the rust-dev toolchain and its decoders -- so a walk that returns
+// nothing, or almost nothing, is red rather than a clean comparison over an empty set.
 const (
-	HelperModule = "github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper"
-	MainModule   = "github.com/gregwebs/agent-vm-images"
+	MinFiles = 20
+	// MinClosurePackages is the floor for the whole import graph `go list` reports, so
+	// a command that returned nothing cannot look like a small module.
+	MinClosurePackages = 20
+	// MinSharedRequirements is the floor for the link-5 comparison: the root module
+	// shares at least two requirements with each helper. A comparison over nothing is
+	// not a pass.
+	MinSharedRequirements = 3
 )
 
-// MinPackages and MinFiles are the floor below which a green result is not
-// believable: the writer reaches at least the toolchain package, the gpg verifier
-// and the strict decoders. A derivation that returns nothing must be red.
-const (
-	MinPackages = 3
-	MinFiles    = 10
-	// MinClosurePackages is the floor for the whole import graph `go list`
-	// reports, so a command that returned nothing cannot look like a small module.
-	MinClosurePackages = 10
-)
+// MinPackages is the per-module package floor.
+var MinPackages = map[string]int{
+	MainModule + "/examples/layers/go-dev/helper":   5,
+	MainModule + "/examples/layers/rust-dev/helper": 3,
+}
 
-// Report is what one run derived, so a test can hold the derivation itself and
-// not only the comparison.
+// ModuleReport is what one run derived for one module.
+type ModuleReport struct {
+	Module      Module
+	Imported    []string
+	Vendored    []string
+	Replacement string
+	Files       int
+}
+
+// Report is what one run derived, so a test can hold the derivation itself and not
+// only the comparison.
 type Report struct {
-	Imported []string
-	Vendored []string
-	Files    int
+	Modules []ModuleReport
+	// Files is every file compared across all modules.
+	Files int
 	// Proxy is what `go env GOPROXY` reported inside the gate's own environment.
 	Proxy string
-	// VendorOnly is every module dependency in the closure resolved to a file
-	// under vendor/, so nothing came from a module cache.
+	// VendorOnly is every module dependency in the closure resolved to a file under
+	// vendor/, so nothing came from a module cache.
 	VendorOnly bool
+	// Shared is every requirement the root and a helper module share, compared at one
+	// version.
+	Shared int
 }
 
 // Options are the two knobs a test needs. Production takes DefaultOptions.
@@ -77,7 +125,7 @@ type Options struct {
 	Go func(root string, environment []string, args ...string) ([]byte, error)
 }
 
-// Check derives the closure, asserts it, and compares every file in it.
+// Check derives each module's closure, asserts it, and compares every file in it.
 func Check(options Options) (Report, error) {
 	var report Report
 	if options.Root == "" {
@@ -89,16 +137,6 @@ func Check(options Options) (Report, error) {
 	// under either) would otherwise be compared against itself and reported as
 	// "not under vendor/". See canonical.
 	root := canonical(options.Root)
-	vendored, layerDir, err := vendoredPackages(root)
-	if err != nil {
-		return report, err
-	}
-	report.Vendored = vendored
-	if len(vendored) < MinPackages {
-		return report, fmt.Errorf("vendordrift: derived %d vendored %s packages, want at least %d: "+
-			"the derivation is not looking at the module", len(vendored), HelperModule,
-			MinPackages)
-	}
 	environment := OfflineEnvironment()
 	proxy, err := proxyInEffect(root, environment, options.Go)
 	if err != nil {
@@ -108,7 +146,11 @@ func Check(options Options) (Report, error) {
 	if report.Proxy != "off" {
 		return report, fmt.Errorf("vendordrift: the run is not offline (GOPROXY=%q)", report.Proxy)
 	}
-	imported, vendorOnly, err := importedPackages(root, environment, options.Go)
+	closure, vendored, err := vendoredPackages(root)
+	if err != nil {
+		return report, err
+	}
+	vendorOnly, importedModules, err := importedPackages(root, environment, options.Go)
 	if err != nil {
 		return report, err
 	}
@@ -117,32 +159,56 @@ func Check(options Options) (Report, error) {
 		return report, fmt.Errorf("vendordrift: the closure is not entirely under vendor/, so the " +
 			"gate is not reading the committed tree")
 	}
-	report.Imported = imported
-	if len(imported) < MinPackages {
-		return report, fmt.Errorf("vendordrift: the writer's import graph names %d %s packages, "+
-			"want at least %d", len(imported), HelperModule, MinPackages)
-	}
-	if problem := compareSets(report.Imported, report.Vendored); problem != "" {
-		return report, fmt.Errorf("vendordrift: %s", problem)
-	}
-	for _, pkg := range report.Vendored {
-		relative := strings.TrimPrefix(strings.TrimPrefix(pkg, HelperModule), "/")
-		differences, files, err := ComparePackageDirectories(
-			filepath.Join(layerDir, filepath.FromSlash(relative)),
-			filepath.Join(root, "vendor", filepath.FromSlash(pkg)))
-		report.Files += files
-		if err != nil {
-			return report, fmt.Errorf("vendordrift: %s: %w", pkg, err)
+	for _, module := range Modules {
+		packages, present := vendored[module.Path]
+		if !present {
+			return report, fmt.Errorf("vendordrift: vendor/modules.txt records no packages for %s",
+				module.Path)
 		}
-		if len(differences) > 0 {
-			return report, fmt.Errorf("vendordrift: the vendored copy of %s is stale:\n  %s\n"+
-				"run `go mod vendor` in a clean checkout and commit the result",
-				pkg, strings.Join(differences, "\n  "))
+		imported := importedModules[module.Path]
+		floor := MinPackages[module.Path]
+		if len(packages) < floor {
+			return report, fmt.Errorf("vendordrift: derived %d vendored %s packages, want at least "+
+				"%d: the derivation is not looking at the module", len(packages), module.Path, floor)
 		}
+		// No second floor on the imported set: set equality below and the vendored floor
+		// above already decide it, and a second check for one fact is not a witness.
+		if problem := compareSets(imported, packages); problem != "" {
+			return report, fmt.Errorf("vendordrift: %s", problem)
+		}
+		layerDir := filepath.Join(root, filepath.FromSlash(module.Directory))
+		entry := ModuleReport{Module: module, Imported: imported, Vendored: packages,
+			Replacement: closure[module.Path]}
+		for _, pkg := range packages {
+			relative := strings.TrimPrefix(strings.TrimPrefix(pkg, module.Path), "/")
+			differences, files, err := ComparePackageDirectories(
+				filepath.Join(layerDir, filepath.FromSlash(relative)),
+				filepath.Join(root, "vendor", filepath.FromSlash(pkg)))
+			entry.Files += files
+			report.Files += files
+			if err != nil {
+				return report, fmt.Errorf("vendordrift: %s: %w", pkg, err)
+			}
+			if len(differences) > 0 {
+				return report, fmt.Errorf("vendordrift: the vendored copy of %s is stale:\n  %s\n"+
+					"run `go mod vendor` in a clean checkout and commit the result",
+					pkg, strings.Join(differences, "\n  "))
+			}
+		}
+		report.Modules = append(report.Modules, entry)
 	}
 	if report.Files < MinFiles {
 		return report, fmt.Errorf("vendordrift: compared %d files, want at least %d",
 			report.Files, MinFiles)
+	}
+	shared, err := sharedRequirements(root)
+	if err != nil {
+		return report, err
+	}
+	report.Shared = shared
+	if report.Shared < MinSharedRequirements {
+		return report, fmt.Errorf("vendordrift: compared %d shared requirements, want at least %d",
+			report.Shared, MinSharedRequirements)
 	}
 	return report, nil
 }
@@ -183,7 +249,9 @@ func proxyInEffect(root string, environment []string, run func(string, []string,
 
 // ComparePackageDirectories compares every file in two package directories, in
 // both directions, and returns one line per difference. `_test.go` files are
-// skipped because vendor never carries them, and that is the only exclusion.
+// skipped because vendor never carries them, and that is the only exclusion --
+// platform-tagged and ignored-by-this-host files are compared like any other, so a
+// `_windows.go` edit in the layer and not in vendor is drift here.
 func ComparePackageDirectories(layerDir, vendorDir string) ([]string, int, error) {
 	layer, err := packageFiles(layerDir)
 	if err != nil {
@@ -260,15 +328,15 @@ func packageFiles(directory string) (map[string][]byte, error) {
 }
 
 // vendoredPackages reads the committed build record: vendor/modules.txt names the
-// packages the build compiles from the helper module, and the local directory the
+// packages the build compiles for each helper module, and the local directory the
 // module was replaced with.
-func vendoredPackages(root string) ([]string, string, error) {
+func vendoredPackages(root string) (map[string]string, map[string][]string, error) {
 	raw, err := os.ReadFile(filepath.Join(root, "vendor", "modules.txt"))
 	if err != nil {
-		return nil, "", fmt.Errorf("vendordrift: %w", err)
+		return nil, nil, fmt.Errorf("vendordrift: %w", err)
 	}
-	packages := []string{}
-	local := ""
+	packages := map[string][]string{}
+	replacements := map[string]string{}
 	module := ""
 	for _, line := range strings.Split(string(raw), "\n") {
 		if strings.HasPrefix(line, "# ") {
@@ -276,7 +344,7 @@ func vendoredPackages(root string) ([]string, string, error) {
 			module = fields[0]
 			if rest := strings.TrimSpace(strings.Join(fields[1:], " ")); rest != "" {
 				if _, replacement, found := strings.Cut(rest, "=>"); found {
-					local = strings.TrimSpace(replacement)
+					replacements[module] = strings.TrimSpace(replacement)
 				}
 			}
 			continue
@@ -284,33 +352,37 @@ func vendoredPackages(root string) ([]string, string, error) {
 		if strings.HasPrefix(line, "## ") || line == "" {
 			continue
 		}
-		if module == HelperModule {
-			packages = append(packages, line)
+		packages[module] = append(packages[module], line)
+	}
+	for _, helper := range Modules {
+		local, present := replacements[helper.Path]
+		if !present {
+			return nil, nil, fmt.Errorf("vendordrift: vendor/modules.txt has no local replacement "+
+				"for %s", helper.Path)
 		}
+		if want := "./" + helper.Directory; local != want {
+			return nil, nil, fmt.Errorf("vendordrift: %s is replaced with %s, want %s", helper.Path,
+				local, want)
+		}
+		sort.Strings(packages[helper.Path])
 	}
-	if local == "" {
-		return nil, "", fmt.Errorf("vendordrift: vendor/modules.txt has no local replacement for %s",
-			HelperModule)
-	}
-	layerDir := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(local, "./")))
-	sort.Strings(packages)
-	return packages, layerDir, nil
+	return replacements, packages, nil
 }
 
-// importedPackages is the writer's own import graph: this module's packages in
+// importedPackages is the writer's own import graph: each helper module's packages in
 // it, and whether every other module dependency resolved under vendor/.
 func importedPackages(root string, environment []string, run func(string, []string,
-	...string) ([]byte, error)) ([]string, bool, error) {
+	...string) ([]byte, error)) (bool, map[string][]string, error) {
 	if run == nil {
 		run = goCommand
 	}
 	raw, err := run(root, environment, "list", "-deps", "-f",
 		"{{.ImportPath}}\t{{.Dir}}", "./cmd/avm-pin")
 	if err != nil {
-		return nil, false, fmt.Errorf("vendordrift: go list: %w", err)
+		return false, nil, fmt.Errorf("vendordrift: go list: %w", err)
 	}
 	vendorRoot := filepath.Join(root, "vendor") + string(filepath.Separator)
-	imported := []string{}
+	imported := map[string][]string{}
 	vendorOnly := true
 	seen := 0
 	for _, line := range strings.Split(string(raw), "\n") {
@@ -319,11 +391,13 @@ func importedPackages(root string, environment []string, run func(string, []stri
 			continue
 		}
 		seen++
-		if path == HelperModule || strings.HasPrefix(path, HelperModule+"/") {
-			imported = append(imported, path)
+		for _, helper := range Modules {
+			if path == helper.Path || strings.HasPrefix(path, helper.Path+"/") {
+				imported[helper.Path] = append(imported[helper.Path], path)
+			}
 		}
 		if !isModulePath(path) || strings.HasPrefix(path, MainModule+"/") &&
-			!strings.HasPrefix(path, HelperModule) {
+			!isHelperPackage(path) {
 			continue
 		}
 		if !strings.HasPrefix(canonical(directory), vendorRoot) {
@@ -331,11 +405,103 @@ func importedPackages(root string, environment []string, run func(string, []stri
 		}
 	}
 	if seen < MinClosurePackages {
-		return nil, false, fmt.Errorf("vendordrift: go list named %d packages, want at least %d",
+		return false, nil, fmt.Errorf("vendordrift: go list named %d packages, want at least %d",
 			seen, MinClosurePackages)
 	}
-	sort.Strings(imported)
-	return imported, vendorOnly, nil
+	for _, helper := range Modules {
+		sort.Strings(imported[helper.Path])
+	}
+	return vendorOnly, imported, nil
+}
+
+// isHelperPackage reports whether a package path belongs to one of the helper modules.
+func isHelperPackage(path string) bool {
+	for _, helper := range Modules {
+		if path == helper.Path || strings.HasPrefix(path, helper.Path+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// sharedRequirements is ADR 0017's link 5, measured at the gate: every requirement a
+// helper module names must be required at the same version by the root module, so MVS
+// in the root cannot raise a version and compile the writer against a library the
+// layer's own build never selects. It returns how many pairs it compared.
+func sharedRequirements(root string) (int, error) {
+	rootPins, err := modulePins(filepath.Join(root, "go.mod"))
+	if err != nil {
+		return 0, err
+	}
+	compared := 0
+	for _, helper := range Modules {
+		helperPins, err := modulePins(filepath.Join(root, filepath.FromSlash(helper.Directory),
+			"go.mod"))
+		if err != nil {
+			return 0, err
+		}
+		// The link itself: the root requires the module at v0.0.0, and the local
+		// replacement is checked with the vendored record above.
+		if version, present := rootPins[helper.Path]; !present || version != "v0.0.0" {
+			return 0, fmt.Errorf("vendordrift: the root go.mod must require %s at v0.0.0, found %q",
+				helper.Path, version)
+		}
+		paths := make([]string, 0, len(helperPins))
+		for path := range helperPins {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		for _, path := range paths {
+			rootVersion, present := rootPins[path]
+			if !present {
+				continue
+			}
+			if rootVersion != helperPins[path] {
+				return 0, fmt.Errorf("vendordrift: the two go.mod files require different versions "+
+					"of a shared module: %s is %s in %s and %s in the root", path,
+					helperPins[path], helper.Path, rootVersion)
+			}
+			compared++
+		}
+	}
+	return compared, nil
+}
+
+// modulePins reads one go.mod's requirements, both the block form and the one-line
+// form. An unreadable or empty go.mod is a refusal: a link-5 comparison over nothing is
+// not a pass.
+func modulePins(path string) (map[string]string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("vendordrift: %w", err)
+	}
+	pins := map[string]string{}
+	inBlock := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		switch {
+		case fields[0] == "require" && len(fields) == 2 && fields[1] == "(":
+			inBlock = true
+			continue
+		case inBlock && fields[0] == ")":
+			inBlock = false
+			continue
+		case inBlock:
+			if len(fields) >= 2 {
+				pins[fields[0]] = fields[1]
+			}
+			continue
+		case fields[0] == "require" && len(fields) >= 3:
+			pins[fields[1]] = fields[2]
+		}
+	}
+	if len(pins) == 0 {
+		return nil, fmt.Errorf("vendordrift: %s records no requirements to compare", path)
+	}
+	return pins, nil
 }
 
 // isModulePath reports whether a package path is a third-party module's: a first

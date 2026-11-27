@@ -79,11 +79,13 @@ nothing any gate sees, and binding source bytes for a product image is
    same version, so MVS cannot raise a version in the root and make `avm-pin`
    link a different decoder than the image compiles.
 
-`rust-dev` satisfies all five because the root module imports its helper. The
-`go-dev` layer's helper (`#249`) is self-contained and *not* linked into the root
-module yet, so it satisfies 1–4 and has no root `require`/`replace` to check; the
-link arrives with the writer that imports it (`#252`), and link 5 then applies to
-it too. One shell function, `check_helper_stage` in
+Both helpers satisfy all five. `rust-dev` has since slice 4a of #232, whose writer
+imports it. The `go-dev` layer's helper was deliberately self-contained while only the
+reader existed (`#249`); `#252`'s writer imports its `closure` package, so the root now
+carries the same `require v0.0.0` + local `replace`, link 5 applies to it too, and
+`internal/vendordrift` compares both copies byte for byte and states link 5 offline for
+both modules — the shell gate below states it as well, which is one fact measured from
+two harnesses (the Go one also runs in `--guard-only`, where this shell gate does not). One shell function, `check_helper_stage` in
 `script/test/example-layers.sh`, holds 1–3 for both layers rather than one copy
 each.
 
@@ -121,6 +123,20 @@ acceptable only because `avm-pin` never ships.
 against the Go program and is the oracle. Output text is frozen only where a
 consumer parses it. ADR 0004's byte-level differential parity is not required
 for new ports.
+
+**A ported staging writer is writer-only code.** `avm-pin gopls` (#252) stages the
+go-dev closure the way `avm-pin rust-toolchain` stages the rust-dev one, with one
+difference that matters: the *resolution* commands (`go get -tool`, `mod download`,
+`mod edit`, `mod tidy`, `mod verify`, `mod tidy -diff`) and the host/toolchain overlay
+that makes them correct live in `internal/goplsstage`, which is never compiled into the
+image, not in the layer's `closure` package. The layer holds what both sides must agree
+on — the canonical wrapper, both sums, the adoption restriction, the notice layout, the
+signature projection and the record's write shape — and the writer calls it before its
+first cross-build rather than re-deriving a selection of its own. The two offline
+Linux builds and their build-info proof are `install.Build`, the same call the image's
+`install` makes, so a flag cannot differ between them. The fixture origin is a build
+tag, not a flag, for the reason D1 gives — the stager's suite drives a
+`-tags example_fixture` binary and the shipped one has no grammar for it.
 
 **A ported reader has two implementations until the Python is deleted.** The
 go-dev example is in that state for its reader (`#249`): `go-dev-helper check`

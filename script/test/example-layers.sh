@@ -31,7 +31,7 @@ GUARDED='chrome-devtools/agent-vm-chrome-mcp chrome-devtools/chrome-devtools-mcp
 # listed file that vanishes fails as `guarded script missing`, and a `.go` file
 # nobody listed fails as `unreviewed helper file`. The vendor tree is deliberately
 # out of this list: its bytes belong to the module's vendor drift gate.
-GUARDED_GO='rust-dev/helper/go.mod rust-dev/helper/go.sum rust-dev/helper/main.go rust-dev/helper/main_test.go rust-dev/helper/imports_test.go rust-dev/helper/seams_fixture.go rust-dev/helper/seams_shipped.go rust-dev/helper/seams_test.go rust-dev/helper/kacheprobe/probe.go rust-dev/helper/kacheprobe/probe_test.go rust-dev/helper/internal/gpg/gpg.go rust-dev/helper/internal/gpg/gpg_test.go rust-dev/helper/internal/strictjson/decode.go rust-dev/helper/internal/strictjson/decode_test.go rust-dev/helper/toolchain/toolchain.go rust-dev/helper/toolchain/policy.go rust-dev/helper/toolchain/types.go rust-dev/helper/toolchain/refusal.go rust-dev/helper/toolchain/decode.go rust-dev/helper/toolchain/pin.go rust-dev/helper/toolchain/inputs.go rust-dev/helper/toolchain/manifest.go rust-dev/helper/toolchain/installed.go rust-dev/helper/toolchain/commands.go rust-dev/helper/toolchain/types_test.go rust-dev/helper/toolchain/decode_test.go rust-dev/helper/toolchain/pin_test.go rust-dev/helper/toolchain/manifest_test.go rust-dev/helper/toolchain/installed_test.go rust-dev/helper/toolchain/fuzz_test.go rust-dev/helper/toolchain/events.go rust-dev/helper/toolchain/preflight.go rust-dev/helper/toolchain/prepare.go rust-dev/helper/toolchain/install.go rust-dev/helper/toolchain/stage.go rust-dev/helper/toolchain/stage_test.go rust-dev/helper/toolchain/preflight_test.go rust-dev/helper/toolchain/prepare_test.go rust-dev/helper/toolchain/install_test.go rust-dev/helper/toolchain/fuzz_install_test.go rust-dev/helper/helpers_test.go rust-dev/helper/internal/fetch/fetch.go rust-dev/helper/internal/fetch/loopback_fixture.go rust-dev/helper/internal/fetch/fetch_test.go rust-dev/helper/internal/fetch/loopback_fixture_test.go rust-dev/helper/internal/tarwalk/tarwalk.go rust-dev/helper/internal/tarwalk/tarwalk_test.go go-dev/helper/go.mod go-dev/helper/go.sum go-dev/helper/main.go go-dev/helper/main_test.go go-dev/helper/closure/constants.go go-dev/helper/closure/document.go go-dev/helper/closure/gomods.go go-dev/helper/closure/gosum.go go-dev/helper/closure/grammar_test.go go-dev/helper/closure/helpers_test.go go-dev/helper/closure/inputs_test.go go-dev/helper/closure/licenses.go go-dev/helper/closure/load.go go-dev/helper/closure/model_test.go go-dev/helper/closure/notice_test.go go-dev/helper/closure/pin.go go-dev/helper/buildinfo/buildinfo.go go-dev/helper/buildinfo/buildinfo_test.go go-dev/helper/gotool/exec.go go-dev/helper/gotool/gotool.go go-dev/helper/gotool/gotool_test.go go-dev/helper/install/install.go go-dev/helper/install/install_test.go go-dev/helper/seams_fixture.go go-dev/helper/seams_shipped.go go-dev/helper/seams_test.go go-dev/helper/installed/installed.go go-dev/helper/installed/installed_test.go go-dev/helper/closure/source.go go-dev/helper/closure/values.go go-dev/helper/internal/pathjoin/pathjoin.go go-dev/helper/internal/pathjoin/pathjoin_test.go go-dev/helper/internal/strictjson/decode.go go-dev/helper/internal/strictjson/decode_test.go go-dev/helper/internal/strictjson/drift_test.go'
+GUARDED_GO='rust-dev/helper/go.mod rust-dev/helper/go.sum rust-dev/helper/main.go rust-dev/helper/main_test.go rust-dev/helper/imports_test.go rust-dev/helper/seams_fixture.go rust-dev/helper/seams_shipped.go rust-dev/helper/seams_test.go rust-dev/helper/kacheprobe/probe.go rust-dev/helper/kacheprobe/probe_test.go rust-dev/helper/internal/gpg/gpg.go rust-dev/helper/internal/gpg/gpg_test.go rust-dev/helper/internal/strictjson/decode.go rust-dev/helper/internal/strictjson/decode_test.go rust-dev/helper/toolchain/toolchain.go rust-dev/helper/toolchain/policy.go rust-dev/helper/toolchain/types.go rust-dev/helper/toolchain/refusal.go rust-dev/helper/toolchain/decode.go rust-dev/helper/toolchain/pin.go rust-dev/helper/toolchain/inputs.go rust-dev/helper/toolchain/manifest.go rust-dev/helper/toolchain/installed.go rust-dev/helper/toolchain/commands.go rust-dev/helper/toolchain/types_test.go rust-dev/helper/toolchain/decode_test.go rust-dev/helper/toolchain/pin_test.go rust-dev/helper/toolchain/manifest_test.go rust-dev/helper/toolchain/installed_test.go rust-dev/helper/toolchain/fuzz_test.go rust-dev/helper/toolchain/events.go rust-dev/helper/toolchain/preflight.go rust-dev/helper/toolchain/prepare.go rust-dev/helper/toolchain/install.go rust-dev/helper/toolchain/stage.go rust-dev/helper/toolchain/stage_test.go rust-dev/helper/toolchain/preflight_test.go rust-dev/helper/toolchain/prepare_test.go rust-dev/helper/toolchain/install_test.go rust-dev/helper/toolchain/fuzz_install_test.go rust-dev/helper/helpers_test.go rust-dev/helper/internal/fetch/fetch.go rust-dev/helper/internal/fetch/loopback_fixture.go rust-dev/helper/internal/fetch/fetch_test.go rust-dev/helper/internal/fetch/loopback_fixture_test.go rust-dev/helper/internal/tarwalk/tarwalk.go rust-dev/helper/internal/tarwalk/tarwalk_test.go go-dev/helper/go.mod go-dev/helper/go.sum go-dev/helper/main.go go-dev/helper/main_test.go go-dev/helper/closure/constants.go go-dev/helper/closure/document.go go-dev/helper/closure/gomods.go go-dev/helper/closure/gosum.go go-dev/helper/closure/grammar_test.go go-dev/helper/closure/helpers_test.go go-dev/helper/closure/inputs_test.go go-dev/helper/closure/licenses.go go-dev/helper/closure/load.go go-dev/helper/closure/model_test.go go-dev/helper/closure/notice_test.go go-dev/helper/closure/pin.go go-dev/helper/closure/stage.go go-dev/helper/closure/stage_test.go go-dev/helper/buildinfo/buildinfo.go go-dev/helper/buildinfo/buildinfo_test.go go-dev/helper/gotool/exec.go go-dev/helper/gotool/gotool.go go-dev/helper/gotool/gotool_test.go go-dev/helper/gotool/loopback.go go-dev/helper/install/install.go go-dev/helper/install/install_test.go go-dev/helper/seams_fixture.go go-dev/helper/seams_shipped.go go-dev/helper/seams_test.go go-dev/helper/installed/installed.go go-dev/helper/installed/installed_test.go go-dev/helper/closure/source.go go-dev/helper/closure/values.go go-dev/helper/internal/pathjoin/pathjoin.go go-dev/helper/internal/pathjoin/pathjoin_test.go go-dev/helper/internal/strictjson/decode.go go-dev/helper/internal/strictjson/decode_test.go go-dev/helper/internal/strictjson/drift_test.go'
 # The rust-dev helper's builder stage. It is a reviewed parent:
 # `images/parent-pins.json` records its digest, and its tag is the root go.mod's
 # toolchain. Both are named by the literals below rather than by a variable, so a
@@ -47,7 +47,7 @@ GUARDED_DATA='chrome-devtools/data/chrome-devtools-mcp.sigstore.json chrome-devt
 # complete 1..N sequence before any case runs, so a duplicated, skipped or
 # appended label fails instead of silently not running (81 labels were defined
 # while the loop stopped at 79).
-SELF_TEST_CASES=178
+SELF_TEST_CASES=180
 fail() { echo "$*" >&2; exit 1; }
 usage() { echo "usage: example-layers.sh [--self-test | --root DIR]" >&2; exit 2; }
 checksum_token() {
@@ -210,6 +210,37 @@ review_args() { # EXAMPLE INSTRUCTIONS
                     reject(example " no longer declares the reviewed ARG " name)
         }
     '
+}
+# One implementation of link 5 (ADR 0017): the root module imports the layer's helper
+# so the maintainer's writer and the image's build compile one library. Two
+# consequences: the import is a local replace at v0.0.0 (what puts the layer's own
+# source in vendor/, which internal/vendordrift compares byte for byte), and every
+# requirement the two modules share is at one version, because minimal version
+# selection in the root could otherwise compile the helper against a version the
+# layer's own build never selects.
+#
+# internal/vendordrift measures the same facts offline, because it also runs in the
+# guard-only mode where this gate does not run. That is one fact measured from two
+# harnesses, not two owners: this one can mutate the go.mod files of a synthetic tree,
+# which the Go gate cannot read as a module.
+module_pins() {
+    awk '$1 == "require" && $2 == "(" { block = 1; next }
+         block && $1 == ")" { block = 0; next }
+         block && NF >= 2 { print $1, $2; next }
+         $1 == "require" && NF >= 3 { print $2, $3 }' "$1"
+}
+check_helper_link() { # EXAMPLE MODULE
+    local example=$1 module=$2 helperdir=$LAYERS/$1/helper shared_mismatch
+    module_pins "$ROOT/go.mod" | grep -qx "$module v0.0.0" ||
+        fail "$example: the root go.mod must require the helper module at v0.0.0"
+    grep -Eq "^replace $module => \./examples/layers/$example/helper\$" "$ROOT/go.mod" ||
+        fail "$example: the root go.mod must replace the helper module with ./examples/layers/$example/helper"
+    shared_mismatch=$(awk 'NR == FNR { rootpins[$1] = $2; next }
+                           $1 in rootpins && rootpins[$1] != $2 {
+                               print "  " $1 ": helper " $2 ", root " rootpins[$1] }' \
+        <(module_pins "$ROOT/go.mod") <(module_pins "$helperdir/go.mod"))
+    [ -z "$shared_mismatch" ] ||
+        fail "$example: the two go.mod files require different versions of a shared module:"$'\n'"$shared_mismatch"
 }
 # One implementation of the helper-stage contract, shared by both layers that
 # compile a helper module. The chain it holds, link by link:
@@ -448,30 +479,8 @@ normalize_instruction() { printf '%s' "$1" | tr -s ' \t' ' ' | sed -e 's/^ //' -
     # --- rust-dev: the helper module and the compiler guard chain (#187) -----
     helperdir=$rustdir/helper
     check_helper_stage rust-dev rust-dev-helper "$instructions"
-    # Link 5 -- the root module imports this one (#232), so the root binary and the
-    # layer's build compile one library instead of two copies of the rules. Two
-    # consequences are checked here: the import is a local replace at v0.0.0 (that
-    # is what puts the layer's own source in vendor/, which
-    # internal/vendordrift then compares byte for byte), and every requirement the
-    # two modules share is at one version, because minimal version selection in the
-    # root could otherwise compile the helper against a version the layer's own
-    # build never selects.
-    module_pins() {
-        awk '$1 == "require" && $2 == "(" { block = 1; next }
-             block && $1 == ")" { block = 0; next }
-             block && NF >= 2 { print $1, $2; next }
-             $1 == "require" && NF >= 3 { print $2, $3 }' "$1"
-    }
-    module_pins "$ROOT/go.mod" | grep -qx 'github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper v0.0.0' ||
-        fail 'rust-dev: the root go.mod must require the helper module at v0.0.0'
-    grep -Eq '^replace github\.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper => \./examples/layers/rust-dev/helper$' "$ROOT/go.mod" ||
-        fail 'rust-dev: the root go.mod must replace the helper module with ./examples/layers/rust-dev/helper'
-    shared_mismatch=$(awk 'NR == FNR { rootpins[$1] = $2; next }
-                           $1 in rootpins && rootpins[$1] != $2 {
-                               print "  " $1 ": helper " $2 ", root " rootpins[$1] }' \
-        <(module_pins "$ROOT/go.mod") <(module_pins "$helperdir/go.mod"))
-    [ -z "$shared_mismatch" ] ||
-        fail "rust-dev: the two go.mod files require different versions of a shared module:"$'\n'"$shared_mismatch"
+    # Link 5 -- the root module imports this one (#232); check_helper_link holds it.
+    check_helper_link rust-dev github.com/gregwebs/agent-vm-images/examples/layers/rust-dev/helper
     # One reader. `check` moved to the layer's own Go helper in #187 slice 2 and
     # the Python oracle is deleted (#245), so this gate holds the Go answer: a
     # refusal is reported with its own text, and the channel assertion must match
@@ -705,11 +714,12 @@ installer_runs=$(printf '%s\n' "$instructions" | grep -cF 'install-rust.sh' || t
     instructions=$(logical_instructions "$godir/Dockerfile" go-dev) || exit 1
     # --- go-dev: the helper module and the compiler guard chain (#249) -------
     # The same chain the rust-dev stage carries (check_helper_stage), over this
-    # layer's own module. The difference that matters: this helper is NOT linked
-    # into the root module (#249, owner ruling G1), so there is no root
-    # require/replace to check and no shared-version rule; #252 adds them with the
-    # writer that imports this package.
+    # layer's own module. Links 1-4 arrived with the reader (#249, owner ruling G1
+    # kept the root go.mod untouched); link 5 arrived with `avm-pin gopls` (#252),
+    # which imports the layer's closure package, so the writer and the image now
+    # compile one library.
     check_helper_stage go-dev go-dev-helper "$instructions"
+    check_helper_link go-dev github.com/gregwebs/agent-vm-images/examples/layers/go-dev/helper
     host_os=$(uname -s | tr '[:upper:]' '[:lower:]')
     go_helper=$(bash "$HELPER_BUILD" go-dev --root "$ROOT" --os "$host_os") ||
         fail 'go-dev pins: cannot build the host helper'
@@ -1724,6 +1734,20 @@ INSTRUCTION
             178)
                 rewrite "$godir/install-gopls.sh" 's#"$HERE/go-dev-helper" install #"$HERE/go-dev-helper" check #'
                 expected='go-dev: install-gopls.sh must run the Go installer' ;;
+            # 179-180: link 5 for the go-dev module (#252). The root gains its
+            # require/replace with the writer, so both halves of the import are
+            # guarded: without the local replace the vendored copy is not the layer
+            # the image compiles, and a shared requirement at another version lets
+            # MVS compile the writer against a library the layer never selects.
+            179)
+                rewrite "$tree/go.mod" '/^replace github.com\/gregwebs\/agent-vm-images\/examples\/layers\/go-dev\/helper/d'
+                expected='go-dev: the root go.mod must replace the helper module with' ;;
+            180)
+                # A requirement only the go-dev helper names, at a version the root
+                # does not: the mutation reaches the go-dev link and not rust-dev's.
+                printf '\nrequire github.com/failsafe-go/failsafe-go v0.9.7\n' \
+                    >> "$tree/$LAYERS/go-dev/helper/go.mod"
+                expected='go-dev: the two go.mod files require different versions of a shared module' ;;
             # SELF_TEST_TABLE_END
             *) fail "case $n: not in the case table" ;;
         esac

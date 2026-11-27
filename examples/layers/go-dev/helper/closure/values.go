@@ -244,6 +244,11 @@ func ParseGoVersion(text, what string) (GoVersion, error) {
 	return parseGoVersion(text, what)
 }
 
+// ParseDate validates a calendar date from a caller's flag spelling.
+func ParseDate(text, what string) (Date, error) {
+	return parseDate(text, what)
+}
+
 // ParseModulePath validates a module path from a decoded document.
 func ParseModulePath(value any, what string) (ModulePath, error) {
 	return parseModulePath(value, what)
