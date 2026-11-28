@@ -17,7 +17,8 @@
 //
 // Statuses: 0 published or unchanged, 1 failed with the sources unchanged or fully
 // restored, 3 undecided or incomplete recovery (the retained directories are
-// printed), 128+N after a signal whose rollback succeeded.
+// printed), 128+N after a signal whose rollback restored the sources
+// (the six signal windows and what each retains: `internal/publication`).
 package agywriter
 
 import (
@@ -129,17 +130,6 @@ func (c *Client) announce(what, directory string) {
 	}
 }
 
-// retain prints, and keeps, a directory a status-3 recovery depends on.
-func (c *Client) retain(what, directory string) {
-	absolute, err := filepath.Abs(directory)
-	if err != nil {
-		absolute = directory
-	}
-	_, _ = fmt.Fprintf(c.Err, "%s%s %s\n", Prefix, what, absolute)
-	_, _ = fmt.Fprintf(c.Err, Prefix+"STOP: recover %s together with the publisher "+
-		"directory above before further edits/builds/commits\n", absolute)
-}
-
 func (c *Client) refuseCI() error {
 	if c.Env.Variables["GITHUB_ACTIONS"] == "true" {
 		return errors.New("refusing GitHub Actions: pins are maintainer-host " +
@@ -165,45 +155,36 @@ func (c *Client) Refresh(ctx context.Context, options Options) int {
 	if err == nil {
 		work = absolute
 	}
-	keepWork := false
-	defer func() {
-		if !keepWork {
-			_ = os.RemoveAll(work)
-		}
-	}()
 	staged, err := c.resolve(ctx, options.Version, work)
 	if err != nil {
+		_ = os.RemoveAll(work)
 		c.diagnose("%s", err)
 		return 1
 	}
 	if c.unchanged(staged) {
+		_ = os.RemoveAll(work)
 		c.report("unchanged (agy %s)", options.Version)
 		return 0
 	}
 	// A signal-driven rollback exits from inside the publisher, so the owner scratch
-	// is named before publication starts, not after it.
+	// is named before publication starts, not after it. From here the publisher owns
+	// that directory: it removes it on a decided outcome and retains and prints it
+	// otherwise.
 	c.announce("owner scratch:", work)
-	status := c.Publish(publication.Request{
+	return c.Publish(publication.Request{
 		Prefix:     Prefix,
 		Root:       c.Env.Root,
 		TempRoot:   c.Env.TempRoot,
 		TempPrefix: "pin-agy.",
 		Stderr:     publication.StderrOf(c.Err),
 		Owner:      work,
-		Files:      staged,
+		Report: publication.Report{To: c.Out, Lines: []string{
+			fmt.Sprintf("published agy %s: %s", options.Version, destinations(staged)),
+			fmt.Sprintf("now update script/test/fixtures/installer-egress/selections.tsv to agy "+
+				"%s, then run: bash script/test/contracts.sh", options.Version),
+		}},
+		Files: staged,
 	})
-	if status == 3 {
-		keepWork = true
-		c.retain("owner scratch retained at", work)
-		return status
-	}
-	if status != 0 {
-		return status
-	}
-	c.report("published agy %s: %s", options.Version, destinations(staged))
-	c.report("now update script/test/fixtures/installer-egress/selections.tsv to agy "+
-		"%s, then run: bash script/test/contracts.sh", options.Version)
-	return 0
 }
 
 // unchanged reports whether every publication byte already equals the committed

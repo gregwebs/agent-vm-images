@@ -3,13 +3,13 @@ package publication
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
-	"syscall"
 	"testing"
-	"time"
 )
 
 // fixture is a throwaway repository root with three destinations, two of which
@@ -23,10 +23,17 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureOf(t, []string{"images/artifacts/node.json", "images/Dockerfile",
+		"images/artifacts/node-release-key.asc"})
+}
+
+// newFixtureOf is the same shape at any width, so a matrix can name its own
+// destinations.
+func newFixtureOf(t *testing.T, relatives []string) *fixture {
+	t.Helper()
 	root := t.TempDir()
 	created := &fixture{t: t, root: root}
-	for _, relative := range []string{"images/artifacts/node.json", "images/Dockerfile",
-		"images/artifacts/node-release-key.asc"} {
+	for _, relative := range relatives {
 		path := filepath.Join(root, relative)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -44,23 +51,26 @@ func newFixture(t *testing.T) *fixture {
 // staged returns what a refresh would publish, rememberable so the assertions can
 // name the committed bytes.
 func (f *fixture) staged() [][]byte {
-	return [][]byte{
-		[]byte("staged node pin\n"),
-		[]byte("staged dockerfile\n"),
-		[]byte("staged key\n"),
+	staged := make([][]byte, 0, len(f.paths))
+	for _, path := range f.paths {
+		staged = append(staged, []byte("staged "+filepath.Base(path)+"\n"))
 	}
+	return staged
 }
 
+// transaction is one publication over the fixture. Its exit is the test's own: only
+// a case that re-executes this binary has a process to end, and every other case
+// asserts the status the transaction decided.
 func (f *fixture) transaction(work string) *Transaction {
-	transaction := &Transaction{
+	return &Transaction{
 		Prefix:       "pin-artifact: ",
 		Root:         f.root,
 		Work:         work,
 		Stderr:       os.Stderr,
 		Destinations: f.paths,
 		Staged:       f.staged(),
+		exit:         func(int) {},
 	}
-	return transaction
 }
 
 // unchanged reports the destinations whose committed bytes still match.
@@ -75,6 +85,31 @@ func (f *fixture) changed() []string {
 	return changed
 }
 
+// republished reports the destinations that carry a published byte.
+func (f *fixture) republished() []string {
+	published := []string{}
+	for index, path := range f.paths {
+		raw, err := os.ReadFile(path)
+		if err == nil && bytes.Equal(raw, f.staged()[index]) {
+			published = append(published, filepath.Base(path))
+		}
+	}
+	return published
+}
+
+// remoded reports the destinations whose permission bits moved. A rollback that
+// restored the bytes but not the mode is not a restore.
+func (f *fixture) remoded() []string {
+	remoded := []string{}
+	for _, path := range f.paths {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o644 {
+			remoded = append(remoded, filepath.Base(path))
+		}
+	}
+	return remoded
+}
+
 func (f *fixture) work(t *testing.T) string {
 	work, err := os.MkdirTemp(t.TempDir(), "pin-artifact.")
 	if err != nil {
@@ -83,9 +118,24 @@ func (f *fixture) work(t *testing.T) string {
 	return work
 }
 
+// ownerScratch is the caller's own scratch directory: a directory the writer staged
+// the proposal into, which the publication disposes of.
+func ownerScratch(t *testing.T) string {
+	t.Helper()
+	owner := filepath.Join(t.TempDir(), "pin-artifact.work.")
+	if err := os.MkdirAll(filepath.Join(owner, "proposal"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(owner, "proposal", "node.json"),
+		[]byte("staged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return owner
+}
+
 // failOn replaces the transaction's write so one destination fails after its own
 // bytes landed — the case the rollback exists for.
-func failOn(transaction *Transaction, name string, signal os.Signal, once *bool) {
+func failOn(transaction *Transaction, name string, once *bool) {
 	real := transaction.copyFile
 	if real == nil {
 		real = copyFile
@@ -97,20 +147,50 @@ func failOn(transaction *Transaction, name string, signal os.Signal, once *bool)
 			if err := os.WriteFile(destination, []byte("half-written\n"), 0o644); err != nil {
 				return err
 			}
-			if signal != nil {
-				if err := syscall.Kill(os.Getpid(), signal.(syscall.Signal)); err != nil {
-					return err
-				}
-				// The interrupt and the failing write are two goroutines, and the
-				// handler must record the signal before this one reports its error or
-				// the run exits 1 as if nothing had interrupted it. A real Ctrl-C is
-				// microseconds ahead of the write it lands in; a loaded CI runner
-				// schedules the handler late, so the case waits for it explicitly.
-				time.Sleep(200 * time.Millisecond)
-			}
 			return os.ErrInvalid
 		}
 		return real(source, destination, mode)
+	}
+}
+
+// TestARequestBecomesTheTransactionItDescribes: a writer builds a Request and nothing
+// else, so every field it names must reach the transaction — a dropped Retain is a
+// directory the caller is told to keep on some other path while this one forgets it,
+// and a dropped Report is a caller that cannot be told an outcome happened.
+//
+// The mutation this case holds down: delete any field of that mapping, and this case
+// names it.
+func TestARequestBecomesTheTransactionItDescribes(t *testing.T) {
+	report := &bytes.Buffer{}
+	request := Request{
+		Prefix:     "pin-artifact: ",
+		Root:       "/repo",
+		TempRoot:   "/tmp",
+		TempPrefix: "pin-artifact.",
+		Stderr:     os.Stderr,
+		Report:     Report{To: report, Lines: []string{"published"}},
+		Owner:      "/owner",
+		Retain:     []Retention{{Label: "staged proposal", Path: "/stage"}},
+		Files:      []Staged{{Path: "images/Dockerfile", Raw: []byte("ARG x=1\n")}},
+	}
+	transaction := request.transaction("/work")
+	if transaction.Prefix != request.Prefix || transaction.Root != request.Root ||
+		transaction.Work != "/work" || transaction.Stderr != request.Stderr {
+		t.Fatalf("the transaction is not the one the request describes: %+v", transaction)
+	}
+	if transaction.Report.To != report || len(transaction.Report.Lines) != 1 ||
+		transaction.Report.Lines[0] != "published" {
+		t.Fatalf("the transaction lost the request's report: %+v", transaction.Report)
+	}
+	if len(transaction.Retain) != 1 || transaction.Retain[0].Label != "staged proposal" ||
+		transaction.Retain[0].Path != "/stage" {
+		t.Fatalf("the transaction lost the directories the caller must keep: %+v",
+			transaction.Retain)
+	}
+	if len(transaction.Destinations) != 1 ||
+		transaction.Destinations[0] != filepath.Join(request.Root, "images/Dockerfile") ||
+		len(transaction.Staged) != 1 || string(transaction.Staged[0]) != "ARG x=1\n" {
+		t.Fatalf("the transaction lost the request's files: %v", transaction.Destinations)
 	}
 }
 
@@ -118,7 +198,7 @@ func TestPublicationFailureRestoresEveryTouchedDestination(t *testing.T) {
 	created := newFixture(t)
 	transaction := created.transaction(created.work(t))
 	once := false
-	failOn(transaction, "node-release-key.asc", nil, &once)
+	failOn(transaction, "node-release-key.asc", &once)
 	if status := transaction.Run(""); status != 1 {
 		t.Fatalf("status %d, want 1", status)
 	}
@@ -127,6 +207,22 @@ func TestPublicationFailureRestoresEveryTouchedDestination(t *testing.T) {
 	}
 	if _, err := os.Stat(transaction.Work); !os.IsNotExist(err) {
 		t.Errorf("a clean rollback removes the work directory")
+	}
+}
+
+// TestPublicationFailureDisposesOfTheOwnerScratch: the package owns the caller's
+// scratch, so a decided outcome removes it and the writer has nothing left to do.
+func TestPublicationFailureDisposesOfTheOwnerScratch(t *testing.T) {
+	created := newFixture(t)
+	owner := ownerScratch(t)
+	transaction := created.transaction(created.work(t))
+	once := false
+	failOn(transaction, "node-release-key.asc", &once)
+	if status := transaction.Run(owner); status != 1 {
+		t.Fatalf("status %d, want 1", status)
+	}
+	if _, err := os.Stat(owner); !os.IsNotExist(err) {
+		t.Errorf("a decided outcome disposes of the owner scratch")
 	}
 }
 
@@ -159,7 +255,7 @@ func TestIncompleteRecoveryExitsThreeAndRetainsTheRecord(t *testing.T) {
 	work := created.work(t)
 	transaction := created.transaction(work)
 	once := false
-	failOn(transaction, "node-release-key.asc", nil, &once)
+	failOn(transaction, "node-release-key.asc", &once)
 	transaction.copyFile = refusingRestore(transaction.copyFile)
 	if status := transaction.Run(""); status != 3 {
 		t.Fatalf("status %d, want 3", status)
@@ -198,6 +294,20 @@ func refusingRestore(copyFile func(source, destination string, mode os.FileMode)
 	}
 }
 
+// refusingRestoreOf refuses the restore of one destination only, which is what a
+// damaged backup for that one destination looks like: every other source still comes
+// back.
+func refusingRestoreOf(copyFile func(source, destination string, mode os.FileMode) error,
+	name string) func(string, string, os.FileMode) error {
+	return func(source, destination string, mode os.FileMode) error {
+		if strings.Contains(source, string(filepath.Separator)+"backup"+string(filepath.Separator)) &&
+			filepath.Base(destination) == name {
+			return os.ErrClosed
+		}
+		return copyFile(source, destination, mode)
+	}
+}
+
 func TestRecoveryRecordFailureStillExitsThree(t *testing.T) {
 	created := newFixture(t)
 	work := created.work(t)
@@ -207,17 +317,14 @@ func TestRecoveryRecordFailureStillExitsThree(t *testing.T) {
 	}
 	transaction := created.transaction(work)
 	once := false
-	failOn(transaction, "node-release-key.asc", nil, &once)
+	failOn(transaction, "node-release-key.asc", &once)
 	transaction.copyFile = refusingRestore(transaction.copyFile)
-	var stderr bytes.Buffer
-	transaction.Stderr = nil
 	if status := transaction.Run(""); status != 3 {
 		t.Fatalf("status %d, want 3", status)
 	}
 	if _, err := os.Stat(filepath.Join(work, "backup", ".complete")); err != nil {
 		t.Errorf("the retained backup is marked complete: %v", err)
 	}
-	_ = stderr
 }
 
 func TestPartialBackupIsNotRestored(t *testing.T) {
@@ -301,122 +408,128 @@ func TestReplacementKeepsTheDestinationsMode(t *testing.T) {
 	}
 }
 
-// The signal path is a contract with the maintainer's shell: exit 128+N with the
-// sources restored. It needs a real process to observe the status, so the case
-// re-executes this test binary.
-const signalCaseVariable = "ARTIFACTWRITER_SIGNAL_CASE"
-
-func TestMain(m *testing.M) {
-	if os.Getenv(signalCaseVariable) != "" {
-		os.Exit(signalChild())
-	}
-	os.Exit(m.Run())
-}
-
-func signalChild() int {
-	root := os.Getenv("ARTIFACTWRITER_SIGNAL_ROOT")
-	work := os.Getenv("ARTIFACTWRITER_SIGNAL_WORK")
-	refuseRestore := os.Getenv("ARTIFACTWRITER_SIGNAL_REFUSE_RESTORE") != ""
-	transaction := &Transaction{
-		Prefix: "pin-artifact: ",
-		Root:   root,
-		Work:   work,
-		Stderr: os.Stderr,
-		Destinations: []string{
-			filepath.Join(root, "images/artifacts/node.json"),
-			filepath.Join(root, "images/Dockerfile"),
-			filepath.Join(root, "images/artifacts/node-release-key.asc"),
-		},
-		Staged: [][]byte{[]byte("a\n"), []byte("b\n"), []byte("c\n")},
-	}
-	once := false
-	failOn(transaction, "Dockerfile", syscall.SIGINT, &once)
-	if refuseRestore {
-		// A restore that cannot read the backups is the case that must stay status 3
-		// rather than report the interrupt: the maintainer needs the material, not a
-		// status that says the tree is fine.
-		publishing := transaction.copyFile
-		transaction.copyFile = func(source, destination string, mode os.FileMode) error {
-			if strings.Contains(source, "backup") {
-				return os.ErrInvalid
-			}
-			return publishing(source, destination, mode)
-		}
-	}
-	status := transaction.Run("")
-	// The handler exits 130 or 3 itself; reaching here means it did not.
-	return status
-}
-
-func TestSignalDuringPublicationRestoresAndExits130(t *testing.T) {
-	created := newFixture(t)
-	work := created.work(t)
-	command := exec.Command(os.Args[0])
-	command.Env = append(os.Environ(),
-		signalCaseVariable+"=1",
-		"ARTIFACTWRITER_SIGNAL_ROOT="+created.root,
-		"ARTIFACTWRITER_SIGNAL_WORK="+work)
-	var stderr bytes.Buffer
-	command.Stderr = &stderr
-	err := command.Run()
-	exit, ok := err.(*exec.ExitError)
-	if !ok {
-		t.Fatalf("the signal case did not exit through the handler: %v (%s)", err, stderr.String())
-	}
-	if exit.ExitCode() != 128+int(syscall.SIGINT) {
-		t.Fatalf("status %d, want %d: %s", exit.ExitCode(),
-			128+int(syscall.SIGINT), stderr.String())
-	}
-	// Both orders of the two exit paths are legitimate — the handler may restore
-	// before the failing copy reports, or the ordinary rollback may get there
-	// first — and both leave the sources restored and exit 130.
-	if !strings.Contains(stderr.String(), "restor") {
-		t.Errorf("the signal case reports the restore: %s", stderr.String())
-	}
-	if changed := created.changed(); len(changed) > 0 {
-		t.Errorf("a signal during publication restores the sources, changed: %v", changed)
-	}
-	if _, err := os.Stat(work); !os.IsNotExist(err) {
-		t.Errorf("a restore that succeeded removes the work directory")
-	}
-}
-
-// TestSignalWithARefusedRestoreExitsThree: the interrupt restores the sources and
-// leaves 128+N, but only if the restore succeeds. When it does not, the status is 3
-// and the material is printed, because "interrupted" plus "half restored" is not a
-// state whose status may claim the tree is intact.
+// TestInclusiveRollbackMatrix: the rollback covers the destination being written, and
+// a destination it cannot put back must not stop the walk over the rest.
 //
-// The case is separate from the two it sits between (a signal that restores, and a
-// failed write whose restore is refused) because it is the crossing of them, and it
-// is the one an exit status can get wrong without any other case noticing.
-func TestSignalWithARefusedRestoreExitsThree(t *testing.T) {
-	created := newFixture(t)
-	work := created.work(t)
-	command := exec.Command(os.Args[0])
-	command.Env = append(os.Environ(),
-		signalCaseVariable+"=1",
-		"ARTIFACTWRITER_SIGNAL_REFUSE_RESTORE=1",
-		"ARTIFACTWRITER_SIGNAL_ROOT="+created.root,
-		"ARTIFACTWRITER_SIGNAL_WORK="+work)
-	var stderr bytes.Buffer
-	command.Stderr = &stderr
-	err := command.Run()
-	exit, ok := err.(*exec.ExitError)
-	if !ok {
-		t.Fatalf("the signal case did not exit through the handler: %v (%s)", err, stderr.String())
+// 5 destinations × ({no restore failure} ∪ {a restore failure at each j ≤ i}) is 20
+// cells. The floor is the count itself: a matrix that quietly ran fewer cells would
+// compare nothing and still print ok.
+func TestInclusiveRollbackMatrix(t *testing.T) {
+	const width = 5
+	relatives := make([]string, 0, width)
+	for index := 0; index < width; index++ {
+		relatives = append(relatives, fmt.Sprintf("images/artifacts/file%d.json", index))
 	}
-	if exit.ExitCode() != 3 {
-		t.Fatalf("status %d, want 3: %s", exit.ExitCode(), stderr.String())
-	}
-	for _, needle := range []string{"restore incomplete", "recovery material retained at", "STOP: recover"} {
-		if !strings.Contains(stderr.String(), needle) {
-			t.Errorf("the incomplete recovery does not say %q: %s", needle, stderr.String())
+	executed := 0
+	for copyAt := 0; copyAt < width; copyAt++ {
+		for restoreAt := -1; restoreAt <= copyAt; restoreAt++ {
+			copyAt, restoreAt := copyAt, restoreAt
+			executed++
+			t.Run(fmt.Sprintf("copy%d-restore%d", copyAt, restoreAt), func(t *testing.T) {
+				created := newFixtureOf(t, relatives)
+				work := created.work(t)
+				transaction := created.transaction(work)
+				once := false
+				failOn(transaction, filepath.Base(created.paths[copyAt]), &once)
+				if restoreAt >= 0 {
+					transaction.copyFile = refusingRestoreOf(transaction.copyFile,
+						filepath.Base(created.paths[restoreAt]))
+				}
+				want := 1
+				if restoreAt >= 0 {
+					want = 3
+				}
+				if status := transaction.Run(""); status != want {
+					t.Fatalf("status %d, want %d", status, want)
+				}
+				staged := created.staged()
+				for index, path := range created.paths {
+					raw, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatalf("destination %d: %v", index, err)
+					}
+					wished := created.raw[index]
+					switch {
+					case index > copyAt:
+						// Never copied: the committed byte is the whole assertion.
+					case index == restoreAt:
+						// The restore was refused, so this destination keeps what the
+						// publication left: half a copy for the failing one, the staged
+						// bytes for one that had been written before it.
+						if index == copyAt {
+							wished = []byte("half-written\n")
+						} else {
+							wished = staged[index]
+						}
+					}
+					if !bytes.Equal(raw, wished) {
+						t.Fatalf("destination %d is %q, want %q", index, raw, wished)
+					}
+					info, err := os.Stat(path)
+					if err != nil || info.Mode().Perm() != 0o644 {
+						t.Fatalf("destination %d lost its mode: %v %v", index, info, err)
+					}
+				}
+				_, err := os.Stat(work)
+				if restoreAt >= 0 {
+					if err != nil {
+						t.Fatalf("an incomplete rollback retains its material: %v", err)
+					}
+				} else if !os.IsNotExist(err) {
+					t.Fatalf("a complete rollback discards its work directory: %v", err)
+				}
+			})
 		}
 	}
-	if _, err := os.Stat(work); err != nil {
-		t.Errorf("an incomplete recovery retains the work directory: %v", err)
+	if executed != 20 {
+		t.Fatalf("the matrix ran %d cells, want 20", executed)
 	}
-	if _, err := os.Stat(filepath.Join(work, "backup")); err != nil {
-		t.Errorf("the retained material holds the backups: %v", err)
+}
+
+// TestNoExportedFieldReachesTheWindowSeam: the window hook, the copy and removal
+// substitutions and the exit are how a test drives a window. They are unexported, so no
+// caller and no other package can reach them; the exported field set is frozen here to
+// keep it that way, because a new exported field is how an external caller would reach
+// the same internals.
+//
+// The mutation this case holds down: promote the hook (or add any exported seam), and
+// this case names the field.
+func TestNoExportedFieldReachesTheWindowSeam(t *testing.T) {
+	frozen := map[string][]string{
+		"Transaction": {"Destinations", "Prefix", "Report", "Retain", "Root", "Staged",
+			"Stderr", "Work"},
+		"Request": {"Files", "Owner", "Prefix", "Report", "Retain", "Root", "Stderr",
+			"TempPrefix", "TempRoot"},
 	}
+	types := map[string]any{"Transaction": Transaction{}, "Request": Request{}}
+	for name, value := range types {
+		got := exportedFields(reflect.TypeOf(value))
+		want := frozen[name]
+		sort.Strings(want)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("%s exports %v, want %v", name, got, want)
+		}
+	}
+	// The seam itself must stay unexported: settable from this package, and only here.
+	seam, ok := reflect.TypeOf(Transaction{}).FieldByName("hook")
+	if !ok {
+		t.Fatal("the window seam is gone; the six window cases cannot run")
+	}
+	if seam.PkgPath == "" {
+		t.Fatal("the window seam is exported")
+	}
+}
+
+// exportedFields reports a type's exported field names in declaration order.
+func exportedFields(subject reflect.Type) []string {
+	names := []string{}
+	for index := 0; index < subject.NumField(); index++ {
+		field := subject.Field(index)
+		if field.PkgPath != "" {
+			continue
+		}
+		names = append(names, field.Name)
+	}
+	sort.Strings(names)
+	return names
 }

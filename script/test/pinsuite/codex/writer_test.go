@@ -349,7 +349,7 @@ func TestWriterPublishStagePublishesTheProposal(t *testing.T) {
 	result := runWriter(t, repo, arguments("--publish-stage", stage))
 	requireStatus(t, result, 0)
 	result.RequireStderr(t, "publishing the staged proposal in "+stage)
-	result.RequireStderr(t, "owner scratch: "+stage)
+	result.RequireStderr(t, "stage directory: "+stage)
 	published := repo.committed(t)
 	if !bytes.Equal(published[PinDirectory+"/pin.json"], proposal["pin.json"]) {
 		t.Fatal("the published pin is not the staged pin")
@@ -365,6 +365,27 @@ func TestWriterPublishStagePublishesTheProposal(t *testing.T) {
 	}
 	if after := repo.snapshot(t); sameSnapshot(after, before) {
 		t.Fatal("the publication changed nothing")
+	}
+	accepts(t, pinInvocation("check", repo.pinDirectory(), "--release", Release))
+}
+
+// TestWriterAPublishLeavesTheStagesOtherFilesAlone: the stage directory belongs to the
+// maintainer who gave it. Publishing from it must not remove it or anything in it, and
+// `readStage` tolerates entries it does not own — so a note beside the proposal is the
+// witness that the publisher was never handed the caller's directory as scratch.
+func TestWriterAPublishLeavesTheStagesOtherFilesAlone(t *testing.T) {
+	w := newWriterFixture(t, "writer-publish-keep")
+	repo := w.repository(t, "publish-keep")
+	stage, _ := w.stageProposal(t, repo)
+	note := filepath.Join(stage, "maintainer-notes")
+	harness.WriteFile(t, note, []byte("reviewed by hand\n"))
+	result := runWriter(t, repo, arguments("--publish-stage", stage))
+	requireStatus(t, result, 0)
+	if _, err := os.Stat(stage); err != nil {
+		t.Fatalf("a successful publish removed the caller's stage directory: %v", err)
+	}
+	if string(harness.ReadFile(t, note)) != "reviewed by hand\n" {
+		t.Fatal("a successful publish removed an unrelated file from the caller's stage")
 	}
 	accepts(t, pinInvocation("check", repo.pinDirectory(), "--release", Release))
 }

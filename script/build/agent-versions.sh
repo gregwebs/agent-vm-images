@@ -344,6 +344,19 @@ codex_committed="$(sed -n 's/^ARG AGENT_VERSION_CODEX=//p' "$file")"
 agy_committed="$(sed -n 's/^ARG AGENT_VERSION_AGY=//p' "$file")"
 claude_committed="$(sed -n 's/^ARG AGENT_VERSION_CLAUDE=//p' "$file")"
 
+# The publisher retains what it printed on 3 (undecided, or an incomplete rollback)
+# and after a signal whose rollback restored the sources (128+N). This scratch is what
+# it was given for the Codex staging and the Codex publication, so deleting it on those
+# statuses would delete the material it just told a maintainer to recover. A decided
+# outcome -- 0 published, 1 restored -- is the only case where deleting this is safe.
+publisher_retained() { # $1 = the writer's exit status
+    local status=$1
+    if [ "$status" -eq 3 ]; then
+        return 0
+    fi
+    [ "$status" -gt 128 ]
+}
+
 # agy publishes FIRST, in its own transaction: its likeliest failure (the updater
 # manifest moving to a new release between the lookup above and this run) then
 # leaves every file untouched. It reads the committed Dockerfile itself, so it
@@ -353,8 +366,9 @@ claude_committed="$(sed -n 's/^ARG AGENT_VERSION_CLAUDE=//p' "$file")"
 agy_status=0
 bash "$agy_writer" --version "$agy" --root "$repo_root" || agy_status=$?
 if [ "$agy_status" -ne 0 ]; then
-    if [ "$agy_status" -eq 3 ]; then
-        echo "error: agy publication is undecided; recover the directories printed above" >&2
+    if publisher_retained "$agy_status"; then
+        keep_recovery=true
+        echo "error: agy publication retains material ($agy_status); owner scratch retained at $work" >&2
     fi
     exit "$agy_status"
 fi
@@ -398,8 +412,9 @@ fi
 claude_status=0
 bash "$claude_writer" --version "$claude" --root "$repo_root" || claude_status=$?
 if [ "$claude_status" -ne 0 ]; then
-    if [ "$claude_status" -eq 3 ]; then
-        echo "error: claude publication is undecided; recover the directories printed above" >&2
+    if publisher_retained "$claude_status"; then
+        keep_recovery=true
+        echo "error: claude publication retains material ($claude_status); owner scratch retained at $work" >&2
     fi
     report_already_published claude "$claude_status"
     exit "$claude_status"
@@ -417,9 +432,9 @@ codex_status=0
 bash "$codex_writer" --version "$codex" --stage-dir "$work" --root "$repo_root" \
     "${cosign_args[@]}" || codex_status=$?
 if [ "$codex_status" -ne 0 ]; then
-    if [ "$codex_status" -eq 3 ]; then
+    if publisher_retained "$codex_status"; then
         keep_recovery=true
-        echo "error: codex staging is undecided; owner scratch retained at $work" >&2
+        echo "error: codex staging retains material ($codex_status); owner scratch retained at $work" >&2
     fi
     report_already_published codex "$codex_status"
     exit "$codex_status"
@@ -440,7 +455,7 @@ publish_status=0
 bash "$codex_writer" --publish-stage "$work" --root "$repo_root" \
     || publish_status=$?
 if [ "$publish_status" -ne 0 ]; then
-    if [ "$publish_status" -eq 3 ]; then
+    if publisher_retained "$publish_status"; then
         keep_recovery=true
         echo "error: recovery material retained; owner scratch retained at $work" >&2
     fi

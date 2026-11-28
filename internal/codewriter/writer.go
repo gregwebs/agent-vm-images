@@ -17,7 +17,8 @@
 //
 // Exit statuses: 0 published or unchanged, 1 failed with the sources unchanged or
 // fully restored, 2 usage, 3 undecided or incomplete recovery (the retained
-// directories are printed), 128+N after a signal whose rollback succeeded.
+// directories are printed), 128+N after a signal whose rollback restored the
+// sources (the six signal windows and what each retains: `internal/publication`).
 package codewriter
 
 import (
@@ -98,8 +99,12 @@ type Client struct {
 	// reviewed cosign and runs it; it is a field rather than an environment
 	// variable so a plain refresh can never be redirected to another verifier.
 	Verify BlobVerifier
-	Out    io.Writer
-	Err    io.Writer
+	// Publish is the publication transaction. Production is publication.Publish; a
+	// test substitutes one, because the publisher ends the process on every outcome
+	// it decides.
+	Publish func(publication.Request) int
+	Out     io.Writer
+	Err     io.Writer
 	// Now is the clock `verified_on` is stamped from. A pin is written on one
 	// maintainer host and read by reviewers and builders in every zone, so the stamp
 	// is the UTC date, never the writer's local calendar.
@@ -119,11 +124,12 @@ type Options struct {
 // New returns a client with the production byte source.
 func New(env Environment, out, errOut io.Writer) *Client {
 	return &Client{
-		Env:   env,
-		Fetch: fetch.New(),
-		Out:   out,
-		Err:   errOut,
-		Now:   codexpin.UTCToday,
+		Env:     env,
+		Fetch:   fetch.New(),
+		Publish: publication.Publish,
+		Out:     out,
+		Err:     errOut,
+		Now:     codexpin.UTCToday,
 	}
 }
 
@@ -156,13 +162,6 @@ func (c *Client) announce(what, directory string) {
 	if flusher, ok := c.Err.(interface{ Flush() error }); ok {
 		_ = flusher.Flush()
 	}
-}
-
-// retain prints, and keeps, a directory a status-3 recovery depends on.
-func (c *Client) retain(what, directory string) {
-	c.diagnose("%s %s", what, directory)
-	c.diagnose("STOP: recover %s together with the publisher directory above "+
-		"before further edits/builds/commits", directory)
 }
 
 // RefuseCI is the guard every writer shares: pins are maintainer-host maintenance.
@@ -254,18 +253,14 @@ func (c *Client) Refresh(ctx context.Context, options Options) int {
 		c.diagnose("%s", err)
 		return 1
 	}
-	keepWork := false
-	defer func() {
-		if !keepWork {
-			_ = os.RemoveAll(work)
-		}
-	}()
 	proposed, err := c.stage(ctx, release, work, verify)
 	if err != nil {
+		_ = os.RemoveAll(work)
 		c.diagnose("%s", err)
 		return 1
 	}
 	if options.StageDir != "" {
+		defer func() { _ = os.RemoveAll(work) }()
 		directory, err := absolute(options.StageDir)
 		if err != nil {
 			c.diagnose("%s", err)
@@ -284,24 +279,20 @@ func (c *Client) Refresh(ctx context.Context, options Options) int {
 		return 0
 	}
 	if c.unchanged(proposed) {
+		_ = os.RemoveAll(work)
 		c.note("unchanged (%s)", release)
 		return 0
 	}
 	directory := filepath.Join(work, "publish")
 	if err := writeStage(directory, proposed.files); err != nil {
+		_ = os.RemoveAll(work)
 		c.diagnose("%s", err)
 		return 1
 	}
+	// From here the publisher owns this invocation's scratch: it removes it on a
+	// decided outcome and retains and prints it otherwise.
 	c.announce("owner scratch:", work)
-	status := c.publishStaged(directory, work, true)
-	if status == 3 {
-		// The transaction is undecided: this invocation's scratch (the staged
-		// six-file proposal) is part of the way back, so it is retained and printed
-		// rather than cleaned up.
-		keepWork = true
-		c.retain("owner scratch retained at", work)
-	}
-	return status
+	return c.publishStaged(directory, work, nil)
 }
 
 // PublishStage publishes the fixed six-file proposal the owner bumper edited, as one
@@ -311,20 +302,27 @@ func (c *Client) PublishStage(stageDir string) int {
 		c.diagnose("%s", err)
 		return 1
 	}
-	// For the bumper, the stage directory IS the owner scratch, so the path is
-	// resolved and handed to the publisher as the caller's own.
+	// The bumper hands its own scratch here, and a maintainer may hand any directory:
+	// it is read where it was named, and it is never this invocation's to remove.
 	directory, err := absolute(stageDir)
 	if err != nil {
 		c.diagnose("%s", err)
 		return 1
 	}
-	return c.publishStaged(directory, directory, false)
+	// The stage directory is the caller's: this invocation was given it and did not
+	// create it, so the publisher must never remove it. Its path is announced (the
+	// publisher may exit from a signal), and it is named for retention instead — the
+	// publication keeps only its own work directory.
+	c.announce("stage directory:", directory)
+	return c.publishStaged(directory, "",
+		[]publication.Retention{{Label: "staged proposal", Path: directory}})
 }
 
-// publishStaged publishes the proposal in directory. owner is the caller's own
-// scratch, printed beside a retained transaction; announced reports that the caller
-// already named it before publication started.
-func (c *Client) publishStaged(directory, owner string, announced bool) int {
+// publishStaged publishes the proposal in directory. owner is a scratch directory
+// this invocation created, which the publisher disposes of and, when the outcome is
+// undecided, prints beside its own work directory. retain names directories the
+// caller must keep but this invocation did not create.
+func (c *Client) publishStaged(directory, owner string, retain []publication.Retention) int {
 	files, err := readStage(directory, stageNames())
 	if err != nil {
 		c.diagnose("%s", err)
@@ -363,21 +361,14 @@ func (c *Client) publishStaged(directory, owner string, announced bool) int {
 	for _, file := range files {
 		staged = append(staged, publication.Staged{Path: destinationOf(file.name), Raw: file.raw})
 	}
-	if owner != "" && !announced {
-		c.announce("owner scratch:", owner)
-	}
-	status := publication.Publish(publication.Request{
+	return c.Publish(publication.Request{
 		Prefix:     Prefix,
 		Root:       c.Env.Root,
 		TempRoot:   c.Env.TempRoot,
 		TempPrefix: "pin-codex.work.",
 		Stderr:     publication.StderrOf(c.Err),
 		Owner:      owner,
+		Retain:     retain,
 		Files:      staged,
 	})
-	if status == 3 {
-		// The proposal the retained backups belong to is part of the way back.
-		c.retain("staged proposal retained at", directory)
-	}
-	return status
 }

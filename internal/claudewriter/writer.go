@@ -17,7 +17,8 @@
 //
 // Exit statuses: 0 published or unchanged, 1 failed with the sources unchanged or
 // fully restored, 2 usage, 3 undecided or incomplete recovery (the work directory is
-// retained and printed), 128+N after a signal whose rollback succeeded.
+// retained and printed), 128+N after a signal whose rollback restored the sources
+// (the six signal windows and what each retains: `internal/publication`).
 package claudewriter
 
 import (
@@ -225,47 +226,37 @@ func (c *Client) Refresh(ctx context.Context, options Options) int {
 	if absolute, err := filepath.Abs(work); err == nil {
 		work = absolute
 	}
-	keepWork := false
-	defer func() {
-		if !keepWork {
-			_ = os.RemoveAll(work)
-		}
-	}()
 	staged, err := c.stage(ctx, version, work)
 	if err != nil {
+		_ = os.RemoveAll(work)
 		c.diagnose("%s", err)
 		return 1
 	}
 	if staged.unchanged {
+		_ = os.RemoveAll(work)
 		c.note("unchanged (claude %s)", version)
 		return 0
 	}
 	_, _ = io.WriteString(c.Out, staged.delta)
 	// A signal-driven rollback exits from inside the transaction, so the owner
-	// scratch is named before publication starts, not after it.
+	// scratch is named before publication starts, not after it. From here the
+	// publisher owns that directory: it removes it on a decided outcome and retains
+	// and prints it otherwise.
 	c.diagnose("owner scratch: %s", work)
-	status := publication.Publish(publication.Request{
+	return publication.Publish(publication.Request{
 		Prefix:     Prefix,
 		Root:       c.Env.Root,
 		TempRoot:   c.Env.TempRoot,
 		TempPrefix: "pin-claude.",
 		Stderr:     publication.StderrOf(c.Err),
 		Owner:      work,
-		Files:      staged.files,
+		Report: publication.Report{To: c.Out, Lines: []string{
+			fmt.Sprintf("published claude %s: %s", version, stringsJoined(staged.files)),
+			fmt.Sprintf("now update script/test/fixtures/installer-egress/selections.tsv to "+
+				"claude %s, then run: bash script/test/contracts.sh", version),
+		}},
+		Files: staged.files,
 	})
-	switch status {
-	case 3:
-		keepWork = true
-		c.diagnose("owner scratch retained at %s", work)
-		c.diagnose("STOP: recover %s together with the publisher directory above "+
-			"before further edits/builds/commits", work)
-		return 3
-	case 0:
-		c.note("published claude %s: %s", version, stringsJoined(staged.files))
-		c.note("now update script/test/fixtures/installer-egress/selections.tsv to "+
-			"claude %s, then run: bash script/test/contracts.sh", version)
-	}
-	return status
 }
 
 func stringsJoined(files []publication.Staged) string {

@@ -13,7 +13,8 @@
 //
 // Exit statuses: 0 published or unchanged, 1 failed with the sources unchanged or
 // fully restored, 2 usage, 3 undecided or incomplete recovery (the work directory is
-// retained and printed), 128+N after a signal whose rollback succeeded.
+// retained and printed), 128+N after a signal whose rollback restored the sources
+// (the six signal windows and what each retains: `internal/publication`).
 package artifactwriter
 
 import (
@@ -231,20 +232,19 @@ func (c *Client) Refresh(ctx context.Context, options Options) int {
 			c.diagnose("would publish %s", entry.Path)
 		}
 	}
-	status := publication.Publish(publication.Request{
+	return publication.Publish(publication.Request{
 		Prefix:     Prefix,
 		Root:       c.Env.Root,
 		TempRoot:   c.Env.TempRoot,
 		TempPrefix: "pin-artifact.",
 		Stderr:     publication.StderrOf(c.Err),
-		Files:      staged,
+		Report: publication.Report{To: c.Out, Lines: []string{
+			fmt.Sprintf("published %s %s: %s", options.Name, options.Version,
+				stringsJoined(staged)),
+			"now run: bash script/build/base-inputs.sh --write",
+		}},
+		Files: staged,
 	})
-	if status != 0 {
-		return status
-	}
-	c.report("published %s %s: %s", options.Name, options.Version, stringsJoined(staged))
-	c.report("now run: bash script/build/base-inputs.sh --write")
-	return 0
 }
 
 func stringsJoined(staged []publication.Staged) string {

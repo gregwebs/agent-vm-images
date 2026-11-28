@@ -1,11 +1,14 @@
 package codewriter
 
 import (
-	"github.com/gregwebs/agent-vm-images/internal/codexpin"
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gregwebs/agent-vm-images/internal/codexpin"
+	"github.com/gregwebs/agent-vm-images/internal/publication"
 )
 
 // fixtureRoot is a private copy of the committed closure and the Dockerfile, so a test
@@ -240,7 +243,11 @@ func TestPublishStageRefusesAnUnrelatedDockerfileEdit(t *testing.T) {
 }
 
 // TestPublishStageCarriesTheUnownedArgEdits: the bumper stages its own single-slot ARG
-// defaults into the Codex proposal, and publishing them must leave the Codex slot alone.
+// defaults into the Codex proposal, and the proposal this owner hands to the publisher
+// must leave the Codex slot alone.
+//
+// The transaction itself is not run here: it ends the process on every outcome it
+// decides, so the request is what a writer-level case can hold.
 func TestPublishStageCarriesTheUnownedArgEdits(t *testing.T) {
 	root := fixtureRoot(t)
 	pin, _ := committedPin(t)
@@ -251,20 +258,45 @@ func TestPublishStageCarriesTheUnownedArgEdits(t *testing.T) {
 	if err := writeStage(stageDir, files); err != nil {
 		t.Fatalf("write: %s", err)
 	}
-	client, _, errOut := newClient(t, root)
+	client, out, errOut := newClient(t, root)
+	var published publication.Request
+	client.Publish = func(request publication.Request) int {
+		published = request
+		return 0
+	}
 	if status := client.PublishStage(stageDir); status != 0 {
 		t.Fatalf("publish stage: status %d: %s", status, errOut)
 	}
-	published := string(readFile(t, filepath.Join(root, Dockerfile)))
-	if err := RequireSingleSlot(published, pin.Release); err != nil {
-		t.Errorf("the published Dockerfile lost the Codex slot: %s", err)
+	if out.Len() != 0 {
+		t.Errorf("the writer reported an outcome the publisher owns: %s", out)
+	}
+	// The stage is the caller's, not this invocation's: it must never be handed over as
+	// owner scratch, because the publisher removes what it is given.
+	if published.Owner != "" {
+		t.Errorf("the request claims an owner scratch it did not create: %s", published.Owner)
+	}
+	retained := published.Retain
+	if len(retained) != 1 || retained[0].Label != "staged proposal" ||
+		retained[0].Path != stageDir {
+		t.Errorf("the request does not name the caller's stage for retention: %+v", retained)
+	}
+	proposed := map[string][]byte{}
+	for _, file := range published.Files {
+		proposed[file.Path] = file.Raw
+	}
+	if !bytes.Equal(proposed[PinFile], readFile(t, filepath.Join(repositoryRoot(t), PinFile))) {
+		t.Errorf("the proposal changes %s, which this owner does not", PinFile)
+	}
+	dockerfile, ok := proposed[Dockerfile]
+	if !ok {
+		t.Fatalf("the proposal carries no %s: %v", Dockerfile, published.Files)
+	}
+	if err := RequireSingleSlot(string(dockerfile), pin.Release); err != nil {
+		t.Errorf("the proposal lost the Codex slot: %s", err)
 	}
 	for _, needle := range []string{"ARG AGENT_VERSION_OPENCODE=v9.9.9", "ARG AGENT_VERSION_COPILOT=9.9.9"} {
-		if !strings.Contains(published, needle) {
-			t.Errorf("the published Dockerfile does not carry %q", needle)
+		if !strings.Contains(string(dockerfile), needle) {
+			t.Errorf("the proposal does not carry %q", needle)
 		}
-	}
-	if string(readFile(t, filepath.Join(root, PinFile))) != string(readFile(t, filepath.Join(repositoryRoot(t), PinFile))) {
-		t.Errorf("publishing a Dockerfile-only proposal changed the pin")
 	}
 }
