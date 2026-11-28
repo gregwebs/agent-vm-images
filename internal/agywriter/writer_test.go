@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -44,95 +45,70 @@ func TestRefreshRefusesGitHubActionsBeforeAnyFetch(t *testing.T) {
 	}
 }
 
-// TestRefreshRetainsTheOwnerScratchWhenPublicationIsIncomplete: a status-3
-// publication is undecided, so the owner's own scratch is kept and printed together
-// with the publisher's, and it still holds exactly the five proposed files. The
-// repository is untouched: nothing was published.
-func TestRefreshRetainsTheOwnerScratchWhenPublicationIsIncomplete(t *testing.T) {
-	fx := newFixture(t)
-	root := fixtureRoot(t, fixtureVersion)
-	client, out, errOut := newTestClient(t, root)
-	client.Fetch = fx.fetcher()
-	var published publication.Request
-	client.Publish = func(request publication.Request) int {
-		published = request
-		return 3
-	}
-	if status := client.Refresh(context.Background(), Options{Version: fx.version}); status != 3 {
-		t.Fatalf("refresh: status %d, want 3\n%s", status, errOut)
-	}
-	if out.Len() != 0 {
-		t.Errorf("an undecided publication reported success: %s", out)
-	}
-	transcript := errOut.String()
-	announced := pathAfter(t, transcript, "owner scratch: ")
-	retained := pathAfter(t, transcript, "owner scratch retained at ")
-	if announced != retained {
-		t.Errorf("the scratch was announced at %s and retained at %s", announced, retained)
-	}
-	if !filepath.IsAbs(retained) {
-		t.Errorf("the retained scratch is not absolute: %s", retained)
-	}
-	if _, err := os.Stat(retained); err != nil {
-		t.Errorf("the retained scratch is gone: %s", err)
-	}
-	if !strings.Contains(transcript, "STOP: recover "+retained) {
-		t.Errorf("the transcript does not tell a maintainer how to recover:\n%s", transcript)
-	}
-	if published.Prefix != Prefix || published.Root != root || published.Owner != announced {
-		t.Errorf("the publication was asked for %s in %s by %s", published.Prefix,
-			published.Root, published.Owner)
-	}
-	paths := make([]string, 0, len(published.Files))
-	for _, entry := range published.Files {
-		paths = append(paths, entry.Path)
-		if raw, err := os.ReadFile(filepath.Join(retained, "proposal", entry.Path)); err != nil ||
-			!bytes.Equal(raw, entry.Raw) {
-			t.Errorf("the retained scratch does not hold the staged %s: %v", entry.Path, err)
-		}
-	}
-	sort.Strings(paths)
-	wanted := []string{
-		PinFile,
-		PinDirectory + "/" + artifactpin.AgyReleaseEvidence.String(),
-		PinDirectory + "/" + artifactpin.AgyEvidence[artifactpin.LinuxAMD64].String(),
-		PinDirectory + "/" + artifactpin.AgyEvidence[artifactpin.LinuxARM64].String(),
-		Dockerfile,
-	}
-	sort.Strings(wanted)
-	if strings.Join(paths, ",") != strings.Join(wanted, ",") {
-		t.Errorf("the publication carries %v", paths)
-	}
-	if files := snapshot(t, root); len(files) != 1 {
-		t.Errorf("an undecided publication changed the repository: %v", files)
-	}
-}
-
-// TestRefreshReportsAFailedPublication: a status-1 publication is fully restored, so
-// the owner scratch is removed again and nothing is retained. The announced
-// directory is where a signal handler would have pointed, so it is the one to check.
-func TestRefreshReportsAFailedPublication(t *testing.T) {
-	fx := newFixture(t)
-	root := fixtureRoot(t, fixtureVersion)
-	client, out, errOut := newTestClient(t, root)
-	client.Fetch = fx.fetcher()
-	client.Publish = func(publication.Request) int { return 1 }
-	if status := client.Refresh(context.Background(), Options{Version: fx.version}); status != 1 {
-		t.Fatalf("refresh: status %d, want 1\n%s", status, errOut)
-	}
-	if out.Len() != 0 {
-		t.Errorf("a failed publication reported success: %s", out)
-	}
-	transcript := errOut.String()
-	if strings.Contains(transcript, "retained at") {
-		t.Errorf("a restored publication retained its scratch:\n%s", transcript)
-	}
-	announced := pathAfter(t, transcript, "owner scratch: ")
-	if _, err := os.Stat(announced); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("the failed run left %s behind: %v", announced, err)
-	}
-	if files := snapshot(t, root); len(files) != 1 {
-		t.Errorf("a failed publication changed the repository: %v", files)
+// TestRefreshLeavesTheOwnerScratchToThePublisher: the publisher owns this
+// invocation's scratch on every status it can return — it removes it on a decided
+// outcome and retains and prints it otherwise — so the writer must not remove it and
+// must not report an outcome the publisher has not reported.
+//
+// Every row reddens if a writer removes its own scratch: the announced directory is
+// gone, and an undecided publication has lost the proposal its backups belong to.
+func TestRefreshLeavesTheOwnerScratchToThePublisher(t *testing.T) {
+	for _, status := range []int{0, 1, 3} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			fx := newFixture(t)
+			root := fixtureRoot(t, fixtureVersion)
+			client, out, errOut := newTestClient(t, root)
+			client.Fetch = fx.fetcher()
+			var published publication.Request
+			client.Publish = func(request publication.Request) int {
+				published = request
+				return status
+			}
+			if got := client.Refresh(context.Background(), Options{Version: fx.version}); got != status {
+				t.Fatalf("refresh: status %d, want %d\n%s", got, status, errOut)
+			}
+			if out.Len() != 0 {
+				t.Errorf("the writer reported an outcome the publisher owns: %s", out)
+			}
+			transcript := errOut.String()
+			announced := pathAfter(t, transcript, "owner scratch: ")
+			if !filepath.IsAbs(announced) {
+				t.Errorf("the announced scratch is not absolute: %s", announced)
+			}
+			if _, err := os.Stat(announced); err != nil {
+				t.Errorf("the writer removed its own scratch: %s", err)
+			}
+			if strings.Contains(transcript, "retained at") || strings.Contains(transcript, "STOP:") {
+				t.Errorf("the writer claims a retention the publisher decides:\n%s", transcript)
+			}
+			if published.Prefix != Prefix || published.Root != root || published.Owner != announced {
+				t.Errorf("the publication was asked for %s in %s by %s", published.Prefix,
+					published.Root, published.Owner)
+			}
+			paths := make([]string, 0, len(published.Files))
+			for _, entry := range published.Files {
+				paths = append(paths, entry.Path)
+				if raw, err := os.ReadFile(filepath.Join(announced, "proposal", entry.Path)); err != nil ||
+					!bytes.Equal(raw, entry.Raw) {
+					t.Errorf("the handed-over scratch does not hold the staged %s: %v", entry.Path, err)
+				}
+			}
+			sort.Strings(paths)
+			wanted := []string{
+				PinFile,
+				PinDirectory + "/" + artifactpin.AgyReleaseEvidence.String(),
+				PinDirectory + "/" + artifactpin.AgyEvidence[artifactpin.LinuxAMD64].String(),
+				PinDirectory + "/" + artifactpin.AgyEvidence[artifactpin.LinuxARM64].String(),
+				Dockerfile,
+			}
+			sort.Strings(wanted)
+			if strings.Join(paths, ",") != strings.Join(wanted, ",") {
+				t.Errorf("the publication carries %v", paths)
+			}
+			if files := snapshot(t, root); len(files) != 1 {
+				t.Errorf("a published request changed the repository: %v", files)
+			}
+		})
 	}
 }
 

@@ -392,12 +392,13 @@ bash script/build/agent-versions.sh --write --cosign /abs/cosign
   retained directory *and* the owner scratch directory are printed absolutely;
   both are preserved and must be recovered before further edits, builds or commits.
   For a standalone `--version` run the owner scratch keeps the staged six-file
-  proposal; a signal-driven rollback reports both directories from the
-  publisher's own handler, because it leaves through `os._exit(3)`. Those paths
-  are proved where the transaction is: `internal/publication/publish_test.go`
-  restores every touched destination after a partial write and after a signal
-  (`128+N`), exits 3 when the restore is refused, and still exits 3 when the
-  recovery record cannot be written. `script/test/agent-versions.sh` keeps the
+  proposal. The publisher disposes of that scratch itself — it removes it on a
+  decided outcome and retains and prints it otherwise — and it ends the process,
+  so no report of its own outcome can disagree with its exit status. Those paths
+  are proved where the transaction is: `internal/publication/windows_test.go`
+  re-executes the test binary for each of the six signal windows and asserts the
+  real exit status, every destination's bytes and mode, the retained backups and
+  the report. `script/test/agent-versions.sh` keeps the
   bumper's side of it — a refused run leaves the closure byte- and
   mode-identical — and, for agy, opens both printed directories and checks all
   five staged files byte-for-byte, every numbered backup's bytes and mode, and
@@ -473,7 +474,9 @@ bash script/build/agent-versions.sh --write --cosign /abs/cosign
 - Write mode is one transaction through the shared publisher with the same
   statuses: `0` published or unchanged, `1` restored failure, `2` usage, `3`
   incomplete rollback (both directories printed absolutely — stop and recover),
-  `128+N` after a signal whose rollback succeeded. `script/test/agent-versions.sh`
+  `128+N` after a signal whose rollback restored the sources (the six
+  signal windows and what each retains: the `internal/publication` package
+  header). `script/test/agent-versions.sh`
   opens both printed directories and checks all five proposed files, every
   numbered backup's bytes and mode, and the `.complete` marker.
 - The bumper publishes agy **before** the Codex transaction, because the manifest
@@ -524,7 +527,9 @@ bash script/test/shipped-installer-network.sh agent-vm-base:local --platform lin
 - Write mode is one transaction through the shared publisher with the usual
   statuses: `0` published or unchanged, `1` restored failure, `2` usage, `3`
   incomplete rollback (both directories printed absolutely — stop and recover),
-  `128+N` after a signal whose rollback succeeded. A successful run prints the
+  `128+N` after a signal whose rollback restored the sources (the six
+  signal windows and what each retains: the `internal/publication` package
+  header). A successful run prints the
   field-by-field payload delta first.
 - After a real bump a human must update the `claude` default in
   `script/test/fixtures/installer-egress/selections.tsv` (the alternate column is

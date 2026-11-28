@@ -26,9 +26,9 @@
 # signature verification, the fixed destination lists, the publication transaction
 # and every status -- is production code.
 #
-# The publication fault cases (a partial write, a signal, a refused restore and an
-# unwritable recovery record) are not here: they live where the transaction does,
-# in `internal/publication/publish_test.go`. The agy and Codex staging, CI and
+# The publication fault cases (a partial write, the six signal windows, a refused
+# restore and an unwritable recovery record) are not here: they live where the
+# transaction does, in `internal/publication`. The agy and Codex staging, CI and
 # destination rules live in `internal/agywriter` and `internal/codewriter`. A case
 # cannot inject a fault into a compiled writer, so what is left here is the
 # bumper's own contract: staging several owners and publishing them as one
@@ -1049,10 +1049,10 @@ assert_contains "$RUN_COMBINED" "missing Dockerfile"
 
 # --- closure destinations: a refused run changes nothing ------------------
 #
-# The publication faults themselves (a partial write, a signal, a refused restore,
-# an unwritable recovery record) are `internal/publication/publish_test.go`. What
-# is checked here is the bumper's side: a run that refuses before publishing leaves
-# every destination byte- and mode-identical.
+# The publication faults themselves (a partial write, the six signal windows, a
+# refused restore, an unwritable recovery record) are `internal/publication`'s own
+# Go tests. What is checked here is the bumper's side: a run that refuses before
+# publishing leaves every destination byte- and mode-identical.
 
 EVIDENCE_BUNDLE='codex-package-aarch64-unknown-linux-musl.tar.gz.sigstore'
 
@@ -1252,13 +1252,12 @@ echo '  ok: a failed Codex staging names the already-published agy bump and the 
 # An undecided agy publication (status 3, both directories retained, the Codex
 # transaction never started) needs a fault injected inside the writer's own
 # transaction. The writer is a compiled binary now, so those cases live where the
-# transaction and the writer's scratch are: `TestIncompleteRecoveryExitsThreeAndRetainsTheRecord`,
-# `TestSignalDuringPublicationRestoresAndExits130`,
-# `TestSignalWithARefusedRestoreExitsThree` and
-# `TestReplacementKeepsTheDestinationsMode` in internal/publication/publish_test.go,
-# and `TestRefreshRetainsTheOwnerScratchWhenPublicationIsIncomplete` in
-# internal/agywriter for what the retained owner scratch holds. This is the same
-# split #181 made for Codex.
+# transaction and the writer's scratch are: `TestIncompleteRecoveryExitsThreeAndRetainsTheRecord`
+# and `TestReplacementKeepsTheDestinationsMode` in
+# internal/publication/publish_test.go, the six signal windows in
+# internal/publication/windows_test.go, and
+# `TestRefreshLeavesTheOwnerScratchToThePublisher` in internal/agywriter for what
+# the retained owner scratch holds. This is the same split #181 made for Codex.
 #
 # What is NOT covered here any more: the bumper's mapping of status 3 to "agy
 # publication is undecided", because there is no seam to make a compiled writer
@@ -1342,12 +1341,12 @@ echo '  ok: a failed claude publication names the landed agy half and stops befo
 # An undecided publication (status 3, both directories retained, Codex never started)
 # needs a fault injected inside the writer during its transaction. The writer is a
 # binary now, so that case lives where the transaction does, as a Go test:
-# `TestIncompleteRecoveryExitsThreeAndRetainsTheRecord` and
-# `TestSignalDuringPublicationRestoresAndExits130` in
-# internal/publication/publish_test.go. What the bump does with that status is still
-# covered here: the builder maps 3 to "claude publication is undecided" and stops
-# before Codex, which `claude-writer-fails-after-agy` exercises through the same
-# stop ordering with status 1.
+# `TestIncompleteRecoveryExitsThreeAndRetainsTheRecord` in
+# internal/publication/publish_test.go, and every signal window as its own
+# re-executed process in internal/publication/windows_test.go. What the bump does
+# with that status is still covered here: the builder maps 3 to "claude publication
+# is undecided" and stops before Codex, which `claude-writer-fails-after-agy`
+# exercises through the same stop ordering with status 1.
 
 new_case check-refuses-mutated-claude-evidence
 printf 'tampered\n' >>"$FIXTURE_ROOT/images/tools/claude/evidence/manifest.json"

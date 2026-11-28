@@ -276,7 +276,8 @@ payload, manifest or security-projection change is refused rather than re-pinned
 Statuses are the shared ones: `0` published or unchanged, `1` failed with the
 sources unchanged or fully restored, `2` usage, `3` undecided/incomplete recovery
 with every retained directory printed, `128+N` after a signal whose rollback
-succeeded.
+restored the sources (the six signal windows and what each retains: the
+`internal/publication` package header).
 
 The suite that holds this tool to its answers is
 `go test ./script/test/pinsuite/codex`. Its fixture builders are also commands,
@@ -358,7 +359,9 @@ corroborates each archive against both channels, preflights both archives and
 publishes the five files as one transaction. Statuses are the shared ones: `0`
 published or unchanged, `1` failed with the sources unchanged or fully restored,
 `2` usage, `3` undecided/incomplete recovery with every retained directory
-printed, `128+N` after a signal whose rollback succeeded.
+printed, `128+N` after a signal whose rollback restored the sources (the six
+  signal windows and what each retains: the `internal/publication` package
+  header).
 `script/build/agent-versions.sh --write` resolves the manifest and delegates to
 this tool **before** the Codex transaction, so a manifest that moves mid-run
 leaves every file untouched.
@@ -454,7 +457,8 @@ and to be ELF objects for their machines, and refuses a same-release rewrite. It
 never writes the key. Statuses are the shared ones: `0` published or unchanged,
 `1` failed with the sources unchanged or fully restored, `2` usage, `3`
 undecided/incomplete recovery with every retained directory printed, `128+N` after
-a signal whose rollback succeeded.
+a signal whose rollback restored the sources (the six signal windows and what each
+retains: the `internal/publication` package header).
 `script/build/agent-versions.sh --write` runs it after agy and before Codex,
 because Codex stages from the Dockerfile Claude has already published and refuses
 a staged Claude ARG difference. Key rotation is manual:
