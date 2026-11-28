@@ -349,7 +349,7 @@ func TestWriterPublishStagePublishesTheProposal(t *testing.T) {
 	result := runWriter(t, repo, arguments("--publish-stage", stage))
 	requireStatus(t, result, 0)
 	result.RequireStderr(t, "publishing the staged proposal in "+stage)
-	result.RequireStderr(t, "owner scratch: "+stage)
+	result.RequireStderr(t, "stage directory: "+stage)
 	published := repo.committed(t)
 	if !bytes.Equal(published[PinDirectory+"/pin.json"], proposal["pin.json"]) {
 		t.Fatal("the published pin is not the staged pin")

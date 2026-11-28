@@ -53,8 +53,9 @@
 // restored from and now retains them.
 //
 // Statuses, unchanged: 0 published, 1 failed with the sources unchanged or fully
-// restored, 2 usage, 3 undecided or incomplete recovery (the work directory and the
-// caller's scratch are retained and printed), 128+N after a signal.
+// restored, 2 usage, 3 undecided or incomplete recovery (the work directory, the
+// caller's scratch and every caller-named retained directory are retained and
+// printed), 128+N after a signal.
 package publication
 
 import (
@@ -111,11 +112,19 @@ type Request struct {
 	// together. It must never name a directory the caller was given: a scratch this
 	// transaction did not create is not its to remove.
 	Owner string
-	// Retain names directories the caller must keep but did not create, as lines to
-	// print when the outcome is retained. They are never removed, and a decided
-	// outcome does not print them.
-	Retain []string
+	// Retain names directories the caller must keep but did not create. They are never
+	// removed, they are printed (labelled, with their absolute paths) only when the
+	// outcome is retained, and a decided outcome does not print them.
+	Retain []Retention
 	Files  []Staged
+}
+
+// Retention is one directory the caller must keep but did not create, and the label
+// the contract line calls it by — the stage a maintainer handed to `--publish-stage`
+// is "staged proposal", and the transaction may not guess that.
+type Retention struct {
+	Label string
+	Path  string
 }
 
 // StderrOf is the *os.File a signal handler can still write to. A caller that gave
@@ -131,9 +140,10 @@ func StderrOf(errOut any) *os.File {
 
 // Publish runs one publication and returns the process status: 0 published, 1
 // failed with the sources unchanged or restored, 3 incomplete recovery (the work
-// directory is retained and printed), 128+N after a signal whose rollback
-// succeeded. It ends the process itself on every decided outcome, so the status it
-// returns is only reached by a test's substituted exit.
+// directory, the caller's scratch and its retained directories are retained and
+// printed), 128+N after a signal whose rollback succeeded. It ends the process
+// itself on every decided outcome, so the status it returns is only reached by a
+// test's substituted exit.
 func Publish(request Request) int {
 	pattern := request.TempPrefix
 	if pattern == "" {
@@ -148,6 +158,13 @@ func Publish(request Request) int {
 	if absolute, err := filepath.Abs(work); err == nil {
 		work = absolute
 	}
+	return request.transaction(work).Run(request.Owner)
+}
+
+// transaction is the one mapping from a caller's request to the transaction that
+// runs it, so nothing the caller named — its root, its report, a directory it must
+// keep — is dropped on the way in.
+func (request Request) transaction(work string) *Transaction {
 	transaction := &Transaction{
 		Prefix: request.Prefix,
 		Root:   request.Root,
@@ -161,7 +178,7 @@ func Publish(request Request) int {
 			filepath.Join(request.Root, entry.Path))
 		transaction.Staged = append(transaction.Staged, entry.Raw)
 	}
-	return transaction.Run(request.Owner)
+	return transaction
 }
 
 func diagnoseRequest(request Request, format string, args ...any) {

@@ -377,7 +377,11 @@ bash script/build/agent-versions.sh --write --cosign /abs/cosign
   created through that descriptor with `O_CREAT|O_EXCL|O_NOFOLLOW` — so replacing
   the checked directory with a symlink cannot redirect a write, and a swap is
   reported instead of being followed. `--publish-stage` reads the proposal the
-  same way and prints the absolute directory it read.
+  same way, prints the absolute directory it read, and never removes it: the stage
+  is the maintainer's, not the publisher's, so on 3 (and after a signalled rollback)
+  it is retained and printed beside the publisher's own work directory, and a
+  successful publish leaves everything in it — including files it did not put
+  there — untouched.
 - One write run resolves the exact release, downloads both payloads and both
   bundles, verifies both with the real verifier under the exact workflow identity
   and issuer, preflights both archives, and publishes the pin, its four evidence
@@ -400,7 +404,7 @@ bash script/build/agent-versions.sh --write --cosign /abs/cosign
   status, every destination's bytes and mode, the retained backups' bytes and
   modes, the `.complete` marker, the retained `recovery.json` entry by entry, and
   whether the report was printed; `publish_test.go` holds the 20-cell inclusive
-  rollback matrix. `script/test/agent-versions.sh` keeps the bumper's side of it
+  rollback matrix.  `script/test/agent-versions.sh` keeps the bumper's side of it
   — a refused run leaves the closure byte- and mode-identical, and the bumper's
   own scratch survives exactly the statuses the publisher reports as retained
   (3 and 128+N) and is deleted for a decided one.

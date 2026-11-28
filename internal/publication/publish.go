@@ -46,9 +46,10 @@ type Transaction struct {
 	// it ends the process, so a caller can never print "published" after an exit
 	// status that says otherwise.
 	Report Report
-	// Retain names directories the caller must keep but did not create, as lines to
-	// print when the outcome is retained.
-	Retain []string
+	// Retain names directories the caller must keep but did not create. They are
+	// printed, and named in the STOP line, exactly when the outcome is retained —
+	// never otherwise, and never removed.
+	Retain []Retention
 
 	Destinations []string
 	Staged       [][]byte
@@ -581,8 +582,14 @@ func (t *Transaction) retained() {
 	if t.owner != "" {
 		t.diagnose("owner scratch retained at %s", t.owner)
 	}
+	// The caller's own directories are part of what a maintainer has to come back
+	// to, so they are named here and in the STOP line: this is the only place that
+	// knows the outcome was retained.
+	for _, retention := range t.Retain {
+		t.diagnose("%s retained at %s", retention.Label, retention.Path)
+	}
 	t.diagnose("STOP: recover %s%s before further edits/builds/commits", t.Work,
-		ownerSuffix(t.owner))
+		togetherWith(t.owner, t.Retain))
 }
 
 // printReport writes the caller's success lines, which the caller cannot write
@@ -606,11 +613,20 @@ func (t *Transaction) printReport() error {
 	return nil
 }
 
-func ownerSuffix(owner string) string {
-	if owner == "" {
+// togetherWith names every other directory a retained outcome keeps, in the one
+// sentence that tells a maintainer what to recover first.
+func togetherWith(owner string, retentions []Retention) string {
+	paths := []string{}
+	if owner != "" {
+		paths = append(paths, owner)
+	}
+	for _, retention := range retentions {
+		paths = append(paths, retention.Path)
+	}
+	if len(paths) == 0 {
 		return ""
 	}
-	return " together with " + owner
+	return " together with " + strings.Join(paths, " and ")
 }
 
 // watchSignals records the signals a maintainer actually sends. The handler runs on

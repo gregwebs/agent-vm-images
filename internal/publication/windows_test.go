@@ -41,6 +41,9 @@ const (
 	// signalFromReportVariable makes the report writer deliver the signal, so the
 	// window that exists while the success lines are being written has a case.
 	signalFromReportVariable = "PUBLICATION_WINDOW_SIGNAL_FROM_REPORT"
+	// retainVariable names a caller-owned directory the transaction must keep, and
+	// print when — and only when — the outcome is retained.
+	retainVariable = "PUBLICATION_WINDOW_RETAIN"
 	// Request mode builds a Request and calls Publish, which is where the resolved
 	// root, the report's errors and a publication that never starts live.
 	requestModeVariable = "PUBLICATION_WINDOW_REQUEST"
@@ -97,6 +100,9 @@ func childStatus() int {
 		// The channel is created by prepare, so the writer reads it from the
 		// transaction when it is called rather than capturing it here.
 		transaction.Report.To = signalWriter{transaction: transaction}
+	}
+	if retained := os.Getenv(retainVariable); retained != "" {
+		transaction.Retain = []Retention{{Label: "staged proposal", Path: retained}}
 	}
 	if refused := os.Getenv(refuseVariable); refused != "" {
 		if refused == "all" {
@@ -750,6 +756,50 @@ func TestSignalDuringAFailingCopyRestores(t *testing.T) {
 	}
 	requireRetained(t, work, owner)
 	requireBackups(t, work, created)
+}
+
+// TestRetainedCallerDirectoriesArePrintedOnlyWhenTheOutcomeIsRetained: a directory the
+// caller must keep but did not create (the stage `--publish-stage` is given) is named on
+// 3 and after a restored signal, and never on a decided outcome. The transaction is the
+// only thing that knows the outcome, so a caller cannot print this itself.
+//
+// The mutation this case holds down: delete the caller-directory lines from the retained
+// report, and the undecided half of this case finds the stage unmentioned.
+func TestRetainedCallerDirectoriesArePrintedOnlyWhenTheOutcomeIsRetained(t *testing.T) {
+	created := newFixture(t)
+	stage := filepath.Join(t.TempDir(), "stage")
+	if err := os.MkdirAll(stage, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	work := created.work(t)
+	owner := ownerScratch(t)
+	undecided := runWindow(t, map[string]string{
+		rootVariable:   created.root,
+		workVariable:   work,
+		ownerVariable:  owner,
+		windowVar:      string(windowCopied),
+		indexVariable:  "3",
+		retainVariable: stage,
+	})
+	undecided.requireStatus(t, 3)
+	undecided.require(t, "staged proposal retained at "+stage)
+	undecided.require(t, "STOP: recover "+work+" together with "+owner+" and "+stage)
+	if info, err := os.Stat(stage); err != nil || !info.IsDir() {
+		t.Fatalf("a retained caller directory was removed: %v", err)
+	}
+
+	decided := runWindow(t, map[string]string{
+		rootVariable:   created.root,
+		workVariable:   created.work(t),
+		ownerVariable:  ownerScratch(t),
+		retainVariable: stage,
+	})
+	decided.requireStatus(t, 0)
+	if !strings.Contains(decided.stdout, "pin-artifact: "+reportLine) {
+		t.Fatalf("a decided 0 printed its report:\n%s", decided.stdout)
+	}
+	decided.requireNone(t, "staged proposal")
+	decided.requireNone(t, "STOP: recover")
 }
 
 // TestAnUnreadableReportStillPublishesAndSaysSo: the publication is decided and the

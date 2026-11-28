@@ -153,6 +153,47 @@ func failOn(transaction *Transaction, name string, once *bool) {
 	}
 }
 
+// TestARequestBecomesTheTransactionItDescribes: a writer builds a Request and nothing
+// else, so every field it names must reach the transaction — a dropped Retain is a
+// directory the caller is told to keep on some other path while this one forgets it,
+// and a dropped Report is a caller that cannot be told an outcome happened.
+//
+// The mutation this case holds down: delete any field of that mapping, and this case
+// names it.
+func TestARequestBecomesTheTransactionItDescribes(t *testing.T) {
+	report := &bytes.Buffer{}
+	request := Request{
+		Prefix:     "pin-artifact: ",
+		Root:       "/repo",
+		TempRoot:   "/tmp",
+		TempPrefix: "pin-artifact.",
+		Stderr:     os.Stderr,
+		Report:     Report{To: report, Lines: []string{"published"}},
+		Owner:      "/owner",
+		Retain:     []Retention{{Label: "staged proposal", Path: "/stage"}},
+		Files:      []Staged{{Path: "images/Dockerfile", Raw: []byte("ARG x=1\n")}},
+	}
+	transaction := request.transaction("/work")
+	if transaction.Prefix != request.Prefix || transaction.Root != request.Root ||
+		transaction.Work != "/work" || transaction.Stderr != request.Stderr {
+		t.Fatalf("the transaction is not the one the request describes: %+v", transaction)
+	}
+	if transaction.Report.To != report || len(transaction.Report.Lines) != 1 ||
+		transaction.Report.Lines[0] != "published" {
+		t.Fatalf("the transaction lost the request's report: %+v", transaction.Report)
+	}
+	if len(transaction.Retain) != 1 || transaction.Retain[0].Label != "staged proposal" ||
+		transaction.Retain[0].Path != "/stage" {
+		t.Fatalf("the transaction lost the directories the caller must keep: %+v",
+			transaction.Retain)
+	}
+	if len(transaction.Destinations) != 1 ||
+		transaction.Destinations[0] != filepath.Join(request.Root, "images/Dockerfile") ||
+		len(transaction.Staged) != 1 || string(transaction.Staged[0]) != "ARG x=1\n" {
+		t.Fatalf("the transaction lost the request's files: %v", transaction.Destinations)
+	}
+}
+
 func TestPublicationFailureRestoresEveryTouchedDestination(t *testing.T) {
 	created := newFixture(t)
 	transaction := created.transaction(created.work(t))

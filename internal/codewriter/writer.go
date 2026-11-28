@@ -302,26 +302,27 @@ func (c *Client) PublishStage(stageDir string) int {
 		c.diagnose("%s", err)
 		return 1
 	}
-	// For the bumper, the stage directory IS the owner scratch, so the path is
-	// resolved and handed to the publisher as the caller's own.
+	// The bumper hands its own scratch here, and a maintainer may hand any directory:
+	// it is read where it was named, and it is never this invocation's to remove.
 	directory, err := absolute(stageDir)
 	if err != nil {
 		c.diagnose("%s", err)
 		return 1
 	}
 	// The stage directory is the caller's: this invocation was given it and did not
-	// create it, so the publisher must never remove it. It is named for retention
-	// instead, and the publication keeps only its own work directory.
-	c.announce("owner scratch:", directory)
+	// create it, so the publisher must never remove it. Its path is announced (the
+	// publisher may exit from a signal), and it is named for retention instead — the
+	// publication keeps only its own work directory.
+	c.announce("stage directory:", directory)
 	return c.publishStaged(directory, "",
-		[]string{"staged proposal retained at " + directory})
+		[]publication.Retention{{Label: "staged proposal", Path: directory}})
 }
 
 // publishStaged publishes the proposal in directory. owner is a scratch directory
 // this invocation created, which the publisher disposes of and, when the outcome is
 // undecided, prints beside its own work directory. retain names directories the
 // caller must keep but this invocation did not create.
-func (c *Client) publishStaged(directory, owner string, retain []string) int {
+func (c *Client) publishStaged(directory, owner string, retain []publication.Retention) int {
 	files, err := readStage(directory, stageNames())
 	if err != nil {
 		c.diagnose("%s", err)
