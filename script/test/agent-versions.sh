@@ -433,6 +433,15 @@ serve_claude() { # $1 = served version
 }
 
 ARGS=()
+# The scratch directory the bumper created, as it names it on stderr before the
+# publication. Read, never guessed: the directory `mktemp` picks depends on the host's
+# TMPDIR handling, and a control that checks a directory nobody created passes whether
+# or not the code is right.
+bumper_scratch() {
+    sed -n 's/^pin-codex: owner scratch: \(.*\) (retained if the publication is undecided)$/\1/p' \
+        "$CASE/stderr" | tail -1
+}
+
 run_agent_versions() {
     set +e
     RUN_OUTPUT="$(env -i \
@@ -673,6 +682,19 @@ grep -q "^ARG AGENT_VERSION_AGY=${DEFAULT_AGY_RELEASE}$" "$CASE/codex-staged-doc
 grep -q "^ARG AGENT_VERSION_AGY=${FIXTURE_OLD_AGY}$" "$CASE/original" ||
     fail 'the fixture did not start from the older agy release'
 echo '  ok: agy published before the Codex staging step read the Dockerfile'
+# A decided outcome is the only case in which the bumper deletes its own scratch: the
+# publisher retains material on 3 and 128+N, and the bumper's `publisher_retained` keeps
+# the scratch for exactly those (the signalled case at the end of the suite is that
+# control's positive half). A successful bump leaves nothing behind.
+#
+# The directory is read from the line the bumper prints before the publication, not
+# guessed from `$CASE`: macOS `mktemp` ignores TMPDIR and Linux honours it, so "a `tmp.*`
+# entry under $CASE" is a real path on one host and a directory that never existed on the
+# other — a green check over the wrong thing.
+scratch="$(bumper_scratch)"
+[[ -n "$scratch" ]] || fail 'the bumper named no scratch on its successful path'
+[[ ! -e "$scratch" ]] || fail "a decided bump left the bumper scratch behind: $scratch"
+echo '  ok: a decided bump discards the bumper scratch'
 
 # --- the authentication token never appears in diagnostics ------------------
 
@@ -1468,15 +1490,28 @@ retained="$(sed -n 's/.*owner scratch retained at //p' "$CASE/stderr" | tail -1)
 [[ -d "$retained" ]] || fail "the bumper deleted the scratch the publisher retained: $retained"
 echo '  ok: a signalled writer keeps the bumper scratch the publisher named'
 
-# The other half of the same rule: a decided outcome still deletes it, so a successful
-# run leaves no scratch behind.
-new_case decided-status-discards-scratch
-printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE_ROOT/script/dev/pin-agy.sh"
-chmod 0755 "$FIXTURE_ROOT/script/dev/pin-agy.sh"
+# The other half of the rule, on a decided failure: status 1 is not retained material,
+# so it must not leave the scratch behind either, and the bumper must not claim it does.
+# The failure is placed at the publication step — after the bumper has named its scratch
+# — because a writer that fails earlier exits before naming one, and a control that
+# cannot name the directory it checks is not a control.
+new_case failure-status-discards-scratch
+cat >"$FIXTURE_ROOT/script/dev/pin-codex.sh" <<SH
+#!/usr/bin/env bash
+set -u
+for argument in "\$@"; do
+    if [ "\$argument" = --publish-stage ]; then exit 1; fi
+done
+exec bash $(printf '%q' "$REPO_ROOT/script/dev/pin-codex.sh") \
+    --fixture-upstream $(printf '%q' "$CASE/codex-upstream") "\$@"
+SH
+chmod 0755 "$FIXTURE_ROOT/script/dev/pin-codex.sh"
 run_agent_versions
-[[ $RUN_STATUS -eq 0 ]] || fail "a decided outcome must keep status 0, got $RUN_STATUS"
-[[ -z "$(find "$CASE" -maxdepth 1 -name 'tmp.*' -print -quit)" ]] \
-    || fail 'a decided outcome left the bumper scratch behind'
-echo '  ok: a decided writer discards the bumper scratch'
+[[ $RUN_STATUS -eq 1 ]] || fail "a failed writer must keep its status, got $RUN_STATUS"
+assert_not_contains "$RUN_STDERR" 'retains material'
+scratch="$(bumper_scratch)"
+[[ -n "$scratch" ]] || fail 'a decided failure never named the bumper scratch'
+[[ ! -e "$scratch" ]] || fail "a decided failure left the bumper scratch behind: $scratch"
+echo '  ok: a decided failure discards the bumper scratch'
 
 echo 'agent-versions black-box tests passed'
