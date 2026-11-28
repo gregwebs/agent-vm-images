@@ -46,6 +46,9 @@ type Transaction struct {
 	// it ends the process, so a caller can never print "published" after an exit
 	// status that says otherwise.
 	Report Report
+	// Retain names directories the caller must keep but did not create, as lines to
+	// print when the outcome is retained.
+	Retain []string
 
 	Destinations []string
 	Staged       [][]byte
@@ -64,7 +67,10 @@ type Transaction struct {
 	copyFile  func(source, destination string, mode os.FileMode) error
 	removeAll func(path string) error
 	// hook is a test's seam at a named window: it delivers the signal the case
-	// names, at the moment that case names. It is nil in every shipped binary.
+	// names, at the moment that case names. It is nil in every production run, and it
+	// is an unexported field of a type whose window is unexported, so no caller and no
+	// exported API can set it: only a test in this package can
+	// (frozen by TestNoExportedFieldReachesTheWindowSeam).
 	hook  func(at window, index int)
 	owner string
 	exit  func(status int)
@@ -75,6 +81,10 @@ type Transaction struct {
 	// the outcome itself) or is handed the outcome by the publication.
 	mu      sync.Mutex
 	settled bool
+	// committed records that the outcome is decided and the exit is imminent. It is
+	// what a handler that arrives during the removal reads: nothing is retained from
+	// here on, so its answer is the decided status and not a retention claim.
+	committed bool
 	// decided is the status the outcome gave. The handler sets it before it ends
 	// the process, so a publication waiting for that exit reports the same status.
 	decided int
@@ -348,6 +358,17 @@ func (t *Transaction) recoveryRecord(message string) error {
 	return os.WriteFile(filepath.Join(t.Work, "recovery.json"), append(raw, '\n'), 0o600)
 }
 
+// recordUndecided writes the recovery record for a window that ends undecided, so the
+// retained directory says what happened rather than leaving a maintainer to guess
+// from the backups. Its failure is named but does not change the status: the retained
+// directory and the printed paths are the way back.
+func (t *Transaction) recordUndecided(message string) {
+	if recordError, failed := t.recordRecoveryBestEffort(message); failed {
+		t.diagnose("could not write the recovery record in %s (%s); the retained "+
+			"directory and the backups in it are still authoritative", t.Work, recordError)
+	}
+}
+
 // recordRecoveryBestEffort writes the record without letting its failure escape.
 //
 // A rollback that failed and then cannot even describe itself is still a status-3
@@ -372,12 +393,18 @@ func (t *Transaction) recordRecoveryBestEffort(message string) (string, bool) {
 func (t *Transaction) Run(owner string) int {
 	if err := t.prepare(owner); err != nil {
 		t.diagnose("%s failed (%s); no destination was touched, sources unchanged", t.phase, err)
+		t.removeScratch()
+		return 1
+	}
+	if err := t.resolveRoot(); err != nil {
+		t.diagnose("cannot resolve the repository root (%s); sources unchanged", err)
+		t.removeScratch()
 		return 1
 	}
 	refused := refusedSymlinks(t.Root, t.Destinations)
 	if len(refused) > 0 {
 		t.diagnose("refusing a path reached through a symlink: [%s]", strings.Join(refused, " "))
-		_ = t.removeAll(t.Work)
+		t.removeScratch()
 		return 1
 	}
 	stop := t.watchSignals()
@@ -413,8 +440,45 @@ func (t *Transaction) Run(owner string) int {
 	if t.handedOver() {
 		return t.decided
 	}
-	t.printReport()
+	if err := t.printReport(); err != nil {
+		// The publication is decided and its bytes are in place; the caller was not
+		// told, and a quiet status 0 would leave it believing it was.
+		t.diagnose("the publication succeeded, but its report could not be written "+
+			"(%s); the destinations are published", err)
+	}
+	// A signal that arrives while the report is being written owns the outcome: the
+	// report may have reached the caller, but nothing has been disposed of yet, and
+	// an undecided 3 with the material is the only status that does not claim an
+	// outcome nobody reported.
+	if t.handedOver() {
+		return t.decided
+	}
 	return t.end(0, discard)
+}
+
+// resolveRoot canonicalises the repository root once, and re-bases the destinations the
+// caller joined to the spelling it used.
+//
+// The resolution is what makes the paths this transaction compares, prints and records
+// name the repository that was written rather than the alias the caller happened to use
+// (a maintainer reading a retained directory should not have to work out which symlink it
+// was published through). The re-basing is what makes that safe: the destinations were
+// joined to the unresolved root, so without it every one of them is "outside the
+// repository" on any host whose TMPDIR is a symlink — the ordinary case on macOS.
+func (t *Transaction) resolveRoot() error {
+	resolved, err := filepath.EvalSymlinks(t.Root)
+	if err != nil {
+		return err
+	}
+	for index, destination := range t.Destinations {
+		relative, ok := localRelative(t.Root, destination)
+		if !ok {
+			continue
+		}
+		t.Destinations[index] = filepath.Join(resolved, relative)
+	}
+	t.Root = resolved
+	return nil
 }
 
 // handedOver gives the outcome to a signal that has already been recorded and waits
@@ -447,7 +511,14 @@ func (t *Transaction) failBeforePublication(cause error) int {
 // recover restores what publication touched and reports the outcome.
 func (t *Transaction) recover(cause error) int {
 	t.diagnose("publication failed (%s); restoring", cause)
-	if err := t.restore(); err != nil {
+	restoreErr := t.restore()
+	if t.handedOver() {
+		// A signal landed while the rollback was running. The rollback already put
+		// back what it could, so the handler's window (not this status) is the one
+		// the caller sees: it decides whether to restore again and what to retain.
+		return t.decided
+	}
+	if err := restoreErr; err != nil {
 		recordError, recordFailed := t.recordRecoveryBestEffort(err.Error())
 		t.diagnose("restore incomplete (%s)", err)
 		if recordFailed {
@@ -471,14 +542,20 @@ func (t *Transaction) recover(cause error) int {
 // publication into a failure, and it is not recovery material, because nothing is
 // left to recover.
 func (t *Transaction) end(status int, f fate) int {
+	t.decided = status
+	t.committed = true
+	// The lock is released before the removal, so a handler that arrives now is not
+	// blocked behind it: the outcome is committed, and the handler's answer is the
+	// decided status rather than a retention claim it could not honour.
+	t.mu.Unlock()
 	if f == discard {
 		t.removeScratch()
 	}
-	t.decided = status
+	// `exited` is closed only after the removal: the path waiting on it returns the
+	// decided status, and a process that reported "discarded" must have discarded.
 	close(t.exited)
 	t.exit(status)
-	// Only a test's substituted exit returns here; the lock is still held, because
-	// the released path is the process itself ending.
+	// Only a test's substituted exit returns here.
 	return status
 }
 
@@ -509,17 +586,24 @@ func (t *Transaction) retained() {
 }
 
 // printReport writes the caller's success lines, which the caller cannot write
-// itself: they describe an outcome only this transaction knows it took.
-func (t *Transaction) printReport() {
+// itself: they describe an outcome only this transaction knows it took. It reports a
+// failure rather than swallowing it: a lost report leaves a caller believing a
+// publication it was never told about did not happen.
+func (t *Transaction) printReport() error {
 	if t.Report.To == nil {
-		return
+		return nil
 	}
 	for _, line := range t.Report.Lines {
-		_, _ = io.WriteString(t.Report.To, t.Prefix+line+"\n")
+		if _, err := io.WriteString(t.Report.To, t.Prefix+line+"\n"); err != nil {
+			return err
+		}
 	}
+	// A caller that buffered the lines has not written them yet, and this process
+	// ends next.
 	if flusher, ok := t.Report.To.(interface{ Flush() error }); ok {
-		_ = flusher.Flush()
+		return flusher.Flush()
 	}
+	return nil
 }
 
 func ownerSuffix(owner string) string {
@@ -561,6 +645,13 @@ func (t *Transaction) onSignal(received os.Signal) {
 		close(t.interrupted)
 	}
 	t.mu.Lock()
+	if t.committed {
+		// The outcome is decided and the exit is imminent; this invocation's
+		// directories are already being removed. Nothing is retained to claim, and the
+		// publication is the path that ends the process.
+		t.mu.Unlock()
+		return
+	}
 	status, f := t.signalOutcome(int(t.number.Load()))
 	t.end(status, f)
 }
@@ -568,8 +659,9 @@ func (t *Transaction) onSignal(received os.Signal) {
 // signalOutcome is the one place a signal decides a status, and therefore the one
 // place the windows P1–P5 are told apart:
 //
-//   - undecided or incomplete keeps material and reports 3: the caller must inspect
-//     before continuing, and the publication stays as the copies left it;
+//   - undecided or incomplete keeps the material, writes the recovery record and
+//     reports 3: the caller must inspect before continuing, and the publication stays
+//     as the copies left it;
 //   - mid-copy restores every destination it may have written and reports 128+N with
 //     the complete backup set retained: the sources are as committed, and the
 //     backups are still the way back;
@@ -584,6 +676,7 @@ func (t *Transaction) signalOutcome(number int) (int, fate) {
 		// a complete publication would destroy bytes that are consistent with the
 		// backups beside them.
 		t.diagnose("publication result undecided when the signal arrived")
+		t.recordUndecided("publication result undecided when the signal arrived")
 		t.retained()
 		return 3, retain
 	}
@@ -631,15 +724,32 @@ func (t *Transaction) diagnose(format string, args ...any) {
 	_, _ = fmt.Fprintf(t.Stderr, t.Prefix+format+"\n", args...)
 }
 
+// relativeTo is the repository-relative name of one destination, refused when it is
+// not a local path.
+//
+// filepath.IsLocal is the rule rather than a ".." prefix test: a committed file may
+// legitimately be called `..x`, and a prefix test refuses it as though it climbed out
+// of the repository. What must be refused is a relative path that leaves the root by
+// any spelling — `..`, `../x`, an absolute path, or an empty one.
 func relativeTo(root, path string) (string, error) {
-	relative, err := filepath.Rel(root, path)
-	if err != nil {
-		return "", err
-	}
-	if strings.HasPrefix(relative, "..") {
+	relative, ok := localRelative(root, path)
+	if !ok {
 		return "", fmt.Errorf("%s is outside the repository", path)
 	}
 	return relative, nil
+}
+
+// localRelative is path relative to root, reported only when it is a local path.
+//
+// One rule for both callers: the restore and the symlink walk must agree with the write
+// about which paths are inside the repository, or a destination named `..x` is written
+// by one and refused by the other.
+func localRelative(root, path string) (string, bool) {
+	relative, err := filepath.Rel(root, path)
+	if err != nil || !filepath.IsLocal(relative) {
+		return "", false
+	}
+	return relative, true
 }
 
 // refusedSymlinks reports every destination reached through a symlink.
@@ -668,9 +778,11 @@ func symlinked(root, destination string) string {
 	if err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return destination
 	}
-	relative, err := filepath.Rel(root, destination)
-	if err != nil || strings.HasPrefix(relative, "..") {
-		return root
+	relative, ok := localRelative(root, destination)
+	if !ok {
+		// Not a path under the root at all. The phase that writes refuses it, with the
+		// reason it actually has; naming a symlink here would name the wrong one.
+		return ""
 	}
 	parts := strings.Split(relative, string(filepath.Separator))
 	current := root

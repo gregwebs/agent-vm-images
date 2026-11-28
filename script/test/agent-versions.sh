@@ -1449,4 +1449,34 @@ rm -f "$FIXTURE_ROOT/images/tools/codex/evidence"
 mv "$CASE/evidence-moved" "$FIXTURE_ROOT/images/tools/codex/evidence"
 echo '  ok: a destination reached through a symlink is refused'
 
+# --- a signalled writer keeps the bumper's own scratch ---------------------
+#
+# The publisher retains its work directory, and names the scratch it was given, on 3
+# and after a signal whose rollback restored the sources (128+N). This scratch is what
+# it was given for the Codex staging and publication, so the bumper's EXIT trap must
+# keep it for exactly those statuses; a decided outcome is the only case where
+# deleting it is safe. The writer is replaced by a stub here because a compiled writer
+# has no seam that can make it exit 130.
+new_case signal-status-keeps-scratch
+printf '#!/usr/bin/env bash\nexit 130\n' >"$FIXTURE_ROOT/script/dev/pin-agy.sh"
+chmod 0755 "$FIXTURE_ROOT/script/dev/pin-agy.sh"
+run_agent_versions
+[[ $RUN_STATUS -eq 130 ]] || fail "a signalled writer must keep its status, got $RUN_STATUS"
+assert_contains "$RUN_STDERR" "agy publication retains material (130); owner scratch retained at "
+retained="$(sed -n 's/.*owner scratch retained at //p' "$CASE/stderr" | tail -1)"
+[[ -n "$retained" ]] || fail 'the bumper named no retained scratch'
+[[ -d "$retained" ]] || fail "the bumper deleted the scratch the publisher retained: $retained"
+echo '  ok: a signalled writer keeps the bumper scratch the publisher named'
+
+# The other half of the same rule: a decided outcome still deletes it, so a successful
+# run leaves no scratch behind.
+new_case decided-status-discards-scratch
+printf '#!/usr/bin/env bash\nexit 0\n' >"$FIXTURE_ROOT/script/dev/pin-agy.sh"
+chmod 0755 "$FIXTURE_ROOT/script/dev/pin-agy.sh"
+run_agent_versions
+[[ $RUN_STATUS -eq 0 ]] || fail "a decided outcome must keep status 0, got $RUN_STATUS"
+[[ -z "$(find "$CASE" -maxdepth 1 -name 'tmp.*' -print -quit)" ]] \
+    || fail 'a decided outcome left the bumper scratch behind'
+echo '  ok: a decided writer discards the bumper scratch'
+
 echo 'agent-versions black-box tests passed'

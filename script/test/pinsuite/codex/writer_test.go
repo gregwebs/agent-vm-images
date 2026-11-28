@@ -369,6 +369,27 @@ func TestWriterPublishStagePublishesTheProposal(t *testing.T) {
 	accepts(t, pinInvocation("check", repo.pinDirectory(), "--release", Release))
 }
 
+// TestWriterAPublishLeavesTheStagesOtherFilesAlone: the stage directory belongs to the
+// maintainer who gave it. Publishing from it must not remove it or anything in it, and
+// `readStage` tolerates entries it does not own — so a note beside the proposal is the
+// witness that the publisher was never handed the caller's directory as scratch.
+func TestWriterAPublishLeavesTheStagesOtherFilesAlone(t *testing.T) {
+	w := newWriterFixture(t, "writer-publish-keep")
+	repo := w.repository(t, "publish-keep")
+	stage, _ := w.stageProposal(t, repo)
+	note := filepath.Join(stage, "maintainer-notes")
+	harness.WriteFile(t, note, []byte("reviewed by hand\n"))
+	result := runWriter(t, repo, arguments("--publish-stage", stage))
+	requireStatus(t, result, 0)
+	if _, err := os.Stat(stage); err != nil {
+		t.Fatalf("a successful publish removed the caller's stage directory: %v", err)
+	}
+	if string(harness.ReadFile(t, note)) != "reviewed by hand\n" {
+		t.Fatal("a successful publish removed an unrelated file from the caller's stage")
+	}
+	accepts(t, pinInvocation("check", repo.pinDirectory(), "--release", Release))
+}
+
 // TestWriterPublishStageRefusesAnUnrelatedDockerfileEdit: the proposal may carry the
 // Codex ARG and its own single-slot defaults, and nothing else.
 func TestWriterPublishStageRefusesAnUnrelatedDockerfileEdit(t *testing.T) {

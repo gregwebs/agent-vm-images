@@ -270,8 +270,14 @@ func TestPublishStageCarriesTheUnownedArgEdits(t *testing.T) {
 	if out.Len() != 0 {
 		t.Errorf("the writer reported an outcome the publisher owns: %s", out)
 	}
-	if published.Owner != stageDir {
-		t.Errorf("the request names the owner scratch %s, want %s", published.Owner, stageDir)
+	// The stage is the caller's, not this invocation's: it must never be handed over as
+	// owner scratch, because the publisher removes what it is given.
+	if published.Owner != "" {
+		t.Errorf("the request claims an owner scratch it did not create: %s", published.Owner)
+	}
+	retained := strings.Join(published.Retain, "\n")
+	if !strings.Contains(retained, "staged proposal retained at "+stageDir) {
+		t.Errorf("the request does not name the caller's stage for retention: %q", retained)
 	}
 	proposed := map[string][]byte{}
 	for _, file := range published.Files {

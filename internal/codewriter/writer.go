@@ -292,7 +292,7 @@ func (c *Client) Refresh(ctx context.Context, options Options) int {
 	// From here the publisher owns this invocation's scratch: it removes it on a
 	// decided outcome and retains and prints it otherwise.
 	c.announce("owner scratch:", work)
-	return c.publishStaged(directory, work)
+	return c.publishStaged(directory, work, nil)
 }
 
 // PublishStage publishes the fixed six-file proposal the owner bumper edited, as one
@@ -309,14 +309,19 @@ func (c *Client) PublishStage(stageDir string) int {
 		c.diagnose("%s", err)
 		return 1
 	}
+	// The stage directory is the caller's: this invocation was given it and did not
+	// create it, so the publisher must never remove it. It is named for retention
+	// instead, and the publication keeps only its own work directory.
 	c.announce("owner scratch:", directory)
-	return c.publishStaged(directory, directory)
+	return c.publishStaged(directory, "",
+		[]string{"staged proposal retained at " + directory})
 }
 
-// publishStaged publishes the proposal in directory. owner is the caller's own
-// scratch, which the publisher disposes of and, when the outcome is undecided,
-// prints beside its own work directory.
-func (c *Client) publishStaged(directory, owner string) int {
+// publishStaged publishes the proposal in directory. owner is a scratch directory
+// this invocation created, which the publisher disposes of and, when the outcome is
+// undecided, prints beside its own work directory. retain names directories the
+// caller must keep but this invocation did not create.
+func (c *Client) publishStaged(directory, owner string, retain []string) int {
 	files, err := readStage(directory, stageNames())
 	if err != nil {
 		c.diagnose("%s", err)
@@ -362,6 +367,7 @@ func (c *Client) publishStaged(directory, owner string) int {
 		TempPrefix: "pin-codex.work.",
 		Stderr:     publication.StderrOf(c.Err),
 		Owner:      owner,
+		Retain:     retain,
 		Files:      staged,
 	})
 }

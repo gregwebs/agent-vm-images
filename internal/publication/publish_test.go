@@ -3,8 +3,11 @@ package publication
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -20,10 +23,17 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureOf(t, []string{"images/artifacts/node.json", "images/Dockerfile",
+		"images/artifacts/node-release-key.asc"})
+}
+
+// newFixtureOf is the same shape at any width, so a matrix can name its own
+// destinations.
+func newFixtureOf(t *testing.T, relatives []string) *fixture {
+	t.Helper()
 	root := t.TempDir()
 	created := &fixture{t: t, root: root}
-	for _, relative := range []string{"images/artifacts/node.json", "images/Dockerfile",
-		"images/artifacts/node-release-key.asc"} {
+	for _, relative := range relatives {
 		path := filepath.Join(root, relative)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -41,11 +51,11 @@ func newFixture(t *testing.T) *fixture {
 // staged returns what a refresh would publish, rememberable so the assertions can
 // name the committed bytes.
 func (f *fixture) staged() [][]byte {
-	return [][]byte{
-		[]byte("staged node pin\n"),
-		[]byte("staged dockerfile\n"),
-		[]byte("staged key\n"),
+	staged := make([][]byte, 0, len(f.paths))
+	for _, path := range f.paths {
+		staged = append(staged, []byte("staged "+filepath.Base(path)+"\n"))
 	}
+	return staged
 }
 
 // transaction is one publication over the fixture. Its exit is the test's own: only
@@ -355,4 +365,130 @@ func TestReplacementKeepsTheDestinationsMode(t *testing.T) {
 	if mode := info.Mode().Perm(); mode != 0o644 {
 		t.Errorf("a created destination is %04o, want 0644", mode)
 	}
+}
+
+// TestInclusiveRollbackMatrix: the rollback covers the destination being written, and
+// a destination it cannot put back must not stop the walk over the rest.
+//
+// 5 destinations × ({no restore failure} ∪ {a restore failure at each j ≤ i}) is 20
+// cells. The floor is the count itself: a matrix that quietly ran fewer cells would
+// compare nothing and still print ok.
+func TestInclusiveRollbackMatrix(t *testing.T) {
+	const width = 5
+	relatives := make([]string, 0, width)
+	for index := 0; index < width; index++ {
+		relatives = append(relatives, fmt.Sprintf("images/artifacts/file%d.json", index))
+	}
+	executed := 0
+	for copyAt := 0; copyAt < width; copyAt++ {
+		for restoreAt := -1; restoreAt <= copyAt; restoreAt++ {
+			copyAt, restoreAt := copyAt, restoreAt
+			executed++
+			t.Run(fmt.Sprintf("copy%d-restore%d", copyAt, restoreAt), func(t *testing.T) {
+				created := newFixtureOf(t, relatives)
+				work := created.work(t)
+				transaction := created.transaction(work)
+				once := false
+				failOn(transaction, filepath.Base(created.paths[copyAt]), &once)
+				if restoreAt >= 0 {
+					transaction.copyFile = refusingRestoreOf(transaction.copyFile,
+						filepath.Base(created.paths[restoreAt]))
+				}
+				want := 1
+				if restoreAt >= 0 {
+					want = 3
+				}
+				if status := transaction.Run(""); status != want {
+					t.Fatalf("status %d, want %d", status, want)
+				}
+				staged := created.staged()
+				for index, path := range created.paths {
+					raw, err := os.ReadFile(path)
+					if err != nil {
+						t.Fatalf("destination %d: %v", index, err)
+					}
+					wished := created.raw[index]
+					switch {
+					case index > copyAt:
+						// Never copied: the committed byte is the whole assertion.
+					case index == restoreAt:
+						// The restore was refused, so this destination keeps what the
+						// publication left: half a copy for the failing one, the staged
+						// bytes for one that had been written before it.
+						if index == copyAt {
+							wished = []byte("half-written\n")
+						} else {
+							wished = staged[index]
+						}
+					}
+					if !bytes.Equal(raw, wished) {
+						t.Fatalf("destination %d is %q, want %q", index, raw, wished)
+					}
+					info, err := os.Stat(path)
+					if err != nil || info.Mode().Perm() != 0o644 {
+						t.Fatalf("destination %d lost its mode: %v %v", index, info, err)
+					}
+				}
+				_, err := os.Stat(work)
+				if restoreAt >= 0 {
+					if err != nil {
+						t.Fatalf("an incomplete rollback retains its material: %v", err)
+					}
+				} else if !os.IsNotExist(err) {
+					t.Fatalf("a complete rollback discards its work directory: %v", err)
+				}
+			})
+		}
+	}
+	if executed != 20 {
+		t.Fatalf("the matrix ran %d cells, want 20", executed)
+	}
+}
+
+// TestNoExportedFieldReachesTheWindowSeam: the window hook, the copy and removal
+// substitutions and the exit are how a test drives a window. They are unexported, so no
+// caller and no other package can reach them; the exported field set is frozen here to
+// keep it that way, because a new exported field is how an external caller would reach
+// the same internals.
+//
+// The mutation this case holds down: promote the hook (or add any exported seam), and
+// this case names the field.
+func TestNoExportedFieldReachesTheWindowSeam(t *testing.T) {
+	frozen := map[string][]string{
+		"Transaction": {"Destinations", "Prefix", "Report", "Retain", "Root", "Staged",
+			"Stderr", "Work"},
+		"Request": {"Files", "Owner", "Prefix", "Report", "Retain", "Root", "Stderr",
+			"TempPrefix", "TempRoot"},
+	}
+	types := map[string]any{"Transaction": Transaction{}, "Request": Request{}}
+	for name, value := range types {
+		got := exportedFields(reflect.TypeOf(value))
+		want := frozen[name]
+		sort.Strings(want)
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("%s exports %v, want %v", name, got, want)
+		}
+	}
+	// The seam itself must stay unexported: settable from this package, and only here.
+	seam, ok := reflect.TypeOf(Transaction{}).FieldByName("hook")
+	if !ok {
+		t.Fatal("the window seam is gone; the six window cases cannot run")
+	}
+	if seam.PkgPath == "" {
+		t.Fatal("the window seam is exported")
+	}
+}
+
+// exportedFields reports a type's exported field names in declaration order.
+func exportedFields(subject reflect.Type) []string {
+	names := []string{}
+	for index := 0; index < subject.NumField(); index++ {
+		field := subject.Field(index)
+		if field.PkgPath != "" {
+			continue
+		}
+		names = append(names, field.Name)
+	}
+	sort.Strings(names)
+	return names
 }

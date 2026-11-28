@@ -13,10 +13,15 @@ import (
 	"testing"
 )
 
-// The six windows of #213 item 3 (P1–P6) are a contract with the maintainer, and
-// every one of them ends a process. Only a real process can be asked what status it
-// produced, so each case re-executes this test binary and the child delivers its
-// signal through the transaction's own window hook.
+// The windows of #213 item 3 (P1–P6) are a contract with the maintainer, and every one
+// of them ends a process. Only a real process can be asked what status it produced, so
+// each case re-executes this test binary and the child delivers its signal through the
+// transaction's own window hook.
+//
+// The hook is an unexported field of the transaction, nil in every production run: it is
+// not a flag, not an environment variable and not reachable from another package, so a
+// shipped binary carries the nil check and nothing that can fire it. That is the whole
+// seam, and TestNoExportedFieldReachesTheWindowSeam keeps it that way.
 const (
 	caseVariable   = "PUBLICATION_WINDOW_CASE"
 	rootVariable   = "PUBLICATION_WINDOW_ROOT"
@@ -28,6 +33,20 @@ const (
 	failVariable   = "PUBLICATION_WINDOW_FAIL_COPY"
 	refuseVariable = "PUBLICATION_WINDOW_REFUSE_RESTORE"
 	cleanupVar     = "PUBLICATION_WINDOW_FAIL_CLEANUP"
+	// signalFromCopyVariable names a destination whose copy delivers the signal, and
+	// signalFromRestoreVariable names one whose *restore* does, which is how a case
+	// lands inside a copy and inside an ordinary rollback.
+	signalFromCopyVariable    = "PUBLICATION_WINDOW_SIGNAL_FROM_COPY"
+	signalFromRestoreVariable = "PUBLICATION_WINDOW_SIGNAL_FROM_RESTORE"
+	// signalFromReportVariable makes the report writer deliver the signal, so the
+	// window that exists while the success lines are being written has a case.
+	signalFromReportVariable = "PUBLICATION_WINDOW_SIGNAL_FROM_REPORT"
+	// Request mode builds a Request and calls Publish, which is where the resolved
+	// root, the report's errors and a publication that never starts live.
+	requestModeVariable = "PUBLICATION_WINDOW_REQUEST"
+	filesVariable       = "PUBLICATION_WINDOW_FILES"
+	tempRootVariable    = "PUBLICATION_WINDOW_TEMP_ROOT"
+	failReportVariable  = "PUBLICATION_WINDOW_FAIL_REPORT"
 )
 
 // reportLine is the success line the child asks the transaction to print. A decided
@@ -37,6 +56,9 @@ const reportLine = "published every destination"
 
 func TestMain(m *testing.M) {
 	if os.Getenv(caseVariable) != "" {
+		if os.Getenv(requestModeVariable) != "" {
+			os.Exit(childRequest())
+		}
 		os.Exit(childStatus())
 	}
 	os.Exit(m.Run())
@@ -52,20 +74,29 @@ func childStatus() int {
 		Work:   os.Getenv(workVariable),
 		Stderr: os.Stderr,
 		Report: Report{To: os.Stdout, Lines: []string{reportLine}},
-		Destinations: []string{
-			filepath.Join(root, "images/artifacts/node.json"),
-			filepath.Join(root, "images/Dockerfile"),
-			filepath.Join(root, "images/artifacts/node-release-key.asc"),
-		},
-		Staged: [][]byte{
-			[]byte("staged node pin\n"),
-			[]byte("staged dockerfile\n"),
-			[]byte("staged key\n"),
-		},
+	}
+	// The same shape the parent's fixture publishes: one staged byte per destination,
+	// named after it, so a case can read the staged bytes back from the tree.
+	for _, relative := range []string{"images/artifacts/node.json", "images/Dockerfile",
+		"images/artifacts/node-release-key.asc"} {
+		transaction.Destinations = append(transaction.Destinations, filepath.Join(root, relative))
+		transaction.Staged = append(transaction.Staged,
+			[]byte("staged "+filepath.Base(relative)+"\n"))
 	}
 	if name := os.Getenv(failVariable); name != "" {
 		once := false
 		failOn(transaction, name, &once)
+	}
+	if name := os.Getenv(signalFromCopyVariable); name != "" {
+		signalDuringCopy(transaction, name, "staged")
+	}
+	if name := os.Getenv(signalFromRestoreVariable); name != "" {
+		signalDuringCopy(transaction, name, "backup")
+	}
+	if os.Getenv(signalFromReportVariable) != "" {
+		// The channel is created by prepare, so the writer reads it from the
+		// transaction when it is called rather than capturing it here.
+		transaction.Report.To = signalWriter{transaction: transaction}
 	}
 	if refused := os.Getenv(refuseVariable); refused != "" {
 		if refused == "all" {
@@ -111,6 +142,75 @@ func childStatus() int {
 	}
 	return transaction.Run(os.Getenv(ownerVariable))
 }
+
+// childRequest runs one publication through Publish, the entry point the writers call,
+// and returns the status the process ended with.
+func childRequest() int {
+	root := os.Getenv(rootVariable)
+	request := Request{
+		Prefix:     "pin-artifact: ",
+		Root:       root,
+		TempRoot:   os.Getenv(tempRootVariable),
+		TempPrefix: "pin-artifact.",
+		Stderr:     os.Stderr,
+		Owner:      os.Getenv(ownerVariable),
+		Report:     Report{To: os.Stdout, Lines: []string{reportLine}},
+	}
+	if os.Getenv(failReportVariable) != "" {
+		request.Report.To = failingWriter{}
+	}
+	for _, name := range strings.Split(os.Getenv(filesVariable), ",") {
+		request.Files = append(request.Files, Staged{Path: name,
+			Raw: []byte("staged " + filepath.Base(name) + "\n")})
+	}
+	return Publish(request)
+}
+
+// signalDuringCopy delivers the signal from the transaction's own write, so the case
+// lands inside a copy that is running (or failing), not between two of them.
+func signalDuringCopy(transaction *Transaction, name, sourceKind string) {
+	real := transaction.copyFile
+	if real == nil {
+		real = copyFile
+	}
+	once := false
+	transaction.copyFile = func(source, destination string, mode os.FileMode) error {
+		err := real(source, destination, mode)
+		if !once && filepath.Base(destination) == name &&
+			strings.Contains(source, sourceKind) {
+			once = true
+			deliver(transaction.Prefix, transaction.interrupted, "copy "+sourceKind)
+		}
+		return err
+	}
+}
+
+// deliver sends the signal and waits for the handler to record it, which is what makes
+// the publication's next window check see it without a sleep.
+func deliver(prefix string, interrupted chan struct{}, where string) {
+	fmt.Fprintf(os.Stderr, "%swindow %s\n", prefix, where)
+	if err := syscall.Kill(os.Getpid(), namedSignal()); err != nil {
+		fmt.Fprintf(os.Stderr, "cannot deliver the signal: %v\n", err)
+		return
+	}
+	<-interrupted
+}
+
+// signalWriter is the report stream that writes the success line and then delivers the
+// signal: the caller has been told before the signal arrives, which is exactly the
+// window that must not exit 0.
+type signalWriter struct{ transaction *Transaction }
+
+func (w signalWriter) Write(raw []byte) (int, error) {
+	written, err := os.Stdout.Write(raw)
+	deliver(w.transaction.Prefix, w.transaction.interrupted, "report")
+	return written, err
+}
+
+// failingWriter is a report stream that accepts nothing.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, os.ErrClosed }
 
 func namedSignal() syscall.Signal {
 	if os.Getenv(signalVar) == "TERM" {
@@ -193,6 +293,13 @@ func requireBackups(t *testing.T, work string, created *fixture) {
 		}
 		if !bytes.Equal(raw, original) {
 			t.Fatalf("the retained backup %d is not the committed byte", index)
+		}
+		info, err := os.Stat(backup)
+		if err != nil {
+			t.Fatalf("the retained backup %s has no mode: %v", backup, err)
+		}
+		if info.Mode().Perm() != 0o644 {
+			t.Fatalf("the retained backup %d is %04o, want 0644", index, info.Mode().Perm())
 		}
 	}
 }
@@ -360,6 +467,30 @@ func TestP3SignalAfterAFailedCopyWithARefusedRestoreExitsThree(t *testing.T) {
 		t.Fatalf("the record lists %d destinations, want %d", len(record.Destinations),
 			len(created.paths))
 	}
+	// Each entry is the mapping a maintainer reads by hand: what the relative
+	// destination was, whether it existed, and which numbered backup puts it back.
+	for index, entry := range record.Destinations {
+		relative, err := filepath.Rel(created.root, created.paths[index])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entry.Destination != relative {
+			t.Fatalf("record entry %d names %q, want %q", index, entry.Destination, relative)
+		}
+		if !entry.Existed {
+			t.Fatalf("record entry %d says the committed destination did not exist", index)
+		}
+		if entry.Backup == nil ||
+			*entry.Backup != filepath.Join(work, "backup", strconv.Itoa(index)) {
+			t.Fatalf("record entry %d names backup %v", index, entry.Backup)
+		}
+	}
+	for index, path := range created.paths {
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o644 {
+			t.Fatalf("destination %d lost its mode: %v %v", index, info, err)
+		}
+	}
 }
 
 // TestP4SignalAfterTheCopiesLeavesThePublicationAndExitsThree: every copy landed and
@@ -396,6 +527,49 @@ func TestP4SignalAfterTheCopiesLeavesThePublicationAndExitsThree(t *testing.T) {
 	}
 	requireRetained(t, work, owner)
 	requireBackups(t, work, created)
+	requireUndecidedRecord(t, work, created)
+}
+
+// requireUndecidedRecord holds the retained recovery record to the window it describes.
+// Without it the retained directory holds backups and no statement of what happened,
+// which is what the package header promises for the two undecided windows.
+func requireUndecidedRecord(t *testing.T, work string, created *fixture) {
+	t.Helper()
+	var record struct {
+		Phase        string `json:"phase"`
+		Error        string `json:"error"`
+		Destinations []struct {
+			Destination string `json:"destination"`
+			Existed     bool   `json:"existed"`
+			Backup      *string
+		} `json:"destinations"`
+	}
+	raw, err := os.ReadFile(filepath.Join(work, "recovery.json"))
+	if err != nil {
+		t.Fatalf("an undecided outcome retains its record: %v", err)
+	}
+	if err := json.Unmarshal(raw, &record); err != nil {
+		t.Fatalf("the retained record is not JSON: %v", err)
+	}
+	if record.Phase != "publication" {
+		t.Fatalf("the record names phase %q, want publication", record.Phase)
+	}
+	if !strings.Contains(record.Error, "undecided") {
+		t.Fatalf("the record does not say the outcome is undecided: %q", record.Error)
+	}
+	if len(record.Destinations) != len(created.paths) {
+		t.Fatalf("the record lists %d destinations, want %d", len(record.Destinations),
+			len(created.paths))
+	}
+	for index, entry := range record.Destinations {
+		relative, err := filepath.Rel(created.root, created.paths[index])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entry.Destination != relative || !entry.Existed || entry.Backup == nil {
+			t.Fatalf("record entry %d is %+v, want %q with its backup", index, entry, relative)
+		}
+	}
 }
 
 // TestP5SignalAfterTheOutcomeExitsThreeWithoutASuccessReport: the outcome exists and
@@ -433,6 +607,7 @@ func TestP5SignalAfterTheOutcomeExitsThreeWithoutASuccessReport(t *testing.T) {
 	}
 	requireRetained(t, work, owner)
 	requireBackups(t, work, created)
+	requireUndecidedRecord(t, work, created)
 }
 
 // TestP6ScratchRemovalFailureAfterSuccessStaysZero: #138. The publication is decided
@@ -453,8 +628,8 @@ func TestP6ScratchRemovalFailureAfterSuccessStaysZero(t *testing.T) {
 		cleanupVar:    "1",
 	})
 	result.requireStatus(t, 0)
-	if !strings.Contains(result.stdout, "pin-artifact: "+reportLine) {
-		t.Fatalf("a decided 0 printed its report\n%s", result.stdout)
+	if count := strings.Count(result.stdout, "pin-artifact: "+reportLine); count != 1 {
+		t.Fatalf("a decided 0 printed its report once, got %d:\n%s", count, result.stdout)
 	}
 	if published := created.republished(); len(published) != len(created.paths) {
 		t.Fatalf("the publication stands, republished: %v", published)
@@ -482,4 +657,250 @@ func TestP6ScratchRemovalFailureAfterSuccessStaysZero(t *testing.T) {
 	}
 	result.requireNone(t, "recovery")
 	result.requireNone(t, "STOP: recover")
+}
+
+// TestSignalDuringTheSuccessReportKeepsTheOutcomeUndecided: the success line has been
+// written and the process has not exited when the signal arrives. The caller has been
+// told, and the outcome is still undecided, so the status must be 3 with the material
+// and not a quiet 0 over directories that were about to be removed.
+//
+// The mutation this case holds down: delete the pending-signal check between the report
+// and the disposal, and this case finds status 0 with both directories gone.
+func TestSignalDuringTheSuccessReportKeepsTheOutcomeUndecided(t *testing.T) {
+	created := newFixture(t)
+	work := created.work(t)
+	owner := ownerScratch(t)
+	result := runWindow(t, map[string]string{
+		rootVariable:             created.root,
+		workVariable:             work,
+		ownerVariable:            owner,
+		signalFromReportVariable: "1",
+	})
+	result.requireStatus(t, 3)
+	result.require(t, "window report")
+	if !strings.Contains(result.stdout, "pin-artifact: "+reportLine) {
+		t.Fatalf("the case did not reach the report it signals from:\n%s", result.stdout)
+	}
+	result.require(t, "publication result undecided when the signal arrived")
+	result.require(t, "recovery material retained at "+work)
+	result.require(t, "owner scratch retained at "+owner)
+	if published := created.republished(); len(published) != len(created.paths) {
+		t.Fatalf("the publication stands, republished: %v", published)
+	}
+	requireRetained(t, work, owner)
+	requireBackups(t, work, created)
+}
+
+// TestSignalDuringAnOrdinaryRollbackKeepsTheMaterial: a copy failed, the rollback is
+// running, and a signal arrives inside it. The rollback finishes, and then the window
+// owns the outcome: 128+N with the sources restored and the material retained, not the
+// status the rollback was about to report and not a work directory nobody can inspect.
+//
+// The mutation this case holds down: delete the pending-signal check after the rollback,
+// and this case finds status 1 with the work directory already gone.
+func TestSignalDuringAnOrdinaryRollbackKeepsTheMaterial(t *testing.T) {
+	created := newFixture(t)
+	work := created.work(t)
+	owner := ownerScratch(t)
+	result := runWindow(t, map[string]string{
+		rootVariable:              created.root,
+		workVariable:              work,
+		ownerVariable:             owner,
+		failVariable:              "Dockerfile",
+		signalFromRestoreVariable: "node.json",
+	})
+	result.requireStatus(t, 130)
+	result.require(t, "window copy backup")
+	result.require(t, "publication interrupted; sources restored")
+	result.require(t, "recovery material retained at "+work)
+	result.require(t, "owner scratch retained at "+owner)
+	result.requireNone(t, reportLine)
+	if changed := created.changed(); len(changed) > 0 {
+		t.Fatalf("the rollback restored every destination, changed: %v", changed)
+	}
+	requireRetained(t, work, owner)
+	requireBackups(t, work, created)
+}
+
+// TestSignalDuringAFailingCopyRestores: the signal lands inside the copy that fails, so
+// the two exit paths cross — the write returns an error and the window is a mid-copy
+// one. Everything touched is restored, from the complete backup set, and the set is
+// retained.
+//
+// The mutation this case holds down: drop the mid-copy restore branch (treat a signal
+// with nothing published as the pre-publication window), and this case finds the half
+// copy in place and nothing retained.
+func TestSignalDuringAFailingCopyRestores(t *testing.T) {
+	created := newFixture(t)
+	work := created.work(t)
+	owner := ownerScratch(t)
+	result := runWindow(t, map[string]string{
+		rootVariable:           created.root,
+		workVariable:           work,
+		ownerVariable:          owner,
+		failVariable:           "Dockerfile",
+		signalFromCopyVariable: "Dockerfile",
+	})
+	result.requireStatus(t, 130)
+	result.require(t, "window copy staged")
+	result.require(t, "publication interrupted; sources restored")
+	result.require(t, "recovery material retained at "+work)
+	if changed := created.changed(); len(changed) > 0 {
+		t.Fatalf("a signal inside a failing copy restored every destination, changed: %v", changed)
+	}
+	requireRetained(t, work, owner)
+	requireBackups(t, work, created)
+}
+
+// TestAnUnreadableReportStillPublishesAndSaysSo: the publication is decided and the
+// caller's report stream accepts nothing. A quiet 0 would leave the caller believing a
+// publication it was never told about did not happen, so the failure is named on stderr
+// and the status stays the one the publication decided.
+//
+// The mutation this case holds down: swallow the report's error, and this case finds a
+// status 0 with an empty stderr and no report.
+func TestAnUnreadableReportStillPublishesAndSaysSo(t *testing.T) {
+	created := newFixture(t)
+	owner := ownerScratch(t)
+	result := runWindow(t, map[string]string{
+		rootVariable:        created.root,
+		workVariable:        created.work(t),
+		ownerVariable:       owner,
+		requestModeVariable: "1",
+		filesVariable:       "images/artifacts/node.json",
+		tempRootVariable:    created.root,
+		failReportVariable:  "1",
+	})
+	result.requireStatus(t, 0)
+	result.require(t, "the publication succeeded, but its report could not be written")
+	if published := created.republished(); len(published) != 1 || published[0] != "node.json" {
+		t.Fatalf("the publication landed, republished: %v", published)
+	}
+	if _, err := os.Stat(owner); !os.IsNotExist(err) {
+		t.Fatalf("a decided 0 discarded the owner scratch: %v", err)
+	}
+}
+
+// TestAPublicationThatCannotStartDisposesOfTheOwnerScratch: the work directory cannot
+// be created, so nothing is published — and the scratch the caller handed over is still
+// the publication's to remove, because the caller no longer cleans it up.
+//
+// The mutation this case holds down: return from that path without disposing, and this
+// case finds the scratch left behind.
+func TestAPublicationThatCannotStartDisposesOfTheOwnerScratch(t *testing.T) {
+	created := newFixture(t)
+	owner := ownerScratch(t)
+	result := runWindow(t, map[string]string{
+		rootVariable:        created.root,
+		ownerVariable:       owner,
+		requestModeVariable: "1",
+		filesVariable:       "images/Dockerfile",
+		tempRootVariable:    filepath.Join(created.root, "absent"),
+	})
+	result.requireStatus(t, 1)
+	result.require(t, "cannot create a work directory")
+	if _, err := os.Stat(owner); !os.IsNotExist(err) {
+		t.Fatalf("a publication that never started left the caller's scratch: %v", err)
+	}
+	if changed := created.changed(); len(changed) > 0 {
+		t.Fatalf("a publication that never started wrote: %v", changed)
+	}
+}
+
+// TestAnUnresolvableRootTouchesNothing: a root that is not a directory cannot be
+// resolved, so nothing is touched and the caller is told.
+func TestAnUnresolvableRootTouchesNothing(t *testing.T) {
+	created := newFixture(t)
+	owner := ownerScratch(t)
+	result := runWindow(t, map[string]string{
+		rootVariable:        filepath.Join(created.root, "absent"),
+		ownerVariable:       owner,
+		requestModeVariable: "1",
+		filesVariable:       "images/Dockerfile",
+		tempRootVariable:    created.root,
+	})
+	result.requireStatus(t, 1)
+	result.require(t, "cannot resolve the repository root")
+	if _, err := os.Stat(owner); !os.IsNotExist(err) {
+		t.Fatalf("a refused root left the caller's scratch: %v", err)
+	}
+}
+
+// TestARootReachedThroughASymlinkIsTheSameRepository: the root is resolved once, and the
+// destinations joined to the spelling it was given are re-based onto the resolved one.
+//
+// Two mutations this case holds down: dropping the re-basing leaves every destination
+// outside the resolved root, so the publication is refused as "outside the repository";
+// dropping the resolution leaves the transaction comparing and recording paths under the
+// alias, which the root it reports names.
+func TestARootReachedThroughASymlinkIsTheSameRepository(t *testing.T) {
+	created := newFixture(t)
+	linked := filepath.Join(t.TempDir(), "repo")
+	if err := os.Symlink(created.root, linked); err != nil {
+		t.Fatalf("cannot link the repository: %v", err)
+	}
+	// The root as a maintainer might spell it, and the destinations joined to that same
+	// spelling: the resolution has to carry both, or the publication is refused as
+	// outside a repository it is inside.
+	transaction := created.transaction(created.work(t))
+	transaction.Root = linked
+	for index, path := range created.paths {
+		relative, err := filepath.Rel(created.root, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		transaction.Destinations[index] = filepath.Join(linked, relative)
+	}
+	if status := transaction.Run(""); status != 0 {
+		t.Fatalf("a root reached through a symlink is the same repository: status %d", status)
+	}
+	resolved, err := filepath.EvalSymlinks(created.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transaction.Root != resolved {
+		t.Fatalf("the transaction kept the root %s, want the resolved %s", transaction.Root,
+			resolved)
+	}
+	if published := created.republished(); len(published) != len(created.paths) {
+		t.Fatalf("the publication landed in the one repository, republished: %v", published)
+	}
+}
+
+// TestADestinationNamedDotDotIsLocal: a file may be called `..x`, and a ".." prefix test
+// refuses it as though it climbed out of the repository. What must be refused is a path
+// that leaves the root.
+//
+// The mutation this case holds down: restore the prefix test, and this case is refused
+// with "outside the repository".
+func TestADestinationNamedDotDotIsLocal(t *testing.T) {
+	created := newFixtureOf(t, []string{"..x"})
+	result := runWindow(t, map[string]string{
+		rootVariable:        created.root,
+		requestModeVariable: "1",
+		filesVariable:       "..x",
+		tempRootVariable:    created.root,
+	})
+	result.requireStatus(t, 0)
+	if published := created.republished(); len(published) != 1 || published[0] != "..x" {
+		t.Fatalf("a local ..x destination was published, republished: %v", published)
+	}
+}
+
+// TestADestinationOutsideTheRepositoryIsRefused: the one path a publication must never
+// write, spelled the way a relative destination could spell it.
+func TestADestinationOutsideTheRepositoryIsRefused(t *testing.T) {
+	created := newFixture(t)
+	outside := filepath.Join(filepath.Dir(created.root), "outside.json")
+	result := runWindow(t, map[string]string{
+		rootVariable:        created.root,
+		requestModeVariable: "1",
+		filesVariable:       "../outside.json",
+		tempRootVariable:    created.root,
+	})
+	result.requireStatus(t, 1)
+	result.require(t, "outside the repository")
+	if _, err := os.Stat(outside); !os.IsNotExist(err) {
+		t.Fatalf("a path outside the repository was written: %v", err)
+	}
 }
