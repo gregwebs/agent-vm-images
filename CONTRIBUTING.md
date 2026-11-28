@@ -404,7 +404,10 @@ bash script/build/agent-versions.sh --write --cosign /abs/cosign
   status, every destination's bytes and mode, the retained backups' bytes and
   modes, the `.complete` marker, the retained `recovery.json` entry by entry, and
   whether the report was printed; `publish_test.go` holds the 20-cell inclusive
-  rollback matrix.  `script/test/agent-versions.sh` keeps the bumper's side of it
+  rollback matrix. The seam that drives those windows is an unexported function
+  field on the transaction: it is compiled into every build, and `go tool objdump`
+  on a built `avm-pin` shows its nil guard — it ships and cannot be reached,
+  rather than not shipping at all. `script/test/agent-versions.sh` keeps the bumper's side of it
   — a refused run leaves the closure byte- and mode-identical, and the bumper's
   own scratch survives exactly the statuses the publisher reports as retained
   (3 and 128+N) and is deleted for a decided one.

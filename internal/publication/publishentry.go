@@ -52,6 +52,17 @@
 // and now report 3, and P1 kept its status but deleted the backups it had just
 // restored from and now retains them.
 //
+// # The window seam ships, and is unreachable rather than absent
+//
+// Every window case re-executes this package's test binary, and the child delivers its
+// signal through an unexported function field on Transaction. That field and its nil
+// guard are compiled into every build — `go tool objdump` on a built `avm-pin` shows
+// the check — so the seam is in shipped code. What ships is a seam nothing can reach:
+// the field is unexported, it is nil in every production run (Publish is its only
+// constructor and never sets it), and no exported field, flag, environment variable or
+// build tag names it. TestNoExportedFieldReachesTheWindowSeam freezes the exported
+// field set of Transaction and Request to keep it that way.
+//
 // Statuses, unchanged: 0 published, 1 failed with the sources unchanged or fully
 // restored, 2 usage, 3 undecided or incomplete recovery (the work directory, the
 // caller's scratch and every caller-named retained directory are retained and
